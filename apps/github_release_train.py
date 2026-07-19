@@ -30,6 +30,7 @@ from apps.github_release_train_spec import (
     AWAITING_UI_LABEL,
     BLOCKED_LABEL,
     CHAIN_AUDIT_MARKER,
+    CANONICAL_PRODUCTION_TARGET_ID,
     COMPLETION_PROOF_MARKER,
     DEPLOY_PROOF_MARKER,
     DONE_LABEL,
@@ -1308,15 +1309,13 @@ def resume_halted_release(
     head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
     if not bool(pull.get("merged")):
         raise ReleaseBlocked("reconciliation applies only to a merged PR")
-    from apps.registry_upload_http_entrypoint_hosted_runtime import ACTIVE_HOSTED_RUNTIME_TARGET_ID
-
     required = {
         "healthy": True,
         "pr": number,
         "head": head_sha,
         "merge": merge_sha,
         "expected_sha": merge_sha,
-        "target_id": ACTIVE_HOSTED_RUNTIME_TARGET_ID,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
     }
     mismatches = [key for key, value in required.items() if evidence.get(key) != value]
     if mismatches or evidence.get("status") != "reconciled":

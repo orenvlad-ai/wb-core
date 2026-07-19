@@ -9,14 +9,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.registry_upload_http_entrypoint_hosted_runtime import (
+    ACTIVE_HOSTED_RUNTIME_TARGET_ID,
     HostedRuntimeTarget,
     _build_auth_env_preflight_command,
     _validate_production_target_identity,
     load_hosted_runtime_target,
 )
+from apps.github_release_train_spec import CANONICAL_PRODUCTION_TARGET_ID
 
 
 def main() -> None:
+    assert ACTIVE_HOSTED_RUNTIME_TARGET_ID == CANONICAL_PRODUCTION_TARGET_ID
     europe = load_hosted_runtime_target(Path("artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"))
     _validate_production_target_identity(europe, action="smoke")
     for field, value in (

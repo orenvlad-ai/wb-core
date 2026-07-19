@@ -60,6 +60,7 @@ from apps.github_release_train_wait import (  # noqa: E402
 from apps.github_release_train_spec import (  # noqa: E402
     ACTIVE_PRIMARY_LABELS,
     CANONICAL_MONITOR_URL,
+    CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
     EXPLICIT_TASK_PROMPTS,
     MONITORED_RELEASE_LABELS,
@@ -1089,8 +1090,6 @@ def _assert_two_parallel_loop_roots() -> None:
 
 
 def _assert_halted_exact_evidence_resume() -> None:
-    from apps.registry_upload_http_entrypoint_hosted_runtime import ACTIVE_HOSTED_RUNTIME_TARGET_ID
-
     api = FakeApi()
     halted = _pull(
         110,
@@ -1109,7 +1108,7 @@ def _assert_halted_exact_evidence_resume() -> None:
         "head": SHA_B,
         "merge": SHA_A,
         "expected_sha": SHA_A,
-        "target_id": ACTIVE_HOSTED_RUNTIME_TARGET_ID,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
     }
     assert resume_halted_release(api, 110, evidence) == "production"
     assert PRODUCTION_LABEL in _labels(halted) and HALTED_LABEL not in _labels(halted)
