@@ -625,6 +625,33 @@ def run_warehouse_ui_flow(
             if item.get("profit_rub") is not None and item.get("margin_pct") is not None
         ]
         _assert(sku_rows_with_proxy_3, "SKU management consumes populated Proxy 3")
+        sku_rows = page.locator("[data-sku-row-nm-id]")
+        expect(sku_rows).to_have_count(len(sku_payload.get("rows") or []), timeout=120_000)
+        _assert(
+            page.locator("[data-sku-management-status]").inner_text().strip().startswith("SKU:"),
+            "SKU management loaded status",
+        )
+        _assert(
+            not page.locator("[data-sku-management-error]").inner_text().strip(),
+            "SKU management visible error state",
+        )
+        visible_proxy_3_rows = 0
+        for item in sku_rows_with_proxy_3:
+            row = page.locator(f'[data-sku-row-nm-id="{int(item["nm_id"])}"]')
+            profit_cell = row.locator('[data-sku-cell="profit_rub"]')
+            margin_cell = row.locator('[data-sku-cell="margin_pct"]')
+            if (
+                profit_cell.count() == 1
+                and margin_cell.count() == 1
+                and profit_cell.inner_text().strip() not in {"", "—", "-"}
+                and margin_cell.inner_text().strip() not in {"", "—", "-"}
+            ):
+                visible_proxy_3_rows += 1
+        _assert(
+            visible_proxy_3_rows == len(sku_rows_with_proxy_3),
+            "SKU management visible Proxy 3 consumer cells",
+        )
+        page.locator('[data-sku-sort="profit_rub"]').scroll_into_view_if_needed(timeout=60_000)
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
         page.screenshot(path=str(sku_screenshot), full_page=False)
         screenshots.append(str(sku_screenshot))
@@ -653,6 +680,7 @@ def run_warehouse_ui_flow(
             "stock_report_navigation": True,
             "sku_management_visible": True,
             "sku_management_proxy_3_row_count": len(sku_rows_with_proxy_3),
+            "sku_management_visible_proxy_3_row_count": visible_proxy_3_rows,
             "proxy_profit_3_visible": True,
             "proxy_margin_3_visible": True,
             "filled_metric_cells_from_2026_07_01": filled_metrics,

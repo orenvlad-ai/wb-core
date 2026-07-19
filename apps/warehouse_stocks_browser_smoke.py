@@ -104,6 +104,7 @@ def main() -> None:
                 _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
                 _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
                 _assert_stock_report_frame(f"http://127.0.0.1:{config.port}")
+                _assert_sku_management_loaded(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -239,6 +240,58 @@ def _assert_stock_report_frame(base_url: str) -> None:
             )
             surface = page.frame_locator("[data-warehouse-stock-report-frame]")
             surface.get_by_role("heading", name="Отчёт по остаткам", exact=True).wait_for()
+        finally:
+            browser.close()
+
+
+def _assert_sku_management_loaded(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route(
+                "**/v1/sheet-vitrina-v1/sku-management",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "rows": [
+                                {
+                                    "nm_id": 210183142,
+                                    "sku": "browser fixture SKU",
+                                    "name": "Browser fixture SKU",
+                                    "risk": "low",
+                                    "profit_rub": "123.45",
+                                    "margin_pct": "0.25",
+                                    "quality": "canonical_daily_projection",
+                                }
+                            ],
+                            "settings": {"forecast": {}, "revision": 0, "table": {}},
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=sku-management",
+                wait_until="domcontentloaded",
+            )
+            page.locator('[data-unified-tab-panel="sku-management"]:not([hidden])').wait_for()
+            row = page.locator('[data-sku-row-nm-id="210183142"]')
+            row.wait_for()
+            _assert(row.locator('[data-sku-cell="profit_rub"]').inner_text().strip() == "123,45 ₽", "loaded SKU profit")
+            _assert(row.locator('[data-sku-cell="margin_pct"]').inner_text().strip() == "25,0%", "loaded SKU margin")
+            _assert(
+                page.locator("[data-sku-management-status]").inner_text().strip().startswith("SKU:"),
+                "loaded SKU management status",
+            )
+            _assert(
+                not page.locator("[data-sku-management-error]").inner_text().strip(),
+                "loaded SKU management error state",
+            )
         finally:
             browser.close()
 
