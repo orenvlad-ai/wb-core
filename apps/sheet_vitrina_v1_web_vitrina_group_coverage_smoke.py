@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+    filter_archived_public_metrics,
+)
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_VITRINA_SOURCE_GROUPS,
     WEB_VITRINA_SOURCE_METRIC_KEYS,
@@ -131,7 +135,7 @@ def _assert_group_metric_coverage() -> None:
     )
     visible_metric_keys = [
         str(item.metric_key)
-        for item in sorted(visible_metrics, key=lambda row: int(row.display_order or 0))
+        for item in sorted(filter_archived_public_metrics(visible_metrics), key=lambda row: int(row.display_order or 0))
         if item.enabled and item.show_in_data
     ]
     metric_to_groups: dict[str, list[str]] = {metric_key: [] for metric_key in visible_metric_keys}
@@ -165,7 +169,7 @@ def _assert_group_metric_coverage() -> None:
         or missing_derived
         or missing_onec_derived
         or missing_our_wb_derived
-        or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
+        or any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
         or any(
             _groups_for_metric(metric_to_groups, metric_key) != [OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID]
             for metric_key in OWN_PRODUCT_CAPITAL_METRIC_KEYS
@@ -178,6 +182,8 @@ def _assert_group_metric_coverage() -> None:
             f"missing_our_wb_derived={missing_our_wb_derived}, "
             f"onec_group={ONEC_STOCKS_SOURCE_GROUP_ID}"
         )
+    if set(visible_metric_keys) & ARCHIVED_PUBLIC_METRIC_KEYS:
+        raise AssertionError("archived metrics leaked into active group coverage")
     if _groups_for_metric(metric_to_groups, OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY) != _groups_for_metric(
         metric_to_groups, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY
     ) or _groups_for_metric(
@@ -313,89 +319,18 @@ def _assert_onec_sources_recomputes_derived_metrics() -> None:
             refreshed_at_factory=lambda: NEW_REFRESHED_AT,
             now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
         )
-        captured: dict[str, object] = {}
-
-        def build_partial_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
-            captured["source_keys"] = list(kwargs.get("source_keys") or [])
-            captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
-            return _build_partial_onec_plan(nm_id=nm_id)
-
-        entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
-        job = entrypoint.start_sheet_source_group_refresh_job(
-            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
-            as_of_date="2026-04-21",
-        )
-        job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
-        if job_snapshot["status"] != "success":
-            raise AssertionError(f"1C group refresh must succeed, got {job_snapshot}")
-        if captured.get("source_keys") != [ONEC_STOCKS_SOURCE_KEY]:
-            raise AssertionError(f"1C group refresh must select only 1C source, got {captured}")
-        for metric_key in DERIVED_ONEC_SOURCE_METRICS:
-            if metric_key not in captured["metric_keys"]:
-                raise AssertionError(f"1C group refresh must include derived metric {metric_key}, got {captured}")
-
-        merged = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
-        data_rows = {row[1]: row for row in _sheet(merged, "DATA_VITRINA").rows}
-        expected_proxy_profit = 45.6
-        expected_margin = 0.0456
-        expected_inventory_return = expected_proxy_profit / 5000.0
-        assert_close(
-            data_rows[f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}"][3],
-            200.0,
-            "1C WB unit cost selected date",
-        )
-        assert_close(
-            data_rows[f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}"][3],
-            5000.0,
-            "1C inventory capital selected date",
-        )
-        assert_close(
-            data_rows[f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}"][3],
-            expected_proxy_profit,
-            "SKU proxy profit 2",
-        )
-        assert_close(
-            data_rows[f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}"][3],
-            expected_margin,
-            "SKU proxy margin 2",
-        )
-        assert_close(
-            data_rows[f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}"][3],
-            expected_inventory_return,
-            "SKU inventory capital return",
-        )
-        assert_close(
-            data_rows[f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}"][3],
-            expected_proxy_profit,
-            "total proxy profit 2",
-        )
-        assert_close(
-            data_rows[f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}"][3],
-            expected_margin,
-            "total proxy margin 2",
-        )
-        assert_close(
-            data_rows[f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}"][3],
-            expected_inventory_return,
-            "total inventory capital return",
-        )
-
-        result = job_snapshot["result"]
-        updated_cells = result["merge_summary"]["updated_cells"]
-        highlighted = {(cell["row_id"], cell["as_of_date"], cell["status"]) for cell in updated_cells}
-        for row_id in (
-            f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}",
-            f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}",
-            f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}",
-            f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}",
-            f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}",
-            f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}",
-        ):
-            if (row_id, "2026-04-21", "updated") not in highlighted:
-                raise AssertionError(f"updated_cells must include 1C derived highlight for {row_id}, got {updated_cells}")
+        try:
+            entrypoint.start_sheet_source_group_refresh_job(
+                source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
+                as_of_date="2026-04-21",
+            )
+        except ValueError as exc:
+            if "technical archive" not in str(exc):
+                raise
+        else:
+            raise AssertionError("archived-only 1C group refresh must not update active materializations")
         print(
-            "web_vitrina_onec_derived_refresh: ok ->",
-            result["merge_summary"]["updated_cell_count"],
+            "web_vitrina_onec_derived_refresh: ok -> archived",
             sorted(DERIVED_ONEC_SOURCE_METRICS),
         )
 

@@ -24,7 +24,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
 source_of_truth_level: "module_canonical"
-update_note: "После `warehouse_functional_cutover_v1` module 45 читает quantity/capital только из active six-stage functional version; отдельного quantity/cost baseline нет."
+update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive."
 ---
 
 # 1. Единственные шесть стадий
@@ -60,7 +60,11 @@ Capital следует тому же physical layer. В каждой стади�
 
 Обычное proportional movement переносит exact quantity и proportional capital без изменения unit WAC. Все intermediate calculations используют `Decimal`; округляется только UI.
 
-# 3. TOTAL semantics
+# 3. Active vitrina and TOTAL semantics
+
+Для каждой из шести стадий active catalog содержит ровно три пользовательские строки: `Количество, шт`, `Средневзвешенная себестоимость, ₽/шт`, `Товарный капитал, ₽`. Общий блок содержит `Всего единиц`, `Общий товарный капитал`, `Общая средневзвешенная себестоимость, ₽/шт`. Пустой склад показывает quantity/capital `0`, а WAC — единообразно `—`.
+
+Legacy `paid_equivalent_qty`, cost coverage/confirmation, old `Недопринято WB`, inventory-capital return, duplicate 1C capital rows, Proxy 2 and `our_wb_cost_confirmed_share_pct` remain source/audit fields only. Central public filter excludes them from normal live-plan materialization, web contract, filter controls and activity metric labels; an archived-only source cannot run an active group refresh or downgrade public `/status`, while its raw result remains technical evidence. Guarded economics backfill removes their stable `scope|metric` materializations from every persisted ready snapshot, including snapshots whose columns are entirely before the 2026-07-01 economics boundary, without deleting primary source tables. If the functional cutover is absent or rolled back, the canonical compatibility reader still calculates every public SKU/stage WAC as capital divided by physical quantity; paid-equivalent remains diagnostic only.
 
 - stage quantity = сумма positive SKU quantities;
 - stage capital = сумма SKU capital;
@@ -68,7 +72,7 @@ Capital следует тому же physical layer. В каждой стади�
 - overall quantity = сумма шести stage quantities;
 - overall capital = сумма шести stage capitals;
 - overall WAC = `SUM(all stage capital) / SUM(all stage quantity)`;
-- coverage/confirmation — ratio of quantity/capital aggregates по фактическим quality buckets, не average SKU percentages.
+- internal coverage/confirmation diagnostics — ratio of quantity/capital aggregates по фактическим quality buckets, не average SKU percentages; они не являются active user metrics.
 
 Каждая физическая единица входит ровно в один stage total. WB physical/in-way/return quantities сначала суммируются внутри WB contour и не являются дополнительными stages. Discrepancy не прибавляется второй раз к FF → WB.
 
@@ -82,6 +86,6 @@ WB использует periodic/snapshot WAC: official snapshot задаёт qu
 
 `warehouse_opening_v1`, legacy own-capital events/daily rows и прежние canonical-cost baseline rows immutable audit-only. Они не суммируются с active functional state. Полная warehouse history начинается с production timestamp `warehouse_functional_cutover_v1`; текущий snapshot назад не копируется.
 
-До functional cutover разрешена только bounded cost projection с `2026-07-01` для `our_wb_unit_cost_rub`, Proxy 3 и direct consumers. Она использует frozen opening map от доказанной accepted-on-FF поставки около 24.06, persisted historical quantities и confirmed downstream expenses. Positive quantity не получает silent zero/NULL cost; fallback всегда имеет explicit quality/provenance.
+До functional cutover разрешена только bounded cost projection с `2026-07-01` для `our_wb_unit_cost_rub`, Proxy 3 и direct consumers. Она использует frozen opening map от доказанной accepted-on-FF поставки около 24.06, persisted historical quantities из exact business-date columns и confirmed downstream expenses. Outer ready-snapshot date не подменяет дату колонки; current snapshot не копируется назад. Positive quantity не получает silent zero/NULL cost; fallback всегда имеет explicit quality/provenance.
 
 Source change/archive не удаляет ledger evidence: он сбрасывает certification и ставит targeted replay по stable flow/supply/SKU/effective date. Failed candidate сохраняет last good active version.

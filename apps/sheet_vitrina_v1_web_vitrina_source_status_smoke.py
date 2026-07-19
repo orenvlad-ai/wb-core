@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _build_auto_update_result_payload,
+    _build_refresh_result_payload,
     _activity_reason_ru,
     _build_web_vitrina_loading_table,
     _web_vitrina_source_status_not_loaded_activity_surface,
 )
+from packages.application.sheet_vitrina_v1_web_vitrina import _active_refresh_summary  # noqa: E402
 
 
 TODAY = "2026-04-25"
@@ -28,6 +32,10 @@ def main() -> None:
     _assert_promo_latest_confirmed_is_ok()
     _assert_fin_report_yesterday_latest_confirmed_is_ok()
     _assert_spp_proxy_missing_public_price_reason_is_human()
+    _assert_archived_onec_source_is_hidden()
+    _assert_archived_onec_failure_is_nonblocking()
+    _assert_empty_source_outcomes_reconcile()
+    _assert_refresh_result_uses_active_source_semantics()
     print("web_vitrina_source_aware_statuses: ok")
 
 
@@ -51,6 +59,101 @@ def _assert_not_loaded_activity_surface_is_lazy_neutral() -> None:
         raise AssertionError(f"not_loaded source-status must not expose stale summary items, got {surface}")
     if "не OK" in str(surface):
         raise AssertionError(f"not_loaded source-status must not reduce missing details to not OK, got {surface}")
+
+
+def _assert_archived_onec_source_is_hidden() -> None:
+    table = _build_web_vitrina_loading_table(
+        upload_summary={"items": [_item("onec_stocks", [])]},
+        today_date=TODAY,
+        yesterday_date=YESTERDAY,
+        available_dates=[YESTERDAY, TODAY],
+        default_refresh_date=YESTERDAY,
+        metric_labels_by_source={"onec_stocks": []},
+        group_last_updated_at={"onec_product_capital": "2026-04-25T08:00:00Z"},
+    )
+    if table["rows"] or any(
+        item.get("group_id") == "onec_product_capital" for item in table["groups"]
+    ):
+        raise AssertionError(f"archived 1C source must not leak into active loading surface, got {table}")
+
+
+def _assert_archived_onec_failure_is_nonblocking() -> None:
+    summary = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="error",
+            semantic_label="Ошибка",
+            semantic_tone="error",
+            semantic_reason="1C failed",
+            source_outcome_counts={"success": 1, "warning": 0, "error": 1},
+            source_outcomes=[
+                {"source_key": "stocks", "status": "success"},
+                {"source_key": "onec_stocks", "status": "error"},
+            ],
+        )
+    )
+    if summary["status"] != "success" or summary["counts"]["error"] != 0:
+        raise AssertionError(f"archived-only 1C failure must not drive active status, got {summary}")
+    if sum(summary["counts"].values()) != len(summary["outcomes"]):
+        raise AssertionError(f"active source counts must equal the visible outcome list, got {summary}")
+
+    archived_only = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="error",
+            semantic_label="Ошибка",
+            semantic_tone="error",
+            semantic_reason="1C failed",
+            source_outcome_counts={"success": 0, "warning": 0, "error": 1},
+            source_outcomes=[{"source_key": "onec_stocks", "status": "error"}],
+        )
+    )
+    if archived_only["counts"] != {"success": 0, "warning": 0, "error": 0} or archived_only["outcomes"]:
+        raise AssertionError(f"archived-only status must expose an empty reconciled active list, got {archived_only}")
+
+
+def _assert_empty_source_outcomes_reconcile() -> None:
+    summary = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="warning",
+            semantic_label="Внимание",
+            semantic_tone="warning",
+            semantic_reason="No persisted source detail",
+            source_outcome_counts={"success": 4, "warning": 2, "error": 1},
+            source_outcomes=[],
+        )
+    )
+    if summary["counts"] != {"success": 0, "warning": 0, "error": 0} or summary["outcomes"]:
+        raise AssertionError(f"empty active source list must not retain technical source counts, got {summary}")
+
+
+def _assert_refresh_result_uses_active_source_semantics() -> None:
+    result = SimpleNamespace(
+        semantic_status="error",
+        semantic_label="Ошибка",
+        semantic_tone="error",
+        semantic_reason="archived 1C failed",
+        source_outcome_counts={"success": 1, "warning": 0, "error": 1},
+        source_outcomes=[
+            {"source_key": "stocks", "status": "success"},
+            {"source_key": "onec_stocks", "status": "error"},
+        ],
+        snapshot_id="snapshot-active-source-smoke",
+        as_of_date=TODAY,
+        refreshed_at="2026-04-25T08:00:00Z",
+    )
+    payload = _build_refresh_result_payload(result)
+    if payload["semantic_status"] != "success" or payload["technical_semantic_status"] != "error":
+        raise AssertionError(f"refresh/job result must reduce archived sources and retain raw audit, got {payload}")
+    if payload["source_outcome_counts"] != {"success": 1, "warning": 0, "error": 0}:
+        raise AssertionError(f"refresh/job active counts mismatch, got {payload}")
+    auto_result = _build_auto_update_result_payload(
+        refresh_payload=payload,
+        load_payload=None,
+        technical_status="success",
+        finished_at="2026-04-25T08:01:00Z",
+        error=None,
+    )
+    if auto_result["semantic_status"] != "success":
+        raise AssertionError(f"archived-only failure must not persist a failed auto job, got {auto_result}")
 
 
 def _assert_current_snapshot_latest_confirmed_is_ok() -> None:

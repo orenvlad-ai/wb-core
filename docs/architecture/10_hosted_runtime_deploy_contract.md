@@ -150,7 +150,7 @@ The same runner owns the only production path for the active functional cutover 
 - `warehouse-functional-rollback --fingerprint <exact stored sha256:...>` removes only functional derived state after another backup;
 - `warehouse-ui-flow --evidence-dir <absolute path outside repo>` uses a fresh isolated Playwright context and reconciles navigation, six warehouses, WB contour, settings/reference, Proxy 3, supplier cost/bank fee fields, consumers, legacy redirects and sync freshness with protected readback. Evidence stays outside Git.
 
-Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`.
+Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`. Exact-date warehouse-chain recovery and archived-metric cleanup additionally follow `migration/104_warehouse_chain_audit_recovery.md` through the same repo-owned dry-run/apply/readback/UI contours.
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
@@ -589,7 +589,7 @@ Public probe validates:
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload` accepts a controlled XLSX upload with months `YYYY-MM` and non-negative numeric facts, rejects empty/invalid/negative rows, stores aggregates idempotently in runtime SQLite and does not write Google Sheets/GAS or accepted daily snapshots
 - Historical web-vitrina/report consistency repair is performed only through the repo-owned one-off CLI `apps/sheet_vitrina_v1_ready_fact_reconcile.py`: dry-run first, apply only for bounded windows/metrics, no overwrite of existing accepted diffs, no fake zeros from blank ready cells, and no recurring Google Sheets/GAS dependency.
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` + `manual_context` or truthful `422 {"error": ..., "server_context": ..., "manual_context": ...}`
-  - on `200`, root `status` is semantic snapshot outcome (`success / warning / error`), while technical completion stays separated in `technical_status`/derived fields
+  - on `200`, root `status` is active-vitrina semantic snapshot outcome (`success / warning / error`), while transport/read completion stays separated in `technical_status`; archive-inclusive semantics remain in `technical_semantic_*`/`technical_source_*`, and active `source_outcome_counts` always reconciles with the returned active `source_outcomes` list
   - `server_context` / `manual_context` must keep persisted latest semantic result summaries, so restart/reload does not erase warning/error truth
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
 - after the current source-aware temporal-policy switch, `stocks[yesterday_closed]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `stocks[today_current]` may truthfully stay `not_available`/blank and must not degrade source or aggregate semantic status by itself

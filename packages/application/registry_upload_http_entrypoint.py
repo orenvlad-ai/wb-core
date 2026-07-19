@@ -85,6 +85,10 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     onec_stage_metric_key,
     onec_stage_total_metric_key,
 )
+from packages.application.sheet_vitrina_v1_archived_metrics import (
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+    active_refresh_summary,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -916,11 +920,37 @@ class RegistryUploadHttpEntrypoint:
         return asdict(self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date))
 
     def handle_sheet_status_request(self, as_of_date: str | None = None) -> dict[str, Any]:
-        payload = asdict(self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date))
+        refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date)
+        payload = asdict(refresh_status)
+        active_summary = active_refresh_summary(refresh_status)
+        payload["transport_status"] = payload["status"]
         payload["technical_status"] = payload["status"]
-        payload["status"] = payload["semantic_status"]
-        payload["status_label"] = payload["semantic_label"]
-        payload["status_reason"] = payload["semantic_reason"]
+        payload["technical_status_label"] = (
+            "Успешно" if payload["status"] == "success" else "Ошибка"
+        )
+        payload["technical_status_tone"] = (
+            "success" if payload["status"] == "success" else "error"
+        )
+        payload["technical_status_reason"] = (
+            "Сохранённый снимок прочитан"
+            if payload["status"] == "success"
+            else "Сохранённый снимок не прочитан"
+        )
+        payload["technical_semantic_status"] = payload["semantic_status"]
+        payload["technical_semantic_label"] = payload["semantic_label"]
+        payload["technical_semantic_tone"] = payload["semantic_tone"]
+        payload["technical_semantic_reason"] = payload["semantic_reason"]
+        payload["technical_source_outcome_counts"] = dict(payload["source_outcome_counts"])
+        payload["technical_source_outcomes"] = list(payload["source_outcomes"])
+        payload["semantic_status"] = active_summary["status"]
+        payload["semantic_label"] = active_summary["label"]
+        payload["semantic_tone"] = active_summary["tone"]
+        payload["semantic_reason"] = active_summary["reason"]
+        payload["source_outcome_counts"] = dict(active_summary["counts"])
+        payload["source_outcomes"] = list(active_summary["outcomes"])
+        payload["status"] = active_summary["status"]
+        payload["status_label"] = active_summary["label"]
+        payload["status_reason"] = active_summary["reason"]
         payload["server_context"] = self.build_sheet_server_context()
         payload["manual_context"] = self.build_sheet_manual_context()
         payload["load_context"] = self.build_sheet_load_context()
@@ -1744,6 +1774,11 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
     ) -> dict[str, Any]:
         normalized_group_id = _normalize_source_group_id(source_group_id)
+        source_keys = set(_source_group_config(normalized_group_id)["source_keys"])
+        if not source_keys.intersection(_active_web_vitrina_source_keys()):
+            raise ValueError(
+                f"source group {normalized_group_id!r} is a technical archive and cannot refresh the active vitrina"
+            )
         now = self.now_factory()
         selected_as_of_date = _resolve_group_refresh_selected_date(as_of_date, now=now)
         available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
@@ -1904,6 +1939,9 @@ class RegistryUploadHttpEntrypoint:
         shared_source_keys = _collect_activity_source_keys(upload_records, update_records)
         upload_source_keys = _ordered_activity_source_keys(shared_source_keys, upload_records)
         update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
+        active_source_keys = _active_web_vitrina_source_keys()
+        upload_source_keys = [key for key in upload_source_keys if key in active_source_keys]
+        update_source_keys = [key for key in update_source_keys if key in active_source_keys]
         current_business_date = current_business_date_iso(self.now_factory())
         previous_business_date = default_business_as_of_date(self.now_factory())
         group_refresh_available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
@@ -3411,6 +3449,7 @@ class RegistryUploadHttpEntrypoint:
                     refreshed_at=refreshed_at,
                     plan=plan,
                 )
+                active_refresh = active_refresh_summary(refresh_result)
                 _finish_operator_phase(
                     refresh_diagnostics,
                     save_snapshot_phase,
@@ -3505,7 +3544,7 @@ class RegistryUploadHttpEntrypoint:
                     started_at=refresh_started_at,
                     finished_at=self.activated_at_factory(),
                     duration_ms=max(0, int(round((time.perf_counter() - refresh_started_perf) * 1000))),
-                    semantic_status=refresh_result.semantic_status,
+                    semantic_status=active_refresh["status"],
                     technical_status=refresh_result.status,
                 )
                 plan = _with_refresh_diagnostics_metadata(plan, refresh_diagnostics)
@@ -3515,9 +3554,7 @@ class RegistryUploadHttpEntrypoint:
                     plan=plan,
                 )
                 payload.update(asdict(refresh_result))
-                payload["technical_status"] = payload["status"]
-                payload["status_label"] = payload["semantic_label"]
-                payload["status_reason"] = payload["semantic_reason"]
+                _apply_active_refresh_semantics(payload, refresh_result)
                 payload["updated_cells"] = updated_cells
                 payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
                 payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
@@ -3536,8 +3573,8 @@ class RegistryUploadHttpEntrypoint:
                         refreshed_at=refresh_result.refreshed_at,
                         data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
                         status_rows=refresh_result.sheet_row_counts.get("STATUS"),
-                        semantic_status=refresh_result.semantic_status,
-                        semantic_reason=refresh_result.semantic_reason,
+                        semantic_status=active_refresh["status"],
+                        semantic_reason=active_refresh["reason"],
                         updated_cells=payload["updated_cell_count"],
                         latest_confirmed_cells=payload["latest_confirmed_cell_count"],
                         duration_ms=refresh_diagnostics.get("duration_ms"),
@@ -3548,8 +3585,8 @@ class RegistryUploadHttpEntrypoint:
                         "cycle_finish",
                         cycle="refresh",
                         status="success",
-                        semantic_status=refresh_result.semantic_status,
-                        semantic_reason=refresh_result.semantic_reason,
+                        semantic_status=active_refresh["status"],
+                        semantic_reason=active_refresh["reason"],
                         route=SHEET_VITRINA_REFRESH_ROUTE,
                         snapshot_id=refresh_result.snapshot_id,
                     )
@@ -5274,16 +5311,46 @@ def _format_operator_result_payload(result_payload: Mapping[str, Any] | None) ->
 
 
 def _build_refresh_result_payload(refresh_result: Any) -> dict[str, Any]:
-    return {
+    payload = {
         "technical_status": "success",
-        "semantic_status": str(getattr(refresh_result, "semantic_status", "") or "warning"),
-        "semantic_label": str(getattr(refresh_result, "semantic_label", "") or "Внимание"),
-        "semantic_tone": str(getattr(refresh_result, "semantic_tone", "") or "warning"),
-        "semantic_reason": str(getattr(refresh_result, "semantic_reason", "") or ""),
         "snapshot_id": str(getattr(refresh_result, "snapshot_id", "") or ""),
         "as_of_date": str(getattr(refresh_result, "as_of_date", "") or ""),
         "refreshed_at": str(getattr(refresh_result, "refreshed_at", "") or ""),
     }
+    _apply_active_refresh_semantics(payload, refresh_result)
+    return payload
+
+
+def _apply_active_refresh_semantics(payload: dict[str, Any], refresh_result: Any) -> None:
+    """Expose active-source semantics while retaining archive-inclusive audit fields."""
+
+    active = active_refresh_summary(refresh_result)
+    payload["technical_semantic_status"] = str(
+        getattr(refresh_result, "semantic_status", "") or "warning"
+    )
+    payload["technical_semantic_label"] = str(
+        getattr(refresh_result, "semantic_label", "") or "Внимание"
+    )
+    payload["technical_semantic_tone"] = str(
+        getattr(refresh_result, "semantic_tone", "") or "warning"
+    )
+    payload["technical_semantic_reason"] = str(
+        getattr(refresh_result, "semantic_reason", "") or ""
+    )
+    payload["technical_source_outcome_counts"] = dict(
+        getattr(refresh_result, "source_outcome_counts", {}) or {}
+    )
+    payload["technical_source_outcomes"] = list(
+        getattr(refresh_result, "source_outcomes", []) or []
+    )
+    payload["semantic_status"] = active["status"]
+    payload["semantic_label"] = active["label"]
+    payload["semantic_tone"] = active["tone"]
+    payload["semantic_reason"] = active["reason"]
+    payload["source_outcome_counts"] = dict(active["counts"])
+    payload["source_outcomes"] = list(active["outcomes"])
+    payload["status_label"] = active["label"]
+    payload["status_reason"] = active["reason"]
 
 
 def _build_refresh_error_payload(
@@ -8036,10 +8103,13 @@ def _build_web_vitrina_loading_table(
     group_last_updated_at: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     items = list(upload_summary.get("items") or [])
+    active_source_keys = _active_web_vitrina_source_keys()
     rows: list[dict[str, Any]] = []
     for item in items:
         item_payload = dict(item or {})
         source_key = str(item_payload.get("source_key") or item_payload.get("endpoint_id") or "").strip()
+        if source_key not in active_source_keys:
+            continue
         source_group_id = _source_group_id_for_source_key(source_key)
         today_status = _loading_table_status_for_slot(
             item_payload,
@@ -8084,6 +8154,7 @@ def _build_web_vitrina_loading_table(
         "default_refresh_date": default_refresh_date,
         "groups": _web_vitrina_loading_table_groups(
             group_last_updated_at or {},
+            active_source_keys=active_source_keys,
             available_dates=_normalize_available_refresh_dates(
                 available_dates,
                 default_refresh_date=default_refresh_date,
@@ -8106,10 +8177,12 @@ def _build_web_vitrina_loading_table(
 def _web_vitrina_loading_table_groups(
     group_last_updated_at: Mapping[str, str],
     *,
+    active_source_keys: Iterable[str] | None = None,
     available_dates: Iterable[str] = (),
     default_refresh_date: str = "",
 ) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
+    active = set(active_source_keys or _active_web_vitrina_source_keys())
     normalized_available_dates = _normalize_available_refresh_dates(
         available_dates,
         default_refresh_date=default_refresh_date,
@@ -8118,11 +8191,14 @@ def _web_vitrina_loading_table_groups(
     max_date = normalized_available_dates[-1] if normalized_available_dates else ""
     for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
         config = WEB_VITRINA_SOURCE_GROUPS[group_id]
+        visible_source_keys = [key for key in config["source_keys"] if key in active]
+        if not visible_source_keys:
+            continue
         groups.append(
             {
                 "group_id": group_id,
                 "label": str(config["label_ru"]),
-                "source_keys": list(config["source_keys"]),
+                "source_keys": visible_source_keys,
                 "last_updated_at": str(group_last_updated_at.get(group_id) or ""),
                 "refresh_action": {
                     "label": "Обновить группу",
@@ -8136,6 +8212,16 @@ def _web_vitrina_loading_table_groups(
             }
         )
     return groups
+
+
+def _active_web_vitrina_source_keys() -> frozenset[str]:
+    """Return sources with at least one non-archived active-vitrina metric."""
+
+    return frozenset(
+        source_key
+        for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items()
+        if any(metric_key not in ARCHIVED_PUBLIC_METRIC_KEYS for metric_key in metric_keys)
+    )
 
 
 def _normalize_available_refresh_dates(
@@ -8214,7 +8300,7 @@ def _build_activity_metric_labels_by_source(metrics: Iterable[Any]) -> dict[str,
         metric_key = str(getattr(item, "metric_key", "") or "").strip()
         label = str(getattr(item, "label_ru", "") or "").strip()
         enabled = bool(getattr(item, "enabled", True))
-        if metric_key and label and enabled:
+        if metric_key and metric_key not in ARCHIVED_PUBLIC_METRIC_KEYS and label and enabled:
             labels_by_key[metric_key] = label
     result: dict[str, list[str]] = {}
     for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items():

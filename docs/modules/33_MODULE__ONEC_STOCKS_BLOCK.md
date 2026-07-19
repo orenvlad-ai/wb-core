@@ -3,8 +3,8 @@ title: "Модуль: onec_stocks_block"
 doc_id: "WB-CORE-MODULE-33-ONEC-STOCKS-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать bounded-интеграцию 1C/Soykasoft API остатков, себестоимости WB, товарного капитала и связанных расчётных метрик web-vitrina."
-scope: "Source/adapter/parser/normalizer для `/hs/soykasoft/stocks_wb`, date-specific historical load через `date=YYYY-MM-DD`, web-vitrina metric wiring, fixture-backed smokes, optional live smoke и runtime env contract."
+purpose: "Зафиксировать bounded-интеграцию 1C/Soykasoft API как technical source/audit seam после перехода active товарного капитала на functional warehouse engine."
+scope: "Source/adapter/parser/normalizer для `/hs/soykasoft/stocks_wb`, date-specific historical load через `date=YYYY-MM-DD`, technical metric wiring, public archive boundary, fixture-backed smokes, optional live smoke и runtime env contract."
 source_basis:
   - "packages/contracts/onec_stocks_block.py"
   - "packages/adapters/onec_stocks_block.py"
@@ -36,15 +36,15 @@ related_docs:
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/12_MODULE__COGS_BY_GROUP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "1C source теперь date-specific для истории и подключён к web-vitrina как source group `onec_product_capital`; расчётные метрики `proxy_profit_2_rub`, `proxy_margin_2_pct` и `inventory_capital_return_pct` используют 1C WB unit cost и 1C товарный капитал. Если 1C payload успешно и свежо покрывает active SKU universe, но не содержит expected canonical stage bucket, runtime трактует этот empty bucket как нулевой остаток и materialize-ит qty/unit_cost/capital rows как `0`; source errors/date mismatch/unmapped stages/неполное SKU-покрытие остаются warning/error/blank без fake zeros."
+update_note: "1C source остаётся date-specific technical source. Старые 1C capital rows, Proxy 2 и inventory return могут рассчитываться для audit/group-refresh compatibility, но centralized archive filter исключает их из active web contract, controls, activity metric labels и active semantic status reduction."
 ---
 
 # 1. Идентификатор и статус
 
 - `module_id`: `onec_stocks_block`
 - `family`: `external-1c-source`
-- `status_transfer`: bounded source path и web-vitrina metric wiring добавлены в `wb-core`
-- `status_verification`: fixture-backed source smoke, wiring smoke, FF_STOCK partial regression smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, source group wiring, stage-bucket partial status и расчётные метрики; live smoke optional и env-guarded
+- `status_transfer`: bounded source path и technical metric wiring добавлены в `wb-core`; public duplicate block archived
+- `status_verification`: fixture-backed source smoke, wiring smoke, FF_STOCK partial regression smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, technical group refresh и отсутствие 1C rows в active web contract; live smoke optional и env-guarded
 - `status_main`: active/current in repo; optional live smoke remains env-guarded
 
 # 2. Runtime contract
@@ -113,7 +113,7 @@ Runtime default mapping folds source/contract aliases such as `CN_TO_RU_TRANSIT`
 
 For web-vitrina readiness, a transport-successful 1C payload can still be semantically partial. When normalized source rows are present, the requested active SKU universe is fully covered, there are no unmapped stage names, and one or more expected web-vitrina stage buckets are absent, the missing canonical bucket is treated as a structural zero stock state: source status stays `success`, carries `diagnostics.onec_stage_bucket_coverage`, and adds a note such as `zero_stock_stage_buckets=FF_STOCK; missing_stage_bucket_rows=materialized_as_zero_stock`. The server materializes SKU and TOTAL `qty`, weighted `unit_cost_rub` and `cost_total_rub` rows for that bucket as `0`. This is not a fake zero: it applies only after fresh exact-date source success and active-SKU coverage. Source errors, date mismatch, no source response, unknown/unmapped stages, unavailable/partial active SKU coverage, and other invalid candidates remain warning/error/blank without invented values. If an invalid later attempt occurs after a valid accepted same-date snapshot, the accepted server-side truth is still preserved and the source-status reason names that fallback.
 
-`onec_product_capital` group-refresh accepts structural empty buckets as fresh success and writes zeros for the selected `source_group_id + as_of_date`. It updates only the selected date/group, preserves prior accepted values on invalid/failing source attempts, leaves true no-truth/error cells blank without fake zeros, and preserves unrelated groups plus non-selected date cells.
+The source/evaluator still accepts structural empty buckets as fresh success and can prove zero-stock semantics in isolated technical audit fixtures. The public active-vitrina group-refresh rejects archived-only `onec_product_capital`; it cannot write those rows back into a ready snapshot after archive cutover.
 
 # 5. Code parts
 
@@ -126,20 +126,20 @@ For web-vitrina readiness, a transport-successful 1C payload can still be semant
 
 # 6. Current boundaries
 
-This module is wired into current web-vitrina metrics, but it still does not:
+This module is retained as a technical source/evaluator seam, but it does not:
 
 - replace existing WB official `stocks_block`;
 - replace or feed `cogs_by_group_block`;
 - define production mapping config storage;
 - confirm multi-`nmId` live batching;
 
-# 7. Web-vitrina metrics
+# 7. Archived metric contract
 
-The active web-vitrina source group is:
+The technical source group is:
 
 - `source_group_id = onec_product_capital`
 - `source_key = onec_stocks`
-- visible source group label = `1С` (`source_group_id` stays `onec_product_capital`)
+- technical label = `1С` (`source_group_id` stays `onec_product_capital`)
 
 Source metric ids used by derived calculations:
 
@@ -154,6 +154,8 @@ Derived metrics:
 - `inventory_capital_return_pct` / `inventory_capital_return_pct_total`: SKU `proxy_profit_2_rub / onec_total_cost_rub`, TOTAL `SUM(proxy_profit_2_rub) / SUM(onec_total_cost_rub)`
 
 Percent totals are ratio-of-aggregates and are not row averages. Zero denominators return `0.0` when numerator data is present, matching the existing proxy margin protection.
+
+All keys in the old 1C capital/Proxy 2/inventory-return catalog are centrally classified as archived. Ready snapshots may retain them as source evidence only until guarded cleanup. Normal live-plan materialization filters them out, active group-refresh rejects the archived-only source, and web-vitrina read normalization, filters and activity labels omit them. An archived-only 1C warning/error remains in technical audit and cannot downgrade the aggregate public `/status` or visible active-source status. Canonical public replacements are the six-stage quantity/WAC/capital block and Proxy 3 from modules 40/45/48.
 
 # 8. Known gaps and next step
 

@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.own_product_capital_backfill import run as run_backfill  # noqa: E402
+from packages.application.canonical_cost_engine import ensure_canonical_cost_schema  # noqa: E402
 from packages.application.cny_ledger import CnyLedgerBlock  # noqa: E402
 from packages.application.own_product_capital import (  # noqa: E402
     STAGE_FF,
@@ -34,7 +35,11 @@ from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     TemporalLiveSources,
     _MetricEvaluator,
 )
+from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
+    filter_archived_public_metrics,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
+    ONEC_STOCKS_ARCHIVED_METRIC_KEYS,
     ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
 )
@@ -43,12 +48,12 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
     extend_metrics_with_our_wb_cost_metrics,
 )
 from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa: E402
-    OWN_CAPITAL_RETURN_PCT_METRIC_KEY,
-    OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    OWN_AVG_COST_RUB_METRIC_KEY,
+    OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
     OWN_PRODUCT_CAPITAL_SECTION_RU,
+    OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
     OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
-    OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY,
     OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
     extend_metrics_with_own_product_capital_metrics,
     own_stage_metric_key,
@@ -92,6 +97,7 @@ def main() -> None:
         _assert_official_wb_stock_override(block)
         _assert_fail_closed_guards(block)
         _assert_metric_identities(block)
+        _assert_canonical_fallback_uses_physical_wac(runtime, block)
         _assert_backfill_runner(runtime, block)
     _assert_payment_document_hard_gate()
     _assert_late_boundary_correction()
@@ -425,24 +431,47 @@ def _assert_metric_identities(block: OwnProductCapitalBlock) -> None:
     evaluator.sku_cache[(slot, 202, OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY)] = 500.0
     total_capital = evaluator.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, slot)
     total_qty = evaluator.resolve_total(OWN_TOTAL_QTY_TOTAL_METRIC_KEY, slot)
+    total_wac = evaluator.resolve_total(OWN_AVG_COST_RUB_TOTAL_METRIC_KEY, slot)
     _dec_eq(total_capital, sum(Decimal(str(row[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY])) for row in lookup.values()), "TOTAL capital identity")
     _dec_eq(total_qty, sum(Decimal(str(row["own_total_product_qty"])) for row in lookup.values()), "TOTAL quantity identity")
-    _dec_eq(
-        evaluator.resolve_total(OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY, slot),
-        Decimal("1500") / Decimal(str(total_capital)),
-        "ratio-of-aggregates profitability",
-    )
-    confirmed_total = evaluator.resolve_total(OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY, slot)
-    if confirmed_total is None or not 0 <= confirmed_total <= 1:
-        raise AssertionError(f"quantity-weighted confirmed share is invalid: {confirmed_total}")
-    evaluator.sku_cache[(slot, 202, OWN_TOTAL_CAPITAL_RUB_METRIC_KEY)] = 0.0
-    evaluator.sku_cache.pop((slot, 202, OWN_CAPITAL_RETURN_PCT_METRIC_KEY), None)
-    if evaluator.resolve_sku(OWN_CAPITAL_RETURN_PCT_METRIC_KEY, 202, slot) is not None:
-        raise AssertionError("zero profitability denominator must be blank")
-    if ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY not in {item.metric_key for item in metrics}:
-        raise AssertionError("proxy2 metric was lost")
+    _dec_eq(total_wac, Decimal(str(total_capital)) / Decimal(str(total_qty)), "TOTAL WAC identity")
+    metric_keys = {item.metric_key for item in filter_archived_public_metrics(metrics)}
+    archived_keys = set(OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS) | set(ONEC_STOCKS_ARCHIVED_METRIC_KEYS)
+    leaked_archived = sorted(metric_keys & archived_keys)
+    if leaked_archived:
+        raise AssertionError(f"archived capital metrics leaked into active catalog: {leaked_archived}")
+    if ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY in metric_keys:
+        raise AssertionError("proxy2 metric must be archived")
     if OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY not in {item.metric_key for item in metrics}:
         raise AssertionError("proxy3 metric was lost")
+
+
+def _assert_canonical_fallback_uses_physical_wac(
+    runtime: RegistryUploadDbBackedRuntime,
+    block: OwnProductCapitalBlock,
+) -> None:
+    with _connect(runtime.db_path) as conn:
+        ensure_canonical_cost_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_canonical_cost_daily_state(
+                as_of_date,nm_id,stage,physical_quantity,paid_equivalent_quantity,
+                recognized_capital_rub,paid_capital_rub,cost_covered_quantity,
+                confirmed_quantity,recognized_unit_cost_rub,paid_unit_cost_rub,
+                underaccepted_quantity,underaccepted_recognized_capital_rub,
+                underaccepted_paid_capital_rub,source_quality,diagnostics_json,
+                calculated_at,fingerprint
+            ) VALUES('2026-07-20',909,'PRODUCTION','100','15','150','150','15','15',
+                     '1.5','10','0','0','0','confirmed_payment','{}',?,'physical-wac-smoke')
+            """,
+            (NOW,),
+        )
+        conn.commit()
+    row = block.load_daily_metric_lookup("2026-07-20")[909]
+    _dec_eq(row[own_stage_metric_key("PRODUCTION", "qty")], "100", "canonical fallback physical qty")
+    _dec_eq(row[own_stage_metric_key("PRODUCTION", "capital_rub")], "150", "canonical fallback capital")
+    _dec_eq(row[own_stage_metric_key("PRODUCTION", "unit_cost_rub")], "1.5", "canonical fallback stage WAC")
+    _dec_eq(row[OWN_AVG_COST_RUB_METRIC_KEY], "1.5", "canonical fallback SKU WAC")
 
 
 def _assert_backfill_runner(runtime: RegistryUploadDbBackedRuntime, block: OwnProductCapitalBlock) -> None:

@@ -75,6 +75,93 @@ CUSTOMS_DOCUMENT_TYPE = "customs_declaration"
 CUSTOMS_BY_QUANTITY = {"customs_fee_1010"}
 CUSTOMS_BY_VALUE = {"import_duty_2010", "import_vat_5010"}
 
+WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
+    "provisional": (
+        "Предварительная себестоимость",
+        "Расчёт использует подтверждённые факты, но часть будущих расходов ещё не закрыта.",
+    ),
+    "confirmed_payments_provisional_expenses": (
+        "Платежи подтверждены, часть расходов предварительная",
+        "Фактические платежи и банковские комиссии учтены; не все расходы этапа подтверждены.",
+    ),
+    "certified": (
+        "Подтверждено документами",
+        "Платежи и расходы этапа подтверждены первичными документами.",
+    ),
+    "primary_documents": (
+        "Подтверждено первичными документами",
+        "Количество и капитал рассчитаны по связанным платежам, invoice и документам расходов.",
+    ),
+    "mixed": (
+        "Смешанные источники",
+        "В строке объединены партии с разным уровнем документального подтверждения.",
+    ),
+    "moving_weighted_average": (
+        "Скользящая средневзвешенная",
+        "Стоимость рассчитана последовательным replay канонического append-only FF ledger.",
+    ),
+    "periodic_snapshot_wac": (
+        "Средневзвешенная по историческому снимку",
+        "Стоимость относится к точной бизнес-дате и учитывает подтверждённые приходы к этой дате.",
+    ),
+    "periodic_snapshot_wac_provisional": (
+        "Текущая средневзвешенная WB",
+        "Остаток взят из официального snapshot WB; себестоимость сохраняет статус исходных слоёв.",
+    ),
+    "periodic_snapshot_wac_closed": (
+        "Закрытая средневзвешенная WB",
+        "Количество и стоимость зафиксированы для закрытой канонической бизнес-даты.",
+    ),
+    "same_purchase_price": (
+        "По подтверждённой одинаковой закупочной цене",
+        "SKU сопоставлен с подтверждённой строкой той же закупочной цены в базовой приёмке.",
+    ),
+    "interpolation": (
+        "Интерполяция базовой стоимости",
+        "Оценка зафиксирована при cutover между подтверждёнными ценовыми точками.",
+    ),
+    "extrapolation": (
+        "Экстраполяция базовой стоимости",
+        "Оценка зафиксирована при cutover по ближайшей подтверждённой ценовой точке.",
+    ),
+    "fallback_average": (
+        "Оценка по зафиксированной средней",
+        "Применена зафиксированная при cutover оценка с явным provenance.",
+    ),
+    "direct_24_06": (
+        "Зафиксировано по приёмке 24.06",
+        "SKU-стоимость взята из подтверждённой базовой приёмки FF и заморожена для replay.",
+    ),
+    "direct_confirmed_downstream": (
+        "Подтверждённые расходы FF → WB",
+        "Расходы поставки от FF до WB связаны напрямую с этим SKU.",
+    ),
+    "confirmed_weighted_downstream_unit_cost": (
+        "Средневзвешенные подтверждённые расходы FF → WB",
+        "Несколько подтверждённых поставок объединены пропорционально их количеству.",
+    ),
+    "supply_specific_downstream_cost": (
+        "Стоимость конкретной поставки FF → WB",
+        "Входящая WAC и расходы этапа привязаны к конкретной поставке WB.",
+    ),
+    "proportional_wac_outbound": (
+        "Списание по текущей средневзвешенной",
+        "Капитал выбытия рассчитан пропорционально количеству по WAC на момент операции.",
+    ),
+    "current_wac_adjustment": (
+        "Корректировка текущей средневзвешенной",
+        "Версионированная корректировка меняет только производную стоимость, сохраняя первичный аудит.",
+    ),
+    "pooled_final_acceptance_discrepancy": (
+        "Расхождение финальной приёмки",
+        "Количество и капитал изолированы в отдельном пуле до доказанной доприёмки или корректировки.",
+    ),
+    "empty": (
+        "Остаток отсутствует",
+        "На выбранном срезе количество и товарный капитал равны нулю.",
+    ),
+}
+
 
 class WarehouseFunctionalError(WarehouseOpeningSnapshotError):
     """Fail-closed functional warehouse invariant error."""
@@ -596,13 +683,16 @@ def build_historical_wb_cost_projection(
         for item in opening_cost_map
         if int(item.get("nm_id") or 0) > 0
     }
-    quantities: defaultdict[str, dict[int, Decimal]] = defaultdict(dict)
+    quantities: defaultdict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
     for row in daily_quantity_rows:
         day = str(row.get("as_of_date") or "")[:10]
         nm_id = int(row.get("nm_id") or 0)
         quantity = _decimal(row.get("physical_quantity") if row.get("physical_quantity") is not None else row.get("stock_qty"))
         if "2026-07-01" <= day < cutover_date and nm_id > 0 and quantity >= ZERO:
-            quantities[day][nm_id] = quantity
+            quantities[day][nm_id] = {
+                "quantity": quantity,
+                "provenance": dict(row.get("quantity_provenance") or {}),
+            }
     downstream_rows = [dict(row) for row in downstream_rows]
     downstream_components = _supply_downstream_component_index(downstream_rows)
     inbounds: defaultdict[str, defaultdict[int, list[tuple[Decimal, Decimal, str]]]] = defaultdict(
@@ -627,7 +717,8 @@ def build_historical_wb_cost_projection(
     last_wac = {nm_id: dict(seed) for nm_id, seed in seeds.items()}
     result: list[dict[str, Any]] = []
     for day in sorted(quantities):
-        for nm_id, quantity in sorted(quantities[day].items()):
+        for nm_id, quantity_row in sorted(quantities[day].items()):
+            quantity = _decimal(quantity_row["quantity"])
             seed = last_wac.get(nm_id)
             if seed is None or _decimal(seed.get("wac")) <= ZERO:
                 if quantity > ZERO:
@@ -654,6 +745,7 @@ def build_historical_wb_cost_projection(
                 quality = str(seed["quality"])
             provenance = {
                 "source": "persisted_historical_daily_quantity",
+                "quantity_evidence": dict(quantity_row.get("provenance") or {}),
                 "frozen_opening": seed.get("provenance") or {},
                 "previous_snapshot_quantity": _text(previous_qty),
                 "inbound_quantity": _text(inbound_qty),
@@ -757,12 +849,21 @@ class WarehouseFunctionalBlock:
             if kind == "functional_cutover"
             else str((cutover or {}).get("cutover_at") or captured_at)[:10]
         )
-        pre_cutover_wb_cost_projection = build_historical_wb_cost_projection(
-            opening_cost_map=opening_cost_map,
-            daily_quantity_rows=capture["historical_wb_daily_quantities"],
-            downstream_rows=capture["downstream_cost_rows"],
-            cutover_date=projection_cutoff,
-        )
+        if cutover is None:
+            pre_cutover_wb_cost_projection = build_historical_wb_cost_projection(
+                opening_cost_map=opening_cost_map,
+                daily_quantity_rows=capture["historical_wb_daily_quantities"],
+                downstream_rows=capture["downstream_cost_rows"],
+                cutover_date=projection_cutoff,
+            )
+        else:
+            # The cutover materializes the exact pre-cutover replay.  Later
+            # ready snapshots are mutable publication artifacts, so an hourly
+            # sync must reuse these frozen rows instead of reconstructing old
+            # business dates from a newly published snapshot.
+            pre_cutover_wb_cost_projection = list(
+                capture.get("frozen_pre_cutover_wb_cost_projection") or []
+            )
         post_cutover_wb_cost_projection = self._build_post_cutover_daily_cost_projection(
             captured_at=captured_at,
             candidate_lines=lines,
@@ -773,6 +874,10 @@ class WarehouseFunctionalBlock:
         )
         historical_wb_cost_projection = (
             pre_cutover_wb_cost_projection + post_cutover_wb_cost_projection
+        )
+        historical_calendar = _validate_historical_projection_calendar(
+            historical_wb_cost_projection,
+            effective_date=captured_at[:10],
         )
         lines = _replace_current_wb_costs(
             lines,
@@ -821,6 +926,7 @@ class WarehouseFunctionalBlock:
                     for item in historical_wb_cost_projection
                     if _decimal(item["quantity"]) > ZERO and _decimal(item["wac_rub"]) <= ZERO
                 ),
+                "historical_wb_calendar": historical_calendar,
                 "wb_quantity_source": "official_snapshot_only",
                 "discrepancy_opening_zero": (
                     summaries[STAGE_DISCREPANCY]["quantity"] == "0"
@@ -873,7 +979,8 @@ class WarehouseFunctionalBlock:
             if str(backup.get("integrity_check") or "").lower() != "ok":
                 raise WarehouseFunctionalError("pre-cutover backup integrity_check is not ok")
 
-        current_digest = self._local_source_digest()
+        recovery_end_date = str(normalized.get("effective_date") or "")[:10]
+        current_digest = self._local_source_digest(recovery_end_date=recovery_end_date)
         if current_digest != str(normalized.get("local_source_digest") or ""):
             raise WarehouseFunctionalError("local sources drifted after dry-run")
         if kind != "functional_cutover" and self._wb_supply_source_digest() != str(
@@ -900,7 +1007,10 @@ class WarehouseFunctionalBlock:
                     raise WarehouseFunctionalError(
                         "active functional warehouse version drifted while acquiring apply lock"
                     )
-                if self._local_source_digest(connection=conn) != current_digest:
+                if self._local_source_digest(
+                    connection=conn,
+                    recovery_end_date=recovery_end_date,
+                ) != current_digest:
                     raise WarehouseFunctionalError("local sources drifted while acquiring apply lock")
                 if kind != "functional_cutover" and self._wb_supply_source_digest(connection=conn) != str(
                     normalized.get("wb_supply_source_digest") or ""
@@ -945,6 +1055,7 @@ class WarehouseFunctionalBlock:
                                 now,
                             ),
                         )
+                cutover_date = ""
                 if kind != "functional_cutover":
                     cutover_date_row = conn.execute(
                         "SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers WHERE cutover_id=?",
@@ -952,12 +1063,28 @@ class WarehouseFunctionalBlock:
                     ).fetchone()
                     if cutover_date_row is None:
                         raise WarehouseFunctionalError("functional daily replay has no cutover row")
+                    cutover_date = str(cutover_date_row["cutover_at"])[:10]
+                    planned_frozen = _canonical_daily_projection_rows(
+                        item
+                        for item in normalized.get("historical_wb_cost_projection") or []
+                        if str(item.get("as_of_date") or "")[:10] < cutover_date
+                    )
+                    persisted_frozen = _frozen_pre_cutover_wb_cost_projection(
+                        conn,
+                        cutover_date=cutover_date,
+                    )
+                    if planned_frozen != persisted_frozen:
+                        raise WarehouseFunctionalError(
+                            "pre-cutover WB daily cost projection differs from the frozen cutover history"
+                        )
                     conn.execute(
                         """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
                            WHERE cutover_id=? AND as_of_date>=?""",
-                        (FUNCTIONAL_CUTOVER_ID, str(cutover_date_row["cutover_at"])[:10]),
+                        (FUNCTIONAL_CUTOVER_ID, cutover_date),
                     )
                 for item in normalized.get("historical_wb_cost_projection") or []:
+                    if cutover_date and str(item.get("as_of_date") or "")[:10] < cutover_date:
+                        continue
                     conn.execute(
                         """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
                                cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
@@ -1028,9 +1155,12 @@ class WarehouseFunctionalBlock:
                         """INSERT INTO sheet_vitrina_v1_warehouse_unmatched_doprinato(
                                unmatched_id,version_id,source_id,business_date,nm_id,quantity,
                                matched_quantity,reason,provenance_json,created_at
-                           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                         (
-                            _stable_id("unmatched", item),
+                            _stable_id(
+                                "unmatched",
+                                {"version_id": version_id, "evidence": item},
+                            ),
                             version_id,
                             str(item.get("source_id") or ""),
                             str(item.get("business_date") or ""),
@@ -1246,23 +1376,40 @@ class WarehouseFunctionalBlock:
         public_balances = []
         for item in balances:
             nm_id = int(item["nm_id"])
+            identity = names.get(nm_id, {})
+            quality_presentation = _warehouse_quality_presentation(item.get("quality"))
+            warning_parts = []
+            if not bool(item.get("certified")):
+                warning_parts.append(quality_presentation["label_ru"])
+            if identity.get("warning"):
+                warning_parts.append(str(identity["warning"]))
             public_balances.append(
                 {
                     **item,
                     "line_id": f"{item['version_id']}:{warehouse_key}:{nm_id}",
-                    "sku": names.get(nm_id, {}).get("sku") or str(nm_id),
-                    "nomenclature_name": names.get(nm_id, {}).get("name") or "",
-                    "barcode": names.get(nm_id, {}).get("barcode") or "",
+                    "sku": identity.get("sku") or str(nm_id),
+                    "nomenclature_name": identity.get("name") or "",
+                    "barcode": identity.get("barcode") or "",
+                    "identity_source": identity.get("source") or "nm_id",
                     "average_unit_cost_rub": item.get("wac_rub"),
-                    "warning": "" if bool(item.get("certified")) else f"provisional · {item.get('quality') or 'quality unknown'}",
+                    "quality_presentation": quality_presentation,
+                    "human_evidence": _warehouse_human_evidence(
+                        item.get("provenance"),
+                        quantity=item.get("quantity"),
+                        capital_rub=item.get("capital_rub"),
+                        quality=item.get("quality"),
+                    ),
+                    "warning": " · ".join(warning_parts),
                 }
             )
         public_documents = []
         for item in documents:
             document_lines = []
+            parent_quality = str((item.get("provenance") or {}).get("quality") or "")
             for line in item.get("lines") or []:
                 nm_id = int(line["nm_id"])
                 identity = names.get(nm_id, {})
+                line_quality = str((line.get("provenance") or {}).get("quality") or parent_quality)
                 document_lines.append(
                     {
                         **line,
@@ -1270,6 +1417,14 @@ class WarehouseFunctionalBlock:
                         "nomenclature_name": identity.get("name") or "",
                         "barcode": identity.get("barcode") or "",
                         "average_unit_cost_rub": line.get("wac_rub"),
+                        "quality_presentation": _warehouse_quality_presentation(line_quality),
+                        "human_evidence": _warehouse_human_evidence(
+                            line.get("provenance"),
+                            quantity=line.get("quantity"),
+                            capital_rub=line.get("capital_rub"),
+                            quality=line_quality,
+                            fallback_date=item.get("occurred_at"),
+                        ),
                     }
                 )
             document_type = str(item.get("document_type") or "")
@@ -1304,10 +1459,21 @@ class WarehouseFunctionalBlock:
                     "total_cost_rub": _text(capital / quantity) if quantity != ZERO else None,
                     "total_capital_rub": _text(capital),
                     "status_label": "Аудит · не склад" if document_type in {"wb_unmatched_doprinato_audit", "wb_pre_cutover_unmatched_audit"} else "Проведено",
+                    "human_evidence": _warehouse_human_evidence(
+                        item.get("provenance"),
+                        quantity=item.get("quantity"),
+                        capital_rub=item.get("capital_rub"),
+                        quality=(item.get("provenance") or {}).get("quality"),
+                        fallback_date=item.get("occurred_at"),
+                    ),
                     "lines": document_lines,
                 }
             )
         status = _summary_status(balances, warehouse_key, readback["sync"])
+        status_presentation = _warehouse_status_presentation(
+            status=status,
+            sync=readback["sync"],
+        )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -1315,6 +1481,7 @@ class WarehouseFunctionalBlock:
             "cutover": readback["cutover"],
             "active_version": readback["active_version"],
             "sync": readback["sync"],
+            "sync_presentation": status_presentation,
             "warehouse": {
                 "warehouse_key": warehouse_key,
                 "warehouse_name": STAGE_NAMES[warehouse_key],
@@ -1326,7 +1493,8 @@ class WarehouseFunctionalBlock:
                 "updated_at": readback["active_version"]["effective_at"],
                 "source_basis": "canonical functional warehouse projection",
                 "status": status,
-                "status_label": status.replace("stale_error", "Ошибка последней синхронизации · last good сохранён").replace("certified", "Сертифицировано").replace("provisional", "Рассчитано · provisional"),
+                "status_label": status_presentation["label_ru"],
+                "status_description": status_presentation["description_ru"],
                 "wb_contour": {
                     "quantity": summary["wb_quantity"],
                     "in_way_to_client": summary["wb_in_way_to_client"],
@@ -1348,17 +1516,53 @@ class WarehouseFunctionalBlock:
         }
 
     def _nomenclature_names(self) -> dict[int, dict[str, str]]:
+        result: dict[int, dict[str, str]] = {}
         try:
             state = self.runtime.load_current_state()
         except Exception:
-            return {}
-        result: dict[int, dict[str, str]] = {}
-        for item in state.config_v2:
-            nm_id = int(item.nm_id)
+            state = None
+        if state is not None:
+            for item in state.config_v2:
+                nm_id = int(item.nm_id)
+                result[nm_id] = {
+                    "sku": str(getattr(item, "sku", "") or getattr(item, "display_name", "") or nm_id),
+                    "name": str(getattr(item, "display_name", "") or ""),
+                    "barcode": str(getattr(item, "barcode", "") or ""),
+                    "source": "config_v2",
+                    "warning": "",
+                }
+        active_by_nm: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+        try:
+            for item in self.runtime.list_nomenclature_items(active_only=True):
+                nm_id = int(item.get("nm_id") or 0)
+                if nm_id > 0:
+                    active_by_nm[nm_id].append(dict(item))
+        except Exception:
+            active_by_nm = defaultdict(list)
+        for nm_id, candidates in active_by_nm.items():
+            identities = {
+                (
+                    str(item.get("our_sku") or item.get("vendor_code") or "").strip(),
+                    str(item.get("nomenclature_name") or item.get("wb_title") or "").strip(),
+                    str(item.get("barcode") or "").strip(),
+                )
+                for item in candidates
+            }
+            if len(identities) != 1:
+                current = result.setdefault(
+                    nm_id,
+                    {"sku": str(nm_id), "name": "", "barcode": "", "source": "nm_id"},
+                )
+                current["warning"] = "Неоднозначная активная номенклатура — требуется проверка"
+                continue
+            sku, name, barcode = next(iter(identities))
+            current = result.get(nm_id, {})
             result[nm_id] = {
-                "sku": str(getattr(item, "sku", "") or getattr(item, "display_name", "") or nm_id),
-                "name": str(getattr(item, "display_name", "") or ""),
-                "barcode": str(getattr(item, "barcode", "") or ""),
+                "sku": sku or str(current.get("sku") or nm_id),
+                "name": name or str(current.get("name") or ""),
+                "barcode": barcode or str(current.get("barcode") or ""),
+                "source": "active_nomenclature_exact_nm_id",
+                "warning": "",
             }
         return result
 
@@ -1430,6 +1634,15 @@ class WarehouseFunctionalBlock:
                    FROM sheet_vitrina_v1_warehouse_wb_daily_cost WHERE cutover_id=?""",
                 (FUNCTIONAL_CUTOVER_ID,),
             ).fetchone()
+            historical_dates = [
+                str(row["as_of_date"])
+                for row in conn.execute(
+                    """SELECT DISTINCT as_of_date
+                       FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                       WHERE cutover_id=? ORDER BY as_of_date""",
+                    (FUNCTIONAL_CUTOVER_ID,),
+                ).fetchall()
+            ]
             cutover_version = conn.execute(
                 """SELECT version_id,effective_at FROM sheet_vitrina_v1_warehouse_functional_versions
                    WHERE cutover_id=? AND version_kind='functional_cutover'
@@ -1447,6 +1660,24 @@ class WarehouseFunctionalBlock:
             )
             sync = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1").fetchone()
         public_balances = [_balance_public(item) for item in balances]
+        expected_historical_dates = _date_range(
+            "2026-07-01",
+            str(active["effective_at"])[:10],
+        )
+        missing_historical_dates = sorted(
+            set(expected_historical_dates) - set(historical_dates)
+        )
+        historical_public = dict(historical_cost) if historical_cost else {}
+        value_gap_count = int(historical_public.get("gap_count") or 0)
+        historical_public.update(
+            {
+                "expected_day_count": len(expected_historical_dates),
+                "missing_day_count": len(missing_historical_dates),
+                "missing_dates": missing_historical_dates,
+                "value_gap_count": value_gap_count,
+                "gap_count": value_gap_count + len(missing_historical_dates),
+            }
+        )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -1457,7 +1688,7 @@ class WarehouseFunctionalBlock:
             "balances": public_balances,
             "documents": [_document_public(item) for item in documents],
             "unmatched_doprinato": [_unmatched_public(item) for item in unmatched],
-            "historical_wb_cost_projection": dict(historical_cost) if historical_cost else {},
+            "historical_wb_cost_projection": historical_public,
             "cutover_opening_discrepancy": {
                 "quantity": _text(sum((_decimal(row["quantity"]) for row in cutover_discrepancy_rows), ZERO)),
                 "capital_rub": _text(sum((_decimal(row["capital_rub"]) for row in cutover_discrepancy_rows), ZERO)),
@@ -1482,8 +1713,9 @@ class WarehouseFunctionalBlock:
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
             conn.execute("BEGIN")
-            sources = _source_rows(conn)
+            sources = _source_rows(conn, recovery_end_date=captured_at[:10])
             conn.commit()
+        sources = _functional_local_source_view(sources)
         local_digest = "sha256:" + _hash(_guarded_local_sources(sources))
         wb_data = dict(wb_payload.get("data") or {})
         raw_rows = list(wb_data.get("raw_rows") or wb_data.get("rows") or [])
@@ -1670,8 +1902,23 @@ class WarehouseFunctionalBlock:
                     "supplier_flow_id": flow_id,
                     "shipment_id": shipment_id,
                     "invoice_no": str(shipment.get("invoice_no") or ""),
+                    "invoice_date": str(shipment.get("invoice_date") or "")[:10],
+                    "business_date": (
+                        str(shipment.get("actual_shipment_date") or "")[:10]
+                        if stage == STAGE_CHINA_TO_FF
+                        else min(
+                            (
+                                str(row.get("operation_date") or "")[:10]
+                                for row in payments[shipment_id]
+                                if str(row.get("operation_date") or "")
+                            ),
+                            default=str(shipment.get("invoice_date") or "")[:10],
+                        )
+                    ),
+                    "actual_shipment_date": str(shipment.get("actual_shipment_date") or "")[:10],
                     "flow_quantity": _text(quantity),
                     "flow_capital_rub": _text(capital),
+                    "quality": quality,
                     "expenses_complete_certification": bool(shipment.get("expenses_complete")),
                     "payment_operation_ids": [str(row["operation_id"]) for row in payments[shipment_id]],
                     "cny_fee_operation_ids": [str(row["operation_id"]) for row in transfer_fees[shipment_id]],
@@ -1822,6 +2069,8 @@ class WarehouseFunctionalBlock:
                     provenance={
                         "source": "canonical_append_only_ff_ledger_replay",
                         "cutover_opening": True,
+                        "cutover_date": str((cutover or {}).get("cutover_at") or "")[:10],
+                        "opening_version_id": str(pool.get("opening_version_id") or ""),
                         "operations": pool["operations"],
                     },
                 )
@@ -1949,7 +2198,14 @@ class WarehouseFunctionalBlock:
                             capital=open_qty * pre_acceptance_cost,
                             covered=open_qty,
                             quality="supply_specific_downstream_cost",
-                            provenance={**provenance, "formula": "max(packed-accepted,0)"},
+                            provenance={
+                                **provenance,
+                                "formula": "max(packed-accepted,0)",
+                                "business_date": business_date,
+                                "pre_acceptance_unit_cost_rub": _text(pre_acceptance_cost),
+                                "flow_quantity": _text(open_qty),
+                                "flow_capital_rub": _text(open_qty * pre_acceptance_cost),
+                            },
                         )
                     continue
                 if cutover_mode or absorbed:
@@ -2132,6 +2388,8 @@ class WarehouseFunctionalBlock:
                 provenance={
                     "source": "official_wb_snapshot",
                     "snapshot_id": capture["wb_snapshot"]["snapshot_id"],
+                    "snapshot_date": capture["wb_snapshot"]["snapshot_date"],
+                    "fetched_at": capture["wb_snapshot"]["fetched_at"],
                     **provenance,
                 },
                 wb_quantity=physical,
@@ -2612,17 +2870,34 @@ class WarehouseFunctionalBlock:
             ).fetchone()
         return _cutover_public(row) if row else None
 
-    def _local_source_digest(self, *, connection: sqlite3.Connection | None = None) -> str:
+    def _local_source_digest(
+        self,
+        *,
+        connection: sqlite3.Connection | None = None,
+        recovery_end_date: str | None = None,
+    ) -> str:
         if connection is not None:
-            return "sha256:" + _hash(_guarded_local_sources(_source_rows(connection)))
+            sources = _functional_local_source_view(
+                _source_rows(connection, recovery_end_date=recovery_end_date)
+            )
+            return "sha256:" + _hash(_guarded_local_sources(sources))
         with _connect(self.runtime.db_path) as conn:
-            return "sha256:" + _hash(_guarded_local_sources(_source_rows(conn)))
+            sources = _functional_local_source_view(
+                _source_rows(conn, recovery_end_date=recovery_end_date)
+            )
+            return "sha256:" + _hash(_guarded_local_sources(sources))
 
     def _wb_supply_source_digest(self, *, connection: sqlite3.Connection | None = None) -> str:
         if connection is not None:
-            return "sha256:" + _hash(_supply_revisions(_source_rows(connection)["wb_supplies"]))
+            rows = connection.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
+            ).fetchall()
+            return "sha256:" + _hash(_supply_revisions(dict(row) for row in rows))
         with _connect(self.runtime.db_path) as conn:
-            return "sha256:" + _hash(_supply_revisions(_source_rows(conn)["wb_supplies"]))
+            rows = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
+            ).fetchall()
+            return "sha256:" + _hash(_supply_revisions(dict(row) for row in rows))
 
     def _last_good_wb_payload(self) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
@@ -2807,6 +3082,9 @@ class WarehouseFunctionalBlock:
     ) -> None:
         nm_id = int(item["nm_id"])
         line_id = _stable_id("whdocline", {"document_id": document_id, "nm_id": nm_id})
+        provenance = dict(item.get("provenance") or {})
+        if str(item.get("quality") or "") and not str(provenance.get("quality") or ""):
+            provenance["quality"] = str(item["quality"])
         conn.execute(
             """INSERT OR IGNORE INTO sheet_vitrina_v1_warehouse_functional_document_lines(
                    line_id,document_id,version_id,nm_id,quantity,wac_rub,capital_rub,
@@ -2820,7 +3098,7 @@ class WarehouseFunctionalBlock:
                 str(item["quantity"]),
                 item.get("wac_rub"),
                 str(item["capital_rub"]),
-                _json(item.get("provenance") or {}),
+                _json(provenance),
                 created_at,
             ),
         )
@@ -2914,7 +3192,11 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _source_rows(conn: sqlite3.Connection) -> dict[str, Any]:
+def _source_rows(
+    conn: sqlite3.Connection,
+    *,
+    recovery_end_date: str | None = None,
+) -> dict[str, Any]:
     tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     required = {
         "sheet_vitrina_v1_supplier_shipments",
@@ -2945,6 +3227,24 @@ def _source_rows(conn: sqlite3.Connection) -> dict[str, Any]:
         raise WarehouseFunctionalError("frozen canonical baseline is not materialized")
     report = _loads(baseline["report_json"], {})
     primary_id = str(baseline["primary_shipment_id"])
+    cutover_row = conn.execute(
+        "SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers WHERE cutover_id=?",
+        (FUNCTIONAL_CUTOVER_ID,),
+    ).fetchone()
+    recovery_boundary = (
+        str(cutover_row["cutover_at"] or "")[:10]
+        if cutover_row is not None
+        else str(recovery_end_date or "")[:10]
+    )
+    if not recovery_boundary:
+        latest_snapshot = conn.execute(
+            "SELECT MAX(as_of_date) AS as_of_date FROM sheet_vitrina_v1_ready_snapshots"
+        ).fetchone()
+        recovery_boundary = str(
+            latest_snapshot["as_of_date"]
+            if latest_snapshot is not None and latest_snapshot["as_of_date"]
+            else date.today().isoformat()
+        )[:10]
     queries = {
         "shipments": "SELECT * FROM sheet_vitrina_v1_supplier_shipments ORDER BY shipment_id",
         "shipment_lines": "SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines ORDER BY shipment_id,sort_order,line_id",
@@ -2965,6 +3265,13 @@ def _source_rows(conn: sqlite3.Connection) -> dict[str, Any]:
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
+    ready_snapshots, frozen_projection = _historical_recovery_source_rows(
+        conn,
+        cutover_at=(str(cutover_row["cutover_at"]) if cutover_row is not None else ""),
+        recovery_boundary=recovery_boundary,
+    )
+    result["ready_snapshots"] = ready_snapshots
+    result["frozen_pre_cutover_wb_cost_projection"] = frozen_projection
     result["primary_cost_rows"] = [dict(row) for row in conn.execute(
         """SELECT line.nm_id,line.qty,line.invoice_unit_price_cny,line.sku_ff_unit_cost_rub,
                   line.layer_line_id,line.source_status
@@ -2979,6 +3286,207 @@ def _source_rows(conn: sqlite3.Connection) -> dict[str, Any]:
         "ff_cost_layer_id": str((report.get("primary_shipment") or {}).get("ff_cost_layer_id") or ""),
     }
     return result
+
+
+def _ready_snapshot_recovery_rows(
+    conn: sqlite3.Connection,
+    *,
+    recovery_boundary: str,
+) -> list[dict[str, Any]]:
+    """Load only snapshots that can contribute an exact pre-cutover column.
+
+    The outer snapshot date is capped at the immutable cutover boundary, so
+    daily post-cutover snapshots cannot make the hourly source scan grow.
+    """
+
+    return [
+        dict(row)
+        for row in conn.execute(
+            """SELECT snapshot.bundle_version,snapshot.as_of_date,snapshot.activated_at,
+                      snapshot.refreshed_at,snapshot.plan_json
+               FROM sheet_vitrina_v1_ready_snapshots snapshot
+               WHERE snapshot.as_of_date <= ?
+                 AND json_valid(snapshot.plan_json)
+                 AND EXISTS (
+                       SELECT 1
+                       FROM json_each(snapshot.plan_json, '$.date_columns') day
+                       WHERE CAST(day.value AS TEXT) >= '2026-07-01'
+                         AND CAST(day.value AS TEXT) < ?
+                 )
+               ORDER BY snapshot.activated_at,snapshot.refreshed_at,
+                        snapshot.as_of_date,snapshot.bundle_version""",
+            (recovery_boundary, recovery_boundary),
+        ).fetchall()
+    ]
+
+
+def _historical_recovery_source_rows(
+    conn: sqlite3.Connection,
+    *,
+    cutover_at: str,
+    recovery_boundary: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select mutable snapshot evidence only before the immutable cutover."""
+
+    if not str(cutover_at or "").strip():
+        return (
+            _ready_snapshot_recovery_rows(
+                conn,
+                recovery_boundary=recovery_boundary,
+            ),
+            [],
+        )
+    # Ready snapshots can legitimately be republished for old outer dates.
+    # After cutover they are no longer an admissible historical input: the
+    # versioned daily rows written by cutover are the immutable replay boundary.
+    return (
+        [],
+        _frozen_pre_cutover_wb_cost_projection(
+            conn,
+            cutover_date=str(cutover_at)[:10],
+        ),
+    )
+
+
+def _canonical_daily_projection_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize derived daily rows for immutable-history comparisons."""
+
+    result = [
+        {
+            "as_of_date": str(item.get("as_of_date") or "")[:10],
+            "nm_id": int(item.get("nm_id") or 0),
+            "quantity": str(item.get("quantity") or "0"),
+            "wac_rub": str(item.get("wac_rub") or "0"),
+            "capital_rub": str(item.get("capital_rub") or "0"),
+            "quality": str(item.get("quality") or ""),
+            "provenance": dict(item.get("provenance") or {}),
+            "fingerprint": str(item.get("fingerprint") or ""),
+        }
+        for item in rows
+    ]
+    return sorted(result, key=lambda item: (item["as_of_date"], item["nm_id"]))
+
+
+def _frozen_pre_cutover_wb_cost_projection(
+    conn: sqlite3.Connection,
+    *,
+    cutover_date: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT as_of_date,nm_id,quantity,wac_rub,capital_rub,quality,
+                  provenance_json,fingerprint
+           FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+           WHERE cutover_id=? AND as_of_date<?
+           ORDER BY as_of_date,nm_id""",
+        (FUNCTIONAL_CUTOVER_ID, str(cutover_date)[:10]),
+    ).fetchall()
+    return _canonical_daily_projection_rows(
+        {
+            **dict(row),
+            "provenance": _loads(row["provenance_json"], {}),
+        }
+        for row in rows
+    )
+
+
+def _merge_historical_wb_quantity_evidence(
+    *,
+    canonical_rows: Iterable[Mapping[str, Any]],
+    ready_snapshot_rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fill exact historical WB quantity dates from persisted ready columns.
+
+    Canonical daily rows remain first priority.  A ready snapshot is used only
+    for an exact ``stock_total`` column that was already materialized for the
+    requested business date; no current value or preceding date is carried
+    backward or forward.
+    """
+
+    merged: dict[tuple[str, int], dict[str, Any]] = {}
+    for raw_snapshot in ready_snapshot_rows:
+        plan_json = str(raw_snapshot.get("plan_json") or "")
+        plan = _loads(plan_json, {})
+        if not isinstance(plan, Mapping):
+            continue
+        dates = [str(value or "") for value in plan.get("date_columns") or []]
+        sheets = plan.get("sheets") or []
+        data_sheet = next(
+            (
+                item
+                for item in sheets
+                if isinstance(item, Mapping) and str(item.get("sheet_name") or "") == "DATA_VITRINA"
+            ),
+            None,
+        )
+        if not dates or not isinstance(data_sheet, Mapping):
+            continue
+        snapshot_fingerprint = "sha256:" + hashlib.sha256(plan_json.encode("utf-8")).hexdigest()
+        for row in data_sheet.get("rows") or []:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            row_id = str(row[1] or "")
+            if not row_id.startswith("SKU:") or not row_id.endswith("|stock_total"):
+                continue
+            try:
+                nm_id = int(row_id[len("SKU:") : -len("|stock_total")])
+            except ValueError:
+                continue
+            if nm_id <= 0:
+                continue
+            for index, day in enumerate(dates):
+                if day < "2026-07-01" or len(row) <= 2 + index:
+                    continue
+                quantity = _optional_decimal(row[2 + index])
+                if quantity is None or quantity < ZERO:
+                    continue
+                merged[(day, nm_id)] = {
+                    "as_of_date": day,
+                    "nm_id": nm_id,
+                    "physical_quantity": _text(quantity),
+                    "quantity_provenance": {
+                        "source": "persisted_ready_snapshot_exact_column",
+                        "metric_key": "stock_total",
+                        "column_date": day,
+                        "snapshot_as_of_date": str(raw_snapshot.get("as_of_date") or ""),
+                        "bundle_version": str(raw_snapshot.get("bundle_version") or ""),
+                        "snapshot_plan_fingerprint": snapshot_fingerprint,
+                    },
+                }
+    for row in canonical_rows:
+        day = str(row.get("as_of_date") or "")[:10]
+        nm_id = int(row.get("nm_id") or 0)
+        if day < "2026-07-01" or nm_id <= 0:
+            continue
+        merged[(day, nm_id)] = {
+            **dict(row),
+            "as_of_date": day,
+            "nm_id": nm_id,
+            "quantity_provenance": {
+                "source": "canonical_cost_daily_state",
+                "stage": "WB",
+                "as_of_date": day,
+            },
+        }
+    return [merged[key] for key in sorted(merged)]
+
+
+def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the deterministic source representation used by plan and apply.
+
+    Exact period columns are a derived view of persisted ready snapshots.  Both
+    the dry-run capture and the optimistic apply gate must hash that same view;
+    hashing raw canonical rows at apply would reject an unchanged reviewed plan.
+    """
+
+    normalized = dict(sources)
+    normalized["historical_wb_daily_quantities"] = _merge_historical_wb_quantity_evidence(
+        canonical_rows=normalized.get("historical_wb_daily_quantities") or [],
+        ready_snapshot_rows=normalized.get("ready_snapshots") or [],
+    )
+    normalized.setdefault("ready_snapshots", [])
+    return normalized
 
 
 def _guarded_local_sources(sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -3169,6 +3677,35 @@ def _summaries(lines: Iterable[WarehouseLine]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _validate_historical_projection_calendar(
+    projection: Iterable[Mapping[str, Any]],
+    *,
+    effective_date: str,
+) -> dict[str, Any]:
+    """Fail closed before activation when any required business day is absent."""
+
+    expected_dates = _date_range("2026-07-01", str(effective_date or "")[:10])
+    projected_dates = {
+        str(item.get("as_of_date") or "")[:10]
+        for item in projection
+        if str(item.get("as_of_date") or "").strip()
+    }
+    missing_dates = sorted(set(expected_dates) - projected_dates)
+    if missing_dates:
+        raise WarehouseFunctionalError(
+            "historical WB cost projection has missing business dates: "
+            + ",".join(missing_dates)
+        )
+    return {
+        "date_from": expected_dates[0] if expected_dates else None,
+        "date_to": expected_dates[-1] if expected_dates else None,
+        "expected_day_count": len(expected_dates),
+        "projected_day_count": len(projected_dates & set(expected_dates)),
+        "missing_day_count": 0,
+        "missing_dates": [],
+    }
+
+
 def _wb_snapshot_quantities(items: Iterable[Mapping[str, Any]]) -> dict[int, Decimal]:
     result: dict[int, Decimal] = {}
     for item in items:
@@ -3304,9 +3841,376 @@ def _summary_status(rows: Iterable[Mapping[str, Any]], stage: str, sync: Mapping
     selected = [row for row in rows if str(row.get("warehouse_key") or "") == stage]
     if sync.get("last_error"):
         return "stale_error"
+    if not selected or all(_decimal(row.get("quantity")) == ZERO for row in selected):
+        return "empty"
     if selected and all(bool(row.get("certified")) for row in selected):
         return "certified"
     return "provisional"
+
+
+def _warehouse_quality_presentation(value: Any) -> dict[str, str]:
+    quality = str(value or "provisional").strip()
+    if quality.startswith("mixed:"):
+        child_codes = [item for item in quality.split(":", 1)[1].split(",") if item]
+        child_labels = [
+            _warehouse_quality_presentation(item)["label_ru"]
+            for item in child_codes
+        ]
+        return {
+            "code": quality,
+            "label_ru": "Смешанные источники",
+            "description_ru": (
+                "Объединены партии с разным уровнем подтверждения: "
+                + "; ".join(child_labels)
+                if child_labels
+                else "Объединены партии с разным уровнем подтверждения."
+            ),
+        }
+    label, description = WAREHOUSE_QUALITY_PRESENTATIONS.get(
+        quality,
+        (
+            "Расчётная себестоимость",
+            "Статус сохранён в техническом аудите; пользовательское значение рассчитано каноническим контуром.",
+        ),
+    )
+    return {
+        "code": quality,
+        "label_ru": label,
+        "description_ru": description,
+    }
+
+
+def _warehouse_status_presentation(
+    *,
+    status: str,
+    sync: Mapping[str, Any],
+) -> dict[str, str]:
+    if status == "stale_error":
+        attempt = str(sync.get("last_attempt_at") or "")
+        success = str(sync.get("last_success_at") or "")
+        reason = _warehouse_sync_error_reason(sync.get("last_error"))
+        description = f"Попытка: {attempt or 'время не записано'}. Причина: {reason}."
+        if success:
+            description += f" Показана последняя успешная версия от {success}."
+        return {
+            "code": status,
+            "tone": "error",
+            "label_ru": "Ошибка последней синхронизации",
+            "description_ru": description,
+        }
+    if status == "certified":
+        return {
+            "code": status,
+            "tone": "success",
+            "label_ru": "Подтверждено документами",
+            "description_ru": (
+                "Все строки склада подтверждены применимыми документами."
+                + _warehouse_sync_success_suffix(sync)
+            ),
+        }
+    if status == "empty":
+        return {
+            "code": status,
+            "tone": "neutral",
+            "label_ru": "Остаток отсутствует",
+            "description_ru": (
+                "Количество и товарный капитал на выбранном срезе равны нулю."
+                + _warehouse_sync_success_suffix(sync)
+            ),
+        }
+    return {
+        "code": status,
+        "tone": "warning",
+        "label_ru": "Предварительный расчёт",
+        "description_ru": (
+            "Часть расходов ещё не закрыта; учтены только подтверждённые на текущий момент факты."
+            + _warehouse_sync_success_suffix(sync)
+        ),
+    }
+
+
+def _warehouse_sync_success_suffix(sync: Mapping[str, Any]) -> str:
+    success = str(sync.get("last_success_at") or "")
+    return f" Последняя успешная синхронизация: {success}." if success else ""
+
+
+def _warehouse_sync_error_reason(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if "warehouse_unmatched_doprinato.unmatched_id" in text:
+        return "коллизия идентификатора строки аудита доприёмки"
+    if not text:
+        return "причина не записана"
+    if any(token in text for token in ("401", "403", "unauthorized", "forbidden", "authentication", "authorization")):
+        return "источник отклонил авторизацию; требуется проверка служебной сессии"
+    if "429" in text or "rate limit" in text or "too many requests" in text:
+        return "WB временно ограничил частоту запросов; сохранена последняя успешная версия"
+    if "timeout" in text or "timed out" in text:
+        return "источник не ответил за допустимое время; сохранена последняя успешная версия"
+    if any(token in text for token in ("pagination", "coverage is incomplete", "missing_nm_ids")):
+        return "WB вернул неполный снимок; публикация отклонена проверкой полноты"
+    if any(token in text for token in ("drifted", "fingerprint mismatch", "source digest")):
+        return "источники изменились после dry-run; требуется новый согласованный план"
+    if any(token in text for token in ("negative", "cost gap", "invariant")):
+        return "расчёт остановлен проверкой целостности складских данных"
+    if any(token in text for token in ("sqlite", "database is locked", "operationalerror", "integrity_check")):
+        return "временная ошибка хранилища; сохранена последняя успешная версия"
+    if any(token in text for token in ("status 5", "http 5", "bad gateway", "service unavailable")):
+        return "внешний сервис временно недоступен; сохранена последняя успешная версия"
+    return "синхронизация остановлена; техническая причина доступна в журнале аудита"
+
+
+def _warehouse_human_evidence(
+    provenance: Any,
+    *,
+    quantity: Any,
+    capital_rub: Any,
+    quality: Any,
+    fallback_date: Any = None,
+) -> dict[str, Any]:
+    raw = dict(provenance or {}) if isinstance(provenance, Mapping) else {}
+    records = _warehouse_evidence_records(
+        raw,
+        aggregate_quantity=quantity,
+        aggregate_capital=capital_rub,
+    )
+    quality_presentation = _warehouse_quality_presentation(quality)
+    items = []
+    for record in records:
+        invoice = str(record.get("invoice_no") or "")
+        operation = str(record.get("operation_id") or "")
+        supply = str(
+            record.get("wb_supply_id")
+            or record.get("shipment_id")
+            or record.get("supplier_flow_id")
+            or record.get("source_id")
+            or ""
+        )
+        document = (
+            str(record.get("document_label") or "")
+            or invoice
+            or supply
+            or operation
+            or str(record.get("snapshot_id") or "")
+            or "Каноническая проекция"
+        )
+        business_date = next(
+            (
+                str(record.get(key) or "")[:10]
+                for key in (
+                    "business_date",
+                    "invoice_date",
+                    "accepted_date",
+                    "supply_date",
+                    "actual_ff_acceptance_date",
+                    "snapshot_date",
+                    "fetched_at",
+                    "created_at",
+                    "cutover_date",
+                )
+                if str(record.get(key) or "")
+            ),
+            "",
+        )
+        if not business_date:
+            business_date = str(fallback_date or "")[:10]
+        record_quality = str(record.get("quality") or "")
+        if not record_quality and "expenses_complete_certification" in record:
+            record_quality = (
+                "certified"
+                if bool(record.get("expenses_complete_certification"))
+                else "confirmed_payments_provisional_expenses"
+            )
+        record_quality_presentation = _warehouse_quality_presentation(record_quality or quality)
+        allocation = str(record.get("allocation") or "")
+        if not allocation:
+            if record.get("source") == "canonical_append_only_ff_ledger_replay":
+                allocation = "Скользящая средневзвешенная по append-only FF ledger"
+            elif record.get("daily_wac_replay") or raw.get("daily_wac_replay"):
+                allocation = "Периодическая средневзвешенная по точной бизнес-дате"
+            else:
+                allocation = "Капитал партии / положительное количество"
+        quantity_contribution, capital_contribution = _warehouse_evidence_contribution(
+            record,
+            aggregate_quantity=quantity,
+            aggregate_capital=capital_rub,
+            record_count=len(records),
+        )
+        items.append(
+            {
+                "document": document,
+                "date": business_date or "—",
+                "invoice_or_supply": invoice or supply or operation or "—",
+                "quantity_source": (
+                    "Полное количество строки invoice после первого подтверждённого платежа"
+                    if invoice
+                    else "Изменение количества в append-only FF ledger"
+                    if operation
+                    else "Открытый остаток конкретной поставки FF → WB"
+                    if supply and record.get("packed_quantity") is not None
+                    else str(record.get("source") or "Канонический складской источник")
+                ),
+                "cost_source": _warehouse_cost_source_label(record),
+                "confirmation_status": record_quality_presentation["label_ru"],
+                "allocation_method": allocation,
+                "quantity_contribution": str(quantity_contribution),
+                "capital_contribution_rub": str(capital_contribution),
+            }
+        )
+    return {
+        "status": quality_presentation,
+        "items": items,
+    }
+
+
+def _warehouse_evidence_records(
+    raw: Mapping[str, Any],
+    *,
+    aggregate_quantity: Any,
+    aggregate_capital: Any,
+) -> list[dict[str, Any]]:
+    source_records = raw.get("source_records")
+    records = [dict(item) for item in source_records or [] if isinstance(item, Mapping)]
+    if records:
+        expanded: list[dict[str, Any]] = []
+        for record in records:
+            if not record.get("operations"):
+                expanded.append(record)
+                continue
+            record_quantity = record.get("flow_quantity")
+            record_capital = record.get("flow_capital_rub")
+            if len(records) == 1:
+                record_quantity = (
+                    aggregate_quantity if record_quantity is None else record_quantity
+                )
+                record_capital = aggregate_capital if record_capital is None else record_capital
+            if record_quantity is None or record_capital is None:
+                expanded.append(record)
+                continue
+            expanded.extend(
+                _expand_ff_ledger_evidence_record(
+                    record,
+                    aggregate_quantity=record_quantity,
+                    aggregate_capital=record_capital,
+                )
+            )
+        return expanded
+    operations = [dict(item) for item in raw.get("operations") or [] if isinstance(item, Mapping)]
+    if not operations:
+        return [dict(raw)]
+
+    return _expand_ff_ledger_evidence_record(
+        raw,
+        aggregate_quantity=aggregate_quantity,
+        aggregate_capital=aggregate_capital,
+    )
+
+
+def _expand_ff_ledger_evidence_record(
+    raw: Mapping[str, Any],
+    *,
+    aggregate_quantity: Any,
+    aggregate_capital: Any,
+) -> list[dict[str, Any]]:
+    operations = [dict(item) for item in raw.get("operations") or [] if isinstance(item, Mapping)]
+
+    common = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"operations", "source_records"}
+    }
+    operation_records: list[dict[str, Any]] = []
+    operation_quantity = ZERO
+    operation_capital = ZERO
+    complete_capital = True
+    for operation in operations:
+        delta = _optional_decimal(operation.get("quantity_delta"))
+        unit_cost = _optional_decimal(operation.get("unit_cost_rub"))
+        capital_delta = delta * unit_cost if delta is not None and unit_cost is not None else None
+        if delta is not None:
+            operation_quantity += delta
+        if capital_delta is None:
+            complete_capital = False
+        else:
+            operation_capital += capital_delta
+        operation_id = str(operation.get("operation_id") or "")
+        operation_records.append(
+            {
+                **common,
+                **operation,
+                "document_label": f"Операция FF {operation_id}" if operation_id else "Операция FF ledger",
+                "business_date": str(operation.get("created_at") or "")[:10],
+                "flow_quantity": _text(delta) if delta is not None else None,
+                "flow_capital_rub": _text(capital_delta) if capital_delta is not None else None,
+                "quality": "moving_weighted_average",
+            }
+        )
+
+    opening_quantity = _decimal(aggregate_quantity) - operation_quantity
+    opening_capital = (
+        _decimal(aggregate_capital) - operation_capital
+        if complete_capital
+        else None
+    )
+    opening = {
+        **common,
+        "document_label": "Остаток FF на cutover",
+        "business_date": str(raw.get("cutover_date") or "")[:10],
+        "flow_quantity": _text(opening_quantity),
+        "flow_capital_rub": _text(opening_capital) if opening_capital is not None else None,
+        "quality": "moving_weighted_average",
+    }
+    return [opening, *operation_records]
+
+
+def _warehouse_evidence_contribution(
+    record: Mapping[str, Any],
+    *,
+    aggregate_quantity: Any,
+    aggregate_capital: Any,
+    record_count: int,
+) -> tuple[str, str]:
+    quantity = _optional_decimal(record.get("flow_quantity"))
+    capital = _optional_decimal(record.get("flow_capital_rub"))
+    if quantity is None and record.get("packed_quantity") is not None:
+        packed = _decimal(record.get("packed_quantity"))
+        accepted = _decimal(record.get("accepted_quantity"))
+        quantity = max(packed - accepted, ZERO)
+    if capital is None and quantity is not None:
+        unit_cost = _optional_decimal(record.get("pre_acceptance_unit_cost_rub"))
+        if unit_cost is None:
+            ff_wac = _optional_decimal(record.get("ff_wac_at_ledger_debit_rub"))
+            addon = _optional_decimal(record.get("downstream_pre_acceptance_addon_rub"))
+            if ff_wac is not None and addon is not None:
+                unit_cost = ff_wac + addon
+        if unit_cost is not None:
+            capital = quantity * unit_cost
+    if record_count == 1:
+        quantity = quantity if quantity is not None else _optional_decimal(aggregate_quantity)
+        capital = capital if capital is not None else _optional_decimal(aggregate_capital)
+    return (
+        _text(quantity) if quantity is not None else "—",
+        _text(capital) if capital is not None else "—",
+    )
+
+
+def _warehouse_cost_source_label(record: Mapping[str, Any]) -> str:
+    if record.get("payment_operation_ids") or record.get("cny_fee_operation_ids"):
+        parts = ["Фактические CNY-платежи в RUB"]
+        if record.get("cny_fee_operation_ids") or _decimal(record.get("direct_rub_bank_fees")) > ZERO:
+            parts.append("связанные банковские комиссии")
+        if record.get("china_expense_sources"):
+            parts.append("документы расходов этапа Китай → FF")
+        return ", ".join(parts)
+    if record.get("ff_wac_at_ledger_debit_rub") is not None:
+        return "WAC FF на момент списания и расходы этапа FF → WB"
+    if record.get("operation_id"):
+        return "Себестоимость на момент операции append-only FF ledger"
+    source = str(record.get("source") or "")
+    if source == "canonical_append_only_ff_ledger_replay":
+        return "SKU-стоимость базовой приёмки и replay канонического FF ledger"
+    if "snapshot" in source or record.get("snapshot_id"):
+        return "Официальный snapshot WB и каноническая предыдущая WAC"
+    return source or "Каноническая складская стоимость"
 
 
 def _balance_public(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -3347,7 +4251,24 @@ def _document_public(item: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _unmatched_public(item: Mapping[str, Any]) -> dict[str, Any]:
-    return {**dict(item), "provenance": _loads(item.get("provenance_json"), {})}
+    value = dict(item)
+    provenance = _loads(value.get("provenance_json"), {})
+    quality = (
+        str(provenance.get("quality") or "")
+        if isinstance(provenance, Mapping)
+        else ""
+    ) or "pooled_final_acceptance_discrepancy"
+    return {
+        **value,
+        "provenance": provenance,
+        "human_evidence": _warehouse_human_evidence(
+            provenance,
+            quantity=value.get("quantity"),
+            capital_rub="0",
+            quality=quality,
+            fallback_date=value.get("business_date"),
+        ),
+    }
 
 
 def _verify_version(conn: sqlite3.Connection, *, version_id: str, expected: Mapping[str, Any]) -> None:

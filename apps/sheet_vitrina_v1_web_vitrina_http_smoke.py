@@ -335,7 +335,6 @@ def main() -> None:
             if [row.get("source_key") for row in loading_rows] != [item.get("source_key") for item in upload_items]:
                 raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
             if sorted(loading_groups) != [
-                "onec_product_capital",
                 "other_sources",
                 "seller_portal_bot",
                 "wb_api",
@@ -343,8 +342,6 @@ def main() -> None:
                 "webcore_product_capital",
             ]:
                 raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
-            if loading_groups["onec_product_capital"].get("label") != "1С":
-                raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
             if loading_groups["webcore_product_capital"].get("label") != "WebCore":
                 raise AssertionError(f"WebCore product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
@@ -355,7 +352,6 @@ def main() -> None:
             expected_row_groups = {
                 "wb_api",
                 "seller_portal_bot",
-                "onec_product_capital",
                 "webcore_product_capital",
                 "other_sources",
             }
@@ -371,11 +367,8 @@ def main() -> None:
                 if required_column not in loading_columns:
                     raise AssertionError(f"web-vitrina loading table missing {required_column}, got {loading_table}")
             endpoint_ids = [item.get("endpoint_id") for item in upload_items]
-            if endpoint_ids[0] != "prices_snapshot" or "onec_stocks" not in endpoint_ids:
-                raise AssertionError(f"upload summary must include 1C after persisted/error sources, got {activity_surface}")
-            onec_upload_item = next((item for item in upload_items if item.get("endpoint_id") == "onec_stocks"), None)
-            if not onec_upload_item or onec_upload_item.get("status_label") != "Внимание":
-                raise AssertionError(f"upload summary must expose unconfirmed 1C state, got {activity_surface}")
+            if endpoint_ids[0] != "prices_snapshot" or "onec_stocks" in endpoint_ids:
+                raise AssertionError(f"upload summary must exclude archived 1C source, got {activity_surface}")
             if [item.get("status_label") for item in upload_items if item.get("endpoint_id") in {"prices_snapshot", "seller_funnel_snapshot", "web_source_snapshot"}] != ["Ошибка", "Успешно", "Успешно"]:
                 raise AssertionError(f"persisted upload summary status mismatch, got {activity_surface}")
             if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":

@@ -2128,6 +2128,7 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
         expected_readback=readback,
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
+        acceptance_profile=str(args.acceptance_profile or "") or None,
     )
     _print_json(
         {
@@ -2363,6 +2364,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     warehouse_ui_flow.add_argument("--evidence-dir", required=True)
     warehouse_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     warehouse_ui_flow.add_argument("--headed", action="store_true")
+    warehouse_ui_flow.add_argument(
+        "--acceptance-profile",
+        choices=("warehouse_chain_recovery_20260719",),
+        default=None,
+        help="Optional migration-specific immutable controls; the default Flow remains reusable.",
+    )
     warehouse_ui_flow.set_defaults(handler=run_warehouse_ui_flow_command)
 
     return parser

@@ -46,6 +46,11 @@ from packages.application.sales_funnel_history_block import SalesFunnelHistoryBl
 from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapshotBlock
 from packages.application.sf_period_block import SfPeriodBlock
 from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
+from packages.application.sheet_vitrina_v1_archived_metrics import (
+    ARCHIVED_ONLY_SOURCE_KEYS,
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+    filter_archived_public_metrics,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -980,10 +985,20 @@ class SheetVitrinaV1LivePlanBlock:
         execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
         source_keys: Iterable[str] | None = None,
         metric_keys: Iterable[str] | None = None,
+        _include_archived_metrics_for_audit: bool = False,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
         selected_metric_keys = {str(item).strip() for item in (metric_keys or []) if str(item).strip()}
+        if _include_archived_metrics_for_audit and (
+            not selected_source_keys
+            or not selected_source_keys.issubset(ARCHIVED_ONLY_SOURCE_KEYS)
+            or not selected_metric_keys
+            or not selected_metric_keys.issubset(ARCHIVED_PUBLIC_METRIC_KEYS)
+        ):
+            raise ValueError(
+                "technical archived metric evaluation requires only archived source and metric keys"
+            )
         diagnostics = _new_refresh_diagnostics(
             execution_mode=execution_mode,
             started_at=self._diagnostic_timestamp(),
@@ -1026,8 +1041,13 @@ class SheetVitrinaV1LivePlanBlock:
         )
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
+        public_metrics = (
+            effective_metrics
+            if _include_archived_metrics_for_audit
+            else filter_archived_public_metrics(effective_metrics)
+        )
         displayed_metrics = sorted(
-            [item for item in effective_metrics if item.enabled and item.show_in_data],
+            [item for item in public_metrics if item.enabled and item.show_in_data],
             key=lambda item: item.display_order,
         )
         if selected_metric_keys:
@@ -2774,7 +2794,7 @@ class _MetricEvaluator:
             elif metric.metric_key == OWN_AVG_COST_RUB_TOTAL_METRIC_KEY:
                 value = _divide_or_none(
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
-                    self.resolve_total(OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY, temporal_slot),
+                    self.resolve_total(OWN_TOTAL_QTY_TOTAL_METRIC_KEY, temporal_slot),
                 )
             elif metric.metric_key == OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY:
                 value = self._aggregate_own_product_capital_confirmed_share(temporal_slot)
@@ -2806,7 +2826,7 @@ class _MetricEvaluator:
                 )
                 value = _divide_or_none(
                     self._aggregate_sum(own_stage_metric_key(stage, "capital_rub"), self.enabled_config, temporal_slot),
-                    self._aggregate_sum(own_stage_metric_key(stage, "paid_equivalent_qty"), self.enabled_config, temporal_slot),
+                    self._aggregate_sum(own_stage_metric_key(stage, "qty"), self.enabled_config, temporal_slot),
                 )
             elif metric.metric_key in {
                 own_stage_total_metric_key(stage, "confirmed_share_pct")
