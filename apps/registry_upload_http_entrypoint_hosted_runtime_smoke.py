@@ -120,11 +120,70 @@ def main() -> None:
                     f"warehouse functional {action} subprocess timeout must be "
                     f"{expected_timeout}, got {actual_timeout}"
                 )
+        failed_backup_source = (
+            "/opt/wb-core-runtime/backups/warehouse-functional/"
+            "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
+        )
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"status":"ready"}',
+            stderr="",
+        )
+        with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+            hosted_runtime._run_remote_warehouse_functional_failed_backup_cleanup(
+                active_target,
+                source=failed_backup_source,
+                apply=False,
+                fingerprint="",
+            )
+        if run_mock.call_args.kwargs.get("timeout") != 1800.0:
+            raise AssertionError("failed backup SHA planning must allow the bounded mutation timeout")
+        try:
+            hosted_runtime._run_remote_warehouse_functional_failed_backup_cleanup(
+                active_target,
+                source="/opt/wb-core-runtime/state/registry_upload_runtime.sqlite3",
+                apply=False,
+                fingerprint="",
+            )
+        except ValueError as exc:
+            if "restricted" not in str(exc):
+                raise AssertionError("failed backup cleanup rejected with unexpected error") from exc
+        else:
+            raise AssertionError("failed backup cleanup unexpectedly accepted the live database")
     ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-ui-flow", "--evidence-dir", "/tmp/wb-core-warehouse-ui-smoke"]
     )
     if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    failed_backup_source = (
+        "/opt/wb-core-runtime/backups/warehouse-functional/"
+        "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
+    )
+    cleanup_dry_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "warehouse-functional-failed-backup-cleanup-dry-run",
+            "--source",
+            failed_backup_source,
+        ]
+    )
+    if (
+        cleanup_dry_args.handler
+        is not hosted_runtime.run_warehouse_functional_failed_backup_cleanup_command
+        or cleanup_dry_args.cleanup_apply is not False
+    ):
+        raise AssertionError("hosted runner must expose read-only failed-backup cleanup planning")
+    cleanup_apply_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "warehouse-functional-failed-backup-cleanup-apply",
+            "--source",
+            failed_backup_source,
+            "--fingerprint",
+            "sha256:cleanup-smoke",
+        ]
+    )
+    if cleanup_apply_args.cleanup_apply is not True:
+        raise AssertionError("hosted runner must explicitly distinguish cleanup apply")
     opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
     if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
         raise AssertionError("hosted runner must expose canonical warehouse opening commands")

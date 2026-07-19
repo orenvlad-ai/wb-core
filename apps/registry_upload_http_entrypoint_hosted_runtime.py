@@ -1998,6 +1998,90 @@ def _warehouse_opening_timeout_seconds(action: str) -> float:
     return WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS
 
 
+def run_warehouse_functional_failed_backup_cleanup_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.cleanup_apply)
+    payload = _run_remote_warehouse_functional_failed_backup_cleanup(
+        target,
+        source=str(args.source),
+        apply=apply,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": "failed-backup-cleanup-apply" if apply else "failed-backup-cleanup-dry-run",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_warehouse_functional_failed_backup_cleanup(
+    target: HostedRuntimeTarget,
+    *,
+    source: str,
+    apply: bool,
+    fingerprint: str,
+) -> dict[str, Any]:
+    action = (
+        "warehouse-functional-failed-backup-cleanup-apply"
+        if apply
+        else "warehouse-functional-failed-backup-cleanup-dry-run"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    source_path = Path(str(source or ""))
+    allowed_parent = Path("/opt/wb-core-runtime/backups/warehouse-functional")
+    if (
+        not source_path.is_absolute()
+        or source_path.parent != allowed_parent
+        or re.fullmatch(r"warehouse_functional_cutover_v1-[0-9TZ]+\.sqlite3", source_path.name) is None
+    ):
+        raise ValueError(
+            "failed backup cleanup is restricted to one functional-cutover SQLite candidate"
+        )
+    runner_args = [
+        "python3",
+        "apps/sqlite_failed_backup_cleanup.py",
+        "--source",
+        str(source_path),
+    ]
+    if apply:
+        if not fingerprint:
+            raise ValueError("failed backup cleanup apply requires an exact fingerprint")
+        runner_args.extend(["--apply", "--fingerprint", fingerprint])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("failed backup cleanup runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("failed backup cleanup runner returned a non-object JSON payload")
+    return payload
+
+
 def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2147,6 +2231,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     functional_apply.set_defaults(
         handler=run_warehouse_functional_command,
         warehouse_functional_action="cutover-apply",
+    )
+
+    functional_failed_backup_cleanup_dry_run = subparsers.add_parser(
+        "warehouse-functional-failed-backup-cleanup-dry-run",
+        help="Fingerprint one proven-invalid partial functional-cutover backup.",
+    )
+    functional_failed_backup_cleanup_dry_run.add_argument("--source", required=True)
+    functional_failed_backup_cleanup_dry_run.set_defaults(
+        handler=run_warehouse_functional_failed_backup_cleanup_command,
+        cleanup_apply=False,
+    )
+
+    functional_failed_backup_cleanup_apply = subparsers.add_parser(
+        "warehouse-functional-failed-backup-cleanup-apply",
+        help="Remove one exact proven-invalid partial functional-cutover backup.",
+    )
+    functional_failed_backup_cleanup_apply.add_argument("--source", required=True)
+    functional_failed_backup_cleanup_apply.add_argument("--fingerprint", required=True)
+    functional_failed_backup_cleanup_apply.set_defaults(
+        handler=run_warehouse_functional_failed_backup_cleanup_command,
+        cleanup_apply=True,
     )
 
     functional_readback = subparsers.add_parser(
