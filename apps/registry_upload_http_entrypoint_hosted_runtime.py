@@ -859,6 +859,7 @@ def deploy_current_checkout(
     seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
+    auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
     status_command = (
         _remote_shell_command(
@@ -891,11 +892,14 @@ def deploy_current_checkout(
             "systemd_restart": systemd_commands["restart"],
             "nginx_public_routes_update": nginx_public_routes_command,
             "status": status_command,
+            "auth_env_preflight": auth_env_preflight_command,
         },
     }
     if dry_run:
         return summary
 
+    # Never let a deploy/restart proceed against a missing hosted auth contour.
+    _run_command(auth_env_preflight_command)
     _run_command(mkdir_command)
     _run_command(rsync_plan)
     _run_command(chown_target_dir_command)
@@ -919,7 +923,24 @@ def deploy_current_checkout(
         _run_command(systemd_commands["restart"])
     if status_command:
         _run_command(status_command)
+    # Read back the same contract after all managed-unit operations.
+    _run_command(auth_env_preflight_command)
     return summary
+
+
+def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
+    """Fail closed on missing required WebCore auth env keys without exposing values."""
+
+    if not target.environment_file:
+        raise ValueError("deploy target is missing environment_file for auth preflight")
+    env_file = shlex.quote(target.environment_file)
+    script = (
+        "set -eu; f=" + env_file + "; test -r \"$f\" || { echo 'missing environment file'; exit 78; }; "
+        "for k in WB_CORE_WEB_AUTH_USERNAME WB_CORE_WEB_AUTH_PASSWORD_HASH WB_CORE_WEB_AUTH_SESSION_SECRET; do "
+        "grep -Eq \"^${k}=[^[:space:]]+\" \"$f\" || { echo \"missing required auth variable: ${k}\"; exit 78; }; "
+        "done"
+    )
+    return _remote_shell_command(target, script)
 
 
 def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
