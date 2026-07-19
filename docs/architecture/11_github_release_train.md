@@ -11,6 +11,8 @@ GitHub Release Train — repo-owned сериализованная очеред�
 
 `task:loop` совместим только с `scope:live-runtime`. Диагностические задачи строго read-only и в Release Train не входят.
 
+Дополнение к уже начатой задаче или существующему PR наследует её task class и продолжает текущую branch/PR: отдельная задача и новый PR не создаются, дополнение не меняет класс молча. Изменить класс и соответствующую `task:*` label можно только по прямому указанию пользователя.
+
 ## Repo-Owned Артефакты
 
 - `.github/workflows/baseline-ci.yml` — обязательный check `baseline`;
@@ -150,7 +152,7 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 
 ## Канонический Мониторинг
 
-[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+is%3Aopen+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aneeds-resume%22) использует `is:open`, явно исключает `release:superseded` и через comma-OR label qualifier показывает только открытую активную очередь плюс отдельный resume overlay. Уже merged `release:awaiting-ui` gate не может входить в `is:open` view и наблюдается на текущем chain PR/workflow. PR-specific failures исследуются по их точной ссылке/comment и после доказанной замены не возвращаются в этот view.
+[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+sort%3Acreated-asc) намеренно не использует `is:open`: merged PR имеет GitHub state `closed`, но LOOP с `release:awaiting-ui` остаётся active global gate и обязан быть видимым. Comma-OR qualifier включает `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked` и `release:halted`; `-label:release:superseded` исключает доказанно заменённые итерации. Terminal `release:production` и `release:done` не включаются, а `sort:created-asc` сохраняет queue order. PR-specific evidence по-прежнему исследуется по точной ссылке, comments и workflow runs.
 
 ## Baseline И Security Boundary
 

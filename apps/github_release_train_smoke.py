@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Iterable
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,23 @@ from apps.github_release_train_wait import (  # noqa: E402
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+CANONICAL_MONITOR_URL = (
+    "https://github.com/orenvlad-ai/wb-core/pulls?"
+    "q=is%3Apr+-label%3Arelease%3Asuperseded+"
+    "label%3A%22release%3Aready%2Crelease%3Arunning%2C"
+    "release%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2C"
+    "release%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+"
+    "sort%3Acreated-asc"
+)
+MONITORED_RELEASE_LABELS = {
+    READY_LABEL,
+    RUNNING_LABEL,
+    AWAITING_AGENT_LABEL,
+    AWAITING_UI_LABEL,
+    NEEDS_RESUME_LABEL,
+    BLOCKED_LABEL,
+    HALTED_LABEL,
+}
 
 
 class FakeApi:
@@ -622,6 +641,101 @@ def _assert_workflow_contract() -> None:
     assert release.count("environment: production") == 1
 
 
+def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
+    """Evaluate the bounded qualifiers used by the canonical monitor regression."""
+
+    tokens = shlex.split(query)
+    if "is:pr" in tokens and item.get("kind") != "pr":
+        return False
+    if "is:open" in tokens and item.get("state") != "open":
+        return False
+    if "is:closed" in tokens and item.get("state") != "closed":
+        return False
+
+    labels = {str(label) for label in item.get("labels") or []}
+    for token in tokens:
+        if token.startswith("-label:") and token.removeprefix("-label:") in labels:
+            return False
+        if token.startswith("label:"):
+            alternatives = set(token.removeprefix("label:").split(","))
+            if not labels & alternatives:
+                return False
+    return True
+
+
+def _assert_codex_task_class_and_monitor_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    execution = (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
+        encoding="utf-8"
+    )
+    release_train = (
+        ROOT / "docs" / "architecture" / "11_github_release_train.md"
+    ).read_text(encoding="utf-8")
+
+    explicit_classes = (
+        "`Класс задачи: стандарт`",
+        "`Класс задачи: loop`",
+        "`Класс задачи: диагностика`",
+    )
+    automatic_messages = (
+        "`Класс задачи: стандарт — определён автоматически`",
+        "`Класс задачи: loop — определён автоматически`",
+        "`Класс задачи: диагностика — определён автоматически`",
+    )
+    classification_rules = (
+        "исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`",
+        "deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`",
+        "обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`",
+    )
+    for source in (agents, execution):
+        for required in (*explicit_classes, *automatic_messages, *classification_rules):
+            assert required in source
+        assert "неоднознач" in source and "всегда" in source and "`стандарт`" in source
+
+    for required in (
+        "не создаёт новую задачу или PR",
+        "текущей ветке",
+        "не меняет класс молча",
+        "только по прямому указанию пользователя",
+    ):
+        assert required in agents
+    for source in (execution, release_train):
+        assert "наследует" in source
+        assert "не меняет класс молча" in source
+        assert "только по прямому указанию пользователя" in source
+
+    for source in (agents, release_train):
+        assert CANONICAL_MONITOR_URL in source
+
+    query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
+    tokens = shlex.split(query)
+    assert "is:pr" in tokens
+    assert "is:open" not in tokens and "is:closed" not in tokens
+    assert "-label:release:superseded" in tokens
+    assert "sort:created-asc" in tokens
+    label_tokens = [token for token in tokens if token.startswith("label:")]
+    assert len(label_tokens) == 1
+    assert set(label_tokens[0].removeprefix("label:").split(",")) == MONITORED_RELEASE_LABELS
+    assert DONE_LABEL not in MONITORED_RELEASE_LABELS
+    assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
+
+    closed_merged_gate = {
+        "kind": "pr",
+        "state": "closed",
+        "merged": True,
+        "labels": {AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL},
+    }
+    assert _monitor_query_matches(query, closed_merged_gate)
+    assert not _monitor_query_matches(
+        query,
+        {**closed_merged_gate, "labels": {AWAITING_UI_LABEL, SUPERSEDED_LABEL}},
+    )
+    assert not _monitor_query_matches(
+        query,
+        {"kind": "pr", "state": "closed", "merged": True, "labels": {PRODUCTION_LABEL}},
+    )
+
+
 def main() -> int:
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
@@ -634,6 +748,7 @@ def main() -> int:
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
     _assert_workflow_contract()
+    _assert_codex_task_class_and_monitor_contract()
     print("github_release_train_smoke: ok")
     return 0
 

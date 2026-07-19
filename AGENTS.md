@@ -28,13 +28,23 @@
 
 ## Классы задач
 
-Каждая новая пользовательская задача должна начинаться ровно с одной строки:
+Каждый новый task prompt по возможности начинается ровно с одной явной строки:
 
-- `КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`
-- `КЛАСС ЗАДАЧИ: СТАНДАРТ`
-- `КЛАСС ЗАДАЧИ: LOOP`
+- `Класс задачи: стандарт`
+- `Класс задачи: loop`
+- `Класс задачи: диагностика`
 
-Класс управляет orchestration/closure, а execution-контур определяет техническую область и риск. `СТАНДАРТ` может иметь `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`; `LOOP` всегда имеет `scope:live-runtime`. Если класс отсутствует или неоднозначен, не выполняй file, GitHub, runtime или production mutations и запроси у пользователя один класс.
+Класс управляет orchestration/closure, а execution-контур определяет техническую область и риск. `СТАНДАРТ` может иметь `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`; `LOOP` всегда имеет `scope:live-runtime`.
+
+Если явная строка отсутствует, Codex самостоятельно классифицирует задачу до начала работы:
+
+- исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`;
+- deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`;
+- обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`.
+
+Если выбор остаётся неоднозначным, Codex всегда использует `стандарт`; отсутствие строки больше не требует останавливать работу и запрашивать класс. В начале автоматически классифицированной задачи Codex сообщает `Класс задачи: стандарт — определён автоматически`, `Класс задачи: loop — определён автоматически` или `Класс задачи: диагностика — определён автоматически` и кратко называет основание. Класс не расширяет requested scope или authority для mutations.
+
+Дополнение к уже начатой задаче или существующему PR наследует её класс: не создаёт новую задачу или PR, применяется в текущей ветке, не меняет класс молча и меняет его только по прямому указанию пользователя.
 
 ### `ДИАГНОСТИКА`
 
@@ -89,6 +99,8 @@ Production changes доставляются только repo-owned deploy/runbo
 Перед изменениями проверь status/branch/remotes/auth, выполни `git fetch --prune origin` и создай отдельную ветку от актуального `origin/main`. Не смешивай, не очищай и не теряй чужой dirty state; при необходимости используй отдельный worktree.
 
 Независимые change-задачи могут выполняться параллельно только в отдельных branch/worktree и отдельных PR. Для PR, явно поставленного в GitHub Release Train меткой `release:ready`, task owner добавляет ровно одну `task:*` и ровно одну `scope:*` метку и продолжает наблюдать применимый terminal state. Queue владеет только сериализованной секцией sync/checks/merge/deploy/verify; semantic conflict возвращается исходной задаче. `release:ready`, `release:awaiting-agent`, `release:needs-resume`, `release:awaiting-ui` и открытый PR не являются closure. `release:superseded` хранит аудит заменённой незамёрженной LOOP-итерации и не является активной queue-задачей. `scope:production-mutation` автоматически не выпускается.
+
+[Канонический монитор исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+sort%3Acreated-asc) не ограничивается `is:open`: merged LOOP PR с `release:awaiting-ui` остаётся активным глобальным gate. Монитор исключает `release:superseded`, не включает terminal `release:production`/`release:done` и сортирует задачи по `created-asc`.
 
 Repo-owned waiter для Codex CLI:
 
