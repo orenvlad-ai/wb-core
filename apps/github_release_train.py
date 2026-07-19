@@ -20,17 +20,32 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-READY_LABEL = "release:ready"
-RUNNING_LABEL = "release:running"
-AWAITING_AGENT_LABEL = "release:awaiting-agent"
-AWAITING_UI_LABEL = "release:awaiting-ui"
-NEEDS_RESUME_LABEL = "release:needs-resume"
-BLOCKED_LABEL = "release:blocked"
-DONE_LABEL = "release:done"
-PRODUCTION_LABEL = "release:production"
-HALTED_LABEL = "release:halted"
-SUPERSEDED_LABEL = "release:superseded"
+from apps.github_release_train_spec import (
+    ACK_PROOF_MARKER,
+    AWAITING_AGENT_LABEL,
+    AWAITING_UI_LABEL,
+    BLOCKED_LABEL,
+    CHAIN_AUDIT_MARKER,
+    COMPLETION_PROOF_MARKER,
+    DEPLOY_PROOF_MARKER,
+    DONE_LABEL,
+    HALTED_LABEL,
+    HALT_PROOF_MARKER,
+    NEEDS_RESUME_LABEL,
+    PRIMARY_STATE_LABELS,
+    PRODUCTION_LABEL,
+    READY_LABEL,
+    RECONCILE_PROOF_MARKER,
+    RUNNING_LABEL,
+    STATUS_COMMENT_MARKER,
+    SUPERSEDED_LABEL,
+    assert_state_invariants,
+    transition_allowed,
+)
 
 REPO_ONLY_LABEL = "scope:repo-only"
 LIVE_RUNTIME_LABEL = "scope:live-runtime"
@@ -42,19 +57,8 @@ LOOP_ROOT_PREFIX = "loop:root-"
 LOOP_ACK_PREFIX = "loop:ack-"
 LOOP_ACCEPT_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 DEFAULT_NEEDS_RESUME_AFTER_SECONDS = 30 * 60
-NEEDS_RESUME_COMMENT_MARKER = "wb-core-release-needs-resume"
 
-STATE_LABELS = {
-    READY_LABEL,
-    RUNNING_LABEL,
-    AWAITING_AGENT_LABEL,
-    AWAITING_UI_LABEL,
-    BLOCKED_LABEL,
-    DONE_LABEL,
-    PRODUCTION_LABEL,
-    HALTED_LABEL,
-    SUPERSEDED_LABEL,
-}
+STATE_LABELS = set(PRIMARY_STATE_LABELS)
 SCOPE_LABELS = {
     REPO_ONLY_LABEL,
     LIVE_RUNTIME_LABEL,
@@ -137,6 +141,12 @@ class ReleaseApi(Protocol):
     def remove_label(self, number: int, label: str) -> None: ...
 
     def add_comment(self, number: int, body: str) -> None: ...
+
+    def update_comment(self, comment_id: int, body: str) -> None: ...
+
+    def delete_comment(self, comment_id: int) -> None: ...
+
+    def close_pull(self, number: int) -> None: ...
 
     def delete_branch(self, branch: str) -> None: ...
 
@@ -348,6 +358,27 @@ class GitHubApi:
         if body.strip():
             self._request("POST", self._repo_path(f"issues/{number}/comments"), {"body": body.strip()})
 
+    def update_comment(self, comment_id: int, body: str) -> None:
+        self._request(
+            "PATCH",
+            self._repo_path(f"issues/comments/{comment_id}"),
+            {"body": body.strip()},
+        )
+
+    def delete_comment(self, comment_id: int) -> None:
+        self._request(
+            "DELETE",
+            self._repo_path(f"issues/comments/{comment_id}"),
+            allowed_statuses=(404,),
+        )
+
+    def close_pull(self, number: int) -> None:
+        self._request(
+            "PATCH",
+            self._repo_path(f"issues/{number}"),
+            {"state": "closed", "state_reason": "not_planned"},
+        )
+
     def delete_branch(self, branch: str) -> None:
         encoded = urllib_parse.quote(branch, safe="")
         self._request(
@@ -424,15 +455,15 @@ def loop_ack_labels(labels: Iterable[str]) -> set[str]:
 
 def release_state_from_labels(labels: Iterable[str]) -> str:
     values = set(labels)
-    if RUNNING_LABEL in values:
+    try:
+        assert_state_invariants(values)
+    except ValueError as exc:
+        raise ReleaseBlocked(str(exc)) from exc
+    primary = values & STATE_LABELS
+    if RUNNING_LABEL in primary:
         return RUNNING_LABEL
-    matches = sorted(values & (STATE_LABELS - {READY_LABEL, RUNNING_LABEL}))
-    if len(matches) > 1:
-        raise ReleaseBlocked("PR carries conflicting release state labels")
-    if matches:
-        return matches[0]
-    if READY_LABEL in values:
-        return READY_LABEL
+    if primary:
+        return next(iter(primary))
     return "release:none"
 
 
@@ -472,8 +503,110 @@ def _latest_label_timestamp(
     return _github_timestamp(fallback.get("updated_at") or fallback.get("created_at"))
 
 
-def _needs_resume_marker(number: int, head_sha: str) -> str:
-    return f"<!-- {NEEDS_RESUME_COMMENT_MARKER} pr={number} head={head_sha} -->"
+def _proof_marker(marker: str, **values: object) -> str:
+    rendered = " ".join(f"{key}={value}" for key, value in sorted(values.items()))
+    return f"<!-- {marker} {rendered} -->"
+
+
+def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: object) -> bool:
+    expected = _proof_marker(marker, **values)
+    for item in api.list_comments(number):
+        if expected not in str(item.get("body") or ""):
+            continue
+        author = item.get("user")
+        if isinstance(author, Mapping):
+            login = str(author.get("login") or "")
+            if login not in {"github-actions", "github-actions[bot]"}:
+                continue
+        return True
+    return False
+
+
+def _status_metadata(body: str) -> dict[str, Any] | None:
+    prefix = f"<!-- {STATUS_COMMENT_MARKER} "
+    for line in body.splitlines():
+        if line.startswith(prefix) and line.endswith(" -->"):
+            try:
+                payload = json.loads(line[len(prefix) : -4])
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
+def upsert_status_comment(
+    api: ReleaseApi,
+    number: int,
+    *,
+    owner: str,
+    reason: str,
+    last_action: str,
+    intervention: bool,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Maintain exactly one machine-owned status/heartbeat comment per active PR."""
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    task_class = task_class_from_labels(labels)
+    state = release_state_from_labels(labels)
+    head_sha = str((pull.get("head") or {}).get("sha") or "")
+    root = loop_root_from_labels(labels)
+    root_identity = root or (number if task_class == LOOP_TASK_LABEL else 0)
+    heartbeat = time.time() if now is None else now
+    resume = "не требуется"
+    if intervention:
+        resume = (
+            f"`python3 apps/github_release_train_wait.py {number} --resume-owner --no-ack-agent`"
+        )
+    metadata = {
+        "heartbeat": heartbeat,
+        "head": head_sha,
+        "owner": owner,
+        "pr": number,
+        "root": root_identity,
+        "state": state,
+    }
+    body = "\n".join(
+        (
+            f"<!-- {STATUS_COMMENT_MARKER} {json.dumps(metadata, sort_keys=True)} -->",
+            "### Release Train status",
+            f"- Задача: {str(pull.get('title') or f'PR #{number}')}",
+            f"- Класс: `{task_class}`",
+            f"- Этап: `{state}`",
+            f"- Ожидание: {reason}",
+            f"- LOOP root: `{root_identity or '—'}`",
+            f"- Последнее действие: {last_action}",
+            f"- Вмешательство: {'требуется' if intervention else 'не требуется'}",
+            f"- Resume: {resume}",
+        )
+    )
+    matches = [
+        item
+        for item in api.list_comments(number)
+        if f"<!-- {STATUS_COMMENT_MARKER} " in str(item.get("body") or "")
+    ]
+    if matches and int(matches[0].get("id") or 0) > 0:
+        api.update_comment(int(matches[0]["id"]), body)
+        for duplicate in matches[1:]:
+            duplicate_id = int(duplicate.get("id") or 0)
+            if duplicate_id > 0:
+                api.delete_comment(duplicate_id)
+    elif not matches:
+        api.add_comment(number, body)
+    return metadata
+
+
+def _latest_status_heartbeat(api: ReleaseApi, number: int, head_sha: str) -> float | None:
+    heartbeats: list[float] = []
+    for comment in api.list_comments(number):
+        metadata = _status_metadata(str(comment.get("body") or ""))
+        if metadata and str(metadata.get("head") or "") == head_sha:
+            try:
+                heartbeats.append(float(metadata.get("heartbeat")))
+            except (TypeError, ValueError):
+                continue
+    return max(heartbeats) if heartbeats else None
 
 
 def mark_needs_resume_if_stale(
@@ -483,56 +616,85 @@ def mark_needs_resume_if_stale(
     threshold_seconds: float,
     now: float | None = None,
 ) -> bool:
-    """Mark a lost LOOP owner without acknowledging, skipping, or opening the gate."""
+    """Mark a lost LOOP owner without acknowledging, accepting UI, or opening a gate."""
 
     number = int(gate.get("number") or 0)
     if number <= 0:
-        raise ReleaseTrainError("active release:awaiting-agent gate has no PR number")
+        raise ReleaseTrainError("active LOOP state has no PR number")
     pull = api.get_pull(number)
     labels = label_names(pull)
-    if AWAITING_AGENT_LABEL not in labels:
+    state = release_state_from_labels(labels)
+    resumable_states = {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL}
+    if state not in resumable_states:
         return False
     if task_class_from_labels(labels) != LOOP_TASK_LABEL:
-        raise ReleaseTrainError(f"active release:awaiting-agent PR #{number} is not task:loop")
+        return False
     if scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
         raise ReleaseTrainError(
             f"active release:awaiting-agent PR #{number} is not scope:live-runtime"
         )
-    if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
+    if state != AWAITING_UI_LABEL and (
+        str(pull.get("state") or "") != "open" or bool(pull.get("draft"))
+    ):
         raise ReleaseTrainError(
-            f"active release:awaiting-agent PR #{number} is not an open non-draft PR"
+            f"active LOOP PR #{number} is not an open non-draft PR"
         )
+    if state == AWAITING_UI_LABEL and not bool(pull.get("merged")):
+        raise ReleaseTrainError(f"release:awaiting-ui PR #{number} is not merged")
     head_sha = str((pull.get("head") or {}).get("sha") or "")
     loop_ack_label(head_sha)
-    labeled_at = _latest_label_timestamp(
-        api,
-        number,
-        AWAITING_AGENT_LABEL,
-        fallback=pull,
-    )
+    observed_at = _latest_status_heartbeat(api, number, head_sha)
+    if observed_at is None:
+        observed_at = _latest_label_timestamp(
+            api,
+            number,
+            state,
+            fallback=pull,
+        )
     current_time = time.time() if now is None else now
     stale = NEEDS_RESUME_LABEL in labels
-    if labeled_at is not None:
-        stale = stale or current_time - labeled_at >= threshold_seconds
+    if observed_at is not None:
+        stale = stale or current_time - observed_at >= threshold_seconds
     if not stale:
         return False
 
-    marker = _needs_resume_marker(number, head_sha)
-    comments = api.list_comments(number)
-    if not any(marker in str(item.get("body") or "") for item in comments):
-        api.add_comment(
-            number,
-            (
-                f"LOOP PR #{number} всё ещё ждёт владельца на exact head `{head_sha}`. "
-                "Release Train не выполнял acknowledgement, не снял gate и не пропустил PR.\n\n"
-                "Возобновите сохранённую Codex CLI-сессию командой `codex resume`, затем в ней "
-                f"запустите `python3 apps/github_release_train_wait.py {number}`.\n\n"
-                f"{marker}"
-            ),
-        )
     if NEEDS_RESUME_LABEL not in labels:
         api.add_labels(number, [NEEDS_RESUME_LABEL])
+    upsert_status_comment(
+        api,
+        number,
+        owner="unowned",
+        reason=f"owner heartbeat истёк на exact head `{head_sha}`",
+        last_action="Release Train выставил release:needs-resume fail-closed",
+        intervention=True,
+        now=current_time,
+    )
     return True
+
+
+def refresh_lost_loop_owners(
+    api: ReleaseApi,
+    *,
+    threshold_seconds: float,
+    now: float | None = None,
+) -> list[int]:
+    """Apply the resume overlay once to every stale active LOOP owner."""
+
+    candidates: dict[int, dict[str, Any]] = {}
+    for label in (READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL):
+        for item in api.list_issues_by_label(label, state="all"):
+            if "pull_request" in item:
+                candidates[int(item.get("number") or 0)] = item
+    stale: list[int] = []
+    for number, item in sorted(candidates.items()):
+        if number > 0 and mark_needs_resume_if_stale(
+            api,
+            item,
+            threshold_seconds=threshold_seconds,
+            now=now,
+        ):
+            stale.append(number)
+    return stale
 
 
 def _active_gate(api: ReleaseApi, label: str) -> dict[str, Any] | None:
@@ -584,6 +746,22 @@ def queue_gate_state(api: ReleaseApi) -> dict[str, Any]:
             "pr_number": int(ui_gate.get("number") or 0),
             "loop_root": root,
         }
+    running = [
+        item
+        for item in api.list_issues_by_label(RUNNING_LABEL, state="all")
+        if "pull_request" in item
+    ]
+    if running:
+        first = min(running, key=lambda item: (str(item.get("created_at") or ""), int(item.get("number") or 0)))
+        return {"status": "running", "pr_number": int(first.get("number") or 0)}
+    ready = [
+        item
+        for item in api.list_issues_by_label(READY_LABEL, state="open")
+        if "pull_request" in item and RUNNING_LABEL not in label_names(item)
+    ]
+    if ready:
+        first = min(ready, key=lambda item: (str(item.get("created_at") or ""), int(item.get("number") or 0)))
+        return {"status": "ready", "pr_number": int(first.get("number") or 0)}
     return {"status": "idle"}
 
 
@@ -625,16 +803,21 @@ def transition_label_set(current: Iterable[str], state: str) -> set[str]:
     if state not in STATE_LABELS:
         raise ValueError(f"unknown release state label: {state}")
     labels = set(current)
+    current_state = release_state_from_labels(labels)
+    if not transition_allowed(current_state, state):
+        raise ValueError(f"forbidden release transition: {current_state} -> {state}")
     if state == RUNNING_LABEL:
         labels -= STATE_LABELS - {READY_LABEL}
         labels.discard(NEEDS_RESUME_LABEL)
         labels.add(READY_LABEL)
         labels.add(RUNNING_LABEL)
+        assert_state_invariants(labels)
         return labels
     labels -= STATE_LABELS
     if state != AWAITING_AGENT_LABEL:
         labels.discard(NEEDS_RESUME_LABEL)
     labels.add(state)
+    assert_state_invariants(labels)
     return labels
 
 
@@ -665,6 +848,14 @@ def select_candidate(
 ) -> dict[str, Any]:
     if needs_resume_after_seconds <= 0:
         raise ValueError("needs-resume threshold must be positive")
+    try:
+        refresh_lost_loop_owners(
+            api,
+            threshold_seconds=needs_resume_after_seconds,
+            now=now,
+        )
+    except (ReleaseBlocked, ReleaseTrainError) as exc:
+        return {"status": "gate-conflict", "found": False, "reason": str(exc)}
     halted = [
         item
         for item in api.list_issues_by_label(HALTED_LABEL, state="all")
@@ -905,7 +1096,16 @@ def prepare_candidate(
         raise ReleaseBlocked("GitHub reports that the PR is not mergeable against current main")
     agent_acknowledged = False
     if task_class == LOOP_TASK_LABEL:
-        agent_acknowledged = loop_ack_label(head_sha) in final_labels
+        agent_acknowledged = (
+            loop_ack_label(head_sha) in final_labels
+            and _has_comment_proof(
+                api,
+                number,
+                ACK_PROOF_MARKER,
+                head=head_sha,
+                pr=number,
+            )
+        )
     return Candidate(
         number=number,
         title=str(pull.get("title") or ""),
@@ -954,8 +1154,16 @@ def merge_candidate(api: ReleaseApi, candidate: Candidate) -> MergeResult:
         raise ReleaseBlocked("main advanced after CI; synchronize the PR and run fresh checks")
     if candidate.task_class == LOOP_TASK_LABEL:
         acknowledgement = loop_ack_label(candidate.head_sha)
-        if acknowledgement not in labels:
-            raise ReleaseBlocked("LOOP acknowledgement is missing or does not match the exact head SHA")
+        if acknowledgement not in labels or not _has_comment_proof(
+            api,
+            candidate.number,
+            ACK_PROOF_MARKER,
+            head=candidate.head_sha,
+            pr=candidate.number,
+        ):
+            raise ReleaseBlocked(
+                "repo-owned LOOP acknowledgement proof is missing or does not match the exact head SHA"
+            )
         api.remove_label(candidate.number, acknowledgement)
     result = api.merge_pull(candidate.number, candidate.head_sha)
     if not bool(result.get("merged")) or not str(result.get("sha") or ""):
@@ -970,6 +1178,179 @@ def cleanup_merged_branch(api: ReleaseApi, repository: str, number: int) -> None
     branch = str(head.get("ref") or "")
     if head_repo == repository and branch and branch != "main":
         api.delete_branch(branch)
+
+
+def complete_standard_release(
+    api: ReleaseApi,
+    number: int,
+    *,
+    merge_sha: str,
+    contour: str,
+) -> str:
+    """Complete STANDARD only from exact merge/deploy evidence owned by this command."""
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    exact_merge = merge_sha.strip().lower()
+    if not bool(pull.get("merged")) or str(pull.get("merge_commit_sha") or "").lower() != exact_merge:
+        raise ReleaseBlocked("completion proof does not match the exact merged PR SHA")
+    if task_class_from_labels(labels) != STANDARD_TASK_LABEL:
+        raise ReleaseBlocked("STANDARD completion command requires task:standard")
+    scope = scope_from_labels(labels)
+    if contour == "repo-only":
+        if scope != REPO_ONLY_LABEL:
+            raise ReleaseBlocked("repo-only completion requires scope:repo-only")
+        target = DONE_LABEL
+    elif contour == "production-verified":
+        if scope != LIVE_RUNTIME_LABEL:
+            raise ReleaseBlocked("production completion requires scope:live-runtime")
+        target = PRODUCTION_LABEL
+    else:
+        raise ReleaseBlocked("unsupported completion contour")
+    proof = _proof_marker(
+        COMPLETION_PROOF_MARKER,
+        contour=contour,
+        merge=exact_merge,
+        pr=number,
+    )
+    if not _has_comment_proof(
+        api,
+        number,
+        COMPLETION_PROOF_MARKER,
+        contour=contour,
+        merge=exact_merge,
+        pr=number,
+    ):
+        api.add_comment(
+            number,
+            f"Release Train verified `{contour}` completion for exact merge `{exact_merge}`.\n\n{proof}",
+        )
+    set_release_state(api, number, target, current_labels=labels)
+    return target
+
+
+def halt_merged_release(
+    api: ReleaseApi,
+    number: int,
+    *,
+    merge_sha: str,
+    reason: str,
+) -> str:
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    exact_merge = merge_sha.strip().lower()
+    if not bool(pull.get("merged")) or str(pull.get("merge_commit_sha") or "").lower() != exact_merge:
+        raise ReleaseBlocked("halt proof does not match the exact merged PR SHA")
+    if scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseBlocked("release:halted requires scope:live-runtime")
+    proof = _proof_marker(HALT_PROOF_MARKER, merge=exact_merge, pr=number)
+    if not _has_comment_proof(api, number, HALT_PROOF_MARKER, merge=exact_merge, pr=number):
+        api.add_comment(
+            number,
+            f"Release Train halted exact merged release `{exact_merge}`: {reason}\n\n{proof}",
+        )
+    set_release_state(api, number, HALTED_LABEL, current_labels=labels)
+    return HALTED_LABEL
+
+
+def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
+    """Reject terminal labels that lack their repo-owned exact-SHA transition proof."""
+
+    number = int(pull.get("number") or 0)
+    labels = label_names(pull)
+    merge_sha = str(pull.get("merge_commit_sha") or "").lower()
+    if number <= 0 or len(merge_sha) != 40:
+        return False
+    task_class = task_class_from_labels(labels)
+    if task_class == STANDARD_TASK_LABEL:
+        scope = scope_from_labels(labels)
+        contour = "repo-only" if scope == REPO_ONLY_LABEL else "production-verified"
+        expected = DONE_LABEL if scope == REPO_ONLY_LABEL else PRODUCTION_LABEL
+        completion = _has_comment_proof(
+            api,
+            number,
+            COMPLETION_PROOF_MARKER,
+            contour=contour,
+            merge=merge_sha,
+            pr=number,
+        )
+        reconciled = scope == LIVE_RUNTIME_LABEL and _has_comment_proof(
+            api,
+            number,
+            RECONCILE_PROOF_MARKER,
+            merge=merge_sha,
+            pr=number,
+        )
+        return expected in labels and (completion or reconciled)
+    if task_class == LOOP_TASK_LABEL and PRODUCTION_LABEL in labels:
+        root = loop_root_from_labels(labels)
+        return root is not None and _has_comment_proof(
+            api,
+            number,
+            CHAIN_AUDIT_MARKER,
+            merge=merge_sha,
+            root=root,
+            terminal_pr=number,
+        )
+    return False
+
+
+def resume_halted_release(
+    api: ReleaseApi,
+    number: int,
+    evidence: Mapping[str, Any],
+) -> str:
+    """Remove halted only after canonical exact-SHA reconciliation evidence."""
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    merge_sha = str(pull.get("merge_commit_sha") or "").lower()
+    head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
+    if not bool(pull.get("merged")):
+        raise ReleaseBlocked("reconciliation applies only to a merged PR")
+    from apps.registry_upload_http_entrypoint_hosted_runtime import ACTIVE_HOSTED_RUNTIME_TARGET_ID
+
+    required = {
+        "healthy": True,
+        "pr": number,
+        "head": head_sha,
+        "merge": merge_sha,
+        "expected_sha": merge_sha,
+        "target_id": ACTIVE_HOSTED_RUNTIME_TARGET_ID,
+    }
+    mismatches = [key for key, value in required.items() if evidence.get(key) != value]
+    if mismatches or evidence.get("status") != "reconciled":
+        raise ReleaseBlocked(
+            "halted reconciliation evidence does not match exact PR/head/merge/target: "
+            + ", ".join(mismatches or ["status"])
+        )
+    proof = _proof_marker(RECONCILE_PROOF_MARKER, merge=merge_sha, pr=number)
+    already_proven = _has_comment_proof(
+        api,
+        number,
+        RECONCILE_PROOF_MARKER,
+        merge=merge_sha,
+        pr=number,
+    )
+    if HALTED_LABEL not in labels:
+        if already_proven and (PRODUCTION_LABEL in labels or AWAITING_UI_LABEL in labels):
+            return "already-reconciled"
+        raise ReleaseBlocked("reconciliation applies only to release:halted or its proven result")
+    if not already_proven:
+        api.add_comment(
+            number,
+            f"Release Train reconciled canonical production target at exact SHA `{merge_sha}`.\n\n{proof}",
+        )
+    task_class = task_class_from_labels(labels)
+    if task_class == STANDARD_TASK_LABEL:
+        if scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+            raise ReleaseBlocked("halted STANDARD reconciliation requires scope:live-runtime")
+        set_release_state(api, number, PRODUCTION_LABEL, current_labels=labels)
+        return "production"
+    if task_class == LOOP_TASK_LABEL:
+        _, status = mark_loop_awaiting_ui(api, number, merge_sha)
+        return status
+    raise ReleaseBlocked("unsupported halted task class")
 
 
 def request_loop_agent(
@@ -1020,8 +1401,17 @@ def acknowledge_loop_agent(
     actual_head_sha = str((pull.get("head") or {}).get("sha") or "")
     if actual_head_sha != expected_head_sha:
         raise ReleaseBlocked("LOOP acknowledgement head SHA is stale")
+    if NEEDS_RESUME_LABEL in labels:
+        raise ReleaseBlocked(
+            "LOOP owner must resume the exact head/root before acknowledgement"
+        )
     acknowledgement = loop_ack_label(actual_head_sha)
-    if acknowledgement in labels and READY_LABEL in labels:
+    proof = _proof_marker(ACK_PROOF_MARKER, head=actual_head_sha, pr=number)
+    if (
+        acknowledgement in labels
+        and READY_LABEL in labels
+        and _has_comment_proof(api, number, ACK_PROOF_MARKER, head=actual_head_sha, pr=number)
+    ):
         if NEEDS_RESUME_LABEL in labels:
             api.remove_label(number, NEEDS_RESUME_LABEL)
         api.dispatch_workflow("release-train.yml", "main")
@@ -1042,6 +1432,10 @@ def acknowledge_loop_agent(
         f"One-shot LOOP agent acknowledgement for exact head {actual_head_sha}",
     )
     api.add_labels(number, [acknowledgement])
+    api.add_comment(
+        number,
+        f"Release Train recorded exact-head acknowledgement from @{actor}.\n\n{proof}",
+    )
     set_release_state(
         api,
         number,
@@ -1053,11 +1447,54 @@ def acknowledge_loop_agent(
     return "acknowledged"
 
 
+def resume_loop_owner(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    expected_root: int,
+    *,
+    actor: str,
+    association: str,
+) -> str:
+    """Claim a lost LOOP session without acknowledging or accepting any safety gate."""
+
+    if association.upper() not in LOOP_ACCEPT_ASSOCIATIONS:
+        raise ReleaseBlocked("LOOP resume requires repository write association")
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    actual_head = str((pull.get("head") or {}).get("sha") or "")
+    actual_root = loop_root_from_labels(labels) or number
+    if actual_head != expected_head_sha:
+        raise ReleaseBlocked("LOOP resume head SHA is stale")
+    if actual_root != expected_root:
+        raise ReleaseBlocked("LOOP resume root is stale or ambiguous")
+    if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseBlocked("LOOP resume requires task:loop + scope:live-runtime")
+    state = release_state_from_labels(labels)
+    if state not in {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL}:
+        raise ReleaseBlocked("LOOP PR is not in a resumable active state")
+    if NEEDS_RESUME_LABEL in labels:
+        api.remove_label(number, NEEDS_RESUME_LABEL)
+    upsert_status_comment(
+        api,
+        number,
+        owner=actor,
+        reason="active owner heartbeat restored; safety gate remains unchanged",
+        last_action=f"@{actor} resumed exact head `{actual_head}`",
+        intervention=False,
+    )
+    return "resumed"
+
+
 def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple[int, str]:
     pull = api.get_pull(number)
     labels = label_names(pull)
     if not bool(pull.get("merged")):
         raise ReleaseBlocked("LOOP UI gate can be opened only after merge")
+    if len(merge_sha) != 40 or any(character not in "0123456789abcdef" for character in merge_sha.lower()):
+        raise ReleaseBlocked("LOOP UI gate requires an exact 40-character deployed merge SHA")
+    if str(pull.get("merge_commit_sha") or "").lower() != merge_sha.lower():
+        raise ReleaseBlocked("deployed SHA does not match the PR merge SHA")
     scope = scope_from_labels(labels)
     if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope != LIVE_RUNTIME_LABEL:
         raise ReleaseBlocked("release:awaiting-ui requires task:loop + scope:live-runtime")
@@ -1077,6 +1514,24 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
     if any(int(item.get("number") or 0) == number for item in gates):
         if current_root is None:
             raise ReleaseTrainError("active LOOP UI gate has no root label")
+        if not _has_comment_proof(
+            api,
+            number,
+            DEPLOY_PROOF_MARKER,
+            merge=merge_sha.lower(),
+            pr=number,
+            root=current_root,
+        ):
+            api.add_comment(
+                number,
+                "Release Train healed the exact deployed-SHA proof for an existing UI gate.\n\n"
+                + _proof_marker(
+                    DEPLOY_PROOF_MARKER,
+                    merge=merge_sha.lower(),
+                    pr=number,
+                    root=current_root,
+                ),
+            )
         for item in gates:
             previous = int(item.get("number") or 0)
             if previous != number:
@@ -1098,6 +1553,24 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
     root_label = loop_root_label(root)
     api.ensure_label(root_label, "C2A5F8", f"Deterministic recovery chain for LOOP PR #{root}")
     api.add_labels(number, [root_label])
+    deploy_proof = _proof_marker(
+        DEPLOY_PROOF_MARKER,
+        merge=merge_sha.lower(),
+        pr=number,
+        root=root,
+    )
+    if not _has_comment_proof(
+        api,
+        number,
+        DEPLOY_PROOF_MARKER,
+        merge=merge_sha.lower(),
+        pr=number,
+        root=root,
+    ):
+        api.add_comment(
+            number,
+            f"Release Train verified deployed exact merge SHA `{merge_sha}`.\n\n{deploy_proof}",
+        )
     set_release_state(
         api,
         number,
@@ -1155,30 +1628,63 @@ def normalize_completed_loop_chain(
             )
         except ReleaseBlocked:
             valid_member = False
+        if not valid_member:
+            raise ReleaseTrainError(
+                f"ambiguous LOOP chain membership for PR #{chain_number}; cleanup refused"
+            )
         if bool(chain_pull.get("merged")):
-            if not valid_member:
-                raise ReleaseTrainError(f"invalid merged LOOP chain member PR #{chain_number}")
             merged_members.append((chain_number, chain_labels))
             continue
-        if valid_member and 0 < chain_number < number:
+        if chain_number > number:
+            raise ReleaseTrainError(
+                f"unmerged LOOP PR #{chain_number} is newer than terminal PR #{number}; cleanup refused"
+            )
+        if 0 < chain_number < number:
             superseded_members.append((chain_number, chain_labels))
 
     if number not in {chain_number for chain_number, _ in merged_members}:
         raise ReleaseTrainError(f"active LOOP PR #{number} is absent from its root chain")
 
+    terminal_sha = str(active_pull.get("merge_commit_sha") or "")
+    audit = _proof_marker(
+        CHAIN_AUDIT_MARKER,
+        merge=terminal_sha,
+        root=root,
+        terminal_pr=number,
+    )
     first_acceptance = PRODUCTION_LABEL not in active_labels
+    set_release_state(
+        api,
+        number,
+        PRODUCTION_LABEL,
+        current_labels=active_labels,
+        comment=(
+            f"Production UI Flow принят @{actor}; LOOP-цепочка `{chain_label}` "
+            f"завершена terminal PR #{number} / `{terminal_sha}`.\n\n{audit}"
+            if first_acceptance
+            else ""
+        ),
+    )
     for chain_number, chain_labels in merged_members:
-        set_release_state(
+        if chain_number == number:
+            continue
+        for stale in sorted(
+            (chain_labels & (STATE_LABELS | {NEEDS_RESUME_LABEL})) | loop_ack_labels(chain_labels)
+        ):
+            api.remove_label(chain_number, stale)
+        if not _has_comment_proof(
             api,
             chain_number,
-            PRODUCTION_LABEL,
-            current_labels=chain_labels,
-            comment=(
-                f"Production UI Flow принят @{actor}; LOOP-цепочка `{chain_label}` завершена."
-                if chain_number == number and first_acceptance
-                else ""
-            ),
-        )
+            CHAIN_AUDIT_MARKER,
+            merge=terminal_sha,
+            root=root,
+            terminal_pr=number,
+        ):
+            api.add_comment(
+                chain_number,
+                f"LOOP chain closed by terminal PR #{number} / `{terminal_sha}`; historical merged "
+                f"iteration retained without a false terminal production label.\n\n{audit}",
+            )
 
     normalized: list[int] = []
     for chain_number, chain_labels in superseded_members:
@@ -1198,6 +1704,8 @@ def normalize_completed_loop_chain(
                 else ""
             ),
         )
+        if str(api.get_pull(chain_number).get("state") or "") == "open":
+            api.close_pull(chain_number)
         normalized.append(chain_number)
     return normalized
 
@@ -1208,6 +1716,8 @@ def accept_loop_ui(
     *,
     actor: str,
     association: str,
+    deployed_sha: str,
+    evidence: str,
 ) -> str:
     if association.upper() not in LOOP_ACCEPT_ASSOCIATIONS:
         raise ReleaseBlocked("LOOP UI acceptance requires repository write association")
@@ -1216,6 +1726,23 @@ def accept_loop_ui(
     root = loop_root_from_labels(labels)
     if root is None or task_class_from_labels(labels) != LOOP_TASK_LABEL:
         raise ReleaseBlocked("PR is not part of a deterministic LOOP chain")
+    merge_sha = str(pull.get("merge_commit_sha") or "").lower()
+    if deployed_sha.lower() != merge_sha or len(merge_sha) != 40:
+        raise ReleaseBlocked("UI acceptance must bind the current exact deployed merge SHA")
+    normalized_evidence = evidence.lower()
+    if not normalized_evidence.startswith("sha256:") or len(normalized_evidence) != 71:
+        raise ReleaseBlocked("UI acceptance requires a sha256 evidence fingerprint")
+    if any(character not in "0123456789abcdef" for character in normalized_evidence[7:]):
+        raise ReleaseBlocked("UI acceptance evidence fingerprint is invalid")
+    if not _has_comment_proof(
+        api,
+        number,
+        DEPLOY_PROOF_MARKER,
+        merge=merge_sha,
+        pr=number,
+        root=root,
+    ):
+        raise ReleaseBlocked("repo-owned deployed-SHA proof is missing")
     active_gate = _active_gate(api, AWAITING_UI_LABEL)
     if active_gate is None:
         if PRODUCTION_LABEL not in labels:
@@ -1225,6 +1752,12 @@ def accept_loop_ui(
         return "already-accepted"
     if int(active_gate.get("number") or 0) != number:
         raise ReleaseBlocked("UI acceptance must target the current LOOP iteration")
+    evidence_comment = f"UI evidence accepted for `{merge_sha}`: `{normalized_evidence}`."
+    if not any(
+        evidence_comment == str(item.get("body") or "").strip()
+        for item in api.list_comments(number)
+    ):
+        api.add_comment(number, evidence_comment)
     normalize_completed_loop_chain(api, number, actor=actor)
     api.dispatch_workflow("release-train.yml", "main")
     return "accepted"
@@ -1253,14 +1786,39 @@ def handle_loop_comment(
             actor=actor,
             association=association,
         )
-    if len(parts) == 4 and parts[:3] == ["/wb-core", "loop", "accept-ui"]:
+    if len(parts) == 8 and parts[:3] == ["/wb-core", "loop", "resume-owner"]:
+        try:
+            command_number = int(parts[3])
+            command_root = int(parts[7])
+        except ValueError as exc:
+            raise ReleaseBlocked("invalid LOOP resume identity") from exc
+        if command_number != number or parts[4] != "head" or parts[6] != "root":
+            raise ReleaseBlocked("LOOP resume must bind current PR, exact head and loop root")
+        return resume_loop_owner(
+            api,
+            number,
+            parts[5],
+            command_root,
+            actor=actor,
+            association=association,
+        )
+    if len(parts) == 8 and parts[:3] == ["/wb-core", "loop", "accept-ui"]:
         try:
             command_number = int(parts[3])
         except ValueError as exc:
             raise ReleaseBlocked("invalid LOOP acceptance PR number") from exc
-        if command_number != number:
-            raise ReleaseBlocked("LOOP UI acceptance must bind the current PR")
-        return accept_loop_ui(api, number, actor=actor, association=association)
+        if command_number != number or parts[4] != "deployed" or parts[6] != "evidence":
+            raise ReleaseBlocked(
+                "LOOP UI acceptance must bind current PR, deployed SHA and evidence"
+            )
+        return accept_loop_ui(
+            api,
+            number,
+            actor=actor,
+            association=association,
+            deployed_sha=parts[5],
+            evidence=parts[7],
+        )
     raise ReleaseBlocked("unsupported LOOP command")
 
 
@@ -1344,8 +1902,53 @@ def command_select(args: argparse.Namespace) -> int:
 
 def command_transition(args: argparse.Namespace) -> int:
     api = _api_from_env()
+    if args.state in {
+        DONE_LABEL,
+        PRODUCTION_LABEL,
+        AWAITING_UI_LABEL,
+        READY_LABEL,
+        HALTED_LABEL,
+        SUPERSEDED_LABEL,
+    }:
+        raise ReleaseBlocked(
+            f"critical transition to {args.state} requires its repo-owned evidence command"
+        )
     set_release_state(api, args.pr, args.state, comment=args.comment or "")
     _json_print({"status": args.state, "pr_number": args.pr})
+    return 0
+
+
+def command_halt(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = halt_merged_release(
+        api,
+        args.pr,
+        merge_sha=args.merge_sha,
+        reason=args.reason,
+    )
+    _json_print({"status": status, "pr_number": args.pr, "merge_sha": args.merge_sha})
+    return 0
+
+
+def command_complete(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = complete_standard_release(
+        api,
+        args.pr,
+        merge_sha=args.merge_sha,
+        contour=args.contour,
+    )
+    _json_print({"status": status, "pr_number": args.pr, "merge_sha": args.merge_sha})
+    return 0
+
+
+def command_resume_halted(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    payload = json.loads(args.evidence_file.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ReleaseBlocked("reconciliation evidence must be a JSON object")
+    status = resume_halted_release(api, args.pr, payload)
+    _json_print({"status": status, "pr_number": args.pr})
     return 0
 
 
@@ -1525,6 +2128,27 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--state", choices=sorted(STATE_LABELS), required=True)
     transition.add_argument("--comment", default="")
     transition.set_defaults(handler=command_transition)
+
+    halt = subparsers.add_parser("halt-merged")
+    halt.add_argument("--pr", type=int, required=True)
+    halt.add_argument("--merge-sha", required=True)
+    halt.add_argument("--reason", required=True)
+    halt.set_defaults(handler=command_halt)
+
+    complete = subparsers.add_parser("complete-standard")
+    complete.add_argument("--pr", type=int, required=True)
+    complete.add_argument("--merge-sha", required=True)
+    complete.add_argument(
+        "--contour",
+        choices=("repo-only", "production-verified"),
+        required=True,
+    )
+    complete.set_defaults(handler=command_complete)
+
+    resume_halted = subparsers.add_parser("resume-halted")
+    resume_halted.add_argument("--pr", type=int, required=True)
+    resume_halted.add_argument("--evidence-file", type=Path, required=True)
+    resume_halted.set_defaults(handler=command_resume_halted)
 
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--pr", type=int, required=True)

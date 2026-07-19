@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Codex CLI waiter for wb-core Release Train states.
 
-Polling is read-only.  For LOOP tasks the default mode emits exactly one
-GitHub-native acknowledgement comment when ``release:awaiting-agent`` is
-observed, then continues polling until the UI handoff or a terminal state.
-Normal queue ownership by another LOOP is durable waiting and never becomes
-a blocker because of elapsed time or repeated observations.
+The waiter maintains one idempotent owner/status comment.  For LOOP tasks it
+also emits at most one exact-head acknowledgement command when requested.
+Normal foreign queue ownership is durable waiting and never becomes a blocker
+because of elapsed time or repeated observations.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ from apps.github_release_train import (  # noqa: E402
     HALTED_LABEL,
     LIVE_RUNTIME_LABEL,
     LOOP_TASK_LABEL,
+    NEEDS_RESUME_LABEL,
     PRODUCTION_LABEL,
     REPO_ONLY_LABEL,
     STANDARD_TASK_LABEL,
@@ -44,11 +44,14 @@ from apps.github_release_train import (  # noqa: E402
     release_state_from_labels,
     scope_from_labels,
     task_class_from_labels,
+    terminal_state_proven,
+    upsert_status_comment,
 )
 
 
 EXIT_BLOCKED = 2
 EXIT_AWAITING_UI = 3
+EXIT_RESUMED = 4
 EXIT_INTERRUPTED = 130
 
 
@@ -86,7 +89,7 @@ def evaluate_release(
     target_root = loop_root_from_labels(labels) if task_class == LOOP_TASK_LABEL else None
     queue_root = int(queue.get("loop_root") or 0)
     foreign_gate = (
-        queue_status in {"awaiting-agent", "awaiting-ui"}
+        queue_status in {"ready", "running", "awaiting-agent", "awaiting-ui", "halted"}
         and queue_pr != pr_number
         and not (queue_status == "awaiting-ui" and target_root == queue_root and queue_root > 0)
     )
@@ -101,7 +104,9 @@ def evaluate_release(
             "reason": f"PR #{pr_number} is in its own {state} state",
         }
     if task_class == LOOP_TASK_LABEL:
-        if state == AWAITING_AGENT_LABEL:
+        if NEEDS_RESUME_LABEL in labels:
+            action = "needs-resume"
+        elif state == AWAITING_AGENT_LABEL:
             action = "ack-agent"
         elif state == AWAITING_UI_LABEL:
             action = "awaiting-ui"
@@ -126,10 +131,7 @@ def evaluate_release(
 
     if decision["action"] == "success":
         return decision
-    if queue_status == "halted":
-        decision["action"] = "blocked"
-        decision["reason"] = f"global release:halted gate is held by PR #{queue_pr}"
-    elif queue_status == "gate-conflict":
+    if queue_status == "gate-conflict":
         decision["action"] = "blocked"
         decision["reason"] = str(queue.get("reason") or "conflicting exclusive release gates")
     elif decision["action"] == "wait-foreign-gate":
@@ -146,11 +148,14 @@ def wait_for_release(
     status_seconds: float,
     poll_seconds: float,
     acknowledge_agent: bool,
+    resume_owner: bool = False,
+    owner: str = "codex-cli",
     emit: Callable[[str], None] = print,
 ) -> int:
     next_status = time.monotonic() + status_seconds if status_seconds > 0 else None
     previous: tuple[str, str, str, str, str, int] | None = None
     acknowledged_heads: set[str] = set()
+    resume_submitted: set[str] = set()
     while True:
         queue = queue_gate_state(api)
         pull = api.get_pull(pr_number)
@@ -165,7 +170,8 @@ def wait_for_release(
             str(queue.get("status") or "idle"),
             int(queue.get("pr_number") or 0),
         )
-        if snapshot != previous:
+        changed = snapshot != previous
+        if changed:
             emit(
                 f"PR #{pr_number} class={decision['task_class']} scope={decision['scope']} "
                 f"state={decision['state']} head={head_sha} "
@@ -175,7 +181,21 @@ def wait_for_release(
                 emit(f"PR #{pr_number} {decision['reason']}")
             previous = snapshot
         action = decision["action"]
+        if changed and action in {"wait", "wait-foreign-gate", "ack-agent"}:
+            upsert_status_comment(
+                api,
+                pr_number,
+                owner=owner,
+                reason=str(decision.get("reason") or "normal deterministic queue waiting"),
+                last_action="Codex CLI waiter started or observed a state change",
+                intervention=False,
+            )
         if action == "success":
+            if not terminal_state_proven(api, pull):
+                emit(
+                    f"PR #{pr_number} fail-closed: terminal label lacks repo-owned exact-SHA proof"
+                )
+                return EXIT_BLOCKED
             return 0
         if action == "blocked":
             if decision.get("reason"):
@@ -183,6 +203,25 @@ def wait_for_release(
             return EXIT_BLOCKED
         if action == "awaiting-ui":
             return EXIT_AWAITING_UI
+        if action == "needs-resume":
+            if not resume_owner:
+                emit(
+                    f"PR #{pr_number} requires explicit owner resume; no acknowledgement was submitted"
+                )
+                return EXIT_RESUMED
+            root = loop_root_from_labels(labels) or pr_number
+            command = (
+                f"/wb-core loop resume-owner {pr_number} head {head_sha} root {root}"
+            )
+            if head_sha not in resume_submitted:
+                if not any(
+                    str(item.get("body") or "").strip() == command
+                    for item in api.list_comments(pr_number)
+                ):
+                    api.add_comment(pr_number, command)
+                resume_submitted.add(head_sha)
+                emit(f"PR #{pr_number} owner resume submitted for exact head {head_sha}")
+            return EXIT_RESUMED
         if action == "ack-agent" and acknowledge_agent and head_sha not in acknowledged_heads:
             try:
                 loop_ack_label(head_sha)
@@ -190,13 +229,25 @@ def wait_for_release(
                 emit(f"PR #{pr_number} fail-closed: {exc}")
                 return EXIT_BLOCKED
             command = f"/wb-core loop ack-agent {pr_number} head {head_sha}"
-            api.add_comment(pr_number, command)
+            if not any(
+                str(item.get("body") or "").strip() == command
+                for item in api.list_comments(pr_number)
+            ):
+                api.add_comment(pr_number, command)
             acknowledged_heads.add(head_sha)
             emit(f"PR #{pr_number} acknowledgement submitted for exact head {head_sha}")
         if next_status is not None and time.monotonic() >= next_status:
             emit(
                 f"PR #{pr_number} is still in a normal non-terminal queue state; "
                 "elapsed time does not make it blocked, polling continues"
+            )
+            upsert_status_comment(
+                api,
+                pr_number,
+                owner=owner,
+                reason=str(decision.get("reason") or "normal deterministic queue waiting"),
+                last_action="Codex CLI waiter heartbeat",
+                intervention=False,
             )
             next_status = time.monotonic() + status_seconds
         time.sleep(poll_seconds)
@@ -237,8 +288,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout-seconds",
         dest="status_seconds",
         type=float,
-        default=7200,
+        default=300,
         help="emit a waiting heartbeat at this interval; never terminates normal queue waiting",
+    )
+    parser.add_argument(
+        "--resume-owner",
+        action="store_true",
+        help="claim release:needs-resume for this exact head/root without acknowledging",
+    )
+    parser.add_argument(
+        "--owner",
+        default=os.environ.get("WB_CORE_RELEASE_OWNER", "codex-cli"),
+        help="stable owner identity recorded in the idempotent status comment",
     )
     parser.add_argument("--poll-seconds", type=float, default=10)
     parser.add_argument(
@@ -264,6 +325,8 @@ def main() -> int:
             status_seconds=args.status_seconds,
             poll_seconds=args.poll_seconds,
             acknowledge_agent=not args.no_ack_agent,
+            resume_owner=args.resume_owner,
+            owner=args.owner,
         )
     except KeyboardInterrupt:
         print(json.dumps({"status": "interrupted", "pr_number": args.pr}), file=sys.stderr)

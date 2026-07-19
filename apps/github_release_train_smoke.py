@@ -35,46 +35,48 @@ from apps.github_release_train import (  # noqa: E402
     ReleaseBlocked,
     accept_loop_ui,
     acknowledge_loop_agent,
+    complete_standard_release,
     loop_ack_label,
     loop_root_label,
     mark_loop_awaiting_ui,
     merge_candidate,
     prepare_candidate,
     request_loop_agent,
+    resume_halted_release,
+    resume_loop_owner,
     require_deploy_environment,
     scope_from_labels,
     select_candidate,
     set_release_state,
     task_class_from_labels,
     transition_label_set,
+    upsert_status_comment,
 )
 from apps.github_release_train_wait import (  # noqa: E402
     EXIT_AWAITING_UI,
     evaluate_release,
     wait_for_release,
 )
+from apps.github_release_train_spec import (  # noqa: E402
+    ACTIVE_PRIMARY_LABELS,
+    CANONICAL_MONITOR_URL,
+    CRITICAL_TRANSITIONS,
+    EXPLICIT_TASK_PROMPTS,
+    MONITORED_RELEASE_LABELS,
+    PRIMARY_STATE_LABELS,
+    TERMINAL_LABELS,
+    TRANSITION_MATRIX,
+    TaskClass,
+    TaskIntent,
+    classify_task,
+    explicit_task_class,
+)
 
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
-CANONICAL_MONITOR_URL = (
-    "https://github.com/orenvlad-ai/wb-core/pulls?"
-    "q=is%3Apr+-label%3Arelease%3Asuperseded+"
-    "label%3A%22release%3Aready%2Crelease%3Arunning%2C"
-    "release%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2C"
-    "release%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+"
-    "sort%3Acreated-asc"
-)
-MONITORED_RELEASE_LABELS = {
-    READY_LABEL,
-    RUNNING_LABEL,
-    AWAITING_AGENT_LABEL,
-    AWAITING_UI_LABEL,
-    NEEDS_RESUME_LABEL,
-    BLOCKED_LABEL,
-    HALTED_LABEL,
-}
+EVIDENCE = "sha256:" + "d" * 64
 
 
 class FakeApi:
@@ -86,6 +88,7 @@ class FakeApi:
         self.dispatched: list[tuple[str, str]] = []
         self.ensured_labels: list[str] = []
         self.comments: list[tuple[int, str]] = []
+        self.comment_ids: list[int] = []
         self.events: dict[int, list[dict[str, Any]]] = {}
         self.merges: list[tuple[int, str]] = []
         self.deleted: list[str] = []
@@ -104,7 +107,11 @@ class FakeApi:
         return list(self.events.get(number, []))
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
-        return [{"body": body} for comment_number, body in self.comments if comment_number == number]
+        return [
+            {"id": comment_id, "body": body}
+            for comment_id, (comment_number, body) in zip(self.comment_ids, self.comments)
+            if comment_number == number
+        ]
 
     def get_pull(self, number: int) -> dict[str, Any]:
         return self.pulls[number]
@@ -160,6 +167,20 @@ class FakeApi:
 
     def add_comment(self, number: int, body: str) -> None:
         self.comments.append((number, body))
+        self.comment_ids.append(max(self.comment_ids, default=0) + 1)
+
+    def update_comment(self, comment_id: int, body: str) -> None:
+        index = self.comment_ids.index(comment_id)
+        number, _ = self.comments[index]
+        self.comments[index] = (number, body)
+
+    def delete_comment(self, comment_id: int) -> None:
+        index = self.comment_ids.index(comment_id)
+        self.comment_ids.pop(index)
+        self.comments.pop(index)
+
+    def close_pull(self, number: int) -> None:
+        self.pulls[number]["state"] = "closed"
 
     def delete_branch(self, branch: str) -> None:
         self.deleted.append(branch)
@@ -214,8 +235,17 @@ def _prepare(api: FakeApi, number: int) -> Candidate:
 
 
 def _assert_label_and_input_validation() -> None:
+    try:
+        transition_label_set(
+            {READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL, BLOCKED_LABEL},
+            RUNNING_LABEL,
+        )
+    except ReleaseBlocked:
+        pass
+    else:
+        raise AssertionError("conflicting primary states must fail closed")
     running = transition_label_set(
-        {READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL, BLOCKED_LABEL},
+        {READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL},
         RUNNING_LABEL,
     )
     assert running == {READY_LABEL, RUNNING_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL}
@@ -294,7 +324,10 @@ def _assert_loop_handshake_and_gate() -> tuple[FakeApi, dict[str, Any]]:
     assert first.task_class == LOOP_TASK_LABEL and not first.agent_acknowledged
     request_loop_agent(api, 10, SHA_A)
     assert AWAITING_AGENT_LABEL in _labels(loop)
-    waiting = select_candidate(api)
+    waiting = select_candidate(
+        api,
+        now=datetime(2026, 7, 17, 5, 32, tzinfo=timezone.utc).timestamp(),
+    )
     assert waiting["status"] == "awaiting-agent" and not waiting["found"]
     try:
         acknowledge_loop_agent(api, 10, SHA_B, actor="codex", association="OWNER")
@@ -355,13 +388,27 @@ def _assert_recovery_transfer_and_acceptance(api: FakeApi, root: dict[str, Any])
     assert select_candidate(api)["status"] == "awaiting-ui"
 
     dispatched_before = len(api.dispatched)
-    assert accept_loop_ui(api, 12, actor="codex", association="OWNER") == "accepted"
-    assert PRODUCTION_LABEL in _labels(root)
+    assert accept_loop_ui(
+        api,
+        12,
+        actor="codex",
+        association="OWNER",
+        deployed_sha=result.merge_sha,
+        evidence=EVIDENCE,
+    ) == "accepted"
+    assert PRODUCTION_LABEL not in _labels(root)
     assert PRODUCTION_LABEL in _labels(recovery)
     assert select_candidate(api)["pr_number"] == 11
-    assert accept_loop_ui(api, 12, actor="codex", association="OWNER") == "already-accepted"
+    assert accept_loop_ui(
+        api,
+        12,
+        actor="codex",
+        association="OWNER",
+        deployed_sha=result.merge_sha,
+        evidence=EVIDENCE,
+    ) == "already-accepted"
     assert len(api.dispatched) == dispatched_before + 2
-    assert PRODUCTION_LABEL in _labels(root) and PRODUCTION_LABEL in _labels(recovery)
+    assert PRODUCTION_LABEL not in _labels(root) and PRODUCTION_LABEL in _labels(recovery)
     assert READY_LABEL in _labels(unrelated)
 
 
@@ -382,7 +429,10 @@ def _assert_foreign_gate_waiting_and_queue_progress() -> None:
     )
     api.pulls = {50: loop_a, 51: loop_b}
 
-    waiting = select_candidate(api)
+    waiting = select_candidate(
+        api,
+        now=datetime(2026, 7, 17, 5, 32, tzinfo=timezone.utc).timestamp(),
+    )
     assert waiting["status"] == "awaiting-ui" and not waiting["found"]
     decision = evaluate_release(
         _labels(loop_b),
@@ -438,6 +488,20 @@ def _assert_lost_owner_resume_lifecycle() -> None:
     assert len(api.comments) == 1
     assert READY_LABEL in _labels(queued)
 
+    try:
+        acknowledge_loop_agent(api, 60, SHA_A, actor="codex", association="OWNER")
+    except ReleaseBlocked as exc:
+        assert "resume" in str(exc)
+    else:
+        raise AssertionError("stale owner overlay must require explicit resume before ack")
+    resume_loop_owner(
+        api,
+        60,
+        SHA_A,
+        60,
+        actor="codex",
+        association="OWNER",
+    )
     acknowledge_loop_agent(api, 60, SHA_A, actor="codex", association="OWNER")
     assert NEEDS_RESUME_LABEL not in _labels(loop)
     assert READY_LABEL in _labels(loop)
@@ -474,12 +538,25 @@ def _assert_superseded_normalization_is_root_bounded() -> None:
     accepted["merged"] = True
     api.pulls = {70: root, 71: failed, 72: other_root, 73: accepted}
 
-    assert accept_loop_ui(api, 73, actor="codex", association="OWNER") == "accepted"
-    assert PRODUCTION_LABEL in _labels(root)
+    accepted["merge_commit_sha"] = SHA_C
+    marker = (
+        "<!-- wb-core-loop-deploy-proof merge=" + SHA_C + " pr=73 root=70 -->"
+    )
+    api.add_comment(73, marker)
+    assert accept_loop_ui(
+        api,
+        73,
+        actor="codex",
+        association="OWNER",
+        deployed_sha=SHA_C,
+        evidence=EVIDENCE,
+    ) == "accepted"
+    assert PRODUCTION_LABEL not in _labels(root)
     assert PRODUCTION_LABEL in _labels(accepted)
     assert SUPERSEDED_LABEL in _labels(failed)
     assert BLOCKED_LABEL not in _labels(failed)
     assert loop_root_label(70) in _labels(failed)
+    assert failed["state"] == "closed"
     assert BLOCKED_LABEL in _labels(other_root)
     assert SUPERSEDED_LABEL not in _labels(other_root)
 
@@ -554,7 +631,10 @@ def _assert_waiter_contract() -> None:
                     )
                     _set_labels(
                         self.pulls[81],
-                        transition_label_set(_labels(self.pulls[81]), AWAITING_AGENT_LABEL),
+                        transition_label_set(
+                            transition_label_set(_labels(self.pulls[81]), RUNNING_LABEL),
+                            AWAITING_AGENT_LABEL,
+                        ),
                     )
                     self.foreign_released = True
             return super().get_pull(number)
@@ -562,9 +642,30 @@ def _assert_waiter_contract() -> None:
         def add_comment(self, number: int, body: str) -> None:
             super().add_comment(number, body)
             if number == 81 and body.startswith("/wb-core loop ack-agent"):
+                self.pulls[81]["state"] = "closed"
+                self.pulls[81]["merged"] = True
+                self.pulls[81]["merge_commit_sha"] = SHA_B
+                super().add_comment(
+                    81,
+                    "<!-- wb-core-loop-chain-audit merge="
+                    + SHA_B
+                    + " root=81 terminal_pr=81 -->",
+                )
                 _set_labels(
                     self.pulls[81],
-                    transition_label_set(_labels(self.pulls[81]), PRODUCTION_LABEL),
+                    transition_label_set(
+                        transition_label_set(
+                            transition_label_set(
+                                transition_label_set(
+                                    _labels(self.pulls[81]), READY_LABEL
+                                ),
+                                RUNNING_LABEL,
+                            ),
+                            AWAITING_UI_LABEL,
+                        ),
+                        PRODUCTION_LABEL,
+                    )
+                    | {loop_root_label(81)},
                 )
 
     api = AdvancingWaitApi()
@@ -592,7 +693,10 @@ def _assert_waiter_contract() -> None:
     )
     assert code == 0
     assert api.foreign_released
-    assert api.comments[-1] == (81, f"/wb-core loop ack-agent 81 head {SHA_A}")
+    assert any(
+        comment == (81, f"/wb-core loop ack-agent 81 head {SHA_A}")
+        for comment in api.comments
+    )
     assert any("normal queue waiting continues" in line for line in output)
     assert not any("fail-closed" in line for line in output)
 
@@ -619,6 +723,12 @@ def _assert_waiter_contract() -> None:
 def _assert_workflow_contract() -> None:
     baseline = (ROOT / ".github" / "workflows" / "baseline-ci.yml").read_text(encoding="utf-8")
     release = (ROOT / ".github" / "workflows" / "release-train.yml").read_text(encoding="utf-8")
+    implementation = "\n".join(
+        (
+            (ROOT / "apps" / "github_release_train.py").read_text(encoding="utf-8"),
+            (ROOT / "apps" / "github_release_train_spec.py").read_text(encoding="utf-8"),
+        )
+    )
     assert "name: baseline" in baseline
     for required in (
         "issue_comment:",
@@ -630,15 +740,18 @@ def _assert_workflow_contract() -> None:
         "handle-comment",
         "await-ui",
         "deploy-and-verify",
+        "complete-standard",
+        "halt-merged",
+        "resume-halted",
         "scope:production-mutation",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",
     ):
-        assert required in release or required in (ROOT / "apps" / "github_release_train.py").read_text(
-            encoding="utf-8"
-        )
+        assert required in release or required in implementation
     assert release.count("group: wb-core-production-release") == 1
-    assert release.count("environment: production") == 1
+    assert release.count("environment: production") == 2
+    assert "reconcile_halted:" in release
+    assert "resume-halted" in release
 
 
 def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
@@ -673,9 +786,9 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     ).read_text(encoding="utf-8")
 
     explicit_classes = (
-        "`Класс задачи: стандарт`",
-        "`Класс задачи: loop`",
-        "`Класс задачи: диагностика`",
+        "`КЛАСС ЗАДАЧИ: СТАНДАРТ`",
+        "`КЛАСС ЗАДАЧИ: LOOP`",
+        "`КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`",
     )
     automatic_messages = (
         "`Класс задачи: стандарт — определён автоматически`",
@@ -706,6 +819,21 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
 
     for source in (agents, release_train):
         assert CANONICAL_MONITOR_URL in source
+        assert "apps/github_release_train_spec.py" in source
+    for source in (agents, execution, release_train):
+        assert "--resume-owner --no-ack-agent" in source
+    for source in (agents, execution, release_train):
+        assert "deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>" in source
+    for required in (
+        "task title",
+        "class",
+        "stage",
+        "root",
+        "last action",
+        "intervention",
+        "resume command",
+    ):
+        assert required in release_train
 
     query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
     tokens = shlex.split(query)
@@ -736,6 +864,276 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     )
 
 
+def _assert_machine_classification_and_state_spec() -> None:
+    for line, expected in EXPLICIT_TASK_PROMPTS.items():
+        assert explicit_task_class(line + "\nbody") == expected
+        assert classify_task(TaskIntent(ambiguous=True), explicit=expected) == expected
+    assert classify_task(TaskIntent(read_only=True)) == TaskClass.DIAGNOSTIC
+    assert classify_task(TaskIntent(deploy=True, production_ui=True, iterative=True)) == TaskClass.LOOP
+    assert classify_task(TaskIntent()) == TaskClass.STANDARD
+    assert classify_task(TaskIntent(ambiguous=True)) == TaskClass.STANDARD
+    assert (
+        classify_task(TaskIntent(read_only=True), inherited=TaskClass.LOOP)
+        == TaskClass.LOOP
+    )
+    assert ACTIVE_PRIMARY_LABELS.isdisjoint(TERMINAL_LABELS)
+    assert PRIMARY_STATE_LABELS == ACTIVE_PRIMARY_LABELS | TERMINAL_LABELS
+    assert NEEDS_RESUME_LABEL in MONITORED_RELEASE_LABELS
+    assert DONE_LABEL not in MONITORED_RELEASE_LABELS
+    assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
+    assert TRANSITION_MATRIX[AWAITING_UI_LABEL] >= {PRODUCTION_LABEL, HALTED_LABEL}
+    assert {
+        (AWAITING_AGENT_LABEL, READY_LABEL),
+        (AWAITING_UI_LABEL, PRODUCTION_LABEL),
+        (HALTED_LABEL, PRODUCTION_LABEL),
+    } <= CRITICAL_TRANSITIONS
+    all_targets = set(PRIMARY_STATE_LABELS)
+    for current, allowed in TRANSITION_MATRIX.items():
+        current_labels = set()
+        if current == RUNNING_LABEL:
+            current_labels = {READY_LABEL, RUNNING_LABEL}
+        elif current != "release:none":
+            current_labels = {current}
+        for target in all_targets:
+            if target == current or target in allowed:
+                transition_label_set(current_labels, target)
+            else:
+                try:
+                    transition_label_set(current_labels, target)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f"forbidden matrix edge accepted: {current} -> {target}")
+
+    diagnostic_api = FakeApi()
+    assert classify_task(TaskIntent(read_only=True)) == TaskClass.DIAGNOSTIC
+    assert not diagnostic_api.pulls and not diagnostic_api.comments and not diagnostic_api.dispatched
+
+
+def _assert_resume_status_and_manual_ack_guards() -> None:
+    api = FakeApi()
+    waiting = _pull(
+        90,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(90)],
+        created_at="2026-07-20T00:00:00Z",
+    )
+    waiting["state"] = "closed"
+    waiting["merged"] = True
+    waiting["merge_commit_sha"] = SHA_A
+    api.pulls[90] = waiting
+    api.events[90] = [
+        {
+            "event": "labeled",
+            "label": {"name": AWAITING_UI_LABEL},
+            "created_at": "2026-07-20T00:00:00Z",
+        }
+    ]
+    now = datetime(2026, 7, 20, 0, 31, tzinfo=timezone.utc).timestamp()
+    assert select_candidate(api, needs_resume_after_seconds=1800, now=now)["status"] == "awaiting-ui"
+    assert NEEDS_RESUME_LABEL in _labels(waiting)
+    status_comments = [body for _, body in api.comments if "wb-core-release-status" in body]
+    assert len(status_comments) == 1
+    upsert_status_comment(
+        api,
+        90,
+        owner="replacement",
+        reason="resume test",
+        last_action="heartbeat",
+        intervention=False,
+        now=now + 1,
+    )
+    assert len([body for _, body in api.comments if "wb-core-release-status" in body]) == 1
+    assert resume_loop_owner(
+        api,
+        90,
+        SHA_A,
+        90,
+        actor="replacement",
+        association="OWNER",
+    ) == "resumed"
+    assert NEEDS_RESUME_LABEL not in _labels(waiting)
+    assert not any(label.startswith(LOOP_ACK_PREFIX) for label in _labels(waiting))
+    assert resume_loop_owner(
+        api,
+        90,
+        SHA_A,
+        90,
+        actor="replacement",
+        association="OWNER",
+    ) == "resumed"
+
+    forged = _pull(
+        91,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_ack_label(SHA_A)],
+        created_at="2026-07-20T00:32:00Z",
+    )
+    forged_api = FakeApi()
+    forged_api.pulls[91] = forged
+    candidate = _prepare(forged_api, 91)
+    assert candidate.agent_acknowledged is False
+    try:
+        merge_candidate(forged_api, candidate)
+    except ReleaseBlocked as exc:
+        assert "repo-owned" in str(exc)
+    else:
+        raise AssertionError("manually forged ack label must not authorize merge")
+
+    terminal_api = FakeApi()
+    forged_terminal = _pull(
+        92,
+        labels=[PRODUCTION_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T00:33:00Z",
+    )
+    forged_terminal["state"] = "closed"
+    forged_terminal["merged"] = True
+    forged_terminal["merge_commit_sha"] = SHA_B
+    terminal_api.pulls[92] = forged_terminal
+    assert wait_for_release(
+        terminal_api,
+        92,
+        status_seconds=0,
+        poll_seconds=0,
+        acknowledge_agent=False,
+        emit=lambda _: None,
+    ) == 2
+
+    proven_api = FakeApi()
+    proven = _pull(
+        93,
+        labels=[RUNNING_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T00:34:00Z",
+    )
+    proven["state"] = "closed"
+    proven["merged"] = True
+    proven["merge_commit_sha"] = SHA_C
+    proven_api.pulls[93] = proven
+    complete_standard_release(
+        proven_api,
+        93,
+        merge_sha=SHA_C,
+        contour="production-verified",
+    )
+    assert wait_for_release(
+        proven_api,
+        93,
+        status_seconds=0,
+        poll_seconds=0,
+        acknowledge_agent=False,
+        emit=lambda _: None,
+    ) == 0
+
+
+def _assert_two_parallel_loop_roots() -> None:
+    api = FakeApi()
+    root_a = _pull(
+        100,
+        labels=[RUNNING_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T01:00:00Z",
+    )
+    root_a["state"] = "closed"
+    root_a["merged"] = True
+    root_a["merge_commit_sha"] = SHA_A
+    root_b = _pull(
+        101,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T01:01:00Z",
+        sha=SHA_C,
+    )
+    api.pulls = {100: root_a, 101: root_b}
+    mark_loop_awaiting_ui(api, 100, SHA_A)
+    assert select_candidate(api, now=datetime(2026, 7, 20, 1, 2, tzinfo=timezone.utc).timestamp())["status"] == "awaiting-ui"
+
+    recovery = _pull(
+        102,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(100)],
+        created_at="2026-07-20T01:02:00Z",
+        sha=SHA_B,
+    )
+    api.pulls[102] = recovery
+    first = _prepare(api, 102)
+    request_loop_agent(api, 102, first.head_sha)
+    acknowledge_loop_agent(api, 102, SHA_B, actor="codex", association="OWNER")
+    recovery_merge = merge_candidate(api, _prepare(api, 102)).merge_sha
+    mark_loop_awaiting_ui(api, 102, recovery_merge)
+    assert len(api.list_issues_by_label(AWAITING_UI_LABEL, state="all")) == 1
+    try:
+        accept_loop_ui(
+            api,
+            100,
+            actor="codex",
+            association="OWNER",
+            deployed_sha=SHA_A,
+            evidence=EVIDENCE,
+        )
+    except ReleaseBlocked as exc:
+        assert "current LOOP iteration" in str(exc)
+    else:
+        raise AssertionError("stale acceptance of pre-recovery PR must fail")
+    accept_loop_ui(
+        api,
+        102,
+        actor="codex",
+        association="OWNER",
+        deployed_sha=recovery_merge,
+        evidence=EVIDENCE,
+    )
+    selected_b = select_candidate(api, now=datetime(2026, 7, 20, 1, 3, tzinfo=timezone.utc).timestamp())
+    assert selected_b["pr_number"] == 101
+    first_b = _prepare(api, 101)
+    request_loop_agent(api, 101, first_b.head_sha)
+    acknowledge_loop_agent(api, 101, SHA_C, actor="codex", association="OWNER")
+    merge_b = merge_candidate(api, _prepare(api, 101)).merge_sha
+    mark_loop_awaiting_ui(api, 101, merge_b)
+    assert len(api.list_issues_by_label(AWAITING_UI_LABEL, state="all")) == 1
+    assert api.merges == [(102, SHA_B), (101, SHA_C)]
+
+
+def _assert_halted_exact_evidence_resume() -> None:
+    from apps.registry_upload_http_entrypoint_hosted_runtime import ACTIVE_HOSTED_RUNTIME_TARGET_ID
+
+    api = FakeApi()
+    halted = _pull(
+        110,
+        labels=[HALTED_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T02:00:00Z",
+        sha=SHA_B,
+    )
+    halted["state"] = "closed"
+    halted["merged"] = True
+    halted["merge_commit_sha"] = SHA_A
+    api.pulls[110] = halted
+    evidence = {
+        "status": "reconciled",
+        "healthy": True,
+        "pr": 110,
+        "head": SHA_B,
+        "merge": SHA_A,
+        "expected_sha": SHA_A,
+        "target_id": ACTIVE_HOSTED_RUNTIME_TARGET_ID,
+    }
+    assert resume_halted_release(api, 110, evidence) == "production"
+    assert PRODUCTION_LABEL in _labels(halted) and HALTED_LABEL not in _labels(halted)
+    assert resume_halted_release(api, 110, evidence) == "already-reconciled"
+    forged = dict(evidence, expected_sha=SHA_C)
+    halted2 = _pull(
+        111,
+        labels=[HALTED_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T02:01:00Z",
+        sha=SHA_B,
+    )
+    halted2["state"] = "closed"
+    halted2["merged"] = True
+    halted2["merge_commit_sha"] = SHA_A
+    api.pulls[111] = halted2
+    try:
+        resume_halted_release(api, 111, forged)
+    except ReleaseBlocked:
+        pass
+    else:
+        raise AssertionError("wrong exact-SHA evidence must retain release:halted")
+    assert HALTED_LABEL in _labels(halted2)
+
+
 def main() -> int:
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
@@ -749,6 +1147,10 @@ def main() -> int:
     _assert_waiter_contract()
     _assert_workflow_contract()
     _assert_codex_task_class_and_monitor_contract()
+    _assert_machine_classification_and_state_spec()
+    _assert_resume_status_and_manual_ack_guards()
+    _assert_two_parallel_loop_roots()
+    _assert_halted_exact_evidence_resume()
     print("github_release_train_smoke: ok")
     return 0
 

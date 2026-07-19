@@ -28,4 +28,12 @@ jobs:
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
 
       - name: Validate Release Train
-        run: python3 apps/github_release_train_smoke.py
+        run: |
+          python3 apps/github_release_train_smoke.py
+          python3 apps/hosted_runtime_auth_preflight_smoke.py
+          python3 apps/hosted_runtime_transport_reconcile_smoke.py
+
+      - name: Parse workflow YAML
+        run: >-
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each {
+          |path| YAML.parse_file(path) }'

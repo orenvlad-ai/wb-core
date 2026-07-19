@@ -24,9 +24,9 @@ Execution contour (`read-only`, `repo-only`, `live/runtime`, `production data mu
 
 Явные строки класса:
 
-- `Класс задачи: стандарт`;
-- `Класс задачи: loop`;
-- `Класс задачи: диагностика`.
+- `КЛАСС ЗАДАЧИ: СТАНДАРТ`;
+- `КЛАСС ЗАДАЧИ: LOOP`;
+- `КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`.
 
 Если явной строки нет, Codex до начала работы выбирает класс по contract order:
 
@@ -164,9 +164,9 @@ Codex CLI наблюдает очередь без AI polling loop:
 
 `python3 apps/github_release_train_wait.py <PR>`
 
-STANDARD-вызов только читает GitHub. LOOP-вызов также выполняет единственную bounded mutation: при собственном `release:awaiting-agent` заново читает actual exact head, публикует command `/wb-core loop ack-agent <PR> head <HEAD_SHA>` и продолжает polling через merge/deploy. Чужой `release:awaiting-agent` или `release:awaiting-ui` выводится как `wait-foreign-gate` и не имеет terminal timeout: `--status-seconds` и совместимый alias `--timeout-seconds` задают только heartbeat. Код `3` означает возврат той же сессии на UI Flow собственного PR, `2` — собственный `release:blocked`, global `release:halted` или конфликт durable gates, `130` — interrupt. Опция `--no-ack-agent` делает LOOP-вызов полностью read-only.
+Waiter ведёт один обновляемый status/heartbeat comment на активном PR и не создаёт повторяющиеся comments. Для LOOP он при own `release:awaiting-agent` заново читает actual head и публикует `/wb-core loop ack-agent <PR> head <HEAD_SHA>`; handler создаёт repo-owned proof, поэтому manually added `loop:ack-*` label не открывает merge. Чужие `ready/running/awaiting-agent/awaiting-ui/halted` — normal waiting без terminal timeout. Код `3` означает own UI Flow, `4` — owner resume без ack, `2` — own blocker или conflicting invariant, `130` — interrupt.
 
-Нормальное ожидание очереди не превращается во внешний blocker после N одинаковых наблюдений или goal-turns. Если продукт завершает текущий goal-turn до terminal state, Codex создаёт следующий goal с тем же bounded outcome — продолжить waiter до своей очереди — и не отдаёт открытый PR handoff-сообщением. Если владельца всё же потеряли, scheduled worker после настраиваемого порога оставляет fail-closed `release:awaiting-agent + release:needs-resume`; сохранённая CLI-сессия возобновляется через `codex resume`, затем запускает точную waiter-команду из PR comment. Ack не автоматизируется и чужой gate не снимается.
+Нормальное ожидание очереди не превращается в blocker после N polls или goal-turns. Если LOOP heartbeat исчез на `ready/running/awaiting-agent/awaiting-ui`, worker добавляет overlay `release:needs-resume` и точную команду `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`. Resume проверяет exact head/root, снимает только overlay и не выполняет ack или acceptance.
 
 Явное ограничение пользователя имеет приоритет: «только ветка», «до commit», «до draft PR», «без merge», «без deploy», «без production mutations» или другая точная граница. Тогда Codex останавливается ровно на ней, подтверждает достигнутое состояние и не считает отсутствие дальнейшего closure ошибкой. Ограничение closure не расширяет authority для иных mutations.
 
@@ -205,7 +205,7 @@ Surface policy:
 4. собранные `pageerror`, явные fatal-error surface matches и существенные console errors; безвредные ошибки вроде missing favicon можно классифицировать отдельно, но не скрывать;
 5. локальный screenshot фактической final surface и его визуальную проверку.
 
-Screenshot и временный test harness не коммитятся без отдельного explicit scope. Для LOOP exact command `/wb-core loop accept-ui <PR>` допустима только после успешного browser evidence. При любой реальной UI-проблеме либо недоступной обязательной авторизации `release:awaiting-ui` сохраняется fail-closed; recovery PR создаётся только для исправления доказанного product/runtime defect, а не из-за ограничения локальной browser surface.
+Screenshot и временный test harness не коммитятся без отдельного explicit scope. Для LOOP exact command `/wb-core loop accept-ui <PR> deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>` допустима только после успешного browser evidence и для current deployed proof. Старый PR после recovery не принимается. При UI-проблеме или недоступной авторизации `release:awaiting-ui` сохраняется fail-closed.
 
 Проверенный reference flow — [PR #616](https://github.com/orenvlad-ai/wb-core/pull/616): изолированный CLI Playwright/Chrome подтвердил защищённый operator route через ожидаемый redirect на отрендеренную login surface, после чего exact UI acceptance перевёл LOOP в `release:production`, а post-accept worker подтвердил пустую очередь.
 
