@@ -8125,7 +8125,9 @@
       function readRegionalFieldValues() {
         const payload = {};
         Object.keys(regionalFields).forEach((key) => {
-          payload[key] = regionalFields[key].value;
+          payload[key] = regionalFields[key].type === "checkbox"
+            ? Boolean(regionalFields[key].checked)
+            : regionalFields[key].value;
         });
         payload.lead_time_to_region_days_by_district = readRegionalLeadTimeDaysByDistrict();
         payload.stock_ff_source = stockFfSource;
