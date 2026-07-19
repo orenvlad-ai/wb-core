@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Iterable
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,12 +24,14 @@ from apps.github_release_train import (  # noqa: E402
     LIVE_RUNTIME_LABEL,
     LOOP_ACK_PREFIX,
     LOOP_TASK_LABEL,
+    NEEDS_RESUME_LABEL,
     PRODUCTION_LABEL,
     PRODUCTION_MUTATION_LABEL,
     READY_LABEL,
     REPO_ONLY_LABEL,
     RUNNING_LABEL,
     STANDARD_TASK_LABEL,
+    SUPERSEDED_LABEL,
     ReleaseBlocked,
     accept_loop_ui,
     acknowledge_loop_agent,
@@ -45,7 +50,6 @@ from apps.github_release_train import (  # noqa: E402
 )
 from apps.github_release_train_wait import (  # noqa: E402
     EXIT_AWAITING_UI,
-    EXIT_TIMEOUT,
     evaluate_release,
     wait_for_release,
 )
@@ -54,6 +58,23 @@ from apps.github_release_train_wait import (  # noqa: E402
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+CANONICAL_MONITOR_URL = (
+    "https://github.com/orenvlad-ai/wb-core/pulls?"
+    "q=is%3Apr+-label%3Arelease%3Asuperseded+"
+    "label%3A%22release%3Aready%2Crelease%3Arunning%2C"
+    "release%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2C"
+    "release%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+"
+    "sort%3Acreated-asc"
+)
+MONITORED_RELEASE_LABELS = {
+    READY_LABEL,
+    RUNNING_LABEL,
+    AWAITING_AGENT_LABEL,
+    AWAITING_UI_LABEL,
+    NEEDS_RESUME_LABEL,
+    BLOCKED_LABEL,
+    HALTED_LABEL,
+}
 
 
 class FakeApi:
@@ -65,6 +86,7 @@ class FakeApi:
         self.dispatched: list[tuple[str, str]] = []
         self.ensured_labels: list[str] = []
         self.comments: list[tuple[int, str]] = []
+        self.events: dict[int, list[dict[str, Any]]] = {}
         self.merges: list[tuple[int, str]] = []
         self.deleted: list[str] = []
 
@@ -77,6 +99,12 @@ class FakeApi:
             for pull in self.pulls.values()
             if label in _labels(pull) and (state == "all" or pull.get("state") == state)
         ]
+
+    def list_issue_events(self, number: int) -> list[dict[str, Any]]:
+        return list(self.events.get(number, []))
+
+    def list_comments(self, number: int) -> list[dict[str, Any]]:
+        return [{"body": body} for comment_number, body in self.comments if comment_number == number]
 
     def get_pull(self, number: int) -> dict[str, Any]:
         return self.pulls[number]
@@ -113,8 +141,17 @@ class FakeApi:
 
     def add_labels(self, number: int, labels: Iterable[str]) -> None:
         current = _labels(self.pulls[number])
-        current.update(str(label) for label in labels)
+        additions = {str(label) for label in labels} - current
+        current.update(additions)
         _set_labels(self.pulls[number], current)
+        for label in sorted(additions):
+            self.events.setdefault(number, []).append(
+                {
+                    "event": "labeled",
+                    "label": {"name": label},
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
     def remove_label(self, number: int, label: str) -> None:
         current = _labels(self.pulls[number])
@@ -328,6 +365,125 @@ def _assert_recovery_transfer_and_acceptance(api: FakeApi, root: dict[str, Any])
     assert READY_LABEL in _labels(unrelated)
 
 
+def _assert_foreign_gate_waiting_and_queue_progress() -> None:
+    api = FakeApi()
+    loop_a = _pull(
+        50,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(50)],
+        created_at="2026-07-17T05:30:00Z",
+    )
+    loop_a["state"] = "closed"
+    loop_a["merged"] = True
+    loop_b = _pull(
+        51,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-17T05:31:00Z",
+        sha=SHA_B,
+    )
+    api.pulls = {50: loop_a, 51: loop_b}
+
+    waiting = select_candidate(api)
+    assert waiting["status"] == "awaiting-ui" and not waiting["found"]
+    decision = evaluate_release(
+        _labels(loop_b),
+        pr_number=51,
+        queue={"status": "awaiting-ui", "pr_number": 50},
+    )
+    assert decision["action"] == "wait-foreign-gate"
+    assert "blocked" not in decision["reason"]
+    linked_recovery = _labels(loop_b) | {loop_root_label(50)}
+    assert evaluate_release(
+        linked_recovery,
+        pr_number=51,
+        queue={"status": "awaiting-ui", "pr_number": 50, "loop_root": 50},
+    )["action"] == "wait"
+
+    set_release_state(api, 50, PRODUCTION_LABEL)
+    assert select_candidate(api)["pr_number"] == 51
+    candidate = _prepare(api, 51)
+    request_loop_agent(api, 51, candidate.head_sha)
+    assert AWAITING_AGENT_LABEL in _labels(loop_b)
+
+
+def _assert_lost_owner_resume_lifecycle() -> None:
+    api = FakeApi()
+    loop = _pull(
+        60,
+        labels=[AWAITING_AGENT_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-17T06:00:00Z",
+    )
+    queued = _pull(
+        61,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-17T06:01:00Z",
+        sha=SHA_B,
+    )
+    api.pulls = {60: loop, 61: queued}
+    api.events[60] = [
+        {
+            "event": "labeled",
+            "label": {"name": AWAITING_AGENT_LABEL},
+            "created_at": "2026-07-17T06:00:00Z",
+        }
+    ]
+    observed_at = datetime(2026, 7, 17, 6, 31, tzinfo=timezone.utc).timestamp()
+    first = select_candidate(api, needs_resume_after_seconds=1800, now=observed_at)
+    assert first["status"] == "awaiting-agent" and first["needs_resume"]
+    assert NEEDS_RESUME_LABEL in _labels(loop)
+    assert len(api.comments) == 1
+    assert "python3 apps/github_release_train_wait.py 60" in api.comments[0][1]
+    assert SHA_A in api.comments[0][1]
+    second = select_candidate(api, needs_resume_after_seconds=1800, now=observed_at + 300)
+    assert second["status"] == "awaiting-agent" and second["needs_resume"]
+    assert len(api.comments) == 1
+    assert READY_LABEL in _labels(queued)
+
+    acknowledge_loop_agent(api, 60, SHA_A, actor="codex", association="OWNER")
+    assert NEEDS_RESUME_LABEL not in _labels(loop)
+    assert READY_LABEL in _labels(loop)
+    resumed = _prepare(api, 60)
+    assert resumed.agent_acknowledged
+    assert not merge_candidate(api, resumed).skip_release
+
+
+def _assert_superseded_normalization_is_root_bounded() -> None:
+    api = FakeApi()
+    root = _pull(
+        70,
+        labels=[LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(70)],
+        created_at="2026-07-17T07:00:00Z",
+    )
+    root["state"] = "closed"
+    root["merged"] = True
+    failed = _pull(
+        71,
+        labels=[BLOCKED_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(70)],
+        created_at="2026-07-17T07:01:00Z",
+    )
+    other_root = _pull(
+        72,
+        labels=[BLOCKED_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(700)],
+        created_at="2026-07-17T07:02:00Z",
+    )
+    accepted = _pull(
+        73,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(70)],
+        created_at="2026-07-17T07:03:00Z",
+    )
+    accepted["state"] = "closed"
+    accepted["merged"] = True
+    api.pulls = {70: root, 71: failed, 72: other_root, 73: accepted}
+
+    assert accept_loop_ui(api, 73, actor="codex", association="OWNER") == "accepted"
+    assert PRODUCTION_LABEL in _labels(root)
+    assert PRODUCTION_LABEL in _labels(accepted)
+    assert SUPERSEDED_LABEL in _labels(failed)
+    assert BLOCKED_LABEL not in _labels(failed)
+    assert loop_root_label(70) in _labels(failed)
+    assert BLOCKED_LABEL in _labels(other_root)
+    assert SUPERSEDED_LABEL not in _labels(other_root)
+
+
 def _assert_blocked_halted_and_production_mutation() -> None:
     api = FakeApi()
     mutation = _pull(
@@ -382,30 +538,76 @@ def _assert_ack_invalidated_by_head_change() -> None:
 
 
 def _assert_waiter_contract() -> None:
-    api = FakeApi()
-    loop = _pull(
-        40,
-        labels=[AWAITING_AGENT_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+    class AdvancingWaitApi(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.target_reads = 0
+            self.foreign_released = False
+
+        def get_pull(self, number: int) -> dict[str, Any]:
+            if number == 81:
+                self.target_reads += 1
+                if self.target_reads == 2:
+                    _set_labels(
+                        self.pulls[80],
+                        transition_label_set(_labels(self.pulls[80]), PRODUCTION_LABEL),
+                    )
+                    _set_labels(
+                        self.pulls[81],
+                        transition_label_set(_labels(self.pulls[81]), AWAITING_AGENT_LABEL),
+                    )
+                    self.foreign_released = True
+            return super().get_pull(number)
+
+        def add_comment(self, number: int, body: str) -> None:
+            super().add_comment(number, body)
+            if number == 81 and body.startswith("/wb-core loop ack-agent"):
+                _set_labels(
+                    self.pulls[81],
+                    transition_label_set(_labels(self.pulls[81]), PRODUCTION_LABEL),
+                )
+
+    api = AdvancingWaitApi()
+    foreign = _pull(
+        80,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(80)],
         created_at="2026-07-17T09:00:00Z",
     )
-    api.pulls[40] = loop
+    foreign["state"] = "closed"
+    foreign["merged"] = True
+    loop = _pull(
+        81,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-17T09:01:00Z",
+    )
+    api.pulls = {80: foreign, 81: loop}
     output: list[str] = []
     code = wait_for_release(
         api,
-        40,
-        timeout_seconds=0,
+        81,
+        status_seconds=0,
         poll_seconds=0,
         acknowledge_agent=True,
         emit=output.append,
     )
-    assert code == EXIT_TIMEOUT
-    assert api.comments[-1] == (40, f"/wb-core loop ack-agent 40 head {SHA_A}")
-    set_release_state(api, 40, AWAITING_UI_LABEL)
+    assert code == 0
+    assert api.foreign_released
+    assert api.comments[-1] == (81, f"/wb-core loop ack-agent 81 head {SHA_A}")
+    assert any("normal queue waiting continues" in line for line in output)
+    assert not any("fail-closed" in line for line in output)
+
+    ui_api = FakeApi()
+    ui_loop = _pull(
+        82,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(82)],
+        created_at="2026-07-17T09:02:00Z",
+    )
+    ui_api.pulls[82] = ui_loop
     assert (
         wait_for_release(
-            api,
-            40,
-            timeout_seconds=0,
+            ui_api,
+            82,
+            status_seconds=0,
             poll_seconds=0,
             acknowledge_agent=True,
             emit=output.append,
@@ -421,16 +623,117 @@ def _assert_workflow_contract() -> None:
     for required in (
         "issue_comment:",
         "release:awaiting-agent",
+        "release:needs-resume",
+        "release:superseded",
         "request-agent",
         "agent_acknowledged",
         "handle-comment",
         "await-ui",
         "deploy-and-verify",
         "scope:production-mutation",
+        'cron: "*/5 * * * *"',
+        "group: wb-core-production-release",
     ):
         assert required in release or required in (ROOT / "apps" / "github_release_train.py").read_text(
             encoding="utf-8"
         )
+    assert release.count("group: wb-core-production-release") == 1
+    assert release.count("environment: production") == 1
+
+
+def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
+    """Evaluate the bounded qualifiers used by the canonical monitor regression."""
+
+    tokens = shlex.split(query)
+    if "is:pr" in tokens and item.get("kind") != "pr":
+        return False
+    if "is:open" in tokens and item.get("state") != "open":
+        return False
+    if "is:closed" in tokens and item.get("state") != "closed":
+        return False
+
+    labels = {str(label) for label in item.get("labels") or []}
+    for token in tokens:
+        if token.startswith("-label:") and token.removeprefix("-label:") in labels:
+            return False
+        if token.startswith("label:"):
+            alternatives = set(token.removeprefix("label:").split(","))
+            if not labels & alternatives:
+                return False
+    return True
+
+
+def _assert_codex_task_class_and_monitor_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    execution = (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
+        encoding="utf-8"
+    )
+    release_train = (
+        ROOT / "docs" / "architecture" / "11_github_release_train.md"
+    ).read_text(encoding="utf-8")
+
+    explicit_classes = (
+        "`Класс задачи: стандарт`",
+        "`Класс задачи: loop`",
+        "`Класс задачи: диагностика`",
+    )
+    automatic_messages = (
+        "`Класс задачи: стандарт — определён автоматически`",
+        "`Класс задачи: loop — определён автоматически`",
+        "`Класс задачи: диагностика — определён автоматически`",
+    )
+    classification_rules = (
+        "исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`",
+        "deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`",
+        "обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`",
+    )
+    for source in (agents, execution):
+        for required in (*explicit_classes, *automatic_messages, *classification_rules):
+            assert required in source
+        assert "неоднознач" in source and "всегда" in source and "`стандарт`" in source
+
+    for required in (
+        "не создаёт новую задачу или PR",
+        "текущей ветке",
+        "не меняет класс молча",
+        "только по прямому указанию пользователя",
+    ):
+        assert required in agents
+    for source in (execution, release_train):
+        assert "наследует" in source
+        assert "не меняет класс молча" in source
+        assert "только по прямому указанию пользователя" in source
+
+    for source in (agents, release_train):
+        assert CANONICAL_MONITOR_URL in source
+
+    query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
+    tokens = shlex.split(query)
+    assert "is:pr" in tokens
+    assert "is:open" not in tokens and "is:closed" not in tokens
+    assert "-label:release:superseded" in tokens
+    assert "sort:created-asc" in tokens
+    label_tokens = [token for token in tokens if token.startswith("label:")]
+    assert len(label_tokens) == 1
+    assert set(label_tokens[0].removeprefix("label:").split(",")) == MONITORED_RELEASE_LABELS
+    assert DONE_LABEL not in MONITORED_RELEASE_LABELS
+    assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
+
+    closed_merged_gate = {
+        "kind": "pr",
+        "state": "closed",
+        "merged": True,
+        "labels": {AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL},
+    }
+    assert _monitor_query_matches(query, closed_merged_gate)
+    assert not _monitor_query_matches(
+        query,
+        {**closed_merged_gate, "labels": {AWAITING_UI_LABEL, SUPERSEDED_LABEL}},
+    )
+    assert not _monitor_query_matches(
+        query,
+        {"kind": "pr", "state": "closed", "merged": True, "labels": {PRODUCTION_LABEL}},
+    )
 
 
 def main() -> int:
@@ -438,10 +741,14 @@ def main() -> int:
     _assert_standard_repo_only_and_live()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
+    _assert_foreign_gate_waiting_and_queue_progress()
+    _assert_lost_owner_resume_lifecycle()
+    _assert_superseded_normalization_is_root_bounded()
     _assert_blocked_halted_and_production_mutation()
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
     _assert_workflow_contract()
+    _assert_codex_task_class_and_monitor_contract()
     print("github_release_train_smoke: ok")
     return 0
 

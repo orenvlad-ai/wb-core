@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -24,10 +25,12 @@ READY_LABEL = "release:ready"
 RUNNING_LABEL = "release:running"
 AWAITING_AGENT_LABEL = "release:awaiting-agent"
 AWAITING_UI_LABEL = "release:awaiting-ui"
+NEEDS_RESUME_LABEL = "release:needs-resume"
 BLOCKED_LABEL = "release:blocked"
 DONE_LABEL = "release:done"
 PRODUCTION_LABEL = "release:production"
 HALTED_LABEL = "release:halted"
+SUPERSEDED_LABEL = "release:superseded"
 
 REPO_ONLY_LABEL = "scope:repo-only"
 LIVE_RUNTIME_LABEL = "scope:live-runtime"
@@ -38,6 +41,8 @@ LOOP_TASK_LABEL = "task:loop"
 LOOP_ROOT_PREFIX = "loop:root-"
 LOOP_ACK_PREFIX = "loop:ack-"
 LOOP_ACCEPT_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+DEFAULT_NEEDS_RESUME_AFTER_SECONDS = 30 * 60
+NEEDS_RESUME_COMMENT_MARKER = "wb-core-release-needs-resume"
 
 STATE_LABELS = {
     READY_LABEL,
@@ -48,6 +53,7 @@ STATE_LABELS = {
     DONE_LABEL,
     PRODUCTION_LABEL,
     HALTED_LABEL,
+    SUPERSEDED_LABEL,
 }
 SCOPE_LABELS = {
     REPO_ONLY_LABEL,
@@ -63,10 +69,12 @@ LABEL_DEFINITIONS = {
     RUNNING_LABEL: ("FBCA04", "Release Train обрабатывает PR"),
     AWAITING_AGENT_LABEL: ("D4C5F9", "LOOP ждёт acknowledgement активной Codex-сессии"),
     AWAITING_UI_LABEL: ("A371F7", "LOOP задеплоен и ждёт production UI acceptance"),
+    NEEDS_RESUME_LABEL: ("F9D0C4", "LOOP acknowledgement требует возобновления Codex-сессии"),
     BLOCKED_LABEL: ("D93F0B", "PR остановлен до исправления конкретного blocker"),
     DONE_LABEL: ("5319E7", "Repo-only PR смёржен; deploy не применяется"),
     PRODUCTION_LABEL: ("1D76DB", "Merge SHA задеплоен и проверен в production"),
     HALTED_LABEL: ("B60205", "Production verify не прошёл; вся очередь остановлена"),
+    SUPERSEDED_LABEL: ("D4C5F9", "Незамёрженная LOOP-итерация заменена завершённой recovery-chain"),
     REPO_ONLY_LABEL: ("C5DEF5", "Execution-контур repo-only без deploy"),
     LIVE_RUNTIME_LABEL: ("BFDADC", "Execution-контур live/runtime с deploy и verify"),
     PRODUCTION_MUTATION_LABEL: ("E99695", "Production data mutation: обязательный human gate"),
@@ -107,6 +115,10 @@ class ReleaseApi(Protocol):
     def ensure_label(self, name: str, color: str, description: str) -> None: ...
 
     def list_issues_by_label(self, label: str, *, state: str) -> list[dict[str, Any]]: ...
+
+    def list_issue_events(self, number: int) -> list[dict[str, Any]]: ...
+
+    def list_comments(self, number: int) -> list[dict[str, Any]]: ...
 
     def get_pull(self, number: int) -> dict[str, Any]: ...
 
@@ -233,6 +245,34 @@ class GitHubApi:
                 }
             )
             payload, _ = self._request("GET", self._repo_path(f"issues?{query}"))
+            batch = list(payload or [])
+            items.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < 100:
+                break
+        return items
+
+    def list_issue_events(self, number: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            query = urllib_parse.urlencode({"per_page": 100, "page": page})
+            payload, _ = self._request(
+                "GET",
+                self._repo_path(f"issues/{number}/events?{query}"),
+            )
+            batch = list(payload or [])
+            items.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < 100:
+                break
+        return items
+
+    def list_comments(self, number: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            query = urllib_parse.urlencode({"per_page": 100, "page": page})
+            payload, _ = self._request(
+                "GET",
+                self._repo_path(f"issues/{number}/comments?{query}"),
+            )
             batch = list(payload or [])
             items.extend(item for item in batch if isinstance(item, dict))
             if len(batch) < 100:
@@ -396,6 +436,105 @@ def release_state_from_labels(labels: Iterable[str]) -> str:
     return "release:none"
 
 
+def _github_timestamp(value: Any) -> float | None:
+    rendered = str(value or "").strip()
+    if not rendered:
+        return None
+    try:
+        parsed = datetime.fromisoformat(rendered.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _latest_label_timestamp(
+    api: ReleaseApi,
+    number: int,
+    label: str,
+    *,
+    fallback: Mapping[str, Any],
+) -> float | None:
+    matches: list[float] = []
+    for event in api.list_issue_events(number):
+        event_label = event.get("label") or {}
+        if (
+            str(event.get("event") or "") == "labeled"
+            and isinstance(event_label, Mapping)
+            and str(event_label.get("name") or "") == label
+        ):
+            timestamp = _github_timestamp(event.get("created_at"))
+            if timestamp is not None:
+                matches.append(timestamp)
+    if matches:
+        return max(matches)
+    return _github_timestamp(fallback.get("updated_at") or fallback.get("created_at"))
+
+
+def _needs_resume_marker(number: int, head_sha: str) -> str:
+    return f"<!-- {NEEDS_RESUME_COMMENT_MARKER} pr={number} head={head_sha} -->"
+
+
+def mark_needs_resume_if_stale(
+    api: ReleaseApi,
+    gate: Mapping[str, Any],
+    *,
+    threshold_seconds: float,
+    now: float | None = None,
+) -> bool:
+    """Mark a lost LOOP owner without acknowledging, skipping, or opening the gate."""
+
+    number = int(gate.get("number") or 0)
+    if number <= 0:
+        raise ReleaseTrainError("active release:awaiting-agent gate has no PR number")
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    if AWAITING_AGENT_LABEL not in labels:
+        return False
+    if task_class_from_labels(labels) != LOOP_TASK_LABEL:
+        raise ReleaseTrainError(f"active release:awaiting-agent PR #{number} is not task:loop")
+    if scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseTrainError(
+            f"active release:awaiting-agent PR #{number} is not scope:live-runtime"
+        )
+    if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
+        raise ReleaseTrainError(
+            f"active release:awaiting-agent PR #{number} is not an open non-draft PR"
+        )
+    head_sha = str((pull.get("head") or {}).get("sha") or "")
+    loop_ack_label(head_sha)
+    labeled_at = _latest_label_timestamp(
+        api,
+        number,
+        AWAITING_AGENT_LABEL,
+        fallback=pull,
+    )
+    current_time = time.time() if now is None else now
+    stale = NEEDS_RESUME_LABEL in labels
+    if labeled_at is not None:
+        stale = stale or current_time - labeled_at >= threshold_seconds
+    if not stale:
+        return False
+
+    marker = _needs_resume_marker(number, head_sha)
+    comments = api.list_comments(number)
+    if not any(marker in str(item.get("body") or "") for item in comments):
+        api.add_comment(
+            number,
+            (
+                f"LOOP PR #{number} всё ещё ждёт владельца на exact head `{head_sha}`. "
+                "Release Train не выполнял acknowledgement, не снял gate и не пропустил PR.\n\n"
+                "Возобновите сохранённую Codex CLI-сессию командой `codex resume`, затем в ней "
+                f"запустите `python3 apps/github_release_train_wait.py {number}`.\n\n"
+                f"{marker}"
+            ),
+        )
+    if NEEDS_RESUME_LABEL not in labels:
+        api.add_labels(number, [NEEDS_RESUME_LABEL])
+    return True
+
+
 def _active_gate(api: ReleaseApi, label: str) -> dict[str, Any] | None:
     gates = [
         item
@@ -406,6 +545,46 @@ def _active_gate(api: ReleaseApi, label: str) -> dict[str, Any] | None:
         numbers = ", ".join(f"#{int(item.get('number') or 0)}" for item in gates)
         raise ReleaseTrainError(f"multiple active {label} gates: {numbers}")
     return gates[0] if gates else None
+
+
+def queue_gate_state(api: ReleaseApi) -> dict[str, Any]:
+    halted = [
+        item
+        for item in api.list_issues_by_label(HALTED_LABEL, state="all")
+        if "pull_request" in item
+    ]
+    if halted:
+        first = min(
+            halted,
+            key=lambda item: (str(item.get("created_at") or ""), int(item.get("number") or 0)),
+        )
+        return {"status": "halted", "pr_number": int(first.get("number") or 0)}
+    try:
+        agent_gate = _active_gate(api, AWAITING_AGENT_LABEL)
+        ui_gate = _active_gate(api, AWAITING_UI_LABEL)
+    except ReleaseTrainError as exc:
+        return {"status": "gate-conflict", "reason": str(exc)}
+    if agent_gate is not None:
+        return {
+            "status": "awaiting-agent",
+            "pr_number": int(agent_gate.get("number") or 0),
+        }
+    if ui_gate is not None:
+        try:
+            root = loop_root_from_labels(label_names(ui_gate))
+        except ReleaseBlocked as exc:
+            return {"status": "gate-conflict", "reason": str(exc)}
+        if root is None:
+            return {
+                "status": "gate-conflict",
+                "reason": "active release:awaiting-ui PR has no deterministic root label",
+            }
+        return {
+            "status": "awaiting-ui",
+            "pr_number": int(ui_gate.get("number") or 0),
+            "loop_root": root,
+        }
+    return {"status": "idle"}
 
 
 def _validate_task_context(
@@ -448,10 +627,13 @@ def transition_label_set(current: Iterable[str], state: str) -> set[str]:
     labels = set(current)
     if state == RUNNING_LABEL:
         labels -= STATE_LABELS - {READY_LABEL}
+        labels.discard(NEEDS_RESUME_LABEL)
         labels.add(READY_LABEL)
         labels.add(RUNNING_LABEL)
         return labels
     labels -= STATE_LABELS
+    if state != AWAITING_AGENT_LABEL:
+        labels.discard(NEEDS_RESUME_LABEL)
     labels.add(state)
     return labels
 
@@ -469,13 +651,20 @@ def set_release_state(
     before = set(current_labels)
     after = transition_label_set(before, state)
     api.add_labels(number, sorted(after - before))
-    for label in sorted((before & STATE_LABELS) - after):
+    for label in sorted((before & (STATE_LABELS | {NEEDS_RESUME_LABEL})) - after):
         api.remove_label(number, label)
     if comment:
         api.add_comment(number, comment)
 
 
-def select_candidate(api: ReleaseApi) -> dict[str, Any]:
+def select_candidate(
+    api: ReleaseApi,
+    *,
+    needs_resume_after_seconds: float = DEFAULT_NEEDS_RESUME_AFTER_SECONDS,
+    now: float | None = None,
+) -> dict[str, Any]:
+    if needs_resume_after_seconds <= 0:
+        raise ValueError("needs-resume threshold must be positive")
     halted = [
         item
         for item in api.list_issues_by_label(HALTED_LABEL, state="all")
@@ -495,16 +684,28 @@ def select_candidate(api: ReleaseApi) -> dict[str, Any]:
     except ReleaseTrainError as exc:
         return {"status": "gate-conflict", "found": False, "reason": str(exc)}
     if agent_gate is not None:
+        try:
+            needs_resume = mark_needs_resume_if_stale(
+                api,
+                agent_gate,
+                threshold_seconds=needs_resume_after_seconds,
+                now=now,
+            )
+        except ReleaseTrainError as exc:
+            return {"status": "gate-conflict", "found": False, "reason": str(exc)}
         return {
             "status": "awaiting-agent",
             "found": False,
             "awaiting_agent_pr_number": int(agent_gate.get("number") or 0),
+            "needs_resume": needs_resume,
         }
 
     ready = [
         item
         for item in api.list_issues_by_label(READY_LABEL, state="open")
-        if "pull_request" in item and BLOCKED_LABEL not in label_names(item)
+        if "pull_request" in item
+        and BLOCKED_LABEL not in label_names(item)
+        and SUPERSEDED_LABEL not in label_names(item)
     ]
     if ui_gate is not None:
         try:
@@ -821,6 +1022,8 @@ def acknowledge_loop_agent(
         raise ReleaseBlocked("LOOP acknowledgement head SHA is stale")
     acknowledgement = loop_ack_label(actual_head_sha)
     if acknowledgement in labels and READY_LABEL in labels:
+        if NEEDS_RESUME_LABEL in labels:
+            api.remove_label(number, NEEDS_RESUME_LABEL)
         api.dispatch_workflow("release-train.yml", "main")
         return "already-acknowledged"
     if AWAITING_AGENT_LABEL not in labels:
@@ -911,6 +1114,94 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
     return root, "awaiting-ui"
 
 
+def normalize_completed_loop_chain(
+    api: ReleaseApi,
+    number: int,
+    *,
+    actor: str,
+) -> list[int]:
+    """Finalize merged iterations and hide unmerged predecessors of one proven LOOP root."""
+
+    active_pull = api.get_pull(number)
+    active_labels = label_names(active_pull)
+    root = loop_root_from_labels(active_labels)
+    if (
+        root is None
+        or task_class_from_labels(active_labels) != LOOP_TASK_LABEL
+        or scope_from_labels(active_labels) != LIVE_RUNTIME_LABEL
+        or not bool(active_pull.get("merged"))
+    ):
+        raise ReleaseBlocked("accepted PR is not a merged member of a deterministic LOOP chain")
+    chain_label = loop_root_label(root)
+    chain = [
+        item
+        for item in api.list_issues_by_label(chain_label, state="all")
+        if "pull_request" in item
+    ]
+    if not chain:
+        raise ReleaseTrainError("active LOOP chain is empty")
+
+    merged_members: list[tuple[int, set[str]]] = []
+    superseded_members: list[tuple[int, set[str]]] = []
+    for item in sorted(chain, key=lambda candidate: int(candidate.get("number") or 0)):
+        chain_number = int(item.get("number") or 0)
+        chain_pull = api.get_pull(chain_number)
+        chain_labels = label_names(chain_pull)
+        try:
+            valid_member = (
+                task_class_from_labels(chain_labels) == LOOP_TASK_LABEL
+                and scope_from_labels(chain_labels) == LIVE_RUNTIME_LABEL
+                and loop_root_from_labels(chain_labels) == root
+            )
+        except ReleaseBlocked:
+            valid_member = False
+        if bool(chain_pull.get("merged")):
+            if not valid_member:
+                raise ReleaseTrainError(f"invalid merged LOOP chain member PR #{chain_number}")
+            merged_members.append((chain_number, chain_labels))
+            continue
+        if valid_member and 0 < chain_number < number:
+            superseded_members.append((chain_number, chain_labels))
+
+    if number not in {chain_number for chain_number, _ in merged_members}:
+        raise ReleaseTrainError(f"active LOOP PR #{number} is absent from its root chain")
+
+    first_acceptance = PRODUCTION_LABEL not in active_labels
+    for chain_number, chain_labels in merged_members:
+        set_release_state(
+            api,
+            chain_number,
+            PRODUCTION_LABEL,
+            current_labels=chain_labels,
+            comment=(
+                f"Production UI Flow принят @{actor}; LOOP-цепочка `{chain_label}` завершена."
+                if chain_number == number and first_acceptance
+                else ""
+            ),
+        )
+
+    normalized: list[int] = []
+    for chain_number, chain_labels in superseded_members:
+        was_superseded = SUPERSEDED_LABEL in chain_labels
+        for acknowledgement in sorted(loop_ack_labels(chain_labels)):
+            api.remove_label(chain_number, acknowledgement)
+        set_release_state(
+            api,
+            chain_number,
+            SUPERSEDED_LABEL,
+            current_labels=chain_labels - loop_ack_labels(chain_labels),
+            comment=(
+                f"Незамёрженный LOOP PR #{chain_number} заменён production recovery PR #{number} "
+                f"в цепочке `{chain_label}`; активные queue/failure labels нормализованы, "
+                "история и root-label сохранены."
+                if not was_superseded
+                else ""
+            ),
+        )
+        normalized.append(chain_number)
+    return normalized
+
+
 def accept_loop_ui(
     api: ReleaseApi,
     number: int,
@@ -929,44 +1220,12 @@ def accept_loop_ui(
     if active_gate is None:
         if PRODUCTION_LABEL not in labels:
             raise ReleaseBlocked("there is no active release:awaiting-ui gate")
+        normalize_completed_loop_chain(api, number, actor=actor)
         api.dispatch_workflow("release-train.yml", "main")
         return "already-accepted"
     if int(active_gate.get("number") or 0) != number:
         raise ReleaseBlocked("UI acceptance must target the current LOOP iteration")
-    chain_label = loop_root_label(root)
-    chain = [
-        item
-        for item in api.list_issues_by_label(chain_label, state="all")
-        if "pull_request" in item
-    ]
-    if not chain:
-        raise ReleaseTrainError("active LOOP chain is empty")
-    ordered = sorted(
-        chain,
-        key=lambda item: (int(item.get("number") or 0) == number, int(item.get("number") or 0)),
-    )
-    for item in ordered:
-        chain_number = int(item.get("number") or 0)
-        chain_pull = api.get_pull(chain_number)
-        chain_labels = label_names(chain_pull)
-        if (
-            task_class_from_labels(chain_labels) != LOOP_TASK_LABEL
-            or scope_from_labels(chain_labels) != LIVE_RUNTIME_LABEL
-            or loop_root_from_labels(chain_labels) != root
-            or not bool(chain_pull.get("merged"))
-        ):
-            raise ReleaseTrainError(f"invalid LOOP chain member PR #{chain_number}")
-        set_release_state(
-            api,
-            chain_number,
-            PRODUCTION_LABEL,
-            current_labels=chain_labels,
-            comment=(
-                f"Production UI Flow принят @{actor}; LOOP-цепочка `{chain_label}` завершена."
-                if chain_number == number
-                else ""
-            ),
-        )
+    normalize_completed_loop_chain(api, number, actor=actor)
     api.dispatch_workflow("release-train.yml", "main")
     return "accepted"
 
@@ -1032,6 +1291,21 @@ def _json_print(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
+def _needs_resume_default_minutes() -> float:
+    configured = os.environ.get("WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES", "").strip()
+    if not configured:
+        return DEFAULT_NEEDS_RESUME_AFTER_SECONDS / 60
+    try:
+        minutes = float(configured)
+    except ValueError as exc:
+        raise ValueError(
+            "WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES must be a positive number"
+        ) from exc
+    if minutes <= 0:
+        raise ValueError("WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES must be positive")
+    return minutes
+
+
 def command_setup(_: argparse.Namespace) -> int:
     api = _api_from_env()
     for name, (color, description) in LABEL_DEFINITIONS.items():
@@ -1042,7 +1316,10 @@ def command_setup(_: argparse.Namespace) -> int:
 
 def command_select(args: argparse.Namespace) -> int:
     api = _api_from_env()
-    result = select_candidate(api)
+    result = select_candidate(
+        api,
+        needs_resume_after_seconds=args.needs_resume_after_minutes * 60,
+    )
     write_github_output(
         args.output_path,
         {
@@ -1053,6 +1330,7 @@ def command_select(args: argparse.Namespace) -> int:
             "halted_pr_number": result.get("halted_pr_number", ""),
             "awaiting_agent_pr_number": result.get("awaiting_agent_pr_number", ""),
             "awaiting_ui_pr_number": result.get("awaiting_ui_pr_number", ""),
+            "needs_resume": bool(result.get("needs_resume")),
             "pr_number": result.get("pr_number", ""),
             "head_sha": result.get("head_sha", ""),
             "head_ref": result.get("head_ref", ""),
@@ -1235,6 +1513,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     select = subparsers.add_parser("select")
     select.add_argument("--output-path", default=os.environ.get("GITHUB_OUTPUT"))
+    select.add_argument(
+        "--needs-resume-after-minutes",
+        type=float,
+        default=_needs_resume_default_minutes(),
+    )
     select.set_defaults(handler=command_select)
 
     transition = subparsers.add_parser("transition")
