@@ -41,6 +41,7 @@ from apps.github_release_train_spec import (
     PRODUCTION_LABEL,
     READY_LABEL,
     RECONCILE_PROOF_MARKER,
+    RETRY_PROOF_MARKER,
     RUNNING_LABEL,
     STATUS_COMMENT_MARKER,
     SUPERSEDED_LABEL,
@@ -1254,6 +1255,48 @@ def halt_merged_release(
     return HALTED_LABEL
 
 
+def retry_blocked_release(
+    api: ReleaseApi,
+    number: int,
+    *,
+    expected_head_sha: str,
+    check_name: str,
+) -> str:
+    """Requeue a fixed pre-merge blocker only after exact-head successful CI."""
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    actual_head = str((pull.get("head") or {}).get("sha") or "").lower()
+    if BLOCKED_LABEL not in labels:
+        raise ReleaseBlocked("retry requires release:blocked")
+    if actual_head != expected_head_sha.strip().lower():
+        raise ReleaseBlocked("blocked retry head SHA is stale")
+    if len(actual_head) != 40 or any(
+        character not in "0123456789abcdef" for character in actual_head
+    ):
+        raise ReleaseBlocked("blocked retry requires an exact 40-character head SHA")
+    if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
+        raise ReleaseBlocked("blocked retry requires an open non-draft PR")
+    successful = any(
+        str(item.get("name") or "") == check_name
+        and str(item.get("status") or "") == "completed"
+        and str(item.get("conclusion") or "") == "success"
+        for item in api.list_check_runs(actual_head)
+    )
+    if not successful:
+        raise ReleaseBlocked(
+            f"blocked retry requires successful {check_name!r} on exact head {actual_head}"
+        )
+    proof = _proof_marker(RETRY_PROOF_MARKER, check=check_name, head=actual_head, pr=number)
+    api.add_comment(
+        number,
+        f"Release Train retry accepted after `{check_name}` succeeded on exact head `{actual_head}`.\n\n{proof}",
+    )
+    set_release_state(api, number, READY_LABEL, current_labels=labels)
+    api.dispatch_workflow("release-train.yml", "main")
+    return READY_LABEL
+
+
 def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
     """Reject terminal labels that lack their repo-owned exact-SHA transition proof."""
 
@@ -1929,6 +1972,18 @@ def command_halt(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_retry_blocked(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = retry_blocked_release(
+        api,
+        args.pr,
+        expected_head_sha=args.expected_head_sha,
+        check_name=args.check_name,
+    )
+    _json_print({"status": status, "pr_number": args.pr, "head_sha": args.expected_head_sha})
+    return 0
+
+
 def command_complete(args: argparse.Namespace) -> int:
     api = _api_from_env()
     status = complete_standard_release(
@@ -2133,6 +2188,12 @@ def build_parser() -> argparse.ArgumentParser:
     halt.add_argument("--merge-sha", required=True)
     halt.add_argument("--reason", required=True)
     halt.set_defaults(handler=command_halt)
+
+    retry_blocked = subparsers.add_parser("retry-blocked")
+    retry_blocked.add_argument("--pr", type=int, required=True)
+    retry_blocked.add_argument("--expected-head-sha", required=True)
+    retry_blocked.add_argument("--check-name", default="baseline")
+    retry_blocked.set_defaults(handler=command_retry_blocked)
 
     complete = subparsers.add_parser("complete-standard")
     complete.add_argument("--pr", type=int, required=True)

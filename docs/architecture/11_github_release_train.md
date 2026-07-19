@@ -154,6 +154,8 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 - repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
 - repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
 
+Исправленный own pre-merge blocker повторно входит в очередь только через `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`. Command требует open non-draft PR, точное совпадение current head и successful `baseline` на этом SHA; затем он ставит `release:ready` и dispatch-ит worker. Ручной label edit не считается retry proof.
+
 SSH exit `255` или unexpected disconnect после merge классифицируется как `transport-indeterminate`. Repo-owned reconciler bounded-переподключается и сопоставляет canonical `target_id`, expected merge SHA, deploy metadata SHA, runtime SHA marker, systemd active/MainPID и обязательные loopback probes. Wrong/mixed SHA, inactive unit или failed probes сохраняют `release:halted`. Повторяются только `daemon-reload`, restart, probes и readback. Отдельный production-environment workflow `resume-halted` снимает halted только после healthy exact PR/head/merge/target JSON evidence; ручное снятие label не считается reconciliation.
 
 ## Канонический Мониторинг

@@ -44,6 +44,7 @@ from apps.github_release_train import (  # noqa: E402
     request_loop_agent,
     resume_halted_release,
     resume_loop_owner,
+    retry_blocked_release,
     require_deploy_environment,
     scope_from_labels,
     select_candidate,
@@ -597,6 +598,35 @@ def _assert_blocked_halted_and_production_mutation() -> None:
     assert result == {"status": "halted", "found": False, "halted_pr_number": 21}
     assert evaluate_release(_labels(halted))["action"] == "blocked"
 
+    fixed = _pull(
+        22,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-17T07:01:00Z",
+        sha=SHA_C,
+    )
+    api.pulls[22] = fixed
+    api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    try:
+        retry_blocked_release(
+            api,
+            22,
+            expected_head_sha=SHA_B,
+            check_name="baseline",
+        )
+    except ReleaseBlocked as exc:
+        assert "stale" in str(exc)
+    else:
+        raise AssertionError("blocked retry must bind the exact current head")
+    assert retry_blocked_release(
+        api,
+        22,
+        expected_head_sha=SHA_C,
+        check_name="baseline",
+    ) == READY_LABEL
+    assert READY_LABEL in _labels(fixed) and BLOCKED_LABEL not in _labels(fixed)
+
 
 def _assert_ack_invalidated_by_head_change() -> None:
     api = FakeApi()
@@ -744,6 +774,7 @@ def _assert_workflow_contract() -> None:
         "complete-standard",
         "halt-merged",
         "resume-halted",
+        "retry-blocked",
         "scope:production-mutation",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",

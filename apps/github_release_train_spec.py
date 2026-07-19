@@ -108,6 +108,7 @@ CHAIN_AUDIT_MARKER = "wb-core-loop-chain-audit"
 RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
 HALT_PROOF_MARKER = "wb-core-release-halt-proof"
+RETRY_PROOF_MARKER = "wb-core-release-retry-proof"
 CANONICAL_PRODUCTION_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 
 

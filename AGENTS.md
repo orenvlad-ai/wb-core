@@ -110,6 +110,8 @@ Repo-owned waiter для Codex CLI:
 
 Release states и transitions определены машинно в `apps/github_release_train_spec.py`: primary active — `ready/running/awaiting-agent/awaiting-ui/blocked/halted`, overlay — `needs-resume`, terminal — `done/production/superseded`. Кроме временной пары `ready+running`, два primary states запрещены. Ручной label edit не доказывает ack, deploy, acceptance или halted recovery: критический transition требует repo-owned exact PR/head/merge/root/evidence command.
 
+После исправления own pre-merge blocker PR возвращается из `release:blocked` в `release:ready` только через `python3 apps/github_release_train.py retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`: command повторно проверяет exact head и successful baseline. Ручное снятие blocker не является retry proof.
+
 ## Независимая проверка
 
 Отчёт Codex или другого агента не является доказательством сам по себе. Перед подтверждением результата проверь применимое:
