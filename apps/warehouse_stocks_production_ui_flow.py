@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import FrameLocator, Page, expect, sync_playwright
 
 
 WAREHOUSES = (
@@ -404,11 +404,17 @@ def run_warehouse_ui_flow(
         settings_url = normalized_base_url + "/sheet-vitrina-v1/settings"
         settings_response = page.goto(settings_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(settings_response is not None and settings_response.status == 200, "calculation settings page status")
-        page.locator('[data-settings-group-button="user-directory"]').click()
-        page.locator('[data-settings-group-panel="user-directory"]:not([hidden])').wait_for(timeout=60_000)
-        page.wait_for_function(
-            "document.querySelector('[data-calculation-rate=\"buyout_rate\"]').value === '91'",
-            timeout=60_000,
+        settings_surface = _settings_frame_locator(page)
+        settings_surface.locator('[data-settings-group-button="user-directory"]').click()
+        settings_surface.locator('[data-settings-group-panel="user-directory"]:not([hidden])').wait_for(
+            timeout=60_000
+        )
+        buyout_input = settings_surface.locator('[data-calculation-rate="buyout_rate"]')
+        buyout_input.wait_for(timeout=60_000)
+        expect(buyout_input).to_have_value("91", timeout=60_000)
+        _assert(
+            buyout_input.input_value() == "91",
+            "visible calculation settings buyout 91%",
         )
         settings_api = context.request.get(
             normalized_base_url + "/v1/sheet-vitrina-v1/settings/calculation-parameters",
@@ -423,16 +429,30 @@ def run_warehouse_ui_flow(
         _assert(parameters.get("retained_share_pct") == "56", "calculation settings retained share 56%")
         reference = dict(settings_payload.get("reference") or {})
         _assert(reference.get("status") == "ready" and len(reference.get("weeks") or []) == 3, "three closed WB weeks")
-        _assert(page.locator("#calculationExpenseTotal").inner_text().strip() == "44%", "visible expenses 44%")
-        _assert(page.locator("#calculationRetainedShare").inner_text().strip() == "56%", "visible retained share 56%")
-        _assert("canonical_WB_WAC" in page.locator("#calculationFormulaPreview").inner_text(), "visible Proxy formula")
-        _assert(page.locator("#calculationReferenceRows tr").count() == 6, "six WB reference rows")
-        _assert(page.locator("#calculationHistoryRows tr").count() >= 1, "settings version history")
+        _assert(
+            settings_surface.locator("#calculationExpenseTotal").inner_text().strip() == "44%",
+            "visible expenses 44%",
+        )
+        _assert(
+            settings_surface.locator("#calculationRetainedShare").inner_text().strip() == "56%",
+            "visible retained share 56%",
+        )
+        _assert(
+            "canonical_WB_WAC" in settings_surface.locator("#calculationFormulaPreview").inner_text(),
+            "visible Proxy formula",
+        )
+        reference_rows = settings_surface.locator("#calculationReferenceRows tr")
+        expect(reference_rows).to_have_count(6, timeout=60_000)
+        _assert(reference_rows.count() == 6, "six WB reference rows")
+        history_rows = settings_surface.locator("#calculationHistoryRows tr")
+        history_rows.first.wait_for(timeout=60_000)
+        _assert(history_rows.count() >= 1, "settings version history")
         settings_screenshot = evidence_dir / "calculation_parameters.png"
         page.screenshot(path=str(settings_screenshot), full_page=True)
         screenshots.append(str(settings_screenshot))
         settings_evidence = {
             "url": page.url,
+            "embedded_url": page.locator("[data-settings-embed-frame]").get_attribute("src"),
             "buyout_rate_pct": parameters.get("buyout_rate_pct"),
             "included_expense_rate_pct": parameters.get("included_expense_rate_pct"),
             "retained_share_pct": parameters.get("retained_share_pct"),
@@ -674,6 +694,18 @@ def _visible_decimal(value: str) -> Decimal:
         return Decimal(normalized)
     except Exception as exc:
         raise AssertionError(f"visible value is not numeric: {value!r}") from exc
+
+
+def _settings_frame_locator(page: Page) -> FrameLocator:
+    frame = page.locator("[data-settings-embed-frame]")
+    frame.wait_for(state="visible", timeout=60_000)
+    page.wait_for_function(
+        "Boolean(document.querySelector('[data-settings-embed-frame]')?.getAttribute('src'))",
+        timeout=60_000,
+    )
+    surface = page.frame_locator("[data-settings-embed-frame]")
+    surface.locator("body").wait_for(timeout=60_000)
+    return surface
 
 
 def _visible_money(value: str) -> Decimal:

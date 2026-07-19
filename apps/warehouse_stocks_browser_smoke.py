@@ -89,6 +89,7 @@ def main() -> None:
                         "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
                     ),
                 )
+                _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -112,6 +113,26 @@ def main() -> None:
                 server.server_close()
                 thread.join(timeout=5)
     print("warehouse stocks browser smoke: ok")
+
+
+def _assert_route_explicit_settings_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
+            page.locator('[data-unified-tab-button="warehouses"]').click()
+            page.locator('[data-unified-tab-panel="warehouses"]:not([hidden])').wait_for()
+            page.goto(f"{base_url}/sheet-vitrina-v1/settings", wait_until="domcontentloaded")
+            frame = page.locator('[data-settings-embed-frame]:not([hidden])')
+            frame.wait_for()
+            surface = page.frame_locator("[data-settings-embed-frame]")
+            surface.locator('[data-settings-group-button="user-directory"]').wait_for()
+            _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
+        finally:
+            browser.close()
 
 
 def _apply_functional_fixture(
