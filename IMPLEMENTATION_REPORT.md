@@ -86,7 +86,7 @@ The deploy preflight temporarily forces the migration process OFF, takes an inte
 Free local acceptance on the release-candidate tree:
 
 ```text
-python3 -m unittest apps.wb_autoanswers_*_test  -> 103 PASS
+python3 -m unittest apps.wb_autoanswers_*_test  -> 104 PASS
 python3 -m compileall -q apps packages         -> PASS
 frozen make_mvp npm test                       -> 28/28 PASS
 sheet_vitrina_v1_feedbacks_browser_smoke.py    -> PASS
