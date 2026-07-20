@@ -26,6 +26,7 @@ from packages.application.calculation_parameters import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.own_product_capital import OwnProductCapitalBlock  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.supplier_financial_documents import build_financial_summary  # noqa: E402
 from packages.application.wb_supplies import validate_functional_supply_sync  # noqa: E402
@@ -36,10 +37,12 @@ from packages.application.warehouse_functional import (  # noqa: E402
     STAGE_WB,
     WAREHOUSE_QUALITY_PRESENTATIONS,
     WarehouseFunctionalBlock,
+    WarehouseFunctionalError,
     WarehouseLine,
     _build_versioned_historical_correction,
     _calculation_digest,
     _counted_cny_operation,
+    _current_snapshot_effective_date,
     _daily_wb_cost_row,
     _fingerprint,
     _functional_local_source_view,
@@ -52,14 +55,19 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _nomenclature_purchase_prices,
     _ready_snapshot_recovery_rows,
     _ready_snapshot_historical_correction_rows,
+    _revalidate_balance_certifications,
+    load_supplier_flow_cost_state,
     _supply_downstream_component_index,
     _supply_revision,
+    _supplier_cost_allocations,
     _summaries,
     _validate_historical_projection_calendar,
     _validate_historical_correction_plan,
     _validate_historical_correction_matches_derived,
     _validated_financial_expense,
+    _warehouse_balance_status_presentation,
     _warehouse_human_evidence,
+    _wb_snapshot_integrity,
     accepted_capital_delta,
     accepted_quantity_delta,
     allocate_capital,
@@ -72,6 +80,9 @@ from packages.application.warehouse_functional import (  # noqa: E402
     validate_cutover_ff_debit_coverage,
 )
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
+    _exact_functional_snapshot_dates,
+    _transform_snapshot,
+    _warehouse_input_manifest_digest,
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
 )
@@ -85,6 +96,12 @@ DRY_RUN_AT = "2026-07-18T11:55:00Z"
 
 def main() -> None:
     _test_decimal_and_allocations()
+    _test_invalid_supplier_line_fails_closed()
+    _test_blocked_cny_operation_cannot_activate_supplier_flow()
+    _test_zero_rub_supplier_payment_fails_closed()
+    _test_26gn390_supplier_line_cost_proof()
+    _test_official_wb_snapshot_integrity()
+    _test_current_snapshot_business_date_gate()
     _test_accepted_source_correction()
     _test_paid_acceptance_cost_boundary()
     _test_financial_document_eligibility()
@@ -98,6 +115,7 @@ def main() -> None:
     _test_zero_quantity_without_cost_basis_consumer()
     _test_exact_historical_wb_quantity_evidence()
     _test_quality_localization_catalog()
+    _test_source_mutation_removes_green_balance_status()
     _test_human_evidence_uses_source_quality_and_date()
     _test_proxy()
     _test_versioned_parameters_and_reference()
@@ -133,6 +151,586 @@ def _test_decimal_and_allocations() -> None:
         method="quantity",
     )
     _assert(sum(quantity.values(), Decimal("0")) == Decimal("1"), "allocation conserves exact capital")
+
+
+def _test_source_mutation_removes_green_balance_status() -> None:
+    with tempfile.TemporaryDirectory(prefix="warehouse-certification-recheck-") as temp_dir:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir) / "runtime")
+        balance = {
+            "version_id": "whfv_active",
+            "warehouse_key": "china_to_ff",
+            "nm_id": 104,
+            "quantity": "10",
+            "capital_rub": "100",
+            "wac_rub": "10",
+            "cost_covered_quantity": "10",
+            "quality": "certified",
+            "certified": True,
+            "provenance": {
+                "source_records": [
+                    {"shipment_id": "shipment-source-changed", "flow_quantity": "10"}
+                ]
+            },
+        }
+        stale_proof = {
+            "certification": {
+                "certified": False,
+                "source_fingerprint_matches": False,
+                "active_version_id": "whfv_active",
+            }
+        }
+        with patch(
+            "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+            return_value=stale_proof,
+        ):
+            [revalidated] = _revalidate_balance_certifications(
+                runtime=runtime,
+                balances=[balance],
+                active_version_id="whfv_active",
+            )
+        _assert(
+            revalidated["persisted_certified"] is True
+            and revalidated["certified"] is False
+            and revalidated["certification_revalidation_failed"] is True,
+            "source mutation removes the stale persisted certification before replay",
+        )
+        status = _warehouse_balance_status_presentation(
+            "source_changed_provisional",
+            certified=bool(revalidated["certified"]),
+        )
+        _assert(
+            status["tone"] == "warning"
+            and status["label_ru"] == "Предварительная себестоимость — источники изменились",
+            "source mutation is presented as an explicit yellow provisional status",
+        )
+
+        runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(
+                       slot INTEGER PRIMARY KEY, version_id TEXT NOT NULL
+                   )"""
+            )
+            conn.execute(
+                """CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id TEXT NOT NULL, warehouse_key TEXT NOT NULL,
+                       quantity TEXT NOT NULL, capital_rub TEXT NOT NULL,
+                       certified INTEGER NOT NULL, quality TEXT NOT NULL,
+                       provenance_json TEXT NOT NULL
+                   )"""
+            )
+            conn.execute(
+                "INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id) VALUES(1,?)",
+                ("whfv_active",),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,quantity,capital_rub,certified,quality,provenance_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    "whfv_active",
+                    "china_to_ff",
+                    "10",
+                    "100",
+                    1,
+                    "certified",
+                    json.dumps({"source_records": [{
+                        "shipment_id": "shipment-source-changed",
+                        "flow_quantity": "10",
+                        "flow_capital_rub": "100",
+                        "quality": "certified",
+                        "expenses_complete_certification": True,
+                    }]}),
+                ),
+            )
+            conn.commit()
+        with patch(
+            "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+            return_value=stale_proof,
+        ):
+            supplier_registry_state = load_supplier_flow_cost_state(
+                runtime=runtime,
+                shipment_id="shipment-source-changed",
+            )
+        _assert(
+            supplier_registry_state["china_to_ff"]["certified"] is False
+            and "source_changed_provisional" in supplier_registry_state["china_to_ff"]["quality"],
+            "supplier registry stage cell also removes stale green certification",
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_functional_balances")
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,quantity,capital_rub,certified,quality,provenance_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    "whfv_active",
+                    "china_to_ff",
+                    "30",
+                    "250",
+                    0,
+                    "mixed:certified,confirmed_payments_provisional_expenses",
+                    json.dumps({"source_records": [
+                        {
+                            "shipment_id": "shipment-source-changed",
+                            "flow_quantity": "10",
+                            "flow_capital_rub": "100",
+                            "quality": "certified",
+                            "expenses_complete_certification": True,
+                        },
+                        {
+                            "shipment_id": "sibling-provisional",
+                            "flow_quantity": "20",
+                            "flow_capital_rub": "150",
+                            "quality": "confirmed_payments_provisional_expenses",
+                            "expenses_complete_certification": False,
+                        },
+                    ]}),
+                ),
+            )
+            conn.commit()
+        with patch(
+            "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+            return_value={
+                "certification": {
+                    "certified": True,
+                    "source_fingerprint_matches": True,
+                    "active_version_id": "whfv_active",
+                }
+            },
+        ):
+            selected_supplier_state = load_supplier_flow_cost_state(
+                runtime=runtime,
+                shipment_id="shipment-source-changed",
+            )
+        _assert(
+            selected_supplier_state["china_to_ff"]["certified"] is True
+            and selected_supplier_state["china_to_ff"]["quality"] == ["certified"],
+            "a provisional sibling party does not downgrade the selected certified supplier shipment",
+        )
+
+
+def _test_invalid_supplier_line_fails_closed() -> None:
+    allocation = _supplier_cost_allocations(
+        {
+            "shipments": [
+                {
+                    "shipment_id": "invalid-line-smoke",
+                    "invoice_no": "INVALID-LINE",
+                    "invoice_date": "2026-07-18",
+                    "order_status": "active",
+                    "expenses_complete": 1,
+                }
+            ],
+            "shipment_lines": [
+                {
+                    "line_id": "valid-line",
+                    "shipment_id": "invalid-line-smoke",
+                    "line_type": "product",
+                    "internal_nm_id": 101,
+                    "qty": "10",
+                    "unit_price": "5",
+                    "amount": "50",
+                },
+                {
+                    "line_id": "zero-quantity-line",
+                    "shipment_id": "invalid-line-smoke",
+                    "line_type": "product",
+                    "internal_nm_id": 202,
+                    "qty": "0",
+                    "unit_price": "5",
+                    "amount": "25",
+                },
+                {
+                    "line_id": "explicit-zero-amount-line",
+                    "shipment_id": "invalid-line-smoke",
+                    "line_type": "product",
+                    "internal_nm_id": 303,
+                    "qty": "5",
+                    "unit_price": "5",
+                    "amount": "0",
+                },
+            ],
+            "cny_operations": [
+                {
+                    "operation_id": "invalid-line-payment",
+                    "operation_type": "supplier_payment_out",
+                    "source_order_id": "invalid-line-smoke",
+                    "operation_date": "2026-07-18",
+                    "sequence_key": "1",
+                    "cny_delta": "-75",
+                    "rub_value_delta": "-750",
+                    "status": "posted",
+                }
+            ],
+            "cny_documents": [],
+            "financial_documents": [],
+            "financial_expense_lines": [],
+        }
+    )["invalid-line-smoke"]
+    _assert(
+        any(item["code"] == "invalid_invoice_product_line" for item in allocation["blockers"]),
+        "one invalid matched product line blocks the entire supplier flow",
+    )
+    _assert(
+        any(
+            "explicit-zero-amount-line" in item["reason_ru"]
+            and "стоимость строки invoice не положительная" in item["reason_ru"]
+            for item in allocation["blockers"]
+        ),
+        "an explicit non-positive invoice amount is not reconstructed from quantity and unit price",
+    )
+    _assert(
+        allocation["capital_rub"] is None
+        and all(item["unit_cost_rub"] is None for item in allocation["lines"]),
+        "a partial invoice cannot be certified or published with silent quantity omission",
+    )
+
+
+def _test_blocked_cny_operation_cannot_activate_supplier_flow() -> None:
+    shipment_id = "blocked-cny-payment-smoke"
+    allocation = _supplier_cost_allocations(
+        {
+            "shipments": [
+                {
+                    "shipment_id": shipment_id,
+                    "invoice_no": "BLOCKED-CNY",
+                    "invoice_date": "2026-07-18",
+                    "order_status": "active",
+                    "expenses_complete": 0,
+                }
+            ],
+            "shipment_lines": [
+                {
+                    "line_id": "blocked-cny-line",
+                    "shipment_id": shipment_id,
+                    "line_type": "product",
+                    "internal_nm_id": 101,
+                    "qty": "10",
+                    "unit_price": "5",
+                    "amount": "50",
+                }
+            ],
+            "cny_operations": [
+                {
+                    "operation_id": "blocked-payment",
+                    "operation_type": "supplier_payment_out",
+                    "source_order_id": shipment_id,
+                    "operation_date": "2026-07-18",
+                    "sequence_key": "1",
+                    "cny_delta": "-50",
+                    "rub_value_delta": "0",
+                    "status": "blocked",
+                    "document_status": "posted",
+                    "error_reason": "insufficient_cny_balance",
+                }
+            ],
+            "cny_documents": [],
+            "financial_documents": [
+                {
+                    "document_id": "recognized-logistics",
+                    "document_type": "logistics_invoice",
+                    "document_number": "LOG-BLOCKED-CNY",
+                    "document_date": "2026-07-18",
+                    "parse_status": "confirmed",
+                }
+            ],
+            "financial_expense_lines": [
+                {
+                    "line_id": "recognized-logistics-line",
+                    "financial_document_id": "recognized-logistics",
+                    "supplier_order_id": shipment_id,
+                    "category": "logistics",
+                    "amount_rub": "100",
+                    "currency": "RUB",
+                    "status": "confirmed",
+                }
+            ],
+        }
+    )[shipment_id]
+    _assert(
+        any(item["code"] == "confirmed_supplier_payment_unavailable" for item in allocation["blockers"]),
+        "a blocked CNY payment remains an explicit missing-payment blocker",
+    )
+    _assert(
+        allocation["capital_rub"] is None
+        and not any(
+            component.get("component_key") == "supplier_payment"
+            for line in allocation["lines"]
+            for component in line.get("components") or []
+        )
+        and all(item["unit_cost_rub"] is None for item in allocation["lines"]),
+        "recognized downstream expenses cannot activate full invoice quantity without a posted supplier payment",
+    )
+
+
+def _test_zero_rub_supplier_payment_fails_closed() -> None:
+    shipment_id = "zero-rub-payment-smoke"
+    allocation = _supplier_cost_allocations(
+        {
+            "shipments": [
+                {
+                    "shipment_id": shipment_id,
+                    "invoice_no": "ZERO-RUB",
+                    "invoice_date": "2026-07-18",
+                    "currency": "CNY",
+                    "order_status": "active",
+                    "expenses_complete": 1,
+                }
+            ],
+            "shipment_lines": [
+                {
+                    "line_id": "zero-rub-line",
+                    "shipment_id": shipment_id,
+                    "line_type": "product",
+                    "internal_nm_id": 101,
+                    "qty": "10",
+                    "unit_price": "5",
+                    "amount": "50",
+                }
+            ],
+            "cny_operations": [
+                {
+                    "operation_id": "zero-rub-payment",
+                    "operation_type": "supplier_payment_out",
+                    "source_order_id": shipment_id,
+                    "operation_date": "2026-07-18",
+                    "sequence_key": "1",
+                    "cny_delta": "-50",
+                    "rub_value_delta": "0",
+                    "status": "posted",
+                }
+            ],
+            "cny_documents": [],
+            "financial_documents": [],
+            "financial_expense_lines": [],
+        }
+    )[shipment_id]
+    _assert(
+        any(
+            item["code"] == "supplier_payment_rub_valuation_unavailable"
+            for item in allocation["blockers"]
+        )
+        and allocation["capital_rub"] is None
+        and allocation["average_unit_cost_rub"] is None,
+        "a posted CNY payment without positive RUB valuation cannot publish or certify zero cost",
+    )
+
+
+def _test_26gn390_supplier_line_cost_proof() -> None:
+    shipment_id = "26GN390"
+    financial_documents = []
+    financial_expense_lines = []
+    expense_specs = (
+        ("log136", "logistics_invoice", "logistics", "1075030"),
+        ("log121", "logistics_invoice", "logistics", "5000"),
+        ("customs", "customs_declaration", "customs_fee_1010", "49240"),
+        ("customs", "customs_declaration", "import_duty_2010", "622093.05"),
+        ("customs", "customs_declaration", "import_vat_5010", "1505465.18"),
+    )
+    for document_id, document_type, category, amount in expense_specs:
+        if not any(item["document_id"] == document_id for item in financial_documents):
+            financial_documents.append(
+                {
+                    "document_id": document_id,
+                    "document_type": document_type,
+                    "document_number": document_id,
+                    "document_date": "2026-07-03",
+                    "parse_status": "confirmed",
+                }
+            )
+        financial_expense_lines.append(
+            {
+                "line_id": f"{document_id}:{category}",
+                "financial_document_id": document_id,
+                "supplier_order_id": shipment_id,
+                "category": category,
+                "amount_rub": amount,
+                "currency": "RUB",
+                "status": "confirmed",
+            }
+        )
+    allocation_sources = {
+            "shipments": [
+                {
+                    "shipment_id": shipment_id,
+                    "invoice_no": shipment_id,
+                    "invoice_date": "2026-05-14",
+                    "currency": "CNY",
+                    "actual_shipment_date": "2026-06-25",
+                    "actual_ff_acceptance_date": "",
+                    "order_status": "active",
+                    "expenses_complete": 1,
+                }
+            ],
+            "shipment_lines": [
+                {"line_id": "anti16pro", "shipment_id": shipment_id, "line_type": "product", "internal_nm_id": 391660889, "qty": "4500", "unit_price": "7.5", "amount": "33750"},
+                {"line_id": "anti16promax", "shipment_id": shipment_id, "line_type": "product", "internal_nm_id": 391661710, "qty": "5250", "unit_price": "7.5", "amount": "39375"},
+                {"line_id": "other", "shipment_id": shipment_id, "line_type": "product", "internal_nm_id": 999999999, "qty": "70500", "unit_price": "1", "amount": "440750"},
+            ],
+            "cny_operations": [
+                {"operation_id": "payment", "operation_type": "supplier_payment_out", "source_order_id": shipment_id, "source_document_id": "payment-doc", "operation_date": "2026-05-21", "sequence_key": "1", "cny_delta": "-541962.5", "rub_value_delta": "-5724403.57", "status": "posted"},
+                {"operation_id": "fee", "operation_type": "transfer_fee", "source_order_id": shipment_id, "source_document_id": "fee-doc", "operation_date": "2026-05-21", "sequence_key": "2", "cny_delta": "-11446.4", "rub_value_delta": "-120899.32", "status": "posted"},
+            ],
+            "cny_documents": [],
+            "financial_documents": financial_documents,
+            "financial_expense_lines": financial_expense_lines,
+        }
+    allocation = _supplier_cost_allocations(allocation_sources)[shipment_id]
+    permuted_allocation = _supplier_cost_allocations(
+        {
+            **allocation_sources,
+            "financial_expense_lines": list(reversed(financial_expense_lines)),
+        }
+    )[shipment_id]
+    _assert(
+        permuted_allocation["source_fingerprint"] == allocation["source_fingerprint"]
+        and permuted_allocation["calculation_fingerprint"]
+        == allocation["calculation_fingerprint"],
+        "supplier cost fingerprints are invariant to equal-sort source row order",
+    )
+    changed_currency = _supplier_cost_allocations(
+        {
+            **allocation_sources,
+            "shipments": [{**allocation_sources["shipments"][0], "currency": "USD"}],
+        }
+    )[shipment_id]
+    _assert(
+        changed_currency["source_fingerprint"] != allocation["source_fingerprint"]
+        and changed_currency["calculation_fingerprint"]
+        != allocation["calculation_fingerprint"],
+        "invoice currency is bound into both supplier cost fingerprints",
+    )
+    checksum_mismatch = _supplier_cost_allocations(
+        {
+            **allocation_sources,
+            "shipments": [
+                {
+                    **allocation_sources["shipments"][0],
+                    "declared_invoice_total": "999999",
+                    "invoice_amount_total": "513875",
+                    "match_status": "checksum_error",
+                }
+            ],
+        }
+    )[shipment_id]
+    _assert(
+        any(
+            item.get("code") == "invoice_checksum_mismatch"
+            for item in checksum_mismatch["blockers"]
+        )
+        and checksum_mismatch["capital_rub"] is None
+        and checksum_mismatch["source_fingerprint"] != allocation["source_fingerprint"],
+        "invoice checksum mismatch changes the proof and fails exact cost closed",
+    )
+    by_nm = {int(item["nm_id"]): item for item in allocation["lines"]}
+    expected = Decimal("130.4357210850608995999639293105")
+    _assert(abs(Decimal(by_nm[391660889]["unit_cost_rub"]) - expected) < Decimal("1e-25"), "26GN390 Anti-Spy 16 Pro exact WAC")
+    _assert(abs(Decimal(by_nm[391661710]["unit_cost_rub"]) - expected) < Decimal("1e-25"), "26GN390 Anti-Spy 16 Pro Max exact WAC")
+    _assert(abs(Decimal(by_nm[391660889]["capital_rub"]) - Decimal("586960.7448827740481998376819")) < Decimal("1e-20"), "26GN390 391660889 capital")
+    _assert(abs(Decimal(by_nm[391661710]["capital_rub"]) - Decimal("684787.5356965697228998106288")) < Decimal("1e-20"), "26GN390 391661710 capital")
+    _assert(all(all(item.values()) for item in [allocation["controls"]]), "26GN390 conservation controls")
+
+
+def _test_official_wb_snapshot_integrity() -> None:
+    evidence = _wb_snapshot_integrity(
+        {
+            "snapshot_id": "wbsnap_test",
+            "version_id": "whfv_test",
+            "snapshot_date": "2026-07-20",
+            "fetched_at": "2026-07-19T22:18:03Z",
+            "pagination_complete": 1,
+            "page_count": 1,
+            "page_offsets_json": "[0]",
+            "raw_rows_digest": "sha256:test",
+            "raw_rows_json": json.dumps(
+                [
+                    {"nmId": 1, "chrtId": 11, "warehouseId": 101, "stockCount": 4, "inWayToClient": 2, "inWayFromClient": 1},
+                    {"nmId": 1, "chrtId": 11, "warehouseId": 102, "stockCount": 6, "inWayToClient": 1, "inWayFromClient": 3},
+                ]
+            ),
+            "items_json": json.dumps(
+                [{"nm_id": 1, "quantity": 10, "in_way_to_client": 3, "in_way_from_client": 4}]
+            ),
+        }
+    )
+    _assert(evidence["raw_to_canonical_mapping_matches"] is True, "WB raw-to-canonical mapping")
+    _assert(evidence["arithmetic"] == "10 + 3 + 4 = 17", "WB contour arithmetic")
+    _assert(evidence["exact_duplicate_count"] == 0, "WB exact duplicate guard")
+    _assert(evidence["source_key_duplicate_count"] == 0, "WB source key duplicate guard")
+
+
+def _test_current_snapshot_business_date_gate() -> None:
+    _assert(
+        _current_snapshot_effective_date(
+            captured_at="2026-07-19T22:18:00Z",
+            snapshot_date="2026-07-20",
+        )
+        == "2026-07-20",
+        "current warehouse version uses the canonical business timezone",
+    )
+    try:
+        _current_snapshot_effective_date(
+            captured_at="2026-07-20T22:18:00Z",
+            snapshot_date="2026-07-20",
+        )
+    except WarehouseFunctionalError as exc:
+        _assert(
+            "stale WB snapshot date" in str(exc),
+            "emergency/current-state version rejects a prior-day last-good snapshot",
+        )
+    else:
+        raise AssertionError("a stale WB snapshot must not date current local state")
+    omitted_zero_and_other = _wb_snapshot_integrity(
+        {
+            "snapshot_id": "wbsnap_zero_other",
+            "version_id": "whfv_zero_other",
+            "snapshot_date": "2026-07-20",
+            "fetched_at": "2026-07-20T00:00:00Z",
+            "pagination_complete": 1,
+            "page_count": 1,
+            "page_offsets_json": "[0]",
+            "raw_rows_digest": "sha256:zero-other",
+            "raw_rows_json": json.dumps(
+                [
+                    {
+                        "nmId": 1,
+                        "chrtId": 11,
+                        "warehouseId": 0,
+                        "warehouseName": "Остальные",
+                        "regionName": "Регион А",
+                        "quantity": 1,
+                        "inWayToClient": 2,
+                        "inWayFromClient": 3,
+                    },
+                    {
+                        "nmId": 1,
+                        "chrtId": 11,
+                        "warehouseId": 0,
+                        "warehouseName": "Остальные",
+                        "regionName": "Регион Б",
+                        "quantity": 4,
+                        "inWayToClient": 5,
+                        "inWayFromClient": 6,
+                    },
+                ]
+            ),
+            "items_json": json.dumps(
+                [
+                    {"nm_id": 1, "quantity": 5, "in_way_to_client": 7, "in_way_from_client": 9},
+                    {"nm_id": 2, "quantity": 0, "in_way_to_client": 0, "in_way_from_client": 0},
+                ]
+            ),
+        }
+    )
+    _assert(
+        omitted_zero_and_other["raw_to_canonical_mapping_matches"] is True,
+        "complete WB response may omit a requested certified-zero SKU",
+    )
+    _assert(
+        omitted_zero_and_other["source_key_duplicate_count"] == 0,
+        "WB Other bucket identity includes warehouse and region names",
+    )
 
 
 def _test_accepted_source_correction() -> None:
@@ -251,11 +849,29 @@ def _test_financial_document_eligibility() -> None:
     _assert(summary["per_unit"]["exact_bank_fees_rub"] == 20.0, "confirmed RUB bank fee is included once")
     _assert(summary["per_unit"]["exact_landed_cost_total_rub"] == 1120.0, "exact cost uses eligible sources only")
     _assert(
-        _counted_cny_operation({"status": "needs_review", "document_status": "posted"}),
-        "counted date-only CNY ordering warning remains eligible",
+        _counted_cny_operation({"status": "posted", "document_status": "posted"}),
+        "only a posted CNY operation from a posted document is eligible",
     )
     _assert(
-        not _counted_cny_operation({"status": "needs_review", "document_status": "needs_review"})
+        _counted_cny_operation(
+            {
+                "status": "needs_review",
+                "source_document_id": "persisted-date-only",
+                "error_reason": "date_only_deterministic_sequence",
+            },
+            document={"document_id": "persisted-date-only", "status": "posted"},
+        ),
+        "a persisted date-only ordering warning recovers posted status from its source document",
+    )
+    _assert(
+        not _counted_cny_operation({"status": "needs_review", "document_status": "posted"})
+        and not _counted_cny_operation(
+            {
+                "status": "needs_review",
+                "error_reason": "date_only_deterministic_sequence",
+            },
+            document={"status": "needs_review"},
+        )
         and not _counted_cny_operation({"status": "blocked", "document_status": "posted"}),
         "review documents and blocked CNY operations remain excluded",
     )
@@ -1077,6 +1693,16 @@ def _test_quality_localization_catalog() -> None:
 
 
 def _test_human_evidence_uses_source_quality_and_date() -> None:
+    certified_status = _warehouse_balance_status_presentation(
+        "direct_24_06",
+        certified=True,
+    )
+    _assert(
+        certified_status["tone"] == "success"
+        and certified_status["label_ru"]
+        == "Все расходы учтены / Подтверждено документами",
+        "certified balance shows an explicit green certification caption regardless of quality code",
+    )
     evidence = _warehouse_human_evidence(
         {
             "source_records": [
@@ -1086,6 +1712,8 @@ def _test_human_evidence_uses_source_quality_and_date() -> None:
                     "flow_quantity": "1",
                     "flow_capital_rub": "10",
                     "expenses_complete_certification": True,
+                    "payment_operation_ids": ["payment-certified"],
+                    "bank_fee_source_ids": ["bank-fee-certified"],
                 },
                 {
                     "invoice_no": "PROVISIONAL",
@@ -1104,13 +1732,18 @@ def _test_human_evidence_uses_source_quality_and_date() -> None:
     _assert(items["CERTIFIED"]["date"] == "2026-07-01", "evidence retains invoice date")
     _assert(items["PROVISIONAL"]["date"] == "2026-07-02", "evidence retains business date")
     _assert(
-        items["CERTIFIED"]["confirmation_status"] == "Подтверждено документами",
+        items["CERTIFIED"]["confirmation_status"]
+        == "Все расходы учтены / Подтверждено документами",
         "certified source keeps its own status inside a mixed SKU",
     )
     _assert(
         items["PROVISIONAL"]["confirmation_status"]
         == "Платежи подтверждены, часть расходов предварительная",
         "provisional source keeps its own status inside a mixed SKU",
+    )
+    _assert(
+        "банковские комиссии" in items["CERTIFIED"]["cost_source"],
+        "readable cost evidence retains bank-fee provenance",
     )
     supplies = _warehouse_human_evidence(
         {
@@ -1586,6 +2219,44 @@ def _test_source_capture_exposes_calculation_timestamp() -> None:
             capture["local_source_digest"] == apply_digest,
             "dry-run and apply hash the same normalized local source view",
         )
+        timestamps = iter(
+            [
+                "2026-07-19T18:59:59Z",
+                "2026-07-19T19:00:01Z",
+            ]
+        )
+        crossing_block = WarehouseFunctionalBlock(
+            runtime=block.runtime,
+            timestamp_factory=lambda: next(timestamps),
+        )
+        midnight_payload = {
+            **wb_payload,
+            "snapshot_date": "2026-07-20",
+            "data": {
+                **wb_payload["data"],
+                "fetched_at": "2026-07-19T19:00:00Z",
+            },
+        }
+        with patch(
+            "packages.application.warehouse_functional._source_rows",
+            return_value=source_rows,
+        ):
+            crossing_capture = crossing_block._capture_sources(  # noqa: SLF001
+                captured_at=None,
+                wb_payload=midnight_payload,
+            )
+        _assert(
+            crossing_capture["captured_at"] == "2026-07-19T19:00:01Z",
+            "coherent capture timestamp is sampled after the local source transaction",
+        )
+        _assert(
+            _current_snapshot_effective_date(
+                captured_at=crossing_capture["captured_at"],
+                snapshot_date=crossing_capture["wb_snapshot"]["snapshot_date"],
+            )
+            == "2026-07-20",
+            "a WB fetch crossing local midnight binds to the completed coherent capture",
+        )
 
 
 def _test_supply_refresh_completeness_gate() -> None:
@@ -1739,6 +2410,15 @@ def _test_guarded_publication() -> None:
             ],
             "new_events": [],
             "movement_documents": [],
+            "supplier_cost_states": [
+                {
+                    "shipment_id": "accepted-supplier-flow-smoke",
+                    "source_fingerprint": "sha256:accepted-source",
+                    "calculation_fingerprint": "sha256:accepted-calculation",
+                    "expenses_complete": True,
+                    "calculation_available": True,
+                }
+            ],
             "historical_wb_cost_projection": [
                 {
                     "as_of_date": "2026-07-17",
@@ -1821,6 +2501,7 @@ def _test_guarded_publication() -> None:
             "snapshot_id": "wbsnap_next",
             "fetched_at": "2026-07-19T12:00:00Z",
             "snapshot_date": "2026-07-19",
+            "requested_nm_ids": [104, 999998],
             "raw_rows_digest": "sha256:rows-next",
             "items": [
                 {
@@ -1876,6 +2557,32 @@ def _test_guarded_publication() -> None:
         tampered_history_plan["historical_wb_cost_projection"][0]["capital_rub"] = "15"
         tampered_history_plan.pop("plan_fingerprint", None)
         tampered_history_plan["plan_fingerprint"] = _fingerprint(tampered_history_plan)
+        class _CrossBusinessDateAtCommit:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self) -> str:
+                self.calls += 1
+                return (
+                    "2026-07-19T12:05:00Z"
+                    if self.calls <= 4
+                    else "2026-07-20T12:05:00Z"
+                )
+
+        block.timestamp_factory = _CrossBusinessDateAtCommit()
+        try:
+            block.apply_plan(
+                sync_plan,
+                confirm_fingerprint=sync_plan["plan_fingerprint"],
+            )
+        except Exception as exc:
+            _assert(
+                "crossed the canonical business-date boundary before commit" in str(exc),
+                "reviewed warehouse plan cannot commit after crossing local midnight",
+            )
+        else:
+            raise AssertionError("cross-business-date warehouse commit must fail closed")
+        block.timestamp_factory = lambda: "2026-07-19T12:05:00Z"
         try:
             block.apply_plan(
                 tampered_history_plan,
@@ -1894,18 +2601,122 @@ def _test_guarded_publication() -> None:
         )
         _assert(sync_applied["idempotent"] is False, "hourly daily WAC version publishes")
         with sqlite3.connect(runtime.db_path) as conn:
+            retained_supplier_cost_state = conn.execute(
+                """SELECT source_fingerprint,calculation_fingerprint,expenses_complete
+                   FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+                   WHERE version_id=? AND shipment_id='accepted-supplier-flow-smoke'""",
+                (sync_applied["active_version"]["version_id"],),
+            ).fetchone()
             unmatched_ids = [
                 row[0]
                 for row in conn.execute(
                     "SELECT unmatched_id FROM sheet_vitrina_v1_warehouse_unmatched_doprinato ORDER BY created_at,unmatched_id"
                 ).fetchall()
             ]
+        _assert(
+            retained_supplier_cost_state
+            == ("sha256:accepted-source", "sha256:accepted-calculation", 1),
+            "supplier certification fingerprints remain versioned after goods leave transit",
+        )
         _assert(len(unmatched_ids) == 2, "the same unmatched evidence is auditable in two versions")
         _assert(len(set(unmatched_ids)) == 2, "unmatched identity includes its owning version")
         daily_state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-19")
         _assert(
             Decimal(str(daily_state[104]["our_wb_unit_cost_rub"])) == Decimal("17"),
             "canonical WB cost consumer reads replayed daily projection",
+        )
+        active_version_id = sync_applied["active_version"]["version_id"]
+        with sqlite3.connect(runtime.db_path) as conn:
+            original_certification_row = conn.execute(
+                """SELECT certified,provenance_json
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id=? AND warehouse_key='wb' AND nm_id=104""",
+                (active_version_id,),
+            ).fetchone()
+            _assert(original_certification_row is not None, "active WB row for revalidation probe")
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET certified=1,provenance_json=?
+                   WHERE version_id=? AND warehouse_key='wb' AND nm_id=104""",
+                (
+                    json.dumps({"source_records": [{"shipment_id": "accepted-supplier-flow-smoke"}]}),
+                    active_version_id,
+                ),
+            )
+            conn.commit()
+        try:
+            with patch(
+                "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+                return_value={
+                    "certification": {
+                        "certified": False,
+                        "source_fingerprint_matches": False,
+                        "active_version_id": active_version_id,
+                    }
+                },
+            ) as breakdown_loader:
+                stale_source_state = OwnProductCapitalBlock(
+                    runtime=runtime,
+                    timestamp_factory=lambda: "2026-07-19T12:00:00Z",
+                ).load_daily_metric_lookup(
+                    "2026-07-19",
+                    requested_nm_ids=[104],
+                    revalidate_current_sources=True,
+                )[104]
+                closed_date_state = OwnProductCapitalBlock(
+                    runtime=runtime,
+                    timestamp_factory=lambda: "2026-07-20T12:00:00Z",
+                ).load_daily_metric_lookup(
+                    "2026-07-19",
+                    requested_nm_ids=[104],
+                    revalidate_current_sources=True,
+                )[104]
+                _assert(
+                    breakdown_loader.call_count == 1,
+                    "closed historical versions do not revalidate against mutable current sources",
+                )
+        finally:
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute(
+                    """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                       SET certified=?,provenance_json=?
+                       WHERE version_id=? AND warehouse_key='wb' AND nm_id=104""",
+                    (
+                        original_certification_row[0],
+                        original_certification_row[1],
+                        active_version_id,
+                    ),
+                )
+                conn.commit()
+        _assert(
+            stale_source_state["presentation_state"] == "unconfirmed"
+            and "source_changed_provisional" in stale_source_state["presentation_reason"],
+            "economics projection removes stale green certification before targeted replay",
+        )
+        _assert(
+            closed_date_state["presentation_state"] == "confirmed"
+            and "source_changed_provisional" not in closed_date_state["presentation_reason"],
+            "closed historical certification remains frozen to its exact-date functional version",
+        )
+        empty_exact_state = OwnProductCapitalBlock(runtime=runtime).load_daily_metric_lookup(
+            "2026-07-19",
+            requested_nm_ids=[999998, 999999],
+        )
+        _assert(
+            empty_exact_state[999998]["own_total_product_qty"] == 0.0,
+            "exact functional day materializes a proved zero for an SKU requested by that snapshot",
+        )
+        _assert(
+            999999 not in empty_exact_state,
+            "exact functional day does not fabricate zero for a currently enabled SKU outside historical scope",
+        )
+        missing_exact_state = OwnProductCapitalBlock(runtime=runtime).load_daily_metric_lookup(
+            "2026-07-20",
+            requested_nm_ids=[999999],
+        )
+        _assert(
+            missing_exact_state == {},
+            "missing functional day does not materialize a zero or carry the previous day",
         )
         sync_repeated = block.apply_plan(
             sync_plan,
@@ -1915,14 +2726,17 @@ def _test_guarded_publication() -> None:
         stale_plan = copy.deepcopy(sync_plan)
         stale_plan["captured_at"] = "2026-07-20T12:00:00Z"
         stale_plan["effective_date"] = "2026-07-20"
+        stale_plan["wb_snapshot"]["snapshot_date"] = "2026-07-20"
         stale_plan.pop("plan_fingerprint", None)
         stale_plan["plan_fingerprint"] = _fingerprint(stale_plan)
+        block.timestamp_factory = lambda: "2026-07-20T12:05:00Z"
         try:
             block.apply_plan(stale_plan, confirm_fingerprint=stale_plan["plan_fingerprint"])
         except Exception as exc:
             _assert("active functional warehouse version drifted" in str(exc), "stale active guard")
         else:
             raise AssertionError("stale concurrent functional plan must not publish")
+        block.timestamp_factory = lambda: "2026-07-19T12:05:00Z"
         with sqlite3.connect(runtime.db_path) as conn:
             frozen_before = conn.execute(
                 """SELECT fingerprint,created_at
@@ -2129,6 +2943,33 @@ def _test_guarded_publication() -> None:
         )
         _assert(wb_balance["quality_presentation"]["label_ru"], "warehouse quality has a Russian label")
         _assert(wb_balance["human_evidence"]["items"], "warehouse row exposes structured human evidence")
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "nom-104-conflict",
+                "is_active": True,
+                "our_sku": "conflicting-smoke",
+                "nm_id": 104,
+                "barcode": "2052929000999",
+                "vendor_code": "conflicting-smoke",
+                "nomenclature_name": "Conflicting smoke",
+                "product_type": "anti_spy",
+                "match_key": "anti_spy|conflicting-smoke",
+                "purchase_price_yuan": 7.2,
+                "aliases": [],
+                "compatible_model_keys": [],
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        ambiguous_detail = entrypoint.handle_warehouse_detail_request("wb")
+        ambiguous_balance = next(
+            item for item in ambiguous_detail["balances"] if int(item["nm_id"]) == 104
+        )
+        _assert(
+            "Неоднозначная активная номенклатура" in ambiguous_balance["identity_warning"]
+            and ambiguous_balance["quality_tone"] == "warning",
+            "identity-review warning cannot inherit a certified success tone",
+        )
         _assert(wb_detail["warehouse"]["status_label"] != wb_detail["warehouse"]["status"], "status code is localized")
         discrepancy_detail = entrypoint.handle_warehouse_detail_request("wb_acceptance_discrepancy")
         _assert(
@@ -2300,6 +3141,275 @@ def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBacke
 
 
 def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntime, root: Path) -> None:
+    supplier_manifest_before = _warehouse_input_manifest_digest(
+        runtime,
+        dates=["2026-07-18", "2026-07-19"],
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_supplier_shipments(
+                   shipment_id,created_at,updated_at,shipment_date,match_status,warnings_json,errors_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-manifest-supplier-probe",
+                NOW,
+                NOW,
+                "2026-07-18",
+                "all_matched",
+                "[]",
+                "[]",
+            ),
+        )
+        conn.commit()
+    supplier_manifest_after = _warehouse_input_manifest_digest(
+        runtime,
+        dates=["2026-07-18", "2026-07-19"],
+    )
+    _assert(
+        supplier_manifest_after != supplier_manifest_before,
+        "economics optimistic manifest fingerprints mutable supplier evidence used by certification",
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            "DELETE FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+            ("economics-manifest-supplier-probe",),
+        )
+        conn.commit()
+
+    exact_days = _exact_functional_snapshot_dates(
+        runtime,
+        ["2026-07-18", "2026-07-19", "2026-07-20"],
+    )
+    _assert(
+        {"2026-07-18", "2026-07-19"}.issubset(exact_days)
+        and "2026-07-20" not in exact_days,
+        "warehouse history identifies exact functional days without carrying the prior day",
+    )
+    exact_day_probe = {
+        "bundle_version": "economics-exact-day-probe",
+        "as_of_date": "2026-07-20",
+        "refreshed_at": NOW,
+        "plan_json": json.dumps(
+            {
+                "date_columns": ["2026-07-20"],
+                "sheets": [
+                    {
+                        "sheet_name": "DATA_VITRINA",
+                        "write_start_cell": "A1",
+                        "header": ["Показатель", "row_id", "2026-07-20"],
+                        "rows": [
+                            ["SKU", "SKU:104|orderSum", 100],
+                            ["SKU", "SKU:104|orderCount", 2],
+                            ["SKU", "SKU:104|ads_sum", 10],
+                            ["WB qty", "SKU:104|own_capital_WB_qty", 999],
+                        ],
+                    }
+                ],
+            }
+        ),
+    }
+    parameters = {
+        "2026-07-20": CalculationParametersBlock(runtime=runtime).parameters_for_date(
+            "2026-07-20"
+        )
+    }
+    probe_args = {
+        "snapshot": exact_day_probe,
+        "costs": {
+            "2026-07-20": {
+                104: {"our_wb_unit_cost_rub": 14, "stock_qty": 0}
+            }
+        },
+        "warehouse_metrics": {"2026-07-20": {}},
+        "parameters": parameters,
+        "source_fingerprint": "sha256:exact-day-probe",
+        "cutover_business_date": "2026-07-18",
+    }
+    missing_probe = _transform_snapshot(
+        **probe_args,
+        warehouse_exact_dates=set(),
+        warehouse_covered_nm_ids={},
+        warehouse_version_ids={},
+    )
+    missing_rows = {
+        row[1]: row
+        for row in json.loads(missing_probe["after_plan_json"])["sheets"][0]["rows"]
+    }
+    _assert(
+        missing_rows["SKU:104|own_capital_WB_qty"][2] == "",
+        "missing exact warehouse day stays unknown instead of carrying stale state",
+    )
+    missing_metadata = json.loads(missing_probe["after_plan_json"])["metadata"]
+    _assert(
+        "нет точной успешной функциональной версии" in missing_metadata[
+            "warehouse_history_coverage"
+        ]["2026-07-20"]["reason_ru"],
+        "post-cutover warehouse gap reports the missing exact publication",
+    )
+    missing_presentation = missing_metadata["server_cell_presentation"][
+        "SKU:104|own_capital_WB_qty"
+    ]["2026-07-20"]
+    _assert(
+        missing_presentation["state"] == "unavailable"
+        and "Исторические данные отсутствуют" in missing_presentation["reason"],
+        "missing warehouse history reaches the server_cell_presentation contract consumed by UI",
+    )
+    empty_exact_probe = _transform_snapshot(
+        **probe_args,
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104}},
+        warehouse_version_ids={"2026-07-20": "whfv_empty_exact"},
+    )
+    empty_exact_rows = {
+        row[1]: row
+        for row in json.loads(empty_exact_probe["after_plan_json"])["sheets"][0]["rows"]
+    }
+    _assert(
+        empty_exact_rows["SKU:104|own_capital_WB_qty"][2] == 0.0,
+        "an exact reconciled empty warehouse day publishes a proved zero",
+    )
+    uncovered_exact_probe = _transform_snapshot(
+        **probe_args,
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {999}},
+        warehouse_version_ids={"2026-07-20": "whfv_uncovered_exact"},
+    )
+    uncovered_exact_payload = json.loads(uncovered_exact_probe["after_plan_json"])
+    uncovered_exact_rows = {
+        row[1]: row for row in uncovered_exact_payload["sheets"][0]["rows"]
+    }
+    _assert(
+        uncovered_exact_rows["SKU:104|own_capital_WB_qty"][2] == "",
+        "an exact date keeps an SKU outside requested/canonical coverage unknown",
+    )
+    _assert(
+        "не входила в requested nmID scope"
+        in uncovered_exact_payload["metadata"]["server_cell_presentation"][
+            "SKU:104|own_capital_WB_qty"
+        ]["2026-07-20"]["reason"],
+        "uncovered exact-date SKU carries a source-level UI reason",
+    )
+    _assert(
+        uncovered_exact_rows["TOTAL|total_own_total_product_qty"][2] == ""
+        and uncovered_exact_rows["TOTAL|total_own_total_product_capital_rub"][2] == "",
+        "warehouse TOTAL remains unknown when any visible SKU is outside exact snapshot coverage",
+    )
+    uncovered_total_presentation = uncovered_exact_payload["metadata"][
+        "server_cell_presentation"
+    ]["TOTAL|total_own_total_product_qty"]["2026-07-20"]
+    _assert(
+        uncovered_total_presentation["state"] == "unavailable"
+        and "Частичная сумма не публикуется" in uncovered_total_presentation["reason"],
+        "partial exact coverage exposes an unavailable TOTAL instead of an understated sum",
+    )
+    provisional_exact_probe = _transform_snapshot(
+        **{
+            **probe_args,
+            "warehouse_metrics": {
+                "2026-07-20": {
+                    104: {
+                        "own_capital_WB_qty": "2",
+                        "own_capital_WB_unit_cost_rub": "10",
+                        "own_capital_WB_capital_rub": "20",
+                        "own_total_product_qty": "2",
+                        "own_total_product_capital_rub": "20",
+                        "own_total_product_avg_cost_rub": "10",
+                        "presentation_state": "unconfirmed",
+                        "presentation_reason": "confirmed_payments_provisional_expenses",
+                        "stage_presentation": {
+                            "WB": {
+                                "state": "unconfirmed",
+                                "reason": "confirmed_payments_provisional_expenses",
+                            }
+                        },
+                    }
+                }
+            },
+        },
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104}},
+        warehouse_version_ids={"2026-07-20": "whfv_provisional_exact"},
+    )
+    provisional_payload = json.loads(provisional_exact_probe["after_plan_json"])
+    provisional_presentation = provisional_payload["metadata"]["server_cell_presentation"]
+    for row_id in (
+        "SKU:104|own_capital_WB_qty",
+        "TOTAL|total_own_capital_WB_qty",
+    ):
+        status = provisional_presentation[row_id]["2026-07-20"]
+        _assert(
+            status["state"] == "unconfirmed"
+            and status["tone"] == "yellow"
+            and "Платежи подтверждены, часть расходов предварительная" in status["reason"],
+            f"exact-date provisional quality is published for {row_id}",
+        )
+    certified_exact_probe = _transform_snapshot(
+        snapshot={
+            **exact_day_probe,
+            "plan_json": provisional_exact_probe["after_plan_json"],
+        },
+        costs=probe_args["costs"],
+        warehouse_metrics={
+            "2026-07-20": {
+                104: {
+                    "own_capital_WB_qty": "2",
+                    "own_capital_WB_unit_cost_rub": "10",
+                    "own_capital_WB_capital_rub": "20",
+                    "own_total_product_qty": "2",
+                    "own_total_product_capital_rub": "20",
+                    "own_total_product_avg_cost_rub": "10",
+                    "presentation_state": "confirmed",
+                    "presentation_reason": "",
+                    "stage_presentation": {
+                        "WB": {"state": "confirmed", "reason": ""}
+                    },
+                }
+            }
+        },
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104}},
+        warehouse_version_ids={"2026-07-20": "whfv_certified_exact"},
+        parameters=parameters,
+        source_fingerprint="sha256:certified-exact-day-probe",
+        cutover_business_date="2026-07-18",
+    )
+    certified_presentation = json.loads(certified_exact_probe["after_plan_json"])[
+        "metadata"
+    ].get("server_cell_presentation", {})
+    _assert(
+        "2026-07-20"
+        not in certified_presentation.get("SKU:104|own_capital_WB_qty", {}),
+        "certification removes the stale yellow exact-date presentation",
+    )
+    scoped_totals_probe = _transform_snapshot(
+        **{
+            **probe_args,
+            "warehouse_metrics": {
+                "2026-07-20": {
+                    104: {
+                        "own_capital_WB_qty": "2",
+                        "own_capital_WB_capital_rub": "20",
+                    },
+                    999: {
+                        "own_capital_WB_qty": "100",
+                        "own_capital_WB_capital_rub": "1000",
+                    },
+                }
+            },
+        },
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104, 999}},
+        warehouse_version_ids={"2026-07-20": "whfv_scoped_totals"},
+    )
+    scoped_total_rows = {
+        row[1]: row
+        for row in json.loads(scoped_totals_probe["after_plan_json"])["sheets"][0]["rows"]
+    }
+    _assert(
+        scoped_total_rows["TOTAL|total_own_capital_WB_qty"][2] == 2.0
+        and scoped_total_rows["TOTAL|total_own_capital_WB_capital_rub"][2] == 20.0,
+        "warehouse TOTAL rows equal the snapshot's published SKU scope and exclude hidden SKU state",
+    )
     plan = {
         "date_columns": ["2026-07-01"],
         "sheets": [
@@ -2315,6 +3425,7 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                     ["Archived coverage", "SKU:104|our_wb_cost_confirmed_share_pct", 1],
                     ["Archived proxy 2", "SKU:104|proxy_profit_2_rub", 12],
                     ["Archived paid equivalent", "SKU:104|own_total_paid_equivalent_qty", 10],
+                    ["Legacy warehouse quantity", "SKU:104|own_capital_WB_qty", 999],
                     ["Legacy presentation A", 93.54754799999999, ""],
                     ["Legacy presentation B", 93.54754799999999, ""],
                 ],
@@ -2429,6 +3540,87 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         )
         conn.commit()
     dry_run = build_functional_economics_backfill_plan(runtime)
+    original_backup_database = runtime.backup_database
+
+    def backup_then_publish_new_daily_cost(destination: Path) -> dict[str, object]:
+        backup_result = original_backup_database(destination)
+        with sqlite3.connect(runtime.db_path) as drift_conn:
+            drift_conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+                   SET wac_rub='15',capital_rub='150',fingerprint='sha256:daily-drift'
+                   WHERE cutover_id=? AND as_of_date='2026-07-01' AND nm_id=104""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            )
+            drift_conn.commit()
+        return backup_result
+
+    runtime.backup_database = backup_then_publish_new_daily_cost  # type: ignore[method-assign]
+    try:
+        apply_functional_economics_backfill_plan(
+            runtime,
+            dry_run,
+            confirm_fingerprint=dry_run["plan_fingerprint"],
+            backup_dir=root / "economics-backups",
+        )
+    except Exception as exc:
+        _assert(
+            "warehouse/cost/settings inputs drifted" in str(exc),
+            "hourly warehouse publication during backup is rejected under the write lock",
+        )
+    else:
+        raise AssertionError("concurrent warehouse source drift must block economics backfill")
+    finally:
+        runtime.backup_database = original_backup_database  # type: ignore[method-assign]
+        with sqlite3.connect(runtime.db_path) as restore_conn:
+            restore_conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+                   SET wac_rub='14',capital_rub='140',fingerprint='sha256:daily'
+                   WHERE cutover_id=? AND as_of_date='2026-07-01' AND nm_id=104""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            )
+            restore_conn.commit()
+    with sqlite3.connect(runtime.db_path) as conn:
+        race_blocked_plan = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()[0]
+    _assert(
+        race_blocked_plan == json.dumps(plan),
+        "concurrent source drift leaves the ready snapshot unchanged",
+    )
+    dry_run = build_functional_economics_backfill_plan(runtime)
+    operation_business_date = str(dry_run["business_date"])
+    next_business_date = (
+        datetime.fromisoformat(operation_business_date) + timedelta(days=1)
+    ).date().isoformat()
+    with patch(
+        "packages.application.warehouse_functional_economics_backfill.current_business_date_iso",
+        side_effect=[operation_business_date, next_business_date],
+    ):
+        try:
+            apply_functional_economics_backfill_plan(
+                runtime,
+                dry_run,
+                confirm_fingerprint=dry_run["plan_fingerprint"],
+                backup_dir=root / "economics-backups",
+            )
+        except Exception as exc:
+            _assert(
+                "business-date boundary" in str(exc),
+                "economics apply fails closed when its pinned business date changes",
+            )
+        else:
+            raise AssertionError("economics apply must not cross the canonical business-date boundary")
+    with sqlite3.connect(runtime.db_path) as conn:
+        midnight_blocked_plan = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()[0]
+    _assert(
+        midnight_blocked_plan == json.dumps(plan),
+        "business-date drift is rejected before any ready-snapshot mutation",
+    )
+    dry_run = build_functional_economics_backfill_plan(runtime)
     applied = apply_functional_economics_backfill_plan(
         runtime,
         dry_run,
@@ -2438,6 +3630,38 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(applied["database_written"] is True, "functional economics backfill applies atomically")
     repeated = build_functional_economics_backfill_plan(runtime)
     _assert(repeated["changed_snapshot_count"] == 0, "functional economics backfill is idempotent")
+    with sqlite3.connect(runtime.db_path) as conn:
+        coverage_row = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()
+        coverage_plan = json.loads(coverage_row[0])
+        coverage_plan["metadata"].pop("warehouse_history_coverage", None)
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'""",
+            (json.dumps(coverage_plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")),),
+        )
+        conn.commit()
+    coverage_repair = build_functional_economics_backfill_plan(runtime)
+    _assert(
+        coverage_repair["changed_snapshot_count"] == 1
+        and coverage_repair["changed_cell_count"] == 0
+        and coverage_repair["coverage_change_count"] == 1,
+        "coverage-only semantic repair is persisted without manufacturing a cell change",
+    )
+    apply_functional_economics_backfill_plan(
+        runtime,
+        coverage_repair,
+        confirm_fingerprint=coverage_repair["plan_fingerprint"],
+        backup_dir=root / "economics-backups",
+    )
+    coverage_repeated = build_functional_economics_backfill_plan(runtime)
+    _assert(
+        coverage_repeated["changed_snapshot_count"] == 0
+        and coverage_repeated["coverage_change_count"] == 0,
+        "coverage-only repair is idempotent",
+    )
     with sqlite3.connect(runtime.db_path) as conn:
         stored = json.loads(conn.execute(
             """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
@@ -2457,6 +3681,17 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(profit == Decimal("15.48"), "Proxy 3 default settings formula")
     _assert(abs(margin - profit / Decimal("91")) < Decimal("0.0000005"), "Proxy 3 margin uses expected buyout revenue")
     _assert(rows["SKU:104|non_target"][2] == 777, "functional economics backfill preserves non-target cells")
+    _assert(rows["SKU:104|own_capital_WB_qty"][2] == "", "unproved pre-cutover warehouse value is cleared, not zeroed")
+    _assert(
+        stored["metadata"]["warehouse_history_coverage"]["2026-07-01"]["status"] == "unavailable",
+        "warehouse history gap carries an explicit source-level reason",
+    )
+    _assert(
+        "до функционального cutover" in stored["metadata"]["warehouse_history_coverage"][
+            "2026-07-01"
+        ]["reason_ru"],
+        "pre-cutover warehouse gap retains the immutable-opening explanation",
+    )
     _assert(
         untouched_pre_boundary_stored == untouched_pre_boundary_plan_json,
         "economics backfill byte-preserves snapshots with no target date or archived metric",

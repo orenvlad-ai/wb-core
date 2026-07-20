@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import math
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
+from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_ONLY_SOURCE_KEYS,
@@ -16,7 +19,13 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_own_product_capital import (
+    OWN_PRODUCT_CAPITAL_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS,
     extend_metrics_with_own_product_capital_metrics,
+)
+from packages.application.sheet_vitrina_v1_live_plan import (
+    _own_product_capital_cell_presentation,
 )
 from packages.application.sheet_vitrina_v1_sku_actions import (
     extend_metrics_with_sku_action_metrics,
@@ -217,6 +226,13 @@ class SheetVitrinaV1WebVitrinaBlock:
             str(item.metric_key): item
             for item in effective_metrics
         }
+        server_cell_presentation = _read_time_warehouse_cell_presentation(
+            runtime=self.runtime,
+            now=now,
+            snapshot=snapshot,
+            enabled_config=[item for item in current_state.config_v2 if item.enabled],
+            displayed_metrics=effective_metrics,
+        )
         rows = _normalize_rows(
             data_sheet.rows,
             date_columns=snapshot.date_columns,
@@ -226,9 +242,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 snapshot,
                 fallback_updated_at=refreshed_at,
             ),
-            server_cell_presentation=(
-                dict(getattr(snapshot, "metadata", {}) or {}).get("server_cell_presentation") or {}
-            ),
+            server_cell_presentation=server_cell_presentation,
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
@@ -286,6 +300,190 @@ class SheetVitrinaV1WebVitrinaBlock:
                 thin_page_shell=True,
             ),
         )
+
+
+def _read_time_warehouse_cell_presentation(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    now: datetime,
+    snapshot: SheetVitrinaV1Envelope,
+    enabled_config: list[ConfigV2Item],
+    displayed_metrics: list[MetricV2Item],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Revalidate the active warehouse date before serving persisted UI state.
+
+    Ready snapshots remain immutable historical evidence, but their presentation
+    metadata must not keep a certified/green interpretation after a mutable
+    supplier source changed and targeted replay is queued or failed.  Only the
+    current functional business date is revalidated; closed dates continue to
+    use their exact persisted version instead of current evidence.
+    """
+
+    snapshot_metadata = dict(getattr(snapshot, "metadata", {}) or {})
+    raw_presentation = snapshot_metadata.get("server_cell_presentation")
+    presentation: dict[str, dict[str, dict[str, str]]] = (
+        deepcopy(raw_presentation) if isinstance(raw_presentation, Mapping) else {}
+    )
+    business_date = current_business_date_iso(now)
+    if business_date not in {str(value) for value in snapshot.date_columns}:
+        return presentation
+
+    capital = OwnProductCapitalBlock(runtime=runtime)
+    cutover_date = capital.functional_warehouse_cutover_date()
+    if not cutover_date or business_date < cutover_date:
+        return presentation
+
+    frozen_config = _frozen_snapshot_warehouse_config(
+        snapshot=snapshot,
+        current_enabled_config=enabled_config,
+        business_date=business_date,
+    )
+    exact_state = capital.load_daily_metric_lookup(
+        business_date,
+        requested_nm_ids=[item.nm_id for item in frozen_config],
+        revalidate_current_sources=True,
+    )
+
+    # A persisted warning or implicit green state is only valid for the frozen
+    # source fingerprint.  Clear the active date for canonical warehouse rows,
+    # then rebuild it from the same centralized presentation function used by
+    # the heavy publisher.  Unrelated metrics and closed dates are untouched.
+    for row_id in list(presentation):
+        metric_key = str(row_id).split("|", 1)[1] if "|" in str(row_id) else ""
+        by_date = presentation.get(row_id)
+        if metric_key not in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS) or not isinstance(by_date, dict):
+            continue
+        by_date.pop(business_date, None)
+        if not by_date:
+            presentation.pop(row_id, None)
+
+    coverage_by_date = snapshot_metadata.get("warehouse_history_coverage")
+    published_version_id = ""
+    if isinstance(coverage_by_date, Mapping):
+        published_coverage = coverage_by_date.get(business_date)
+        if isinstance(published_coverage, Mapping):
+            published_version_id = str(
+                published_coverage.get("functional_version_id") or ""
+            )
+    loaded_version_ids = {
+        str(state.get("_warehouse_version_id") or "")
+        for state in exact_state.values()
+        if str(state.get("_warehouse_version_id") or "")
+    }
+    loaded_version_is_active = bool(exact_state) and all(
+        bool(state.get("_warehouse_version_is_active"))
+        for state in exact_state.values()
+    )
+    if (
+        not published_version_id
+        or loaded_version_ids != {published_version_id}
+        or not loaded_version_is_active
+    ):
+        reason = (
+            "Исторические данные отсутствуют: числовое значение витрины и текущая "
+            "функциональная версия склада ещё не опубликованы одним согласованным "
+            "снимком. Старое значение скрыто до targeted publication."
+        )
+        metric_keys = {
+            item.metric_key
+            for item in displayed_metrics
+            if item.metric_key in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
+        }
+        for item in frozen_config:
+            for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
+                presentation.setdefault(f"SKU:{item.nm_id}|{metric_key}", {})[
+                    business_date
+                ] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": reason,
+                    "source": "WebCore",
+                }
+        for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS):
+            presentation.setdefault(f"TOTAL|{metric_key}", {})[business_date] = {
+                "state": "unavailable",
+                "tone": "neutral",
+                "reason": reason,
+                "source": "WebCore",
+            }
+        return presentation
+
+    revalidated = _own_product_capital_cell_presentation(
+        enabled_config=frozen_config,
+        displayed_metrics=displayed_metrics,
+        temporal_slots=[
+            SimpleNamespace(
+                slot_key="read_time_current",
+                slot_label="read_time_current",
+                column_date=business_date,
+            )
+        ],
+        live_sources=SimpleNamespace(
+            slot_lookups={
+                "read_time_current": SimpleNamespace(
+                    own_product_capital_lookup=exact_state,
+                    own_product_capital_cutover_date=cutover_date,
+                )
+            }
+        ),
+    )
+    for row_id, by_date in revalidated.items():
+        presentation.setdefault(row_id, {}).update(by_date)
+    return presentation
+
+
+def _frozen_snapshot_warehouse_config(
+    *,
+    snapshot: SheetVitrinaV1Envelope,
+    current_enabled_config: list[ConfigV2Item],
+    business_date: str | None = None,
+) -> list[ConfigV2Item]:
+    """Recover the SKU scope frozen into a ready warehouse snapshot."""
+
+    current_by_nm_id = {int(item.nm_id): item for item in current_enabled_config}
+    scope_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
+        "warehouse_nm_ids_by_date"
+    )
+    restricted_scope: set[int] | None = None
+    if isinstance(scope_by_date, Mapping) and business_date in scope_by_date:
+        raw_scope = scope_by_date.get(business_date)
+        if isinstance(raw_scope, list):
+            restricted_scope = {
+                int(value)
+                for value in raw_scope
+                if str(value).strip().isdigit() and int(value) > 0
+            }
+    frozen: dict[int, ConfigV2Item] = {}
+    for row_order, row in enumerate(_require_data_sheet(snapshot).rows, start=1):
+        row_id = str(row[1] or "").strip() if len(row) > 1 else ""
+        if "|" not in row_id:
+            continue
+        scope_token, metric_key = row_id.split("|", 1)
+        if (
+            not scope_token.startswith("SKU:")
+            or metric_key not in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
+        ):
+            continue
+        try:
+            nm_id = int(scope_token.split(":", 1)[1])
+        except ValueError:
+            continue
+        if restricted_scope is not None and nm_id not in restricted_scope:
+            continue
+        frozen.setdefault(
+            nm_id,
+            current_by_nm_id.get(nm_id)
+            or ConfigV2Item(
+                nm_id=nm_id,
+                enabled=True,
+                display_name=_label_prefix(str(row[0] or "")) or str(nm_id),
+                group="",
+                display_order=row_order,
+            ),
+        )
+    if restricted_scope is not None:
+        return list(frozen.values())
+    return list(frozen.values()) or list(current_enabled_config)
 
 
 def _validate_period_request(
@@ -351,6 +549,11 @@ def _build_period_snapshot(
         for binding in period_date_bindings
         if not binding.missing
     }
+    combined_presentation = _merge_period_server_cell_presentation(
+        period_date_bindings=period_date_bindings,
+        snapshots_by_as_of_date=snapshots_by_as_of_date,
+        template_rows=template_rows,
+    )
 
     combined_rows: list[list[Any]] = []
     for row in template_rows:
@@ -390,7 +593,115 @@ def _build_period_snapshot(
                 column_count=2 + len(selected_dates),
             )
         ],
+        metadata={
+            "server_cell_presentation": combined_presentation,
+            "warehouse_history_coverage": _merge_period_warehouse_history_coverage(
+                period_date_bindings=period_date_bindings,
+                snapshots_by_as_of_date=snapshots_by_as_of_date,
+            ),
+            "warehouse_nm_ids_by_date": {
+                binding.requested_date: sorted(
+                    _warehouse_nm_ids_in_snapshot(
+                        snapshots_by_as_of_date[binding.snapshot_as_of_date]
+                    )
+                )
+                for binding in period_date_bindings
+                if not binding.missing
+            },
+        },
     ), period_date_bindings
+
+
+def _merge_period_warehouse_history_coverage(
+    *,
+    period_date_bindings: list[_PeriodDateBinding],
+    snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
+) -> dict[str, dict[str, Any]]:
+    """Carry each exact numeric warehouse version into a period envelope."""
+
+    result: dict[str, dict[str, Any]] = {}
+    for binding in period_date_bindings:
+        if binding.missing:
+            continue
+        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        coverage_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
+            "warehouse_history_coverage"
+        )
+        if not isinstance(coverage_by_date, Mapping):
+            continue
+        coverage = coverage_by_date.get(binding.column_date)
+        if isinstance(coverage, Mapping):
+            result[binding.requested_date] = deepcopy(dict(coverage))
+    return result
+
+
+def _warehouse_nm_ids_in_snapshot(snapshot: SheetVitrinaV1Envelope) -> set[int]:
+    """Return the warehouse SKU scope owned by one immutable source snapshot."""
+
+    result: set[int] = set()
+    for row in _require_data_sheet(snapshot).rows:
+        row_id = str(row[1] or "").strip() if len(row) > 1 else ""
+        if "|" not in row_id:
+            continue
+        scope_token, metric_key = row_id.split("|", 1)
+        if (
+            not scope_token.startswith("SKU:")
+            or metric_key not in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
+        ):
+            continue
+        try:
+            nm_id = int(scope_token.split(":", 1)[1])
+        except ValueError:
+            continue
+        if nm_id > 0:
+            result.add(nm_id)
+    return result
+
+
+def _merge_period_server_cell_presentation(
+    *,
+    period_date_bindings: list[_PeriodDateBinding],
+    snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
+    template_rows: list[list[Any]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Preserve exact-date warehouse explanations in a multi-day read."""
+
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    canonical_row_ids = {
+        str(row[1] or "")
+        for row in template_rows
+        if len(row) > 1
+        and "|" in str(row[1] or "")
+        and str(row[1] or "").split("|", 1)[1] in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
+    }
+    for binding in period_date_bindings:
+        if binding.missing:
+            for row_id in canonical_row_ids:
+                result.setdefault(row_id, {})[binding.requested_date] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": (
+                        "Исторические данные отсутствуют: exact-date ready snapshot этой "
+                        "бизнес-даты не материализован. Нулевое значение не предполагается."
+                    ),
+                    "source": "WebCore",
+                }
+            continue
+        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        raw = dict(getattr(snapshot, "metadata", {}) or {}).get(
+            "server_cell_presentation"
+        )
+        if not isinstance(raw, Mapping):
+            continue
+        for row_id, by_date in raw.items():
+            if not isinstance(by_date, Mapping):
+                continue
+            presentation = by_date.get(binding.column_date)
+            if isinstance(presentation, Mapping):
+                result.setdefault(str(row_id), {})[binding.requested_date] = {
+                    str(key): str(value) for key, value in presentation.items()
+                }
+    return result
 
 
 def _period_template_sheets(

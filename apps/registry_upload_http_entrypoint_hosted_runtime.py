@@ -2910,7 +2910,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     warehouse_ui_flow.add_argument("--headed", action="store_true")
     warehouse_ui_flow.add_argument(
         "--acceptance-profile",
-        choices=("warehouse_chain_recovery_20260719",),
+        choices=(
+            "warehouse_chain_recovery_20260719",
+            "warehouse_cost_transparency_20260720",
+        ),
         default=None,
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",
     )

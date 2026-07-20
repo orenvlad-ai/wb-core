@@ -20,10 +20,12 @@ if str(ROOT) not in sys.path:
 
 from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
 from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
+    _metric_date_coverage,
     _supplier_financial_detail_url,
     _visible_money,
     run_warehouse_ui_flow,
 )
+from playwright.sync_api import sync_playwright  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -54,6 +56,7 @@ def main() -> None:
         == "https://example.invalid/sheet-vitrina-v1/supplier?embedded=operator&shipment_id=shipment%20id%2F1&tab=documents",
         "operator supplier financial detail URL",
     )
+    _assert_metric_coverage_applicability()
     with TemporaryDirectory(prefix="warehouse-browser-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime = _seed_runtime(root / "runtime")
@@ -131,9 +134,60 @@ def main() -> None:
     print("warehouse stocks browser smoke: ok")
 
 
-def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
-    from playwright.sync_api import sync_playwright
+def _assert_metric_coverage_applicability() -> None:
+    day = "2026-07-18"
+    metric_keys = (
+        "our_wb_unit_cost_rub",
+        "proxy_profit_3_rub",
+        "proxy_margin_3_pct",
+    )
+    cells = []
+    for scope, order_sum, wb_quantity, values in (
+        ("SKU:1", "100", "10", ("10", "20", "5")),
+        ("SKU:2", "—", "4", ("—", "—", "—")),
+        ("SKU:3", "0", "0", ("10", "0", "—")),
+    ):
+        cells.append(
+            f'<td data-row-id="{scope}|orderSum" data-metric-key="orderSum" '
+            f'data-cell-date="{day}">{order_sum}</td>'
+        )
+        cells.append(
+            f'<td data-row-id="{scope}|stock_total" '
+            f'data-metric-key="stock_total" data-cell-date="{day}">{wb_quantity}</td>'
+        )
+        for metric_key, value in zip(metric_keys, values, strict=True):
+            cells.append(
+                f'<td data-row-id="{scope}|{metric_key}" data-metric-key="{metric_key}" '
+                f'data-cell-date="{day}">{value}</td>'
+            )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_content("<table><tbody><tr>" + "".join(cells) + "</tr></tbody></table>")
+        cost = _metric_date_coverage(
+            page,
+            metric_key="our_wb_unit_cost_rub",
+            day=day,
+            wb_contour_by_scope={"SKU:1": "10", "SKU:2": "4", "SKU:3": "2"},
+        )
+        profit = _metric_date_coverage(page, metric_key="proxy_profit_3_rub", day=day)
+        margin = _metric_date_coverage(page, metric_key="proxy_margin_3_pct", day=day)
+        browser.close()
+    _assert(
+        cost == {"total": 3, "applicable": 3, "inapplicable": 0, "filled": 2},
+        "WB cost applicability uses the contour and exposes a gap even with zero physical stock",
+    )
+    _assert(
+        profit == {"total": 3, "applicable": 2, "inapplicable": 1, "filled": 2},
+        "Proxy profit applicability",
+    )
+    _assert(
+        margin == {"total": 3, "applicable": 1, "inapplicable": 2, "filled": 1},
+        "zero-revenue margin is undefined",
+    )
 
+
+def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
     detail_fragment = "/v1/sheet-vitrina-v1/warehouses/production"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)

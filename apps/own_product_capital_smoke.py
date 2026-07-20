@@ -34,6 +34,7 @@ from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     SlotLookups,
     TemporalLiveSources,
     _MetricEvaluator,
+    _warehouse_history_unavailable_reason,
 )
 from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
     filter_archived_public_metrics,
@@ -57,6 +58,7 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa:
     OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
     extend_metrics_with_own_product_capital_metrics,
     own_stage_metric_key,
+    own_stage_total_metric_key,
 )
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, MetricV2Item  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot  # noqa: E402
@@ -105,7 +107,25 @@ def main() -> None:
     _assert_historical_doprinato_paid_boundary()
     _assert_targeted_orphan_doprinato_classification()
     _assert_persisted_expense_events()
+    _assert_warehouse_history_gap_reasons()
     print("own product capital smoke: OK")
+
+
+def _assert_warehouse_history_gap_reasons() -> None:
+    before = _warehouse_history_unavailable_reason(
+        column_date="2026-07-18",
+        cutover_date="2026-07-19",
+    )
+    after = _warehouse_history_unavailable_reason(
+        column_date="2026-07-20",
+        cutover_date="2026-07-19",
+    )
+    if "до функционального cutover" not in before:
+        raise AssertionError("pre-cutover warehouse gap must expose its immutable source boundary")
+    if "нет точной успешной функциональной версии" not in after:
+        raise AssertionError("post-cutover warehouse gap must expose the missing exact version")
+    if "до функционального cutover" in after:
+        raise AssertionError("post-cutover gap must not claim a pre-cutover source limitation")
 
 
 def _assert_partial_payment_layers(block: OwnProductCapitalBlock) -> None:
@@ -435,6 +455,31 @@ def _assert_metric_identities(block: OwnProductCapitalBlock) -> None:
     _dec_eq(total_capital, sum(Decimal(str(row[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY])) for row in lookup.values()), "TOTAL capital identity")
     _dec_eq(total_qty, sum(Decimal(str(row["own_total_product_qty"])) for row in lookup.values()), "TOTAL quantity identity")
     _dec_eq(total_wac, Decimal(str(total_capital)) / Decimal(str(total_qty)), "TOTAL WAC identity")
+    partial_lookups = SlotLookups(
+        seller_funnel_lookup={}, history_lookup={}, web_lookup={}, prices_lookup={}, sf_period_lookup={},
+        spp_lookup={}, ads_bids_lookup={}, stocks_lookup={}, onec_stocks_lookup={}, ads_compact_lookup={},
+        fin_lookup={}, fin_storage_fee_total=None, cost_price_lookup={}, promo_lookup={},
+        own_product_capital_lookup={101: lookup[101]}, column_date="2026-07-12",
+    )
+    partial_evaluator = _MetricEvaluator(
+        enabled_config=configs,
+        metrics_by_key={item.metric_key: item for item in metrics},
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key=slot, slot_label="Сегодня", column_date="2026-07-12")],
+            statuses=[], slot_lookups={slot: partial_lookups}, source_temporal_policies={},
+        ),
+    )
+    for metric_key in (
+        OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+        OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
+        OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
+        own_stage_total_metric_key("PRODUCTION", "qty"),
+        own_stage_total_metric_key("PRODUCTION", "capital_rub"),
+        own_stage_total_metric_key("PRODUCTION", "unit_cost_rub"),
+    ):
+        if partial_evaluator.resolve_total(metric_key, slot) is not None:
+            raise AssertionError(f"partial historical SKU coverage must not publish TOTAL {metric_key}")
     metric_keys = {item.metric_key for item in filter_archived_public_metrics(metrics)}
     archived_keys = set(OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS) | set(ONEC_STOCKS_ARCHIVED_METRIC_KEYS)
     leaked_archived = sorted(metric_keys & archived_keys)

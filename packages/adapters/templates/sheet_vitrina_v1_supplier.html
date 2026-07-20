@@ -175,6 +175,15 @@
     }
     .exact-cost-complete { color: var(--success); font-weight: 800; }
     .exact-cost-incomplete { color: var(--warning); font-weight: 800; }
+    .line-cost-cell { min-width: 330px; max-width: 520px; }
+    .line-cost-value { display: block; font-size: 14px; font-weight: 900; }
+    .line-cost-status { display: block; margin-top: 4px; font-size: 11px; font-weight: 800; }
+    .line-cost-proof { margin-top: 8px; }
+    .line-cost-proof > summary { color: var(--accent-2); cursor: pointer; font-size: 12px; font-weight: 900; }
+    .line-cost-proof-body { display: grid; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .line-cost-component { border: 1px solid rgba(177, 139, 255, 0.2); border-radius: 6px; padding: 7px; background: rgba(16, 19, 27, 0.55); }
+    .line-cost-component strong { color: var(--text); }
+    .line-cost-control { color: var(--success); font-weight: 800; }
     .document-row-missing td {
       color: var(--muted);
       background: rgba(170, 176, 197, 0.05);
@@ -505,6 +514,7 @@
                 <th>单价 / Unit price / Цена</th>
                 <th>价格匹配 / Price check / Соответствие цены</th>
                 <th>金额 / Amount / Сумма</th>
+                <th>Себестоимость, ₽/шт.</th>
                 <th>备注 / Comment / Комментарий</th>
                 <th>匹配 / Matching / Матчинг</th>
               </tr>
@@ -859,7 +869,12 @@
 
       function exactCostTooltip(row) {
         if (row && row.exact_landed_cost_per_unit_rub !== null && row.exact_landed_cost_per_unit_rub !== undefined && row.exact_landed_cost_per_unit_rub !== "") {
-          return "по CNY ledger и подтверждённым документам";
+          const certification = row.supplier_cost_breakdown && row.supplier_cost_breakdown.certification;
+          return certification && certification.status_label_ru
+            ? String(certification.status_label_ru)
+            : (row.exact_cost_status === "certified"
+              ? "Все расходы учтены / Подтверждено документами"
+              : "Предварительная себестоимость — не все расходы учтены");
         }
         const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
         return blockers.length ? blockers.join("; ") : "точная себестоимость недоступна";
@@ -870,7 +885,7 @@
         if (display === "—") {
           return escapeHtml(display);
         }
-        const className = row && row.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete";
+        const className = row && row.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete";
         return '<span class="' + className + '">' + escapeHtml(display) + '</span>';
       }
 
@@ -979,7 +994,7 @@
             if (supplyHeadings[1]) supplyHeadings[1].textContent = "Прочие позиции";
             setTableHeaders("#productLines", [
               "Группа номенклатуры", "Модель из invoice", "Штрихкод", "Нормализованная модель", "Match key", "nmId",
-              "Номенклатура", "Количество", "Цена", "Соответствие цены", "Сумма", "Комментарий", "Матчинг"
+              "Номенклатура", "Количество", "Цена", "Соответствие цены", "Сумма", "Себестоимость, ₽/шт.", "Комментарий", "Матчинг"
             ]);
             setTableHeaders("#extraLines", ["Номер строки", "Позиция", "Количество", "Цена", "Сумма", "Комментарий"]);
             documentInvoiceDownloadLink.textContent = "Скачать invoice";
@@ -1497,6 +1512,112 @@
         return financialDocumentsPath(shipmentId) + "/" + encodeURIComponent(documentId);
       }
 
+      async function refreshCurrentShipmentCostProof() {
+        const shipmentId = currentShipment && currentShipment.shipment_id
+          ? String(currentShipment.shipment_id)
+          : "";
+        if (!shipmentId) {
+          return;
+        }
+        const detail = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+          headers: { Accept: "application/json" }
+        });
+        if (!currentShipment || String(currentShipment.shipment_id || "") !== shipmentId) {
+          return;
+        }
+        // Financial-document actions may finish while the operator has an
+        // unsaved draft in the supply tab.  Re-read the whole form after the
+        // request so the proof refresh cannot replace header/metadata inputs
+        // (or a line edit made while the request was in flight) with the
+        // persisted server values.
+        const draftPayload = readCurrentPayload();
+        const draftShipment = {
+          ...currentShipment,
+          ...draftPayload,
+          metadata: {
+            ...((currentShipment && currentShipment.metadata) || {}),
+            ...(draftPayload.metadata || {})
+          },
+          lines: Array.isArray(draftPayload.lines) ? draftPayload.lines : []
+        };
+        const serverLines = Array.isArray(detail.lines) ? detail.lines : [];
+        const serverCostByLine = new Map(serverLines.map((line) => [
+          String(line.line_id || ""),
+          line.cost_breakdown && typeof line.cost_breakdown === "object" ? line.cost_breakdown : {}
+        ]));
+        const serverLineById = new Map(serverLines.map((line) => [
+          String(line.line_id || ""),
+          line
+        ]));
+        const serverCostContext = {
+          planned_shipment_date: detail.planned_shipment_date || detail.shipment_date || "",
+          actual_shipment_date: detail.actual_shipment_date || "",
+          actual_ff_acceptance_date: detail.actual_ff_acceptance_date || ""
+        };
+        const draftCostContextChanged = Object.keys(serverCostContext).some(
+          (field) => String(draftShipment[field] || "") !== String(serverCostContext[field] || "")
+        ) || ["invoice_no", "invoice_date", "currency", "declared_invoice_total"].some((field) => {
+          const draftValue = (draftShipment.metadata || {})[field];
+          const serverValue = (detail.metadata || {})[field];
+          if (field === "declared_invoice_total") {
+            return canonicalDecimalText(draftValue) !== canonicalDecimalText(serverValue);
+          }
+          return String(draftValue || "").trim() !== String(serverValue || "").trim();
+        });
+        const draftLines = draftShipment.lines;
+        const draftCostInputsChanged = draftLines.some((line) => {
+          const lineId = String(line.line_id || "");
+          const serverLine = serverLineById.get(lineId);
+          return !serverLine || ["qty", "unit_price", "amount"].some(
+            (field) => canonicalDecimalText(line[field]) !== canonicalDecimalText(serverLine[field])
+          );
+        });
+        currentShipment = {
+          ...draftShipment,
+          expenses_complete: detail.expenses_complete,
+          supplier_cost_breakdown: detail.supplier_cost_breakdown,
+          cny_ledger_effective_rate: detail.cny_ledger_effective_rate,
+          cny_payment_currency_rub_cost: detail.cny_payment_currency_rub_cost,
+          cny_paid_amount: detail.cny_paid_amount,
+          cny_bank_fee_rub: detail.cny_bank_fee_rub,
+          cny_calculation_status: detail.cny_calculation_status,
+          cny_calculation_error: detail.cny_calculation_error,
+          cny_calculated_at: detail.cny_calculated_at,
+          exact_bank_fees_rub: detail.exact_bank_fees_rub,
+          exact_currency_payment_cost_rub: detail.exact_currency_payment_cost_rub,
+          exact_landed_cost_total_rub: detail.exact_landed_cost_total_rub,
+          exact_landed_cost_per_unit_rub: detail.exact_landed_cost_per_unit_rub,
+          exact_cost_status: detail.exact_cost_status,
+          exact_cost_blockers: detail.exact_cost_blockers,
+          exact_cost_warnings: detail.exact_cost_warnings,
+          lines: draftLines.map((line) => {
+            const lineId = String(line.line_id || "");
+            const serverLine = serverLineById.get(lineId);
+            const costInputsChanged = !serverLine || ["qty", "unit_price", "amount"].some(
+              (field) => canonicalDecimalText(line[field]) !== canonicalDecimalText(serverLine[field])
+            );
+            return {
+              ...line,
+              cost_breakdown: costInputsChanged || draftCostContextChanged
+                ? {
+                    unavailable_reason_ru: "Сохраните изменения состава или дат поставки, чтобы пересчитать себестоимость и её расшифровку."
+                  }
+                : (serverCostByLine.get(lineId) || {})
+            };
+          })
+        };
+        currentShipment.product_lines = currentShipment.lines.filter((line) => line.line_type !== "extra");
+        currentShipment.extra_lines = currentShipment.lines.filter((line) => line.line_type === "extra");
+        if (draftCostInputsChanged || draftCostContextChanged) {
+          invalidateCurrentShipmentCostProof(
+            "Сохраните изменения состава или дат поставки, чтобы пересчитать себестоимость и её расшифровку."
+          );
+        }
+        renderCard();
+        renderFinancialSummary();
+        await loadRegistry();
+      }
+
       function resetFinancialState() {
         orderRequiredDocuments = [];
         orderDocumentPackageDownloads = {};
@@ -1585,7 +1706,30 @@
         const packing = summary.packing_list || {};
         const match = summary.quote_invoice_match || {};
         const perKg = summary.per_kg || {};
-        const perUnit = summary.per_unit || {};
+        const rawPerUnit = summary.per_unit || {};
+        const proofBlockers = currentShipment && currentShipment.supplier_cost_breakdown
+          && Array.isArray(currentShipment.supplier_cost_breakdown.blockers)
+          ? currentShipment.supplier_cost_breakdown.blockers
+          : [];
+        const unsavedCostBlocker = proofBlockers.find(
+          (item) => item && item.code === "unsaved_cost_inputs"
+        );
+        const canonicalPerUnit = {
+          ...rawPerUnit,
+          exact_cost_status: rawPerUnit.exact_cost_status || "unavailable",
+          exact_cost_blockers: rawPerUnit.exact_cost_blockers || [],
+          supplier_cost_breakdown: rawPerUnit.supplier_cost_breakdown || null
+        };
+        const perUnit = unsavedCostBlocker
+          ? {
+              ...canonicalPerUnit,
+              exact_landed_cost_total_rub: null,
+              exact_landed_cost_per_unit_rub: null,
+              exact_cost_blockers: [
+                unsavedCostBlocker.reason_ru || "Сохраните изменения для пересчёта себестоимости."
+              ]
+            }
+          : canonicalPerUnit;
         const quoteWeight = perKg.quote_weight || {};
         const customsWeight = perKg.customs_weight || {};
         const percent = summary.percent_of_value || {};
@@ -1616,9 +1760,11 @@
               ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")],
               [
                 "Себестоимость на единицу товара",
-                formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"),
+                perUnit.exact_landed_cost_per_unit_rub == null
+                  ? "—"
+                  : formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"),
                 exactCostTooltip(perUnit),
-                perUnit.exact_landed_cost_per_unit_rub == null ? "" : (currentShipment && currentShipment.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete")
+                perUnit.exact_landed_cost_per_unit_rub == null ? "" : (perUnit.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete")
               ]
             ]
           },
@@ -2079,6 +2225,7 @@
             renderFinancialUploadProgress(progress);
           }
           await loadFinancialDocuments(lastDocumentId ? { selectedDocumentId: lastDocumentId } : undefined);
+          await refreshCurrentShipmentCostProof();
           if (errorCount) {
             setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " успешно, " + String(errorCount) + " с ошибкой.", "error");
           } else if (pendingBankFeePreview) {
@@ -2110,6 +2257,7 @@
             selectedFinancialDocumentId = "";
           }
           await loadFinancialDocuments();
+          await refreshCurrentShipmentCostProof();
           setMessage(financialDocumentsMessage, "Документ удалён.", "success");
         } catch (error) {
           setMessage(financialDocumentsMessage, error.message, "error");
@@ -2136,10 +2284,7 @@
           pendingBankFeePreview = null;
           renderBankFeePreview();
           await loadFinancialDocuments({ selectedDocumentId: documentId });
-          const detail = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } });
-          currentShipment = detail;
-          renderCard();
-          await loadRegistry();
+          await refreshCurrentShipmentCostProof();
           setMessage(financialDocumentsMessage, "Комиссии импортированы.", "success");
         } catch (error) {
           setMessage(financialDocumentsMessage, error.message, "error");
@@ -2156,7 +2301,7 @@
       function renderLineTables(lines) {
         const products = lines.filter((line) => line.line_type !== "extra");
         const extras = lines.filter((line) => line.line_type === "extra");
-        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="13">' + escapeHtml(uiText("未识别商品明细 / No product lines recognized / Товарные строки не распознаны.", "Товарные строки не распознаны.")) + '</td></tr>';
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="14">' + escapeHtml(uiText("未识别商品明细 / No product lines recognized / Товарные строки не распознаны.", "Товарные строки не распознаны.")) + '</td></tr>';
         extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">' + escapeHtml(uiText("未识别其他项目 / No extras recognized / Прочие позиции не распознаны.", "Прочие позиции не распознаны.")) + '</td></tr>';
         Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
           input.addEventListener("input", () => {
@@ -2166,8 +2311,53 @@
               row.dataset.dirty = "1";
             }
             syncLinesFromInputs();
+            if (["qty", "unit_price", "amount"].includes(input.dataset.lineField)) {
+              invalidateCurrentShipmentCostProof(
+                "Сохраните изменения состава или дат поставки, чтобы пересчитать себестоимость и её расшифровку."
+              );
+            }
             updateTotalsAndState();
           });
+        });
+      }
+
+      function invalidateCurrentShipmentCostProof(reason) {
+        if (!currentShipment) {
+          return;
+        }
+        const message = reason || "Сохраните изменения, чтобы пересчитать себестоимость и её расшифровку.";
+        const existingBreakdown = currentShipment.supplier_cost_breakdown && typeof currentShipment.supplier_cost_breakdown === "object"
+          ? currentShipment.supplier_cost_breakdown
+          : {};
+        currentShipment.supplier_cost_breakdown = {
+          ...existingBreakdown,
+          certification: {
+            ...((existingBreakdown.certification && typeof existingBreakdown.certification === "object")
+              ? existingBreakdown.certification
+              : {}),
+            certified: false,
+            status_code: "draft_source_changed",
+            status_label_ru: "Предварительная себестоимость — есть несохранённые изменения"
+          },
+          blockers: [{ code: "unsaved_cost_inputs", reason_ru: message }]
+        };
+        currentShipment.exact_landed_cost_total_rub = null;
+        currentShipment.exact_landed_cost_per_unit_rub = null;
+        currentShipment.exact_cost_status = "unavailable";
+        currentShipment.exact_cost_blockers = [message];
+        currentShipment.lines = (currentShipment.lines || []).map((line) => (
+          line.line_type === "extra"
+            ? line
+            : { ...line, cost_breakdown: { unavailable_reason_ru: message } }
+        ));
+        currentShipment.product_lines = currentShipment.lines.filter((line) => line.line_type !== "extra");
+        currentShipment.extra_lines = currentShipment.lines.filter((line) => line.line_type === "extra");
+        Array.from(productLines.querySelectorAll("tr[data-line-kind='product']")).forEach((row) => {
+          const line = currentShipment.product_lines[Number(row.dataset.lineIndex)] || {};
+          const cell = row.querySelector(".line-cost-cell");
+          if (cell) {
+            cell.innerHTML = renderLineCost(line);
+          }
         });
       }
 
@@ -2185,10 +2375,76 @@
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
           '<td>' + renderPriceConformity(line) + '</td>',
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
+          '<td class="line-cost-cell">' + renderLineCost(line) + '</td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
           '<td><span class="badge ' + (line.manual_override ? "warning" : (["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status)) ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
           '</tr>'
         ].join("");
+      }
+
+      function renderLineCost(line) {
+        const proof = line.cost_breakdown && typeof line.cost_breakdown === "object" ? line.cost_breakdown : {};
+        const shipmentProof = currentShipment && currentShipment.supplier_cost_breakdown && typeof currentShipment.supplier_cost_breakdown === "object"
+          ? currentShipment.supplier_cost_breakdown
+          : {};
+        const certification = shipmentProof.certification && typeof shipmentProof.certification === "object"
+          ? shipmentProof.certification
+          : {};
+        const blockers = Array.isArray(shipmentProof.blockers) ? shipmentProof.blockers : [];
+        if (proof.unit_cost_rub == null) {
+          const reason = proof.unavailable_reason_ru || (blockers.length
+            ? blockers.map((item) => item.reason_ru || item.code || "Недостающие данные").join("; ")
+            : "Канонический расчёт ещё не опубликован для этой строки.");
+          return '<span class="line-cost-value muted-dash">—</span>' +
+            '<span class="line-cost-status exact-cost-incomplete">' + escapeHtml(reason) + '</span>';
+        }
+        const certified = certification.certified === true;
+        const tone = certified ? "exact-cost-complete" : "exact-cost-incomplete";
+        const invoiceCurrency = String(shipmentProof.invoice_currency || "CNY").trim().toUpperCase();
+        const components = Array.isArray(proof.components) ? proof.components : [];
+        const componentHtml = components.map((component) => {
+          const document = component.document && typeof component.document === "object" ? component.document : {};
+          const sourceCny = component.source_amount_cny == null ? "" : "; источник: " + formatNumber(component.source_amount_cny) + " CNY";
+          const rate = component.effective_rate_rub_per_cny == null ? "" : "; курс: " + formatRate(component.effective_rate_rub_per_cny) + " ₽/CNY";
+          return '<div class="line-cost-component">' +
+            '<strong>' + escapeHtml(component.label_ru || component.component_key || "Компонент") + ': ' + escapeHtml(formatRegistryMoney(component.amount_rub)) + '</strong>' +
+            '<div>' + escapeHtml(component.allocation_method_ru || component.allocation_method || "") + '</div>' +
+            '<div>Документ: ' + escapeHtml(document.number || "без номера") +
+              '; ID ' + escapeHtml(document.document_id || "—") +
+              '; дата ' + escapeHtml(document.date || "—") +
+              '; статус ' + escapeHtml(document.status || "—") + sourceCny + rate + '</div>' +
+          '</div>';
+        }).join("");
+        const arithmetic = proof.arithmetic || (
+          formatRegistryMoney(proof.capital_rub) + " / " + formatNumber(proof.quantity) + " шт."
+        );
+        return '<span class="line-cost-value ' + tone + '">' + escapeHtml(formatRegistryMoney(proof.unit_cost_rub)) + '</span>' +
+          '<span class="line-cost-status ' + tone + '">' + escapeHtml(certification.status_label_ru || "Предварительная себестоимость — не все расходы учтены") + '</span>' +
+          '<details class="line-cost-proof"><summary>Из чего сложилась себестоимость</summary>' +
+            '<div class="line-cost-proof-body">' +
+              '<div>Invoice ' + escapeHtml(shipmentProof.invoice_no || "—") + ' от ' + escapeHtml(shipmentProof.invoice_date || "—") +
+                '; nmID ' + escapeHtml(proof.nm_id || line.internal_nm_id || "—") +
+                '; количество ' + escapeHtml(formatNumber(proof.quantity)) +
+                '; цена ' + escapeHtml(formatNumber(proof.unit_price_cny)) + ' ' + escapeHtml(invoiceCurrency) +
+                '; строка ' + escapeHtml(formatNumber(proof.invoice_value_cny)) + ' ' + escapeHtml(invoiceCurrency) + '.</div>' +
+              componentHtml +
+              '<div class="line-cost-control">Контроль: ' + escapeHtml(arithmetic) + '</div>' +
+              '<div>Source fingerprint: ' + escapeHtml(shipmentProof.source_fingerprint || "—") + '<br>Calculation fingerprint: ' + escapeHtml(shipmentProof.calculation_fingerprint || "—") + '</div>' +
+              '<details><summary>Технические данные JSON</summary><pre>' + escapeHtml(JSON.stringify(proof, null, 2)) + '</pre></details>' +
+            '</div>' +
+          '</details>';
+      }
+
+      function canonicalDecimalText(value) {
+        const normalized = String(value == null ? "" : value)
+          .trim()
+          .replace(/\s+/g, "")
+          .replace(",", ".");
+        if (!normalized) {
+          return "";
+        }
+        const number = Number(normalized);
+        return Number.isFinite(number) ? String(number) : normalized;
       }
 
       function renderAuthoritativeGroup(line) {
@@ -2320,7 +2576,7 @@
         exactLandedCostPerUnit.textContent = formatRegistryMoney(shipment.exact_landed_cost_per_unit_rub);
         exactLandedCostPerUnit.classList.remove("exact-cost-complete", "exact-cost-incomplete");
         if (exactLandedCostPerUnit.textContent !== "—") {
-          exactLandedCostPerUnit.classList.add(shipment.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete");
+          exactLandedCostPerUnit.classList.add(shipment.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete");
         }
         exactLandedCostPerUnit.parentElement.title = exactCostTooltip(shipment);
         const hasDate = Boolean(shipmentDateInput.value);
@@ -2657,16 +2913,25 @@
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
+        invalidateCurrentShipmentCostProof();
         updateTotalsAndState();
       });
-      [actualShipmentDateInput, actualFfAcceptanceDateInput, approxYuanRateInput].forEach((input) => {
+      [actualShipmentDateInput, actualFfAcceptanceDateInput].forEach((input) => {
         input.addEventListener("input", () => {
           cardDirty = true;
+          invalidateCurrentShipmentCostProof();
           updateTotalsAndState();
         });
       });
+      approxYuanRateInput.addEventListener("input", () => {
+        cardDirty = true;
+        updateTotalsAndState();
+      });
       metaInputs.forEach((input) => input.addEventListener("input", () => {
         cardDirty = true;
+        if (["invoice_no", "invoice_date", "currency", "declared_invoice_total"].includes(input.dataset.metaField)) {
+          invalidateCurrentShipmentCostProof();
+        }
         updateTotalsAndState();
       }));
       invoiceFileInput.addEventListener("change", () => parseFile(invoiceFileInput.files[0]));

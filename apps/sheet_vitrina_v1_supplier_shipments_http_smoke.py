@@ -12,6 +12,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+from unittest.mock import patch
 from urllib import error as urllib_error, request as urllib_request
 from uuid import uuid4
 
@@ -220,7 +221,8 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
 
     def next_timestamp() -> str:
         timestamp_counter["value"] += 1
-        return f"2026-06-01T09:{timestamp_counter['value']:02d}:00Z"
+        minutes = timestamp_counter["value"]
+        return f"2026-06-01T{9 + minutes // 60:02d}:{minutes % 60:02d}:00Z"
 
     with TemporaryDirectory(prefix="supplier-authoritative-groups-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
@@ -332,6 +334,66 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
             or updated["product_lines"][0].get("internal_nm_id") != 601001
         ):
             raise AssertionError(f"update must repeat server-side barcode rebinding: {updated['product_lines'][0]}")
+        certified = block.update_expenses_complete(created["shipment_id"], True)
+        if not certified.get("expenses_complete"):
+            raise AssertionError("test shipment must enter certified state before a source rematch")
+        completed_queue_id = str(
+            certified.get("warehouse_targeted_recalculation", {}).get("queue_id") or ""
+        )
+        if not completed_queue_id:
+            raise AssertionError("certification must enqueue its exact source revision")
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                   SET status='complete' WHERE queue_id=?""",
+                (completed_queue_id,),
+            )
+            conn.commit()
+        metadata_update = json.loads(json.dumps(certified))
+        metadata_update["metadata"]["invoice_no"] = "26GN-METADATA-REVISION"
+        metadata_update["metadata"]["invoice_date"] = "2026-05-16"
+        metadata_changed = block.update_shipment(
+            created["shipment_id"],
+            {"payload": metadata_update},
+        )
+        if metadata_changed.get("expenses_complete"):
+            raise AssertionError("invoice identity/date source change must remove certification")
+        metadata_queue = metadata_changed.get("warehouse_targeted_recalculation", {})
+        if not metadata_queue.get("queue_id"):
+            raise AssertionError("invoice identity/date source change must enqueue targeted replay")
+        if metadata_queue.get("queue_id") == completed_queue_id or metadata_queue.get("status") != "queued":
+            raise AssertionError(
+                "invoice identity/date source change must create a new queued revision after a completed one"
+            )
+        if metadata_queue.get("effective_date") != "2026-05-16":
+            raise AssertionError(f"metadata replay must retain the edited invoice date: {metadata_queue}")
+        certified = block.update_expenses_complete(created["shipment_id"], True)
+
+        checksum_edit = json.loads(json.dumps(certified))
+        checksum_edit["metadata"]["declared_invoice_total"] = (
+            float(checksum_edit["summary"]["invoice_amount_total"]) + 1
+        )
+        checksum_changed = block.update_shipment(
+            created["shipment_id"],
+            {"payload": checksum_edit},
+        )
+        if (
+            checksum_changed.get("expenses_complete")
+            or checksum_changed.get("match_status") != "checksum_error"
+            or checksum_changed.get("exact_cost_status") != "unavailable"
+            or "контрольной суммы" not in " ".join(checksum_changed.get("exact_cost_blockers") or [])
+            or not checksum_changed.get("warehouse_targeted_recalculation", {}).get("queue_id")
+        ):
+            raise AssertionError(
+                "declared invoice checksum mutation must invalidate certification and queue replay: "
+                f"{checksum_changed}"
+            )
+        checksum_fixed = json.loads(json.dumps(checksum_changed))
+        checksum_fixed["metadata"]["declared_invoice_total"] = checksum_changed["summary"][
+            "invoice_amount_total"
+        ]
+        block.update_shipment(created["shipment_id"], {"payload": checksum_fixed})
+        certified = block.update_expenses_complete(created["shipment_id"], True)
 
         first_owner = owners[0]
         block.update_nomenclature_item(
@@ -346,6 +408,10 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
         first_line = rematched["product_lines"][0]
         if first_line.get("product_type") != "no_frame_matte" or first_line.get("match_key") != "no_frame_matte|iphone_14_pro":
             raise AssertionError(f"explicit rematch must rebind group and match key from the current barcode owner: {first_line}")
+        if rematched.get("expenses_complete"):
+            raise AssertionError("a changed source rematch must return the shipment to provisional state")
+        if not rematched.get("warehouse_targeted_recalculation", {}).get("queue_id"):
+            raise AssertionError("a changed source rematch must enqueue bounded warehouse recalculation")
 
         matte_group = next(group for group in block.list_sku_groups()["groups"] if group["group_key"] == "no_frame_matte")
         block.update_sku_group("no_frame_matte", {**matte_group, "label": "Runtime-renamed group"})
@@ -353,11 +419,193 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
         if reopened["product_lines"][0].get("group_label") != "Runtime-renamed group":
             raise AssertionError("saved invoice labels must resolve live through the same SKU-group registry")
 
+        frozen = runtime.load_supplier_shipment(created["shipment_id"])
+        frozen_header = dict(frozen["header"])
+        frozen_header["actual_ff_acceptance_date"] = "2026-06-30"
+        runtime.save_supplier_shipment(header=frozen_header, lines=frozen["lines"])
+        matte_group = next(
+            group
+            for group in block.list_sku_groups()["groups"]
+            if group["group_key"] == "no_frame_matte"
+        )
+        block.update_sku_group(
+            "no_frame_matte",
+            {**matte_group, "label": "Frozen presentation rename"},
+        )
+        presentation_rematched = block.rematch_shipment(created["shipment_id"])
+        if presentation_rematched.get("warehouse_targeted_recalculation"):
+            raise AssertionError(
+                "presentation-only rematch must not enqueue a capital recalculation"
+            )
+        if (
+            presentation_rematched["product_lines"][0].get("group_label")
+            != "Frozen presentation rename"
+        ):
+            raise AssertionError(
+                "presentation-only rematch must refresh current labels after FF receipt"
+            )
+        frozen_after_presentation = runtime.load_supplier_shipment(created["shipment_id"])
+        if _canonical_supplier_cost_signature(frozen_after_presentation) != _canonical_supplier_cost_signature(frozen):
+            raise AssertionError(
+                "presentation-only rematch must preserve canonical invoice cost inputs"
+            )
+        current_owner = next(
+            item
+            for item in block.list_nomenclature()["items"]
+            if str(item.get("item_id") or "") == str(first_owner["item_id"])
+        )
+        block.update_nomenclature_item(
+            str(current_owner["item_id"]),
+            {**current_owner, "match_key": "no_frame_matte|frozen-rematch"},
+        )
+        try:
+            block.rematch_shipment(created["shipment_id"])
+        except ValueError as exc:
+            if "append-only ledger" not in str(exc):
+                raise
+        else:
+            raise AssertionError("post-FF-receipt identity rematch must fail closed")
+        frozen_readback = runtime.load_supplier_shipment(created["shipment_id"])
+        if frozen_readback["lines"] != frozen_after_presentation["lines"]:
+            raise AssertionError("rejected post-receipt rematch must preserve frozen invoice identity")
+
+
+def _canonical_supplier_cost_signature(payload: dict[str, object]) -> tuple[object, ...]:
+    header = dict(payload.get("header") or {})
+    return (
+        header.get("invoice_no"),
+        header.get("invoice_date"),
+        header.get("currency"),
+        header.get("declared_invoice_total"),
+        header.get("invoice_amount_total"),
+        header.get("match_status"),
+        tuple(
+            (
+                item.get("line_id"),
+                item.get("line_type"),
+                item.get("internal_nm_id"),
+                item.get("product_type"),
+                item.get("match_key"),
+                item.get("qty"),
+                item.get("unit_price"),
+                item.get("amount"),
+            )
+            for item in payload.get("lines") or []
+            if isinstance(item, dict)
+        ),
+    )
+
+
+def _assert_blocked_canonical_cost_suppresses_legacy_aggregate() -> None:
+    with TemporaryDirectory(prefix="supplier-canonical-cost-guard-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = SupplierShipmentsBlock(runtime=runtime)
+        payload = {
+            "shipment_id": "blocked-canonical-cost",
+            "exact_bank_fees_rub": 12.0,
+            "exact_currency_payment_cost_rub": 100.0,
+            "exact_landed_cost_total_rub": 112.0,
+            "exact_landed_cost_per_unit_rub": 11.2,
+            "exact_cost_status": "complete",
+            "lines": [{"line_id": "line-1", "line_type": "product"}],
+        }
+        blocked = {
+            "shipment_id": payload["shipment_id"],
+            "lines": [{"line_id": "line-1", "unit_cost_rub": None}],
+            "blockers": [
+                {
+                    "code": "supplier_payment_rub_valuation_unavailable",
+                    "reason_ru": "Фактическая RUB-стоимость платежа отсутствует.",
+                }
+            ],
+        }
+        with patch(
+            "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+            return_value=blocked,
+        ):
+            result = block._with_supplier_line_costs(payload)
+        if (
+            result.get("exact_landed_cost_total_rub") is not None
+            or result.get("exact_landed_cost_per_unit_rub") is not None
+            or result.get("exact_cost_status") != "unavailable"
+            or "RUB-стоимость" not in " ".join(result.get("exact_cost_blockers") or [])
+        ):
+            raise AssertionError(
+                "blocked canonical proof must suppress every legacy exact aggregate: "
+                f"{result}"
+            )
+        registry_row = {
+            **payload,
+            "expenses_complete": True,
+            "invoice_no": "BLOCKED-LIST",
+        }
+        with (
+            patch.object(block, "migrate_existing_supplier_shipments_into_trade_documents"),
+            patch.object(runtime, "list_supplier_shipments", return_value=[registry_row]),
+            patch.object(block, "_with_document_fields", side_effect=lambda value: value),
+            patch.object(block, "_with_approx_cost_fields", side_effect=lambda value: value),
+            patch(
+                "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+                side_effect=AssertionError("collection must not load a full proof per shipment"),
+            ),
+            patch(
+                "packages.application.warehouse_functional.load_supplier_cost_summary_fields",
+                return_value={
+                    payload["shipment_id"]: {
+                        "exact_bank_fees_rub": None,
+                        "exact_currency_payment_cost_rub": None,
+                        "exact_landed_cost_total_rub": None,
+                        "exact_landed_cost_per_unit_rub": None,
+                        "exact_cost_status": "unavailable",
+                        "exact_cost_blockers": [
+                            "Фактическая RUB-стоимость платежа отсутствует."
+                        ],
+                        "exact_cost_warnings": [],
+                    }
+                },
+            ),
+        ):
+            list_row = block.list_shipments()["shipments"][0]
+        if (
+            list_row.get("exact_landed_cost_per_unit_rub") is not None
+            or list_row.get("exact_cost_status") != "unavailable"
+            or "RUB-стоимость" not in " ".join(list_row.get("exact_cost_blockers") or [])
+        ):
+            raise AssertionError(
+                "collection registry response must apply the same canonical blockers as detail: "
+                f"{list_row}"
+            )
+
+        provisional = {
+            "shipment_id": payload["shipment_id"],
+            "capital_rub": "112",
+            "average_unit_cost_rub": "11.2",
+            "lines": [{"line_id": "line-1", "unit_cost_rub": "11.2"}],
+            "blockers": [],
+            "component_controls": [],
+            "certification": {
+                "certified": False,
+                "source_fingerprint_matches": False,
+                "status_label_ru": "Предварительная себестоимость — источники изменились",
+            },
+        }
+        with patch(
+            "packages.application.warehouse_functional.load_supplier_line_cost_breakdown",
+            return_value=provisional,
+        ):
+            result = block._with_supplier_line_costs(registry_row)
+        if result.get("exact_cost_status") != "provisional":
+            raise AssertionError(
+                "expenses_complete alone must not upgrade a fingerprint-mismatched proof: "
+                f"{result}"
+            )
+
 
 def main() -> None:
     _assert_barcode_schema_upgrade_smoke()
     _assert_price_conformity_application_smoke()
     _assert_authoritative_group_rebinding_smoke()
+    _assert_blocked_canonical_cost_suppresses_legacy_aggregate()
     workbook_bytes = _build_invoice_fixture()
     workbook_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
     with TemporaryDirectory(prefix="supplier-shipments-http-") as tmp:
@@ -857,6 +1105,24 @@ def main() -> None:
             ff_stock_keys = [str(item.get("source_key") or "") for item in runtime.list_ff_stock_operations()]
             if ff_stock_keys.count(f"supplier_shipment_acceptance:{shipment_id}") != 1:
                 raise AssertionError(f"actual FF acceptance must create one idempotent ФФ stock operation, got {ff_stock_keys}")
+
+            frozen_before_update = runtime.load_supplier_shipment(shipment_id)
+            changed_after_receipt = json.loads(json.dumps(accepted_patched))
+            changed_after_receipt["lines"][0]["qty"] += 1
+            changed_after_receipt["lines"][0]["amount"] += changed_after_receipt["lines"][0]["unit_price"]
+            try:
+                entrypoint.supplier_shipments_block.update_shipment(
+                    shipment_id,
+                    {"payload": changed_after_receipt},
+                )
+            except ValueError as exc:
+                if "append-only ledger" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("post-FF invoice quantity mutation must fail before persistence")
+            frozen_after_update = runtime.load_supplier_shipment(shipment_id)
+            if frozen_after_update != frozen_before_update:
+                raise AssertionError("rejected post-FF invoice mutation must preserve shipment and lines atomically")
 
             rematch_status, rematched = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",

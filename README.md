@@ -164,3 +164,4 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/103_warehouse_functional_cutover.md](migration/103_warehouse_functional_cutover.md) — guarded six-stage functional apply, economics publication, hourly sync and production UI gate.
 - [migration/104_warehouse_chain_audit_recovery.md](migration/104_warehouse_chain_audit_recovery.md) — exact-date historical recovery, archived metric cutover, nomenclature identity and UI acceptance contract.
 - [migration/105_wb_autoanswers_server_v1.md](migration/105_wb_autoanswers_server_v1.md) — staged activation, external gates and fail-safe rollback for server autoanswers v1.
+- [migration/106_warehouse_cost_transparency_and_business_date_recovery.md](migration/106_warehouse_cost_transparency_and_business_date_recovery.md) — per-SKU supplier cost proof, version-scoped certification, exact business-date warehouse history and guarded derived recovery.
