@@ -2725,6 +2725,22 @@ def handle_loop_comment(
     association: str,
 ) -> str:
     parts = command.strip().split()
+    if len(parts) == 6 and parts[:3] == ["/wb-core", "loop", "retry-blocked"]:
+        try:
+            command_number = int(parts[3])
+        except ValueError as exc:
+            raise ReleaseBlocked("invalid LOOP retry PR number") from exc
+        if command_number != number or parts[4] != "head":
+            raise ReleaseBlocked("LOOP retry must bind the current PR and exact head")
+        _require_loop_operator(association)
+        if task_class_from_labels(label_names(api.get_pull(number))) != LOOP_TASK_LABEL:
+            raise ReleaseBlocked("LOOP retry command requires task:loop")
+        return retry_blocked_release(
+            api,
+            number,
+            expected_head_sha=parts[5],
+            check_name="baseline",
+        )
     if len(parts) == 6 and parts[:3] == ["/wb-core", "loop", "enqueue-new"]:
         try:
             command_number = int(parts[3])
