@@ -16,6 +16,7 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -380,6 +381,124 @@ def _compress_verified_current_schema_backup(source: Path) -> dict[str, Any]:
     }
 
 
+def _prune_superseded_compressed_backups(
+    runtime_dir: Path,
+    *,
+    current_backup: dict[str, Any],
+    required_free: int,
+) -> dict[str, Any]:
+    """Remove the minimum older owned archives after current v3 restore proof."""
+
+    snapshot_sha256 = str(current_backup.get("snapshot_sha256") or "")
+    current_filename = str(current_backup.get("latest_filename") or "")
+    if (
+        int(current_backup.get("count") or 0) < 1
+        or current_backup.get("integrity_check") != "ok"
+        or current_backup.get("format") != "zstd"
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", snapshot_sha256)
+        or Path(current_filename).name != current_filename
+    ):
+        raise RuntimeError("superseded backup pruning requires a verified current-schema restore")
+
+    backup_root = runtime_dir / "backups"
+    free_before = shutil.disk_usage(backup_root).free
+    if free_before >= required_free:
+        return {
+            "status": "not_required",
+            "free_before": free_before,
+            "free_after": free_before,
+            "removed": [],
+            "audit_manifest": None,
+        }
+
+    candidates: list[tuple[int, Path, Path, dict[str, Any], str]] = []
+    for version in range(1, SCHEMA_VERSION):
+        directory = backup_root / f"wb_autoanswers_schema_v{version}"
+        if not directory.is_dir():
+            continue
+        prefix = f"registry_upload_runtime__pre_autoanswers_v{version}__"
+        for archive in sorted(directory.glob(f"{prefix}*.sqlite3.zst")):
+            manifest = archive.with_suffix(archive.suffix + ".manifest.json")
+            if not manifest.is_file():
+                continue
+            metadata = json.loads(manifest.read_text(encoding="utf-8"))
+            contract = str(metadata.get("contract") or "")
+            archive_sha256 = _sha256_file(archive)
+            if (
+                archive.parent != directory
+                or Path(str(metadata.get("compressed_filename") or "")).name != archive.name
+                or int(metadata.get("compressed_size") or -1) != archive.stat().st_size
+                or str(metadata.get("compressed_sha256") or "") != archive_sha256
+                or str(metadata.get("sqlite_integrity_check") or "") != "ok"
+                or not contract.startswith("wb_autoanswers_compressed_")
+            ):
+                raise RuntimeError("superseded autoanswers backup manifest mismatch")
+            candidates.append((version, archive, manifest, metadata, archive_sha256))
+
+    if not candidates:
+        raise RuntimeError("insufficient operational headroom and no superseded backup pair exists")
+
+    current_dir = backup_root / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    current_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    removed: list[dict[str, Any]] = []
+    audit_path: Path | None = None
+    for version, archive, manifest, metadata, archive_sha256 in candidates:
+        entry = {
+            "schema_version": version,
+            "archive_filename": archive.name,
+            "manifest_filename": manifest.name,
+            "archive_size": archive.stat().st_size,
+            "archive_sha256": f"sha256:{archive_sha256}",
+            "snapshot_sha256": f"sha256:{str(metadata.get('snapshot_sha256') or metadata.get('source_sha256') or '')}",
+        }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        audit_path = current_dir / f"superseded_backup_cleanup__{stamp}__{os.getpid()}.json"
+        audit_base = {
+            "contract": "wb_autoanswers_superseded_backup_cleanup_v1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "current_backup": {
+                "filename": current_filename,
+                "snapshot_sha256": snapshot_sha256,
+                "integrity_check": "ok",
+                "format": "zstd",
+            },
+            "required_free": required_free,
+            "free_before": free_before,
+        }
+        _write_json_atomic(
+            audit_path,
+            {
+                **audit_base,
+                "status": "planned",
+                "removed": removed,
+                "planned_removal": entry,
+            },
+        )
+        archive.unlink()
+        manifest.unlink(missing_ok=True)
+        removed.append(entry)
+        free_after = shutil.disk_usage(backup_root).free
+        _write_json_atomic(
+            audit_path,
+            {
+                **audit_base,
+                "status": "applied",
+                "removed": removed,
+                "planned_removal": None,
+                "free_after": free_after,
+            },
+        )
+        if free_after >= required_free:
+            return {
+                "status": "superseded_backups_removed",
+                "free_before": free_before,
+                "free_after": free_after,
+                "removed": removed,
+                "audit_manifest": audit_path.name,
+            }
+    raise RuntimeError("verified superseded backup pruning left insufficient operational headroom")
+
+
 def _create_current_compressed_schema_backup(
     runtime_dir: Path,
     *,
@@ -567,6 +686,16 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
                     sidecar.unlink()
                     orphan_sidecars_removed += 1
         free_after_cleanup = shutil.disk_usage(backup_root).free
+        superseded_cleanup = None
+        if free_after_cleanup < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+            superseded_cleanup = _prune_superseded_compressed_backups(
+                runtime_dir,
+                current_backup=compressed,
+                required_free=BACKUP_OPERATIONAL_HEADROOM_BYTES,
+            )
+            free_after_cleanup = shutil.disk_usage(backup_root).free
+        if free_after_cleanup < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+            raise RuntimeError("verified backup cleanup left insufficient operational headroom")
         return {
             "status": "ready",
             "free_before": free_before,
@@ -576,6 +705,7 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
                 **compressed,
                 "redundant_autoanswers_raw_removed": redundant_raw_removed,
                 "orphan_autoanswers_sidecars_removed": orphan_sidecars_removed,
+                "superseded_cleanup": superseded_cleanup,
             },
         }
     current_schema_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"

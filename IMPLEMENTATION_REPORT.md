@@ -85,7 +85,7 @@ The deploy preflight temporarily forces the migration process OFF, takes an inte
 Free local acceptance on the release-candidate tree:
 
 ```text
-python3 -m unittest apps.wb_autoanswers_*_test  -> 96 PASS
+python3 -m unittest apps.wb_autoanswers_*_test  -> 101 PASS
 python3 -m compileall -q apps packages         -> PASS
 frozen make_mvp npm test                       -> 28/28 PASS
 sheet_vitrina_v1_feedbacks_browser_smoke.py    -> PASS
@@ -126,6 +126,8 @@ Production release is authorized separately by the current LOOP request. Its rea
 The first deployment of merged PR #694 halted before service restart because the root volume did not have space for another raw database-sized pre-schema snapshot. Read-only inspection proved the live database and both recovery sources remained structurally valid. A lifecycle `status` invocation on the old implementation also exposed that constructing the repository below target schema could apply additive DDL; the database reached schema v3, while persisted `master_enabled=true`, `mode=manual`, the existing owner-published answer and its audit remained unchanged.
 
 The recovery increment makes `status` non-mutating for an old or absent database. It also resumes from the complete current-schema raw snapshot left by the interrupted preparation: only the owned backup filename boundary is accepted; SQLite integrity, compressed integrity, archive SHA-256 and exact decompressed SHA-256 are verified; the canonical v3 manifest is read back; and only then is the raw source removed to recover capacity. Failure before that proof retains the raw snapshot. Targeted tests cover both status cases and low-capacity exact backup compaction. The recovery performs no ad-hoc deletion, SQL mutation, WB/OpenAI call or service action; release remains owned by the standard deploy path.
+
+The first recovery deploy completed that compression/readback but remained below the explicit 256 MiB operational headroom, so it halted before restart. The follow-up keeps the verified current v3 archive and removes only the minimum older compressed autoanswers archive+manifest pair after checking its exact owned path, manifest filename, byte size, SHA-256 and recorded SQLite integrity. A private cleanup audit is persisted before unlink, unrelated files are excluded, and insufficient resulting headroom still fails closed. This second step is covered by a fixture that proves one-pair minimum deletion, current-v3 preservation, unrelated-file preservation and audit permissions.
 
 ## Owner’s first media-aware test after release
 
