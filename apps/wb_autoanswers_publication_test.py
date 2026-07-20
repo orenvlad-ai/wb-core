@@ -9,7 +9,7 @@ import unittest
 
 from packages.adapters.wb_autoanswers import WbAutoanswersHttpError, WbAutoanswersTransportError
 from packages.application.wb_autoanswers_publication import AutoanswersPublicationWorker
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError, final_reply_hash
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_result
 
 
@@ -61,6 +61,27 @@ class PublicationTest(unittest.TestCase):
         detail = self.repo.get_feedback(feedback_id)
         return stored["processing_key"], detail["publications"][0]["publication_key"]
 
+    def manual_reviewed(self, feedback_id: str = "manual", *, route: str = "public_only") -> dict:
+        self.env["WB_CORE_WEB_AUTH_USERNAME"] = "reviewer"
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.repo.upsert_feedback(feedback(feedback_id), source_stream="unanswered", run_kind="steady")
+        job = self.repo.enqueue_manual_processing(feedback_id, content_version=1, actor_id="reviewer")
+        self.repo.claim_processing_job(worker_id="ai")
+        result = successful_result(route)
+        if route == "seller_chat":
+            result["final_reply"] = "Здравствуйте. Напишите в чат продавца по коду WB-A123."
+            result["case_code"] = "WB-A123"
+        stored = self.repo.complete_generation(job["processing_key"], result=result, worker_id="ai")
+        reviewed = self.repo.save_manual_reply_review(
+            job["processing_key"],
+            reply=result["final_reply"],
+            guard_passed=True,
+            guard_errors=[],
+            actor_id="reviewer",
+        )
+        self.assertIn(stored["state"], {"generated", "needs_review"})
+        return reviewed
+
     def test_204_requires_matching_detail_readback(self) -> None:
         _processing, publication = self.approved()
         reply = self.repo.get_feedback("publish")["generated_reply"]
@@ -99,25 +120,18 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(len(self.transport.write_calls), 1)
         self.assertEqual(self.repo.get_feedback("publish")["processing_status"], "published")
 
-    def test_readback_429_is_not_claimed_while_master_off(self) -> None:
+    def test_readback_429_reconciles_get_only_while_master_off(self) -> None:
         self.approved()
         reply = self.repo.get_feedback("publish")["generated_reply"]
         self.transport.readbacks = [WbAutoanswersHttpError(429, "limited", retry_after_seconds=1), {"answer": {"text": reply}}]
         self.worker.run_once()
         self.repo.update_settings(master_enabled=False, actor_id="admin")
         first_readback = self.worker.run_once()
-        self.assertIsNone(first_readback)
+        self.assertEqual(first_readback["state"], "retryable_error")
         self.clock.advance(2)
         second_readback = self.worker.run_once()
-        self.assertIsNone(second_readback)
-        self.assertEqual(len(self.transport.readbacks), 2)
-        self.assertEqual(len(self.transport.write_calls), 1)
-        self.repo.update_settings(master_enabled=True, actor_id="admin")
-        retryable = self.worker.run_once()
-        self.assertEqual(retryable["state"], "retryable_error")
-        self.clock.advance(2)
-        published = self.worker.run_once()
-        self.assertEqual(published["state"], "published")
+        self.assertEqual(second_readback["state"], "published")
+        self.assertEqual(len(self.transport.readbacks), 0)
         self.assertEqual(len(self.transport.write_calls), 1)
 
     def test_off_and_emergency_force_off_block_new_write(self) -> None:
@@ -129,6 +143,113 @@ class PublicationTest(unittest.TestCase):
         self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
         self.assertIsNone(self.worker.run_once())
         self.assertEqual(self.transport.write_calls, [])
+
+    def test_manual_publication_requires_confirmation_and_is_idempotent(self) -> None:
+        reviewed = self.manual_reviewed()
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "confirmation"):
+            self.repo.approve_for_publication(reviewed["processing_key"], actor_id="reviewer")
+        publication = self.repo.approve_for_publication(
+            reviewed["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=reviewed["manual_reply_sha256"],
+        )
+        self.assertEqual(publication["request_source"], "manual")
+        with self.assertRaises((AutoanswersRuntimeError, ValueError)):
+            self.repo.approve_for_publication(
+                reviewed["processing_key"],
+                actor_id="reviewer",
+                confirmed=True,
+                expected_reply_sha256=reviewed["manual_reply_sha256"],
+            )
+        self.assertEqual(len(self.repo.get_feedback("manual")["publications"]), 1)
+
+    def test_manual_edit_must_be_guarded_again_and_exact_hash_is_bound(self) -> None:
+        reviewed = self.manual_reviewed("edited")
+        edited = "Здравствуйте. Благодарим за обратную связь."
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "hash"):
+            self.repo.approve_for_publication(
+                reviewed["processing_key"],
+                actor_id="reviewer",
+                confirmed=True,
+                expected_reply_sha256=final_reply_hash(edited),
+            )
+        guarded = self.repo.save_manual_reply_review(
+            reviewed["processing_key"],
+            reply=edited,
+            guard_passed=True,
+            guard_errors=[],
+            actor_id="reviewer",
+        )
+        publication = self.repo.approve_for_publication(
+            reviewed["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=guarded["manual_reply_sha256"],
+        )
+        self.assertEqual(publication["normalized_reply_sha256"], final_reply_hash(edited))
+
+    def test_manual_existing_answer_mode_change_permission_and_off_block_write(self) -> None:
+        reviewed = self.manual_reviewed("gated")
+        publication = self.repo.approve_for_publication(
+            reviewed["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=reviewed["manual_reply_sha256"],
+        )
+        self.repo.update_settings(master_enabled=False, actor_id="admin")
+        self.assertIsNone(self.worker.run_once())
+        self.assertEqual(self.transport.write_calls, [])
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.env["WB_CORE_WEB_AUTH_USERNAME"] = "another-user"
+        self.assertIsNone(self.worker.run_once())
+        detail = self.repo.get_feedback("gated")
+        self.assertEqual(detail["publications"][0]["state"], "needs_review")
+        self.assertEqual(publication["publication_key"], detail["publications"][0]["publication_key"])
+
+    def test_manual_existing_wb_answer_blocks_approval(self) -> None:
+        reviewed = self.manual_reviewed("answered")
+        self.repo.upsert_feedback(
+            feedback("answered", answer="Внешний ответ"), source_stream="detail", run_kind="reconciliation"
+        )
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "already has an answer"):
+            self.repo.approve_for_publication(
+                reviewed["processing_key"],
+                actor_id="reviewer",
+                confirmed=True,
+                expected_reply_sha256=reviewed["manual_reply_sha256"],
+            )
+
+    def test_manual_publication_is_quarantined_if_mode_changes_before_write(self) -> None:
+        reviewed = self.manual_reviewed("mode-changed")
+        self.repo.approve_for_publication(
+            reviewed["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=reviewed["manual_reply_sha256"],
+        )
+        self.repo.update_settings(mode="draft_only", actor_id="admin")
+        self.assertIsNone(self.worker.run_once())
+        self.assertEqual(self.transport.write_calls, [])
+        self.assertEqual(
+            self.repo.get_feedback("mode-changed")["publications"][0]["state"],
+            "needs_review",
+        )
+
+    def test_manual_seller_chat_requires_review_and_exact_single_case_code(self) -> None:
+        reviewed = self.manual_reviewed("manual-chat", route="seller_chat")
+        publication = self.repo.approve_for_publication(
+            reviewed["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=reviewed["manual_reply_sha256"],
+        )
+        self.assertEqual(publication["state"], "approved")
+        self.transport.readbacks = [{"answer": {"text": reviewed["manual_reply"]}}]
+        self.worker.run_once()
+        result = self.worker.run_once()
+        self.assertEqual(result["state"], "published")
+        self.assertEqual(len(self.transport.write_calls), 1)
 
     def test_duplicate_approval_and_worker_ticks_do_not_duplicate_publication(self) -> None:
         processing, publication = self.approved()
@@ -160,7 +281,9 @@ class PublicationTest(unittest.TestCase):
         stored = self.repo.complete_generation(job["processing_key"], result=result, worker_id="ai")
         self.assertEqual(stored["state"], "needs_review")
         self.assertEqual(self.repo.get_feedback("chat")["publications"], [])
-        publication = self.repo.approve_for_publication(job["processing_key"], actor_id="reviewer")
+        publication = self.repo.approve_for_publication(
+            job["processing_key"], actor_id="reviewer", confirmed=True
+        )
         self.assertEqual(publication["state"], "approved")
 
 

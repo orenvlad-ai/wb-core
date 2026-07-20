@@ -105,6 +105,19 @@ DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/preview"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/enqueue"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/review/approve"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/manual/generate"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/manual/edit"
+AUTOANSWERS_MUTATION_PATHS = frozenset(
+    {
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
+    }
+)
 DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH = "/v1/sheet-vitrina-v1/feedbacks/export.xlsx"
 DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-prompt"
 DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-analyze"
@@ -439,6 +452,8 @@ def _build_handler(
                 return
             if not _ensure_web_auth(self, parsed):
                 return
+            if parsed.path in AUTOANSWERS_MUTATION_PATHS and not _ensure_autoanswers_csrf(self, parsed.path):
+                return
             if parsed.path in {
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
@@ -471,16 +486,30 @@ def _build_handler(
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
-            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH:
+            if parsed.path in {
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
+            }:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
                     return
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW):
                     return
                 try:
                     body = _load_request_payload(self)
-                    payload = entrypoint.handle_sheet_feedbacks_autoanswers_approve_request(
-                        body, actor_id=_current_web_user_actor(self)
-                    )
+                    actor = _current_web_user_actor(self)
+                    if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_generate_request(
+                            body, actor_id=actor
+                        )
+                    elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_manual_edit_request(
+                            body, actor_id=actor
+                        )
+                    else:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_approve_request(
+                            body, actor_id=actor
+                        )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
@@ -5805,6 +5834,30 @@ def _ensure_feedback_capability(handler: BaseHTTPRequestHandler, path: str, capa
     return False
 
 
+def _ensure_autoanswers_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    """Require an unforgeable JSON fetch marker and reject cross-site browser requests."""
+
+    content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
+    marker = str(handler.headers.get("X-WB-Autoanswers-CSRF", "") or "").strip()
+    origin = str(handler.headers.get("Origin", "") or "").strip().rstrip("/")
+    request_origin = _request_origin(handler).rstrip("/")
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").strip().lower()
+    valid = (
+        content_type == "application/json"
+        and marker == "1"
+        and (not origin or hmac.compare_digest(origin, request_origin))
+        and fetch_site not in {"cross-site", "same-site"}
+    )
+    if valid:
+        return True
+    _write_json_response(
+        handler,
+        HTTPStatus.FORBIDDEN,
+        {"error": "autoanswers CSRF validation failed", "code": "csrf_failed", "path": path},
+    )
+    return False
+
+
 def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
     config = _web_auth_config()
     if not config["enabled"]:
@@ -7639,6 +7692,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_autoanswers_backlog_preview_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
         "feedbacks_autoanswers_backlog_enqueue_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
         "feedbacks_autoanswers_approve_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
+        "feedbacks_autoanswers_generate_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+        "feedbacks_autoanswers_edit_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
         "feedbacks_can_ai_review": PERMISSION_AI_REVIEW in normalized_sections,
         "feedbacks_can_admin": PERMISSION_ADMIN in normalized_sections,
         "feedbacks_export_path": DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,

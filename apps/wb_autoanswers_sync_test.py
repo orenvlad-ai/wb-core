@@ -76,6 +76,15 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(second["enqueued"], 0)
         self.assertEqual(len(self.repo.get_feedback("new")["ai_jobs"]), 1)
 
+    def test_manual_mode_steady_sync_never_creates_ai_jobs(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.source.pages = [[feedback("manual-new")], [feedback("manual-new")]]
+        first = self.service.steady_sync_tick(is_answered=False)
+        second = self.service.steady_sync_tick(is_answered=False)
+        self.assertEqual(first["enqueued"], 0)
+        self.assertEqual(second["enqueued"], 0)
+        self.assertEqual(self.repo.get_feedback("manual-new")["ai_jobs"], [])
+
     def test_semantic_edit_creates_one_new_processing_version_but_observation_does_not(self) -> None:
         self.repo.update_settings(master_enabled=True, actor_id="admin")
         changed = feedback("edited", text="Новый смысл отзыва")

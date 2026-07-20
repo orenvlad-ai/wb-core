@@ -7,10 +7,23 @@
   "required": ["boundary_version", "operation"],
   "properties": {
     "boundary_version": {"const": "wb_autoanswers_node_boundary_v1"},
-    "operation": {"enum": ["verify", "run"]},
+    "operation": {"enum": ["verify", "run", "guard_final"]},
     "processing_key": {"type": "string", "minLength": 1},
     "execution_mode": {"enum": ["fixture", "live"]},
     "fixture_scenario": {"type": "string"},
-    "raw_input": {"type": "object"}
+    "raw_input": {"type": "object"},
+    "guard_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_id", "review_version", "route", "case_code", "reply", "primary_issue"],
+      "properties": {
+        "review_id": {"type": "string", "minLength": 1},
+        "review_version": {"type": "string", "minLength": 1},
+        "route": {"enum": ["public_only", "seller_chat", "wb_return", "wb_support"]},
+        "case_code": {"type": ["string", "null"]},
+        "reply": {"type": "string", "minLength": 2, "maxLength": 900},
+        "primary_issue": {"type": ["string", "null"]}
+      }
+    }
   }
 }

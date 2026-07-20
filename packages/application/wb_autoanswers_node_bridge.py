@@ -150,6 +150,39 @@ class NodeAutoanswersBridge:
             payload["fixture_scenario"] = fixture_scenario
         return self._invoke(payload)
 
+    def guard_final(
+        self,
+        *,
+        review_id: str,
+        review_version: int | str,
+        route: str,
+        case_code: str | None,
+        reply: str,
+        primary_issue: str | None,
+    ) -> dict[str, Any]:
+        """Run the untouched frozen deterministic final guard for an exact manual edit."""
+
+        data = self._invoke(
+            {
+                "boundary_version": NODE_BOUNDARY_VERSION,
+                "operation": "guard_final",
+                "guard_input": {
+                    "review_id": str(review_id),
+                    "review_version": str(review_version),
+                    "route": str(route),
+                    "case_code": case_code,
+                    "reply": str(reply),
+                    "primary_issue": primary_issue,
+                },
+            }
+        )
+        guard = data.get("guard") if isinstance(data.get("guard"), Mapping) else {}
+        return {
+            "passed": bool(guard.get("passed")),
+            "errors": [str(item) for item in guard.get("errors") or []],
+            "reply": str(guard.get("reply") or ""),
+        }
+
     def _invoke(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         environment = os.environ.copy() if self.env is None else dict(self.env)
         try:
