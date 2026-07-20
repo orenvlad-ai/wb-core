@@ -1495,9 +1495,6 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                 and all(bool(item.get("conserved")) for item in allocated)
                 and not reasons
             )
-            source_component_ids = [
-                str(item.get("source_component_id") or "") for item in candidates
-            ]
             document_controls.append(
                 {
                     "document_id": str(evidence.get("document_id") or ""),
@@ -1512,7 +1509,6 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                     "allocated_amount_rub": _text(allocated_amount),
                     "conserved": conserved,
                     "incomplete_reasons": reasons,
-                    "source_component_ids": source_component_ids,
                 }
             )
 
@@ -1644,11 +1640,6 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "controls": {
                 "document_allocation_conserved": all(item["conserved"] for item in component_controls),
                 "document_counted_once": len(seen_source_components) == len(component_controls),
-                "cost_documents_complete": all(
-                    bool(item.get("conserved"))
-                    and not list(item.get("incomplete_reasons") or [])
-                    for item in document_controls
-                ),
                 "line_components_equal_capital": all(
                     _decimal_conserves(
                         sum((_decimal(item["amount_rub"]) for item in line["components"]), ZERO),
