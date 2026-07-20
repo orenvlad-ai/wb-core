@@ -100,7 +100,10 @@ def main() -> None:
             ("cutover-dry-run", 1800.0),
             ("emergency-dry-run", 1800.0),
             ("economics-backfill-dry-run", 1800.0),
+            ("supplier-certification-dry-run", 1800.0),
             ("cutover-apply", 1800.0),
+            ("supplier-certification-apply", 1800.0),
+            ("supplier-certification-rollback", 1800.0),
         ):
             completed = subprocess.CompletedProcess(
                 args=[],
@@ -112,8 +115,25 @@ def main() -> None:
                 hosted_runtime._run_remote_warehouse_functional_action(
                     active_target,
                     action=action,
-                    plan_path=plan_path if action == "cutover-apply" else None,
-                    fingerprint="sha256:timeout-smoke" if action == "cutover-apply" else "",
+                    plan_path=(
+                        plan_path
+                        if action in {"cutover-apply", "supplier-certification-apply"}
+                        else None
+                    ),
+                    fingerprint=(
+                        "sha256:timeout-smoke"
+                        if action in {
+                            "cutover-apply",
+                            "supplier-certification-apply",
+                            "supplier-certification-rollback",
+                        }
+                        else ""
+                    ),
+                    reason=(
+                        "bounded smoke rollback"
+                        if action == "supplier-certification-rollback"
+                        else ""
+                    ),
                 )
             actual_timeout = run_mock.call_args.kwargs.get("timeout")
             if actual_timeout != expected_timeout:

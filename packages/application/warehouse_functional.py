@@ -421,13 +421,11 @@ def load_supplier_line_cost_breakdown(
         active_version_id = str(active["version_id"]) if active is not None else ""
         active_fingerprints: tuple[str, str] | None = None
         if active is not None:
-            certified_row = conn.execute(
-                """SELECT source_fingerprint,calculation_fingerprint
-                   FROM sheet_vitrina_v1_warehouse_supplier_cost_states
-                   WHERE version_id=? AND shipment_id=? AND expenses_complete=1
-                         AND calculation_available=1""",
-                (active["version_id"], selected_id),
-            ).fetchone()
+            certified_row = _effective_supplier_cost_state(
+                conn,
+                version_id=str(active["version_id"]),
+                shipment_id=selected_id,
+            )
             if certified_row is not None:
                 active_fingerprints = (
                     str(certified_row["source_fingerprint"]),
@@ -534,18 +532,17 @@ def load_supplier_cost_summary_fields(
         active_version_id = str(active["version_id"]) if active is not None else ""
         active_fingerprints_by_shipment: dict[str, tuple[str, str]] = {}
         if active is not None:
-            for row in conn.execute(
-                """SELECT shipment_id,source_fingerprint,calculation_fingerprint
-                   FROM sheet_vitrina_v1_warehouse_supplier_cost_states
-                   WHERE version_id=? AND expenses_complete=1 AND calculation_available=1""",
-                (active["version_id"],),
-            ).fetchall():
-                shipment_id = str(row["shipment_id"] or "")
-                if shipment_id in selected:
-                    active_fingerprints_by_shipment[shipment_id] = (
-                        str(row["source_fingerprint"]),
-                        str(row["calculation_fingerprint"]),
-                    )
+            active_fingerprints_by_shipment = {
+                shipment_id: (
+                    str(row["source_fingerprint"]),
+                    str(row["calculation_fingerprint"]),
+                )
+                for shipment_id, row in _effective_supplier_cost_states(
+                    conn,
+                    version_id=active_version_id,
+                    shipment_ids=selected_ids,
+                ).items()
+            }
     allocations = _supplier_cost_allocations(sources)
     shipments_by_id = {
         str(item.get("shipment_id") or ""): item for item in sources["shipments"]
@@ -646,6 +643,84 @@ def _supplier_allocation_with_certification(
             )
         ),
     }
+    return result
+
+
+def _effective_supplier_cost_state(
+    conn: sqlite3.Connection,
+    *,
+    version_id: str,
+    shipment_id: str,
+) -> sqlite3.Row | None:
+    """Read one version's base certification plus append-only recovery overlay.
+
+    Functional versions remain immutable.  A recovery replay therefore never
+    inserts into ``warehouse_supplier_cost_states`` retroactively; it appends a
+    version-scoped correction with an audited ``supersedes`` identity instead.
+    A rollback is an append-only tombstone, so the previous state becomes
+    effective again without deleting audit evidence.
+    """
+
+    return _effective_supplier_cost_states(
+        conn,
+        version_id=version_id,
+        shipment_ids=[shipment_id],
+    ).get(shipment_id)
+
+
+def _effective_supplier_cost_states(
+    conn: sqlite3.Connection,
+    *,
+    version_id: str,
+    shipment_ids: Iterable[str],
+) -> dict[str, sqlite3.Row]:
+    """Batch effective certification reads in at most two SQLite statements."""
+
+    selected = sorted(
+        {
+            str(shipment_id or "").strip()
+            for shipment_id in shipment_ids
+            if str(shipment_id or "").strip()
+        }
+    )
+    if not selected:
+        return {}
+    placeholders = ",".join("?" for _ in selected)
+    result: dict[str, sqlite3.Row] = {}
+    corrections = conn.execute(
+        f"""SELECT correction.shipment_id,correction.source_fingerprint,
+                   correction.calculation_fingerprint,correction.expenses_complete,
+                   correction.calculation_available,correction.state_fingerprint,
+                   correction.replay_id,replay.sequence_no
+            FROM sheet_vitrina_v1_warehouse_supplier_cost_state_corrections correction
+            JOIN sheet_vitrina_v1_warehouse_supplier_cost_state_replays replay
+              ON replay.replay_id=correction.replay_id
+            LEFT JOIN sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks rollback
+              ON rollback.replay_id=replay.replay_id
+            WHERE correction.version_id=?
+              AND correction.shipment_id IN ({placeholders})
+              AND rollback.replay_id IS NULL
+              AND correction.expenses_complete=1
+              AND correction.calculation_available=1
+            ORDER BY correction.shipment_id,replay.sequence_no DESC""",
+        (version_id, *selected),
+    ).fetchall()
+    for row in corrections:
+        result.setdefault(str(row["shipment_id"]), row)
+    remaining = [shipment_id for shipment_id in selected if shipment_id not in result]
+    if not remaining:
+        return result
+    base_placeholders = ",".join("?" for _ in remaining)
+    for row in conn.execute(
+        f"""SELECT shipment_id,source_fingerprint,calculation_fingerprint,
+                   expenses_complete,calculation_available,NULL AS state_fingerprint,
+                   NULL AS replay_id,NULL AS sequence_no
+            FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+            WHERE version_id=? AND shipment_id IN ({base_placeholders})
+              AND expenses_complete=1 AND calculation_available=1""",
+        (version_id, *remaining),
+    ).fetchall():
+        result[str(row["shipment_id"])] = row
     return result
 
 
@@ -3379,6 +3454,23 @@ class WarehouseFunctionalBlock:
                 ]
                 for version_id in version_ids:
                     conn.execute(
+                        """DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks
+                           WHERE replay_id IN(
+                               SELECT replay_id
+                               FROM sheet_vitrina_v1_warehouse_supplier_cost_state_replays
+                               WHERE version_id=?
+                           )""",
+                        (version_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_state_corrections WHERE version_id=?",
+                        (version_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_state_replays WHERE version_id=?",
+                        (version_id,),
+                    )
+                    conn.execute(
                         "DELETE FROM sheet_vitrina_v1_warehouse_functional_document_lines WHERE version_id=?",
                         (version_id,),
                     )
@@ -5440,6 +5532,31 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS warehouse_supplier_cost_state_shipment
         ON sheet_vitrina_v1_warehouse_supplier_cost_states(shipment_id,version_id);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_cost_state_replays(
+            replay_id TEXT PRIMARY KEY,version_id TEXT NOT NULL,sequence_no INTEGER NOT NULL,
+            supersedes_version_plan_fingerprint TEXT NOT NULL,
+            replay_plan_fingerprint TEXT NOT NULL UNIQUE,source_manifest_digest TEXT NOT NULL,
+            target_shipment_ids_json TEXT NOT NULL,state_fingerprints_json TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,backup_json TEXT NOT NULL,created_at TEXT NOT NULL,
+            UNIQUE(version_id,sequence_no)
+        );
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_cost_state_corrections(
+            correction_id TEXT PRIMARY KEY,replay_id TEXT NOT NULL,version_id TEXT NOT NULL,
+            shipment_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,
+            calculation_fingerprint TEXT NOT NULL,expenses_complete INTEGER NOT NULL,
+            calculation_available INTEGER NOT NULL,supersedes_state_fingerprint TEXT NOT NULL,
+            state_fingerprint TEXT NOT NULL,created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS warehouse_supplier_cost_state_correction_lookup
+        ON sheet_vitrina_v1_warehouse_supplier_cost_state_corrections(
+            version_id,shipment_id,replay_id
+        );
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks(
+            rollback_id TEXT PRIMARY KEY,replay_id TEXT NOT NULL UNIQUE,
+            replay_plan_fingerprint TEXT NOT NULL,rollback_fingerprint TEXT NOT NULL UNIQUE,
+            reason TEXT NOT NULL,primary_source_digest TEXT NOT NULL,
+            backup_json TEXT NOT NULL,created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_wb_snapshots(
             snapshot_id TEXT PRIMARY KEY,version_id TEXT NOT NULL,fetched_at TEXT NOT NULL,
             snapshot_date TEXT NOT NULL,requested_nm_ids_json TEXT NOT NULL,pagination_complete INTEGER NOT NULL,
