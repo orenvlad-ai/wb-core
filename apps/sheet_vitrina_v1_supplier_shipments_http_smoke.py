@@ -561,6 +561,16 @@ def _assert_blocked_canonical_cost_suppresses_legacy_aggregate() -> None:
                             "Фактическая RUB-стоимость платежа отсутствует."
                         ],
                         "exact_cost_warnings": [],
+                        "expense_allocation": {
+                            "status": "none",
+                            "label": "Расходы не распределены",
+                            "diagnostics": {
+                                "eligible_documents": 1,
+                                "eligible_components": 1,
+                                "allocated_components": 0,
+                            },
+                            "reasons": ["Фактическая RUB-стоимость платежа отсутствует."],
+                        },
                     }
                 },
             ),
@@ -569,6 +579,7 @@ def _assert_blocked_canonical_cost_suppresses_legacy_aggregate() -> None:
         if (
             list_row.get("exact_landed_cost_per_unit_rub") is not None
             or list_row.get("exact_cost_status") != "unavailable"
+            or (list_row.get("expense_allocation") or {}).get("status") != "none"
             or "RUB-стоимость" not in " ".join(list_row.get("exact_cost_blockers") or [])
         ):
             raise AssertionError(
@@ -899,6 +910,7 @@ def main() -> None:
                 loaded_detail.get("approx_yuan_rate") != 13.2
                 or loaded_detail.get("approx_invoice_cost_rub") != 435.6
                 or loaded_detail.get("approx_landed_cost_per_unit_rub") != 25.45
+                or (loaded_detail.get("expense_allocation") or {}).get("status") != "partial"
             ):
                 raise AssertionError(f"detail route must expose approximate landed cost with factual expenses, got {loaded_detail}")
             post_expense_list_status, post_expense_list = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
@@ -908,6 +920,7 @@ def main() -> None:
                 or listed_created.get("approx_yuan_rate") != 13.2
                 or listed_created.get("approx_invoice_cost_rub") != 435.6
                 or listed_created.get("approx_landed_cost_per_unit_rub") != 25.45
+                or (listed_created.get("expense_allocation") or {}).get("status") != "partial"
             ):
                 raise AssertionError(f"list route must expose approximate landed cost with factual expenses, got {post_expense_list_status} {post_expense_list}")
             if loaded_detail.get("order_status") != "in_transit":
