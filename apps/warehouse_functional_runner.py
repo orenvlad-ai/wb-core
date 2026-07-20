@@ -138,8 +138,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return block.readback()
     if args.command in {"hourly-sync", "manual-sync"}:
         try:
-            supply_refresh = _refresh_official_supply_state(runtime)
+            supply_refresh = _refresh_official_supply_state(
+                runtime,
+                record_ff_movements=False,
+            )
             downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
+            ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
             plan = block.build_sync_plan()
             result = block.apply_plan(
                 plan,
@@ -152,6 +156,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "mode": args.command,
                 "supply_refresh": supply_refresh,
                 "downstream_cost_layers_materialized": downstream_cost_layers,
+                "ff_state": ff_state,
                 "plan_fingerprint": plan["plan_fingerprint"],
                 "diff": plan["diff"],
                 "active_version": result.get("active_version"),

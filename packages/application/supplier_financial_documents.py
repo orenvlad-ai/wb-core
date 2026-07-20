@@ -1064,6 +1064,14 @@ class SupplierFinancialDocumentsBlock:
             "warnings": _dedupe_strings(warnings),
             "errors": _dedupe_strings(errors),
         }
+        shipment = _supplier_order_shipment_with_linked_contract(
+            self.runtime,
+            self.runtime.load_supplier_shipment(supplier_order_id) or {},
+        )
+        updated_document = apply_supplier_order_document_match(
+            updated_document,
+            shipment,
+        )
         stored_lines = [
             _expense_line_for_storage(
                 line,
@@ -4952,7 +4960,11 @@ def _extract_bank_transfer_beneficiary_account(text: str) -> str:
 def _extract_bank_transfer_contract_ref(payment_details: str, text: str = "") -> str:
     haystacks = [payment_details, text]
     for haystack in haystacks:
-        match = re.search(r"\b(CONTRACT\s+[A-Za-zА-Яа-я0-9/-]+\s+DD\s+\d{1,2}\.\d{1,2}\.\d{4})\b", haystack, flags=re.I)
+        match = re.search(
+            r"\b(CONTRACT\s+(?:NO\.?\s*)?[A-Za-zА-Яа-я0-9/-]+(?:\s+(?:DD|DATED)\s*(?:\d{1,2}\.\d{1,2}\.\d{4})?)?)\b",
+            haystack,
+            flags=re.I,
+        )
         if match:
             return _clean_value(match.group(1)).upper()
     match = re.search(r"\b(контракт\s*(?:№\s*)?[A-Za-zА-Яа-я0-9/-]+\s*(?:от|DD)\s*\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
@@ -4962,10 +4974,14 @@ def _extract_bank_transfer_contract_ref(payment_details: str, text: str = "") ->
 
 
 def _extract_bank_transfer_contract_parts(contract_ref: str) -> tuple[str, str]:
-    match = re.search(r"(?:CONTRACT|контракт)\s*№?\s*([A-Za-zА-Яа-я0-9/-]+)\s*(?:DD|от)\s*(\d{1,2}\.\d{1,2}\.\d{4})", contract_ref, flags=re.I)
+    match = re.search(
+        r"(?:CONTRACT|контракт)\s*(?:(?:NO\.?|№)\s*)?([A-Za-zА-Яа-я0-9/-]+)(?:\s*(?:DD|DATED|от)\s*(\d{1,2}\.\d{1,2}\.\d{4})?)?",
+        contract_ref,
+        flags=re.I,
+    )
     if not match:
         return "", ""
-    return _clean_value(match.group(1)), _parse_date(match.group(2))
+    return _clean_value(match.group(1)), _parse_date(match.group(2) or "")
 
 
 def _extract_bank_transfer_charges_mode(text: str) -> str:
@@ -5332,21 +5348,101 @@ def _append_missing_warnings(warnings: list[str], normalized: Mapping[str, Any],
 
 def apply_supplier_order_document_match(document: Mapping[str, Any], shipment: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(document)
-    document_type = str(payload.get("document_type") or "").strip()
+    source_normalized = dict(payload.get("normalized_parse") or {})
+    document_type = str(
+        payload.get("document_type") or source_normalized.get("document_type") or ""
+    ).strip()
     if document_type not in ORDER_MATCH_DOCUMENT_TYPES:
         return payload
-    normalized = dict(payload.get("normalized_parse") or {})
+    payload["document_type"] = document_type
+    normalized = _resolve_bank_transfer_contract_from_canonical_package(
+        source_normalized,
+        shipment,
+    )
+    payload["normalized_parse"] = normalized
     match = verify_supplier_order_document_match(payload, shipment)
     normalized.update(match)
     payload["normalized_parse"] = normalized
     payload.update(match)
     warnings = _dedupe_strings([*_string_list(payload.get("warnings")), *_string_list(match.get("order_match_warnings"))])
+    if normalized.get("contract_resolution"):
+        warnings = _remove_resolved_missing_warning(warnings, "contract date")
     payload["warnings"] = warnings
     if (
         match.get("order_match_status") in {ORDER_MATCH_STATUS_NEEDS_REVIEW, ORDER_MATCH_STATUS_MISMATCH}
         and str(payload.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED
     ):
         payload["parse_status"] = FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+    elif (
+        document_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
+        and match.get("order_match_status") == ORDER_MATCH_STATUS_MATCHED
+        and not _bank_transfer_missing_critical_fields(normalized)
+        and str(payload.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+        and bool(normalized.get("contract_resolution"))
+    ):
+        # The source PDF stays immutable. A missing contract date may be
+        # resolved only from the invoice's explicit canonical contract link
+        # after exact number, currency, and amount checks.
+        payload["parse_status"] = FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED
+    return payload
+
+
+def _remove_resolved_missing_warning(warnings: list[str], resolved_label: str) -> list[str]:
+    prefix = "Parser needs review: missing "
+    result: list[str] = []
+    for warning in warnings:
+        if not warning.startswith(prefix):
+            result.append(warning)
+            continue
+        missing = [item.strip() for item in warning[len(prefix):].split(",") if item.strip()]
+        remaining = [item for item in missing if item != resolved_label]
+        if remaining:
+            result.append(prefix + ", ".join(remaining))
+    return _dedupe_strings(result)
+
+
+def _resolve_bank_transfer_contract_from_canonical_package(
+    normalized: Mapping[str, Any],
+    shipment: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(normalized)
+    if str(payload.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
+        return payload
+    order = _supplier_order_identity(shipment)
+    order_number = str(order.get("contract_number") or "").strip()
+    order_date = str(order.get("contract_date") or "").strip()
+    parsed_number = str(payload.get("contract_number") or "").strip()
+    if not parsed_number:
+        parsed_number, _ = _contract_parts_from_ref(
+            str(payload.get("contract_ref") or payload.get("payment_details") or "")
+        )
+    if (
+        not order_number
+        or not order_date
+        or not parsed_number
+        or _contract_number_key(order_number) != _contract_number_key(parsed_number)
+    ):
+        return payload
+    if not _supplier_order_amount_match_reason(
+        order,
+        {
+            "amount": payload.get("transfer_amount") or payload.get("total_amount"),
+            "currency": payload.get("currency"),
+        },
+    ):
+        return payload
+    payload["contract_number"] = order_number
+    if not payload.get("contract_date"):
+        payload["contract_date"] = order_date
+        payload["contract_resolution"] = {
+            "source": "canonical_invoice_contract_package",
+            "contract_number": order_number,
+            "contract_date": order_date,
+            "checks": {
+                "contract_number_exact": True,
+                "invoice_amount_and_currency_match": True,
+            },
+        }
     return payload
 
 
@@ -5514,7 +5610,11 @@ def _supplier_order_document_identity(document: Mapping[str, Any]) -> dict[str, 
 
 
 def _contract_parts_from_ref(value: str) -> tuple[str, str]:
-    match = re.search(r"(?:CONTRACT|контракт|договор)\s*№?\s*([A-Za-zА-Яа-я0-9/-]+)\s*(?:DD|от)?\s*(\d{1,2}\.\d{1,2}\.\d{4})?", value, flags=re.I)
+    match = re.search(
+        r"(?:CONTRACT|контракт|договор)\s*(?:(?:NO\.?|№)\s*)?([A-Za-zА-Яа-я0-9/-]+)(?:\s*(?:DD|DATED|от)\s*(\d{1,2}\.\d{1,2}\.\d{4})?)?",
+        value,
+        flags=re.I,
+    )
     if not match:
         return "", ""
     return _clean_value(match.group(1)), _parse_date(match.group(2) or "")

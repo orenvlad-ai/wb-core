@@ -455,6 +455,7 @@ class SupplierShipmentsBlock:
         if actual_ff_acceptance_date:
             self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
+            self._reconcile_ff_reservations()
         self._autolink_invoice_contract_from_metadata(
             invoice_document_id=str(invoice_document.get("document_id") or ""),
             contract_no=str(metadata.get("contract_no") or ""),
@@ -669,6 +670,7 @@ class SupplierShipmentsBlock:
         if actual_ff_acceptance_date:
             self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
+            self._reconcile_ff_reservations()
         if "contract_document_id" in payload:
             contract_document_id = str(payload.get("contract_document_id") or "").strip()
             if contract_document_id:
@@ -933,6 +935,14 @@ class SupplierShipmentsBlock:
             runtime=self.runtime,
             timestamp_factory=self.timestamp_factory,
         ).has_current_supplier_ff_cost_layer(shipment_id)
+
+    def _reconcile_ff_reservations(self) -> dict[str, Any]:
+        from packages.application.ff_stock_ledger import FfStockLedgerBlock
+
+        return FfStockLedgerBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).record_wb_supply_debits(self.runtime.list_wb_supplies_cache_records())
 
     def recheck_shipment_prices(self, shipment_id: str, *, actor: str = "", context: Mapping[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)

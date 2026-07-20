@@ -28,6 +28,11 @@ FF_STOCK_OPERATION_AUTO_RECEIPT = "auto_receipt"
 FF_STOCK_OPERATION_AUTO_WRITEOFF = "auto_writeoff"
 FF_STOCK_OPERATION_CORRECTION_RECEIPT = "correction_receipt"
 
+FF_STOCK_RESERVATION_RESERVE = "reserve"
+FF_STOCK_RESERVATION_ADJUST = "adjust"
+FF_STOCK_RESERVATION_RELEASE = "release"
+FF_STOCK_RESERVATION_FULFILL = "fulfill"
+
 FF_STOCK_SOURCE_MANUAL_EXCEL = "manual_excel"
 FF_STOCK_SOURCE_SUPPLIER_SHIPMENT = "supplier_shipment"
 FF_STOCK_SOURCE_WB_SUPPLY = "wb_supply"
@@ -155,6 +160,17 @@ class FfStockLedgerBlock:
             int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
             for item in self.runtime.list_ff_stock_balances()
         }
+        reservations = self.runtime.list_ff_stock_reservations()
+        reservations_by_nm: dict[int, float] = {}
+        reservation_supplies_by_nm: dict[int, set[str]] = {}
+        for reservation in reservations:
+            nm_id = int(reservation.get("nm_id") or 0)
+            reservations_by_nm[nm_id] = reservations_by_nm.get(nm_id, 0.0) + float(
+                reservation.get("quantity") or 0.0
+            )
+            reservation_supplies_by_nm.setdefault(nm_id, set()).add(
+                str(reservation.get("supply_id") or "")
+            )
         items = self._active_nomenclature_items()
         rows: list[dict[str, Any]] = []
         seen: set[int] = set()
@@ -164,11 +180,28 @@ class FfStockLedgerBlock:
                 continue
             seen.add(nm_id)
             balance = float(balances_by_nm.get(nm_id, 0.0))
+            reserved = float(reservations_by_nm.get(nm_id, 0.0))
             rows.append(
                 {
                     **_nomenclature_public_fields(item),
                     "current_stock_ff": balance,
                     "quantity": balance,
+                    "physical_quantity": balance,
+                    "reserved_quantity": reserved,
+                    "available_quantity": max(balance - reserved, 0.0),
+                    "unsecured_reservation_quantity": (
+                        max(reserved - max(balance, 0.0), 0.0) if reserved > 0 else 0.0
+                    ),
+                    "reservation_supply_ids": sorted(
+                        item for item in reservation_supplies_by_nm.get(nm_id, set()) if item
+                    ),
+                    "reservation_status": (
+                        "Ожидает поступления"
+                        if reserved > max(balance, 0.0)
+                        else "Зарезервировано"
+                        if reserved > 0
+                        else ""
+                    ),
                     "negative_balance": balance < 0,
                     "warning": "Отрицательный остаток ФФ" if balance < 0 else "",
                 }
@@ -180,11 +213,18 @@ class FfStockLedgerBlock:
             int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
             for item in self.runtime.list_ff_stock_balances()
         }
+        reservations_by_nm: dict[int, float] = {}
+        for reservation in self.runtime.list_ff_stock_reservations():
+            nm_id = int(reservation.get("nm_id") or 0)
+            reservations_by_nm[nm_id] = reservations_by_nm.get(nm_id, 0.0) + float(
+                reservation.get("quantity") or 0.0
+            )
         nomenclature_by_nm = self._nomenclature_by_nm()
         rows: list[dict[str, Any]] = []
         for nm_id, sku_comment in active_skus:
             item = nomenclature_by_nm.get(int(nm_id), {})
             balance = float(balances_by_nm.get(int(nm_id), 0.0))
+            reserved = float(reservations_by_nm.get(int(nm_id), 0.0))
             rows.append(
                 {
                     **_nomenclature_public_fields(item),
@@ -193,6 +233,19 @@ class FfStockLedgerBlock:
                     "sku_comment": str(sku_comment or item.get("nomenclature_name") or item.get("comment") or ""),
                     "current_stock_ff": balance,
                     "quantity": balance,
+                    "physical_quantity": balance,
+                    "reserved_quantity": reserved,
+                    "available_quantity": max(balance - reserved, 0.0),
+                    "unsecured_reservation_quantity": (
+                        max(reserved - max(balance, 0.0), 0.0) if reserved > 0 else 0.0
+                    ),
+                    "reservation_status": (
+                        "Ожидает поступления"
+                        if reserved > max(balance, 0.0)
+                        else "Зарезервировано"
+                        if reserved > 0
+                        else ""
+                    ),
                     "negative_balance": balance < 0,
                     "warning": "Отрицательный остаток ФФ" if balance < 0 else "",
                 }
@@ -347,7 +400,25 @@ class FfStockLedgerBlock:
     def record_wb_supply_debits(self, records: list[Mapping[str, Any]]) -> dict[str, Any]:
         created: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        active_supply_ids: set[str] = set()
+        supply_revisions: dict[str, str] = {}
         for record in records:
+            normalized = dict(record.get("normalized") or record)
+            status_id = _optional_int(normalized.get("status_id"))
+            supply_id = str(
+                _first_present(normalized, "supply_id", "wb_supply_id", "preorder_id")
+                or _first_present(record, "supply_id", "wb_supply_id", "preorder_id")
+                or ""
+            ).strip()
+            if supply_id:
+                supply_revisions[supply_id] = _wb_supply_revision(record, normalized)
+            if (
+                supply_id
+                and status_id in WB_DEBIT_STATUS_IDS
+                and _optional_int(normalized.get("virtual_type_id")) != WB_SKIP_VIRTUAL_TYPE_ID
+                and str(normalized.get("type_label") or "").strip() != WB_SKIP_TYPE_LABEL
+            ):
+                active_supply_ids.add(supply_id)
             result = self.record_wb_supply_debit(record)
             if not result:
                 continue
@@ -355,6 +426,39 @@ class FfStockLedgerBlock:
                 created.append(result)
             elif result.get("skip_reason"):
                 skipped.append(result)
+        released: list[dict[str, Any]] = []
+        reservation_rows = self.runtime.list_ff_stock_reservations()
+        reservation_supply_ids = {
+            str(item.get("supply_id") or "") for item in reservation_rows
+        }
+        for supply_id in sorted(reservation_supply_ids - active_supply_ids):
+            supply_reservations = [
+                item
+                for item in reservation_rows
+                if str(item.get("supply_id") or "") == supply_id
+            ]
+            release = self._set_wb_supply_reservation(
+                supply_id=supply_id,
+                supply_revision="inactive:"
+                + _fingerprint(
+                    {
+                        "supply_id": supply_id,
+                        "supply_revision": supply_revisions.get(supply_id, "missing_from_cache"),
+                        "reservation_state": [
+                            {
+                                "nm_id": int(item.get("nm_id") or 0),
+                                "quantity": float(item.get("quantity") or 0.0),
+                                "latest_operation_id": str(item.get("latest_operation_id") or ""),
+                            }
+                            for item in supply_reservations
+                        ],
+                    }
+                ),
+                desired={},
+                reason="wb_supply_inactive_or_cancelled",
+            )
+            if release and not release.get("idempotent"):
+                released.append(release)
         return {
             "created_count": len(created),
             "created_operation_ids": [str(item.get("operation_id") or "") for item in created],
@@ -362,6 +466,38 @@ class FfStockLedgerBlock:
             "skipped_total_quantity": sum(float(item.get("total_quantity") or 0.0) for item in skipped),
             "skipped_reasons": _count_by_key(skipped, "skip_reason"),
             "skipped": skipped[:20],
+            "reservation_release_count": len(released),
+            "reservation_summary": self.reservation_summary(),
+        }
+
+    def reservation_summary(self) -> dict[str, Any]:
+        reservations = self.runtime.list_ff_stock_reservations()
+        balances = {
+            int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
+            for item in self.runtime.list_ff_stock_balances()
+        }
+        reserved_by_nm: dict[int, float] = {}
+        for item in reservations:
+            nm_id = int(item.get("nm_id") or 0)
+            reserved_by_nm[nm_id] = reserved_by_nm.get(nm_id, 0.0) + float(
+                item.get("quantity") or 0.0
+            )
+        return {
+            "physical_quantity": sum(balances.values()),
+            "reserved_quantity": sum(reserved_by_nm.values()),
+            "available_quantity": sum(
+                max(quantity - reserved_by_nm.get(nm_id, 0.0), 0.0)
+                for nm_id, quantity in balances.items()
+            ),
+            "unsecured_reservation_quantity": sum(
+                max(quantity - max(balances.get(nm_id, 0.0), 0.0), 0.0)
+                for nm_id, quantity in reserved_by_nm.items()
+            ),
+            "reservation_supply_count": len(
+                {str(item.get("supply_id") or "") for item in reservations}
+            ),
+            "reservation_sku_count": len(reserved_by_nm),
+            "rows": reservations,
         }
 
     def ensure_wb_supply_auto_writeoff_checkpoint(
@@ -430,8 +566,15 @@ class FfStockLedgerBlock:
         cache_key, supply_id, source_key = _wb_supply_debit_identity(record=record, normalized=normalized)
         if not source_key:
             return {"skip_reason": "wb_supply_identity_missing", "supply_id": supply_id}
+        supply_revision = _wb_supply_revision(record, normalized)
         existing = self.runtime.load_ff_stock_operation_by_source_key(source_key)
         if existing is not None:
+            self._set_wb_supply_reservation(
+                supply_id=supply_id,
+                supply_revision=supply_revision,
+                desired={},
+                reason="physical_writeoff_already_recorded",
+            )
             existing["idempotent"] = True
             existing["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
             return existing
@@ -526,22 +669,88 @@ class FfStockLedgerBlock:
                 "activation_operation_id": str(activation.get("operation_id") or ""),
                 "total_quantity": total_quantity,
             }
-        negative_preview = _negative_balance_preview(lines, self.runtime.list_ff_stock_balances())
-        if negative_preview:
+        balance_rows = self.runtime.list_ff_stock_balances()
+        negative_preview = _negative_balance_preview(lines, balance_rows)
+        downstream_state = self._validated_downstream_cost_state(
+            record=record,
+            normalized=normalized,
+            lines=lines,
+        )
+        if negative_preview or not downstream_state["validated"]:
+            desired = {
+                int(item.get("nm_id") or 0): abs(float(item.get("quantity_delta") or 0.0))
+                for item in lines
+            }
+            reservation = self._set_wb_supply_reservation(
+                supply_id=supply_id,
+                supply_revision=supply_revision,
+                desired=desired,
+                reason=(
+                    "waiting_for_goods"
+                    if negative_preview
+                    else "waiting_for_validated_downstream_costs"
+                ),
+                diagnostics={
+                    "negative_nm_ids": negative_preview[:20],
+                    "downstream_cost_state": downstream_state,
+                },
+            )
             return {
-                "skip_reason": "wb_supply_would_make_negative_balance",
+                "skip_reason": (
+                    "wb_supply_reserved_waiting_for_goods"
+                    if negative_preview
+                    else "wb_supply_reserved_waiting_for_validated_downstream_costs"
+                ),
                 "supply_id": supply_id,
                 "source_key": source_key,
                 "source_timestamp": source_dt.isoformat(),
                 "source_timestamp_field": source_dt_field,
                 "activation_created_at": activation_dt.isoformat(),
                 "negative_nm_ids": negative_preview[:20],
+                "downstream_cost_state": downstream_state,
+                "reservation": reservation,
+                "reservation_status": "Ожидает поступления" if negative_preview else "Ожидает подтверждения расходов",
                 "total_quantity": total_quantity,
             }
         if 0 < total_quantity < 250:
             warnings.append(f"WB-поставка меньше 250 шт: {total_quantity:g}")
         label = str(normalized.get("visible_number") or normalized.get("number_label") or supply_id or cache_key)
-        operation = self.runtime.create_ff_stock_operation(
+        balances_by_nm = {
+            int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
+            for item in balance_rows
+        }
+        expected_balances = {
+            int(item.get("nm_id") or 0): balances_by_nm.get(int(item.get("nm_id") or 0), 0.0)
+            for item in lines
+        }
+        current_reservations = {
+            int(item.get("nm_id") or 0): float(item.get("quantity") or 0.0)
+            for item in self.runtime.list_ff_stock_reservations(supply_id=supply_id)
+        }
+        reservation_transition = None
+        if current_reservations:
+            release_lines = [
+                {"nm_id": nm_id, "quantity_delta": -quantity, "raw": {"reason": "physical_writeoff"}}
+                for nm_id, quantity in sorted(current_reservations.items())
+                if quantity > 0
+            ]
+            reservation_transition = {
+                "operation_id": "ffsr_" + uuid4().hex[:20],
+                "source_key": _reservation_source_key(
+                    supply_id,
+                    supply_revision,
+                    FF_STOCK_RESERVATION_FULFILL,
+                    {},
+                ),
+                "supply_id": supply_id,
+                "supply_revision": supply_revision,
+                "operation_type": FF_STOCK_RESERVATION_FULFILL,
+                "created_at": self.timestamp_factory(),
+                "diagnostics": {"physical_source_key": source_key},
+                "lines": release_lines,
+                "expected_current": current_reservations,
+            }
+        operation = self.runtime.create_ff_stock_operation_guarded(
             operation_id="ffso_" + uuid4().hex[:20],
             operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
             source_type=FF_STOCK_SOURCE_WB_SUPPLY,
@@ -562,11 +771,132 @@ class FfStockLedgerBlock:
                 "auto_writeoff_checkpoint_created_at": checkpoint_dt.isoformat(),
                 "ledger_activation_operation_id": str(activation.get("operation_id") or ""),
                 "ledger_activation_created_at": activation_dt.isoformat(),
+                "downstream_cost_state": downstream_state,
             },
             lines=lines,
+            expected_balances=expected_balances,
+            reservation_transition=reservation_transition,
+            expected_downstream_costs=downstream_state.get("guard") or {},
         )
         operation["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
         return operation
+
+    def _validated_downstream_cost_state(
+        self,
+        *,
+        record: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        lines: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        cache_key, supply_id, _ = _wb_supply_debit_identity(
+            record=record,
+            normalized=normalized,
+        )
+        wb_supply_id = str(
+            _first_present(normalized, "wb_supply_id")
+            or _first_present(record, "wb_supply_id")
+            or ""
+        ).strip()
+        rows = self.runtime.list_current_wb_supply_cost_layers(
+            supply_ids=[supply_id, wb_supply_id, cache_key],
+        )
+        by_nm = {int(item.get("nm_id") or 0): item for item in rows}
+        missing: list[dict[str, Any]] = []
+        fingerprints: dict[str, str] = {}
+        guard: dict[int, dict[str, Any]] = {}
+        for line in lines:
+            nm_id = int(line.get("nm_id") or 0)
+            row = by_nm.get(nm_id)
+            if row is None:
+                missing.append({"nm_id": nm_id, "component": "wb_supply_cost_layer", "reason": "missing"})
+                continue
+            fingerprints[str(nm_id)] = str(row.get("inputs_hash") or "")
+            guard[nm_id] = {
+                "wb_supply_id": str(row.get("wb_supply_id") or ""),
+                "nm_id": nm_id,
+                "inputs_hash": str(row.get("inputs_hash") or ""),
+                "source_status": str(row.get("source_status") or ""),
+                "transit_cost_status": str(row.get("transit_cost_status") or ""),
+                "sku_ff_unit_cost_rub": row.get("sku_ff_unit_cost_rub"),
+                "pre_acceptance_unit_cost_rub": row.get("pre_acceptance_unit_cost_rub"),
+            }
+            reasons: list[str] = []
+            if float(row.get("sku_ff_unit_cost_rub") or 0.0) <= 0:
+                reasons.append("missing_supplier_ff_cost_layer")
+            if str(row.get("transit_cost_status") or "") in {"transit_missing", "unknown_route"}:
+                reasons.append(str(row.get("missing_reason") or row.get("transit_cost_status") or "transit_missing"))
+            if float(row.get("pre_acceptance_unit_cost_rub") or 0.0) <= 0:
+                reasons.append("pre_acceptance_unit_cost_missing")
+            if str(row.get("source_status") or "") in {"pending", "needs_review"}:
+                reasons.append(str(row.get("source_status") or "needs_review"))
+            if reasons:
+                missing.append({
+                    "nm_id": nm_id,
+                    "component": "validated_downstream_cost_state",
+                    "reason": ",".join(dict.fromkeys(reasons)),
+                    "transit_status": str(row.get("transit_cost_status") or ""),
+                    "source_status": str(row.get("source_status") or ""),
+                })
+        return {
+            "validated": not missing,
+            "missing_components": missing,
+            "inputs_hashes": fingerprints,
+            "guard": guard,
+        }
+
+    def _set_wb_supply_reservation(
+        self,
+        *,
+        supply_id: str,
+        supply_revision: str,
+        desired: Mapping[int, float],
+        reason: str,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        current = {
+            int(item.get("nm_id") or 0): float(item.get("quantity") or 0.0)
+            for item in self.runtime.list_ff_stock_reservations(supply_id=supply_id)
+        }
+        target = {
+            int(nm_id): float(quantity)
+            for nm_id, quantity in desired.items()
+            if int(nm_id) > 0 and float(quantity) > 1e-9
+        }
+        scope = sorted(set(current) | set(target))
+        lines = [
+            {
+                "nm_id": nm_id,
+                "quantity_delta": target.get(nm_id, 0.0) - current.get(nm_id, 0.0),
+                "raw": {"reason": reason, "target_quantity": target.get(nm_id, 0.0)},
+            }
+            for nm_id in scope
+            if abs(target.get(nm_id, 0.0) - current.get(nm_id, 0.0)) > 1e-9
+        ]
+        if not lines:
+            return {"idempotent": True, "no_op": True, "supply_id": supply_id}
+        operation_type = (
+            FF_STOCK_RESERVATION_RELEASE
+            if not target
+            else FF_STOCK_RESERVATION_RESERVE
+            if not current
+            else FF_STOCK_RESERVATION_ADJUST
+        )
+        return self.runtime.create_ff_stock_reservation_operation(
+            operation_id="ffsr_" + uuid4().hex[:20],
+            source_key=_reservation_source_key(
+                supply_id,
+                supply_revision,
+                operation_type,
+                target,
+            ),
+            supply_id=supply_id,
+            supply_revision=supply_revision,
+            operation_type=operation_type,
+            created_at=self.timestamp_factory(),
+            diagnostics={"reason": reason, **dict(diagnostics or {})},
+            lines=lines,
+            expected_current=current,
+        )
 
     def _record_own_capital_wb_supply(
         self,
@@ -1891,6 +2221,41 @@ def _wb_supply_debit_identity(
     return cache_key, supply_id, source_key
 
 
+def _wb_supply_revision(
+    record: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+) -> str:
+    return _fingerprint(
+        {
+            "supply_id": _first_present(normalized, "supply_id", "wb_supply_id", "preorder_id"),
+            "status_id": normalized.get("status_id"),
+            "updated_date": _first_present(normalized, "updated_date", "updatedDate"),
+            "raw_goods_hash": record.get("raw_goods_hash") or normalized.get("raw_goods_hash"),
+            "raw_goods": record.get("raw_goods") or normalized.get("raw_goods") or [],
+        }
+    )
+
+
+def _reservation_source_key(
+    supply_id: str,
+    supply_revision: str,
+    operation_type: str,
+    target: Mapping[int, float],
+) -> str:
+    state_hash = _fingerprint(
+        {str(key): float(value) for key, value in sorted(target.items())}
+    ).removeprefix("sha256:")[:20]
+    return (
+        f"wb_supply_reservation:{supply_id}:{operation_type}:"
+        f"{str(supply_revision).removeprefix('sha256:')[:20]}:{state_hash}"
+    )
+
+
+def _fingerprint(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _wb_supply_checkpoint_match_fields(
     *,
     checkpoint: Mapping[str, Any],
@@ -2026,6 +2391,12 @@ def _balance_summary(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "sku_count": len(rows),
         "total_quantity": sum(float(item.get("current_stock_ff") or 0.0) for item in rows),
+        "physical_quantity": sum(float(item.get("physical_quantity") or 0.0) for item in rows),
+        "reserved_quantity": sum(float(item.get("reserved_quantity") or 0.0) for item in rows),
+        "available_quantity": sum(float(item.get("available_quantity") or 0.0) for item in rows),
+        "unsecured_reservation_quantity": sum(
+            float(item.get("unsecured_reservation_quantity") or 0.0) for item in rows
+        ),
         "negative_sku_count": sum(1 for item in rows if bool(item.get("negative_balance"))),
     }
 

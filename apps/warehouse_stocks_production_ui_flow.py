@@ -280,7 +280,8 @@ def _run_warehouse_ui_flow(
                 )
 
             summary_values = page.locator("[data-warehouse-summary] .warehouse-summary-value").all_inner_texts()
-            _assert(len(summary_values) == (7 if warehouse_key == "wb" else 4), f"{warehouse_name}: summary values")
+            expected_summary_count = 7 if warehouse_key in {"ff", "wb"} else 4
+            _assert(len(summary_values) == expected_summary_count, f"{warehouse_name}: summary values")
             visible_sku_count = _visible_decimal(summary_values[0])
             visible_quantity = _visible_decimal(summary_values[1])
             visible_capital = _visible_money(summary_values[2])
@@ -303,6 +304,20 @@ def _run_warehouse_ui_flow(
                 labels = page.locator("[data-warehouse-summary] .warehouse-summary-label").all_inner_texts()
                 _assert(labels[1] == "Всего в контуре WB", "WB contour replaces ambiguous total tile")
                 _assert("На складах WB + В пути к покупателям + В пути возврата на WB" in page.locator("[data-warehouse-meta]").inner_text(), "WB contour formula is visible")
+            if warehouse_key == "ff":
+                labels = page.locator("[data-warehouse-summary] .warehouse-summary-label").all_inner_texts()
+                _assert(
+                    labels == [
+                        "Уникальных SKU",
+                        "Физический остаток",
+                        "Товарный капитал",
+                        "Средневзвешенная себестоимость",
+                        "Зарезервировано",
+                        "Доступно",
+                        "Необеспеченный резерв",
+                    ],
+                    "Склад FF: physical and reservation summary labels",
+                )
             visible_status = page.locator("[data-warehouse-status]").inner_text().strip()
             _assert(
                 visible_status == str(detail_summary.get("status_label") or "").strip(),
@@ -461,7 +476,7 @@ def _run_warehouse_ui_flow(
         legacy_summary_values = page.locator(
             "[data-warehouse-summary] .warehouse-summary-value"
         ).all_inner_texts()
-        _assert(len(legacy_summary_values) == 4, "legacy FF transition: four loaded summary values")
+        _assert(len(legacy_summary_values) == 7, "legacy FF transition: reservation-aware summary values")
         _assert(
             _visible_decimal(legacy_summary_values[0])
             == Decimal(str(legacy_ff_expected["sku_count"])),

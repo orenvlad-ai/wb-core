@@ -380,11 +380,13 @@ def run_browser_checks(
                 )
                 if unavailable_cell.count() != 1:
                     raise AssertionError("unavailable stale-value fixture cell must render once")
-                if unavailable_cell.inner_text().strip() != "Исторические данные отсутствуют":
+                if unavailable_cell.inner_text().strip() != "—":
                     raise AssertionError(
                         "unavailable presentation must suppress a persisted numeric value, got "
                         f"{unavailable_cell.inner_text()!r}"
                     )
+                if unavailable_cell.locator('span[aria-label="Исторические данные отсутствуют"]').count() != 1:
+                    raise AssertionError("unavailable presentation must keep one accessible shared explanation")
             auto_schedule_block = _check_auto_schedule_block(page)
             activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)

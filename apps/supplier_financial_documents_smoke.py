@@ -1162,6 +1162,40 @@ def _assert_order_document_verification_smoke(bank_transfer_payload: dict[str, A
     if needs_review.get("order_match_status") != "needs_review" or needs_review.get("parse_status") != "needs_review":
         raise AssertionError(f"poor parse must require review: {needs_review}")
 
+    dated_without_date = parse_financial_document_text(
+        BANK_TRANSFER_TEXT.replace(
+            "CONTRACT 083/26 DD 13.05.2026",
+            "ADVANCE PAYMENT FOR GOODS UNDER CONTRACT NO 082/26 DATED",
+        ),
+        filename="bank-transfer-contract-no-dated.txt",
+    )
+    if (
+        dated_without_date.get("normalized_parse", {}).get("contract_number") != "082/26"
+        or dated_without_date.get("normalized_parse", {}).get("contract_date")
+    ):
+        raise AssertionError(
+            f"source without a contract date must preserve the missing source field: {dated_without_date}"
+        )
+    resolved = apply_supplier_order_document_match(
+        {**dated_without_date, "parse_status": "needs_review"},
+        {
+            "contract_no": "082/26",
+            "contract_date": "2026-04-04",
+            "invoice_amount_total": 541962.5,
+            "currency": "CNY",
+        },
+    )
+    if (
+        resolved.get("parse_status") != "parsed"
+        or resolved.get("order_match_status") != "matched"
+        or resolved.get("normalized_parse", {}).get("contract_date") != "2026-04-04"
+        or resolved.get("normalized_parse", {}).get("contract_resolution", {}).get("source")
+        != "canonical_invoice_contract_package"
+    ):
+        raise AssertionError(f"canonical linked contract fallback mismatch: {resolved}")
+    if any("missing contract date" in warning for warning in resolved.get("warnings", [])):
+        raise AssertionError(f"resolved contract date kept a stale warning: {resolved}")
+
     with TemporaryDirectory(prefix="supplier-financial-linked-contract-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
         now = "2026-05-30T08:00:00Z"
