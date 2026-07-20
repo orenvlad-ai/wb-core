@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -52,8 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     cutover_apply.add_argument("--backup-dir", required=True)
 
     commands.add_parser("readback")
+    backup = commands.add_parser("backup")
+    backup.add_argument("--backup-dir", required=True)
     commands.add_parser("hourly-sync")
-    commands.add_parser("manual-sync")
+    manual_sync = commands.add_parser("manual-sync")
+    manual_sync.add_argument("--backup-dir", required=True)
 
     emergency_dry_run = commands.add_parser("emergency-dry-run")
     emergency_dry_run.add_argument("--output", default="")
@@ -136,42 +141,64 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ) | {"external_optimistic_recheck": external_recheck}
     if args.command == "readback":
         return block.readback()
-    if args.command in {"hourly-sync", "manual-sync"}:
-        try:
-            supply_refresh = _refresh_official_supply_state(
-                runtime,
-                record_ff_movements=False,
-            )
-            downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
-            ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
-            plan = block.build_sync_plan()
-            result = block.apply_plan(
-                plan,
-                confirm_fingerprint=str(plan["plan_fingerprint"]),
-            )
-            proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations()
-            economics_publication = block.calculation_parameters.publish_current_functional_economics()
+    if args.command == "backup":
+        with _warehouse_sync_lock(runtime.runtime_dir):
             return {
                 "status": "success",
-                "mode": args.command,
-                "supply_refresh": supply_refresh,
-                "downstream_cost_layers_materialized": downstream_cost_layers,
-                "ff_state": ff_state,
-                "plan_fingerprint": plan["plan_fingerprint"],
-                "diff": plan["diff"],
-                "active_version": result.get("active_version"),
-                "sync": result.get("sync"),
-                "reconciliation": result.get("reconciliation"),
-                "proxy_targeted_recalculation": proxy_recalculation,
-                "functional_economics_publication": {
-                    "plan_fingerprint": economics_publication.get("plan_fingerprint"),
-                    "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
-                    "database_written": economics_publication.get("database_written"),
-                },
+                "mode": "backup",
+                "backup": _create_pre_sync_backup(
+                    runtime,
+                    backup_dir=Path(str(args.backup_dir)),
+                    timestamp=block.timestamp_factory(),
+                ),
             }
-        except Exception as exc:
-            block.record_failed_sync(exc)
-            raise
+    if args.command in {"hourly-sync", "manual-sync"}:
+        with _warehouse_sync_lock(runtime.runtime_dir):
+            backup_result = (
+                _create_pre_sync_backup(
+                    runtime,
+                    backup_dir=Path(str(args.backup_dir)),
+                    timestamp=block.timestamp_factory(),
+                )
+                if args.command == "manual-sync"
+                else None
+            )
+            try:
+                supply_refresh = _refresh_official_supply_state(
+                    runtime,
+                    record_ff_movements=False,
+                )
+                downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
+                ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
+                plan = block.build_sync_plan()
+                result = block.apply_plan(
+                    plan,
+                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                )
+                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations()
+                economics_publication = block.calculation_parameters.publish_current_functional_economics()
+                return {
+                    "status": "success",
+                    "mode": args.command,
+                    "backup": backup_result,
+                    "supply_refresh": supply_refresh,
+                    "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "ff_state": ff_state,
+                    "plan_fingerprint": plan["plan_fingerprint"],
+                    "diff": plan["diff"],
+                    "active_version": result.get("active_version"),
+                    "sync": result.get("sync"),
+                    "reconciliation": result.get("reconciliation"),
+                    "proxy_targeted_recalculation": proxy_recalculation,
+                    "functional_economics_publication": {
+                        "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                        "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
+                        "database_written": economics_publication.get("database_written"),
+                    },
+                }
+            except Exception as exc:
+                block.record_failed_sync(exc)
+                raise
     if args.command == "emergency-dry-run":
         plan = block.build_emergency_rebuild_plan()
         return _write_optional_plan(plan, str(args.output or ""))
@@ -289,6 +316,35 @@ def _fresh_stocks_block() -> StocksBlock:
     """Return an official source whose cutover/hourly fetch cannot reuse a prior capture."""
 
     return StocksBlock(HttpBackedStocksSource(reuse_ttl_seconds=0.0))
+
+
+@contextmanager
+def _warehouse_sync_lock(runtime_dir: Path):
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_dir / ".warehouse-functional-sync.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _create_pre_sync_backup(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    backup_dir: Path,
+    timestamp: str,
+) -> dict[str, Any]:
+    if not backup_dir.is_absolute():
+        raise ValueError("warehouse functional backup requires an absolute backup directory")
+    resolved_dir = backup_dir.resolve()
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+    normalized_timestamp = str(timestamp).replace(":", "").replace("-", "")
+    destination = resolved_dir / f"warehouse-functional-pre-sync-{normalized_timestamp}.sqlite3"
+    backup_result = runtime.backup_database(destination)
+    destination.chmod(0o600)
+    return backup_result
 
 
 def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) -> int:
