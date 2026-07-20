@@ -162,6 +162,11 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('"autoanswers-capacity"', source)
         self.assertIn('"autoanswers-schema-preflight"', source)
         self.assertGreaterEqual(source.count("allow_transport_reconciliation=False"), 2)
+        activation_source = (ROOT / "apps" / "wb_autoanswers_activation.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("shutil.disk_usage(backup_root).free", activation_source)
+        self.assertIn("_create_current_compressed_schema_backup", activation_source)
 
     def test_manual_activation_uses_get_only_canary_before_enabling_worker_timer(self) -> None:
         original = hosted.load_hosted_runtime_target(TARGET)

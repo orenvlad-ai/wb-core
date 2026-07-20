@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -62,6 +63,7 @@ DEFAULT_POLICY_VERSION = "owner-policy-2026-07-20-v1"
 DEFAULT_LEASE_SECONDS = 300
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v2"
 
 
 class AutoanswersRuntimeError(RuntimeError):
@@ -80,6 +82,90 @@ def iso_utc(value: datetime | None = None) -> str:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return current.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _zstd_decompressed_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    process = subprocess.Popen(
+        ["zstd", "--decompress", "--stdout", "--quiet", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+        digest.update(chunk)
+    _stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        raise AutoanswersRuntimeError(
+            "compressed schema backup decompression failed: "
+            + stderr.decode("utf-8", errors="replace").strip(),
+            code="schema_backup_failed",
+        )
+    return digest.hexdigest()
+
+
+def _verified_compressed_schema_backup_status(
+    runtime_dir: Path,
+    *,
+    verify_bytes: bool,
+) -> dict[str, Any]:
+    backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    manifests = sorted(backup_dir.glob("*.sqlite3.zst.manifest.json")) if backup_dir.is_dir() else []
+    if not manifests:
+        return {"count": 0, "latest_filename": None, "integrity_check": None, "sha256": None}
+    manifest_path = manifests[-1]
+    try:
+        metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+        filename = str(metadata.get("compressed_filename") or "")
+        if (
+            metadata.get("contract") != COMPRESSED_SCHEMA_BACKUP_CONTRACT
+            or int(metadata.get("schema_version") or 0) != SCHEMA_VERSION
+            or Path(filename).name != filename
+            or metadata.get("sqlite_integrity_check") != "ok"
+        ):
+            raise ValueError("compressed schema backup manifest contract mismatch")
+        archive = backup_dir / filename
+        if not archive.is_file() or archive.stat().st_size != int(metadata.get("compressed_size") or -1):
+            raise ValueError("compressed schema backup archive size mismatch")
+        if verify_bytes:
+            archive_sha = _sha256_path(archive)
+            if archive_sha != str(metadata.get("compressed_sha256") or ""):
+                raise ValueError("compressed schema backup archive hash mismatch")
+            subprocess.run(
+                ["zstd", "--test", "--quiet", str(archive)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=7200,
+                check=True,
+            )
+            if _zstd_decompressed_sha256(archive) != str(metadata.get("snapshot_sha256") or ""):
+                raise ValueError("compressed schema backup restore hash mismatch")
+    except Exception as exc:
+        if isinstance(exc, AutoanswersRuntimeError):
+            raise
+        raise AutoanswersRuntimeError(
+            "compressed pre-schema backup verification failed",
+            code="schema_backup_failed",
+        ) from exc
+    return {
+        "count": len(manifests),
+        "latest_filename": filename,
+        "manifest_filename": manifest_path.name,
+        "size_bytes": int(metadata["compressed_size"]),
+        "integrity_check": "ok",
+        "sha256": f"sha256:{metadata['compressed_sha256']}",
+        "snapshot_sha256": f"sha256:{metadata['snapshot_sha256']}",
+        "format": "zstd",
+    }
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -400,6 +486,17 @@ class AutoanswersRepository:
 
         if not self.db_path.exists() or self.db_path.stat().st_size == 0:
             return None
+        compressed = _verified_compressed_schema_backup_status(
+            self.runtime_dir,
+            verify_bytes=True,
+        )
+        if int(compressed.get("count") or 0) > 0:
+            return (
+                self.runtime_dir
+                / "backups"
+                / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+                / str(compressed["latest_filename"])
+            )
         backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backup_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(backup_dir, 0o700)
@@ -907,6 +1004,10 @@ class AutoanswersRepository:
             ).fetchall()
         backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
+        compressed = _verified_compressed_schema_backup_status(
+            self.runtime_dir,
+            verify_bytes=False,
+        )
         settings = self.settings()
         return {
             "settings": {
@@ -938,8 +1039,10 @@ class AutoanswersRepository:
             ],
             "schema_migrations": [dict(row) for row in schema_rows],
             "schema_backup": {
-                "count": len(backups),
-                "latest_filename": backups[-1].name if backups else None,
+                "count": len(backups) + int(compressed.get("count") or 0),
+                "latest_filename": (
+                    backups[-1].name if backups else compressed.get("latest_filename")
+                ),
             },
         }
 
@@ -947,7 +1050,10 @@ class AutoanswersRepository:
         backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
         if not backups:
-            return {"count": 0, "latest_filename": None, "integrity_check": None, "sha256": None}
+            return _verified_compressed_schema_backup_status(
+                self.runtime_dir,
+                verify_bytes=True,
+            )
         latest = backups[-1]
         with sqlite3.connect(f"file:{latest.resolve()}?mode=ro", uri=True, timeout=60) as conn:
             integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
