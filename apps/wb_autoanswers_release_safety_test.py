@@ -136,8 +136,17 @@ class ReleaseSafetyTest(unittest.TestCase):
             dry_run=True,
             allow_dirty=True,
         )
+        os_dependency_command = " ".join(plan["commands"]["autoanswers_os_dependencies"])
         dependency_command = " ".join(plan["commands"]["autoanswers_node_dependencies"])
         migration_command = " ".join(plan["commands"]["autoanswers_prepare_deploy"])
+        self.assertIn("nodejs.org/dist/v22.21.1", os_dependency_command)
+        self.assertIn("680d3f30b24a7ff24b98db5e96f294c0070f8f9078df658da1bce1b9c9873c88", os_dependency_command)
+        self.assertIn("e660365729b434af422bcd2e8e14228637ecf24a1de2cd7c916ad48f2a0521e1", os_dependency_command)
+        self.assertIn("sha256sum --check --status", os_dependency_command)
+        self.assertIn("apt-get install -y ca-certificates curl xz-utils ffmpeg", os_dependency_command)
+        self.assertIn("mktemp -d /opt/wb-core-runtime/node-runtimes/.install", os_dependency_command)
+        self.assertIn("command -v npm", os_dependency_command)
+        self.assertIn("command -v ffmpeg", os_dependency_command)
         self.assertIn("npm ci --omit=dev --ignore-scripts", dependency_command)
         self.assertIn("Number(process.versions.node.split", dependency_command)
         self.assertIn("command -v ffmpeg", dependency_command)
