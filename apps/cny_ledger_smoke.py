@@ -817,10 +817,19 @@ def _assert_http_routes_and_order_integration() -> None:
             if shipment["approx_yuan_rate"] != 15.75:
                 raise AssertionError("HTTP flow must not overwrite old estimated CNY rate")
             detail_status, detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/http-order")
-            if detail_status != 200 or detail.get("exact_landed_cost_per_unit_rub") in (None, "", 0):
-                raise AssertionError(f"exact cost per unit must be exposed after confirmed fees: {detail_status} {detail}")
-            if detail.get("exact_cost_status") != "ok":
-                raise AssertionError(f"exact cost status must be ok when CNY ledger and quantity are available: {detail}")
+            if (
+                detail_status != 200
+                or detail.get("exact_landed_cost_per_unit_rub") is not None
+                or detail.get("exact_cost_status") != "unavailable"
+                or not any(
+                    "товарных строк invoice" in str(reason)
+                    for reason in detail.get("exact_cost_blockers") or []
+                )
+            ):
+                raise AssertionError(
+                    "a legacy header quantity cannot replace missing canonical invoice SKU lines: "
+                    f"{detail_status} {detail}"
+                )
             delete_statement_status, delete_statement = _delete_json(
                 f"{base_url}{order_doc_path}/{statement_document_id}"
             )

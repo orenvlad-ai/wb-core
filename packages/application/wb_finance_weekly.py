@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_OPENING_DATE,
 )
+from packages.business_time import business_date_from_timestamp
 
 
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
@@ -65,8 +66,6 @@ def _functional_wb_cost_state(
 
     required = {
         "sheet_vitrina_v1_warehouse_functional_cutovers",
-        "sheet_vitrina_v1_warehouse_functional_versions",
-        "sheet_vitrina_v1_warehouse_functional_balances",
         "sheet_vitrina_v1_warehouse_wb_daily_cost",
     }
     tables = {
@@ -83,7 +82,7 @@ def _functional_wb_cost_state(
     ).fetchone()
     if cutover is None:
         return None, False
-    cutover_date = str(cutover["cutover_at"])[:10]
+    cutover_date = business_date_from_timestamp(str(cutover["cutover_at"]))
     row = conn.execute(
         """SELECT * FROM sheet_vitrina_v1_warehouse_wb_daily_cost
            WHERE cutover_id='warehouse_functional_cutover_v1'
@@ -111,39 +110,10 @@ def _functional_wb_cost_state(
         }, True
     if as_of_date < cutover_date:
         return None, True
-    version = conn.execute(
-        """SELECT version_id,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_versions
-           WHERE cutover_id='warehouse_functional_cutover_v1'
-             AND status='good' AND substr(effective_at,1,10)<=?
-           ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
-        (as_of_date,),
-    ).fetchone()
-    if version is None:
-        return None, True
-    row = conn.execute(
-        """SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
-           WHERE version_id=? AND warehouse_key='wb' AND nm_id=?""",
-        (version["version_id"], nm_id),
-    ).fetchone()
-    if row is None:
-        return None, True
-    quantity = max(_decimal(row["quantity"]), ZERO)
-    covered = min(max(_decimal(row["cost_covered_quantity"]), ZERO), quantity)
-    certified = bool(row["certified"])
-    quality = str(row["quality"] or "coverage_gap")
-    fallback = covered if quality == "fallback_average" else ZERO
-    confirmed = covered if certified else ZERO
-    estimated = max(covered - confirmed - fallback, ZERO)
-    return {
-        "our_wb_unit_cost_rub": row["wac_rub"],
-        "confirmed_qty": _money_text(confirmed),
-        "estimated_qty": _money_text(estimated),
-        "fallback_qty": _money_text(fallback),
-        "confirmed_share_pct": _money_text(confirmed / quantity if quantity > ZERO else None),
-        "source_status": quality,
-        "component_status_json": row["provenance_json"],
-        "inputs_hash": str(version["plan_fingerprint"]),
-    }, True
+    # A current functional balance is not historical evidence.  Once the
+    # functional boundary applies, a missing exact-day row must remain unknown
+    # instead of inheriting the last published warehouse version.
+    return None, True
 
 
 def week_bounds(day: date) -> tuple[date, date]:

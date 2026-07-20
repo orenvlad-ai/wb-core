@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
 import time
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import FrameLocator, Page, expect, sync_playwright
@@ -24,6 +26,7 @@ WAREHOUSES = (
 )
 WAREHOUSE_UI_PATH = "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
 WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
+WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
 
 
 def _period_vitrina_url(base_url: str, *, date_to: str) -> str:
@@ -49,6 +52,50 @@ def run_warehouse_ui_flow(
     allowed_server_error_paths: tuple[str, ...] = (),
     allowed_console_error_messages: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    """Run acceptance and always persist a machine-readable terminal report."""
+
+    try:
+        return _run_warehouse_ui_flow(
+            base_url=base_url,
+            auth_cookie=auth_cookie,
+            expected_readback=expected_readback,
+            evidence_dir=evidence_dir,
+            headless=headless,
+            strict_business_acceptance=strict_business_acceptance,
+            acceptance_profile=acceptance_profile,
+            allowed_server_error_paths=allowed_server_error_paths,
+            allowed_console_error_messages=allowed_console_error_messages,
+        )
+    except Exception as exc:
+        target = Path(evidence_dir).resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        report = {
+            "status": "failed",
+            "requested_url": str(base_url or "").strip().rstrip("/") + WAREHOUSE_UI_PATH,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "strict_business_acceptance": bool(strict_business_acceptance),
+            "acceptance_profile": str(acceptance_profile or ""),
+        }
+        (target / "warehouse_ui_flow_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        raise
+
+
+def _run_warehouse_ui_flow(
+    *,
+    base_url: str,
+    auth_cookie: str | None,
+    expected_readback: Mapping[str, Any],
+    evidence_dir: Path,
+    headless: bool = True,
+    strict_business_acceptance: bool = True,
+    acceptance_profile: str | None = None,
+    allowed_server_error_paths: tuple[str, ...] = (),
+    allowed_console_error_messages: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Render every warehouse and compare visible values with canonical readback."""
 
     normalized_base_url = str(base_url or "").strip().rstrip("/")
@@ -56,7 +103,11 @@ def run_warehouse_ui_flow(
     if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname:
         raise ValueError("warehouse UI flow requires an absolute http(s) base URL")
     normalized_acceptance_profile = str(acceptance_profile or "").strip()
-    if normalized_acceptance_profile not in {"", WAREHOUSE_CHAIN_RECOVERY_PROFILE}:
+    if normalized_acceptance_profile not in {
+        "",
+        WAREHOUSE_CHAIN_RECOVERY_PROFILE,
+        WAREHOUSE_COST_TRANSPARENCY_PROFILE,
+    }:
         raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
     documents = [
         dict(item)
@@ -88,6 +139,28 @@ def run_warehouse_ui_flow(
     sync_readback = dict(expected_readback.get("sync") or {})
     if not str(sync_readback.get("last_success_at") or ""):
         raise ValueError("warehouse UI flow requires a successful bounded WB sync timestamp")
+    wb_snapshot = dict(expected_readback.get("wb_snapshot") or {})
+    if strict_business_acceptance:
+        if (
+            normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE
+            and int(wb_snapshot.get("sku_count") or 0) != 33
+        ):
+            raise ValueError("profiled official WB snapshot must reconcile all 33 SKU")
+        if not bool(wb_snapshot.get("pagination_complete")):
+            raise ValueError("official WB snapshot pagination must be complete")
+        if int(wb_snapshot.get("exact_duplicate_count") or 0) != 0 or int(
+            wb_snapshot.get("source_key_duplicate_count") or 0
+        ) != 0:
+            raise ValueError("official WB snapshot contains duplicate source rows")
+        if not bool(wb_snapshot.get("raw_to_canonical_mapping_matches")):
+            raise ValueError("official WB raw payload does not reconcile to canonical items")
+        if (
+            Decimal(str(wb_snapshot.get("physical_quantity") or 0))
+            + Decimal(str(wb_snapshot.get("in_way_to_client") or 0))
+            + Decimal(str(wb_snapshot.get("in_way_from_client") or 0))
+            != Decimal(str(wb_snapshot.get("wb_contour_quantity") or 0))
+        ):
+            raise ValueError("official WB contour arithmetic does not reconcile")
 
     evidence_dir = evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +280,7 @@ def run_warehouse_ui_flow(
                 )
 
             summary_values = page.locator("[data-warehouse-summary] .warehouse-summary-value").all_inner_texts()
-            _assert(len(summary_values) == (8 if warehouse_key == "wb" else 4), f"{warehouse_name}: summary values")
+            _assert(len(summary_values) == (7 if warehouse_key == "wb" else 4), f"{warehouse_name}: summary values")
             visible_sku_count = _visible_decimal(summary_values[0])
             visible_quantity = _visible_decimal(summary_values[1])
             visible_capital = _visible_money(summary_values[2])
@@ -226,6 +299,10 @@ def run_warehouse_ui_flow(
                 _assert(summary_values[3].strip() == "—", f"{warehouse_name}: zero warehouse WAC is honestly empty")
             _assert("Актуальность:" in page.locator("[data-warehouse-meta]").inner_text(), f"{warehouse_name}: timestamp")
             _assert("Источник:" in page.locator("[data-warehouse-meta]").inner_text(), f"{warehouse_name}: source")
+            if warehouse_key == "wb":
+                labels = page.locator("[data-warehouse-summary] .warehouse-summary-label").all_inner_texts()
+                _assert(labels[1] == "Всего в контуре WB", "WB contour replaces ambiguous total tile")
+                _assert("На складах WB + В пути к покупателям + В пути возврата на WB" in page.locator("[data-warehouse-meta]").inner_text(), "WB contour formula is visible")
             visible_status = page.locator("[data-warehouse-status]").inner_text().strip()
             _assert(
                 visible_status == str(detail_summary.get("status_label") or "").strip(),
@@ -250,9 +327,9 @@ def run_warehouse_ui_flow(
                     Decimal(str(contour.get("quantity") or 0)),
                     Decimal(str(contour.get("in_way_to_client") or 0)),
                     Decimal(str(contour.get("in_way_from_client") or 0)),
-                    Decimal(str(contour.get("total") or 0)),
                 ]
-                _assert([_visible_decimal(value) for value in summary_values[4:8]] == expected_contour, "Склад WB: four contour quantities")
+                _assert([_visible_decimal(value) for value in summary_values[4:7]] == expected_contour, "Склад WB: contour components")
+                _assert(visible_quantity == Decimal(str(contour.get("total") or 0)), "Склад WB: contour total")
             warehouse_surface_text = page.locator('[data-unified-tab-panel="warehouses"]').inner_text()
             for marker in ("Internal Server Error", "Traceback", "Остатки / Склады failed", "Данные склада не загружены."):
                 if marker in warehouse_surface_text:
@@ -261,6 +338,23 @@ def run_warehouse_ui_flow(
             balance_count = page.locator("[data-warehouse-balance-row]").count()
             _assert(balance_count == int(expected_sku_count), f"{warehouse_name}: balance row count")
             _assert(balance_count == len(detail_balances), f"{warehouse_name}: UI/detail balance rows")
+            _assert(
+                all(str(item.get("warning") or "").strip() for item in detail_balances),
+                f"{warehouse_name}: every cost row has a visible localized status",
+            )
+            certified_count = sum(1 for item in detail_balances if bool(item.get("certified")))
+            if certified_count:
+                certified_without_identity_warning = sum(
+                    1
+                    for item in detail_balances
+                    if bool(item.get("certified"))
+                    and not str(item.get("identity_warning") or "").strip()
+                )
+                _assert(
+                    page.locator('[data-warehouse-balance-row] .warehouse-balance-warning[data-tone="success"]').count()
+                    == certified_without_identity_warning,
+                    f"{warehouse_name}: only certified rows without identity warnings have green visible status",
+                )
             if warehouse_key == "ff":
                 legacy_payload = _protected_json_get(
                     context,
@@ -573,6 +667,16 @@ def run_warehouse_ui_flow(
         registry_json = json.dumps(registry_payload, ensure_ascii=False)
         _assert("production_average_cost_rub" in registry_json, "supplier production cost field")
         _assert("china_to_ff_average_cost_rub" in registry_json, "supplier China-to-FF cost field")
+        cost_profile_evidence: dict[str, Any] = {}
+        if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE:
+            cost_profile_evidence = _assert_supplier_cost_transparency_profile(
+                page=page,
+                context=context,
+                base_url=normalized_base_url,
+                registry_payload=registry_payload,
+                evidence_dir=evidence_dir,
+            )
+            screenshots.extend(cost_profile_evidence.pop("screenshots"))
         bank_fee_payload: dict[str, Any] | None = None
         bank_fee_shipment_id = ""
         for column in reversed(list(registry_payload.get("columns") or [])):
@@ -672,6 +776,7 @@ def run_warehouse_ui_flow(
             "bank_fee_sources": sorted({str((item.get("raw") or {}).get("source") or "") for item in bank_fee_lines}),
             "registry_screenshot": str(supplier_registry_screenshot),
             "screenshot": str(supplier_screenshot),
+            **cost_profile_evidence,
         }
 
         vitrina_url = normalized_base_url + "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
@@ -734,7 +839,12 @@ def run_warehouse_ui_flow(
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
         page.screenshot(path=str(sku_screenshot), full_page=False)
         screenshots.append(str(sku_screenshot))
-        period_date_to = str((expected_readback.get("active_version") or {}).get("effective_at") or "")[:10]
+        snapshot_date = str(wb_snapshot.get("snapshot_date") or "")[:10]
+        last_closed_date = str(
+            datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Yekaterinburg")).date()
+            - timedelta(days=1)
+        )
+        period_date_to = min(snapshot_date, last_closed_date) if snapshot_date else last_closed_date
         period_vitrina_url = _period_vitrina_url(
             normalized_base_url,
             date_to=period_date_to,
@@ -765,11 +875,51 @@ def run_warehouse_ui_flow(
             all(count > 0 for count in filled_metrics.values()),
             "canonical WB cost and Proxy 3 are filled from 2026-07-01 where persisted inputs exist",
         )
+        closed_dates = []
+        cursor = date.fromisoformat("2026-07-01")
+        closed_end = date.fromisoformat(period_date_to)
+        while cursor <= closed_end:
+            closed_dates.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+        wb_contour_by_date = dict(
+            historical_cost.get("contour_quantities_by_date") or {}
+        )
+        closed_date_coverage = {
+            metric_key: {
+                day: _metric_date_coverage(
+                    page,
+                    metric_key=metric_key,
+                    day=day,
+                    wb_contour_by_scope=wb_contour_by_date.get(day),
+                )
+                for day in closed_dates
+            }
+            for metric_key in (
+                "our_wb_unit_cost_rub",
+                "proxy_profit_3_rub",
+                "proxy_margin_3_pct",
+            )
+        }
+        for metric_key, day_rows in closed_date_coverage.items():
+            for day, coverage in day_rows.items():
+                _assert(coverage["total"] > 0, f"{metric_key} {day}: rendered cells")
+                _assert(
+                    coverage["filled"] == coverage["applicable"],
+                    f"{metric_key} {day}: all applicable closed-date cells are filled",
+                )
         exact_gap_dates: dict[str, dict[str, dict[str, int]]] = {}
-        if normalized_acceptance_profile == WAREHOUSE_CHAIN_RECOVERY_PROFILE:
+        if normalized_acceptance_profile in {
+            WAREHOUSE_CHAIN_RECOVERY_PROFILE,
+            WAREHOUSE_COST_TRANSPARENCY_PROFILE,
+        }:
             exact_gap_dates = {
                 metric_key: {
-                    day: _metric_date_coverage(page, metric_key=metric_key, day=day)
+                    day: _metric_date_coverage(
+                        page,
+                        metric_key=metric_key,
+                        day=day,
+                        wb_contour_by_scope=wb_contour_by_date.get(day),
+                    )
                     for day in ("2026-07-17", "2026-07-18")
                 }
                 for metric_key in (
@@ -782,7 +932,7 @@ def run_warehouse_ui_flow(
                 for day, coverage in day_rows.items():
                     _assert(coverage["total"] > 0, f"{metric_key} {day}: rendered cells")
                     _assert(
-                        coverage["filled"] == coverage["total"],
+                        coverage["filled"] == coverage["applicable"],
                         f"{metric_key} {day}: no unexplained gaps",
                     )
         archived_metric_keys = (
@@ -820,6 +970,31 @@ def run_warehouse_ui_flow(
             if page.locator(f'[data-metric-key="{metric_key}"]').count() == 0
         ]
         _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
+        if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE:
+            historical_unavailable_cells = page.locator(
+                'td[data-metric-key^="own_capital_"][data-cell-date="2026-07-18"]'
+            )
+            _assert(historical_unavailable_cells.count() > 0, "18 July warehouse history cells are rendered")
+            _assert(
+                all(
+                    historical_unavailable_cells.nth(index).inner_text().strip()
+                    == "Исторические данные отсутствуют"
+                    for index in range(historical_unavailable_cells.count())
+                ),
+                "18 July unproved warehouse history has an explicit reason instead of zero or dash",
+            )
+            functional_closed_cells = page.locator(
+                f'td[data-metric-key^="own_capital_"][data-cell-date="{period_date_to}"]'
+            )
+            _assert(functional_closed_cells.count() > 0, "last closed warehouse history cells are rendered")
+            _assert(
+                all(
+                    functional_closed_cells.nth(index).inner_text().strip()
+                    != "Исторические данные отсутствуют"
+                    for index in range(functional_closed_cells.count())
+                ),
+                "last closed functional warehouse date is not presented as a historical gap",
+            )
         proxy_screenshot = evidence_dir / "proxy3_vitrina.png"
         page.screenshot(path=str(proxy_screenshot), full_page=False)
         screenshots.append(str(proxy_screenshot))
@@ -832,8 +1007,19 @@ def run_warehouse_ui_flow(
             "proxy_margin_3_visible": True,
             "filled_metric_cells_from_2026_07_01": filled_metrics,
             "exact_gap_date_coverage": exact_gap_dates,
+            "closed_date_coverage": closed_date_coverage,
             "archived_metric_keys_absent": list(archived_metric_keys),
             "canonical_stage_metric_keys": canonical_stage_keys,
+            "warehouse_history_unavailable_reason_date": (
+                "2026-07-18"
+                if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE
+                else None
+            ),
+            "warehouse_history_last_closed_date": (
+                period_date_to
+                if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE
+                else None
+            ),
             "period_url": period_vitrina_url,
             "screenshots": [str(stock_report_screenshot), str(sku_screenshot), str(proxy_screenshot)],
         }
@@ -869,6 +1055,8 @@ def run_warehouse_ui_flow(
         "supplier_registry": supplier_evidence,
         "dependent_consumers": consumer_evidence,
         "hourly_sync": dict(expected_readback.get("sync") or {}),
+        "recent_warehouse_versions": list(expected_readback.get("recent_versions") or []),
+        "official_wb_snapshot": wb_snapshot,
         "warehouse_action_theme": warehouse_action_theme,
         "business_acceptance": business_acceptance,
         "acceptance_profile": normalized_acceptance_profile or None,
@@ -1008,6 +1196,8 @@ def _assert_business_warehouse_acceptance(
     _assert(set(details) == {key for key, _ in WAREHOUSES}, "business acceptance has all six warehouse details")
     production_rows = list(details["production"].get("balances") or [])
     recovery_profile = acceptance_profile == WAREHOUSE_CHAIN_RECOVERY_PROFILE
+    cost_transparency_profile = acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE
+    fixed_cost_controls = recovery_profile or cost_transparency_profile
     expected_identities = (
         {
             1221231049: "(Anti-Spy) iPhone 18 Pro",
@@ -1066,7 +1256,7 @@ def _assert_business_warehouse_acceptance(
 
     china_rows = list(details["china_to_ff"].get("balances") or [])
     china_wacs = [Decimal(str(item.get("wac_rub") or 0)) for item in china_rows if Decimal(str(item.get("quantity") or 0)) > 0]
-    if recovery_profile:
+    if fixed_cost_controls:
         _assert(china_wacs and min(china_wacs) < Decimal("84"), "China → FF retains lower-cost confirmed party rows")
         _assert(max(china_wacs) >= Decimal("121"), "China → FF retains arithmetically supported 121–130 ₽ rows")
 
@@ -1074,14 +1264,14 @@ def _assert_business_warehouse_acceptance(
         (dict(item) for item in details["ff"].get("balances") or [] if int(item.get("nm_id") or 0) == 391662965),
         None,
     )
-    if recovery_profile:
+    if fixed_cost_controls:
         _assert(ff_control is not None, "FF control nmID 391662965 exists")
         _assert(Decimal(str((ff_control or {}).get("quantity") or 0)) == Decimal("6750"), "FF control quantity")
         _assert(abs(Decimal(str((ff_control or {}).get("wac_rub") or 0)) - Decimal("119.9415482137855")) < Decimal("0.0000001"), "FF control WAC")
         _assert(abs(Decimal(str((ff_control or {}).get("capital_rub") or 0)) - Decimal("809605.450443052125")) < Decimal("0.0001"), "FF control capital")
 
     ff_to_wb = dict(details["ff_to_wb"].get("warehouse") or {})
-    if recovery_profile:
+    if fixed_cost_controls:
         _assert(Decimal(str(ff_to_wb.get("total_quantity") or 0)) == 0, "FF → WB expected zero")
         _assert(
             not any(Decimal(str(item.get("quantity") or 0)) == Decimal("31500") for item in details["ff_to_wb"].get("balances") or []),
@@ -1100,7 +1290,7 @@ def _assert_business_warehouse_acceptance(
                 "wac_rub": str((ff_control or {}).get("wac_rub") or 0),
                 "capital_rub": str((ff_control or {}).get("capital_rub") or 0),
             }
-            if recovery_profile
+            if fixed_cost_controls
             else None
         ),
         "ff_to_wb_quantity": str(ff_to_wb.get("total_quantity") or 0),
@@ -1128,11 +1318,16 @@ def _settings_frame_locator(page: Page) -> FrameLocator:
 
 
 def _supplier_financial_detail_url(base_url: str, shipment_id: str) -> str:
+    return _supplier_detail_url(base_url, shipment_id, tab="documents")
+
+
+def _supplier_detail_url(base_url: str, shipment_id: str, *, tab: str) -> str:
     return (
         str(base_url).rstrip("/")
         + "/sheet-vitrina-v1/supplier?embedded=operator&shipment_id="
         + quote(str(shipment_id), safe="")
-        + "&tab=documents"
+        + "&tab="
+        + quote(str(tab), safe="")
     )
 
 
@@ -1178,15 +1373,75 @@ def _filled_metric_cells(page: Page, *, metric_key: str, date_from: str) -> int:
     return filled
 
 
-def _metric_date_coverage(page: Page, *, metric_key: str, day: str) -> dict[str, int]:
+def _metric_date_coverage(
+    page: Page,
+    *,
+    metric_key: str,
+    day: str,
+    wb_contour_by_scope: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
     cells = page.locator(
         f'td[data-metric-key="{metric_key}"][data-cell-date="{day}"]'
     )
     filled = 0
+    applicable = 0
     for index in range(cells.count()):
-        if cells.nth(index).inner_text().strip() not in {"", "—", "-"}:
+        cell = cells.nth(index)
+        row_id = str(cell.get_attribute("data-row-id") or "")
+        scope_id = row_id.rsplit("|", 1)[0]
+        if metric_key == "our_wb_unit_cost_rub":
+            contour = dict(wb_contour_by_scope or {})
+            _assert(
+                scope_id in contour,
+                f"{metric_key} {day}: canonical WB contour quantity for {scope_id}",
+            )
+            applicability_value = _visible_optional_decimal(str(contour[scope_id]))
+        else:
+            applicability_metric = "total_orderSum" if scope_id == "TOTAL" else "orderSum"
+            applicability_cell = page.locator(
+                f'td[data-row-id="{scope_id}|{applicability_metric}"]'
+                f'[data-cell-date="{day}"]'
+            )
+            _assert(
+                applicability_cell.count() == 1,
+                f"{metric_key} {day}: applicability source {scope_id}|{applicability_metric}",
+            )
+            applicability_value = _visible_optional_decimal(applicability_cell.inner_text())
+        is_applicable = applicability_value is not None and (
+            applicability_value > 0
+            if metric_key == "our_wb_unit_cost_rub"
+            else not (metric_key == "proxy_margin_3_pct" and applicability_value == 0)
+        )
+        if not is_applicable:
+            continue
+        applicable += 1
+        if _visible_optional_decimal(cell.inner_text()) is not None:
             filled += 1
-    return {"total": cells.count(), "filled": filled}
+    return {
+        "total": cells.count(),
+        "applicable": applicable,
+        "inapplicable": cells.count() - applicable,
+        "filled": filled,
+    }
+
+
+def _visible_optional_decimal(value: str) -> Decimal | None:
+    normalized = (
+        str(value or "")
+        .replace("\u00a0", "")
+        .replace("\u202f", "")
+        .replace(" ", "")
+        .replace("₽", "")
+        .replace("%", "")
+        .replace(",", ".")
+        .strip()
+    )
+    if normalized in {"", "—", "-", "Историческиеданныеотсутствуют"}:
+        return None
+    try:
+        return Decimal(normalized)
+    except Exception as exc:
+        raise AssertionError(f"visible metric value is not numeric: {value!r}") from exc
 
 
 def _registry_cell_display(
@@ -1205,6 +1460,167 @@ def _registry_cell_display(
             cell = ((row or {}).get("cells") or {}).get(shipment_id) or {}
             return str((cell or {}).get("display") or "")
     return ""
+
+
+def _assert_supplier_cost_transparency_profile(
+    *,
+    page: Page,
+    context: Any,
+    base_url: str,
+    registry_payload: Mapping[str, Any],
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    """Verify immutable controls for migration 106 only when explicitly selected."""
+
+    control_column = next(
+        (
+            dict(item)
+            for item in registry_payload.get("columns") or []
+            if str((item or {}).get("invoice_no") or "") == "26GN390"
+        ),
+        None,
+    )
+    _assert(control_column is not None, "26GN390 supplier registry column")
+    control_shipment_id = str((control_column or {}).get("shipment_id") or "")
+    control_detail = _protected_json_get(
+        context,
+        base_url
+        + "/v1/sheet-vitrina-v1/supply/supplier-shipments/"
+        + quote(control_shipment_id, safe=""),
+        label="26GN390 supplier detail API",
+    )
+    control_breakdown = dict(control_detail.get("supplier_cost_breakdown") or {})
+    control_lines = {
+        int(item.get("nm_id") or 0): dict(item)
+        for item in control_breakdown.get("lines") or []
+    }
+    expected_anti_spy = {
+        391660889: (Decimal("4500"), Decimal("586960.7448827740481998376819")),
+        391661710: (Decimal("5250"), Decimal("684787.5356965697228998106288")),
+    }
+    for nm_id, (expected_qty, expected_capital) in expected_anti_spy.items():
+        line = control_lines.get(nm_id)
+        _assert(line is not None, f"26GN390 canonical cost line {nm_id}")
+        _assert(
+            Decimal(str((line or {}).get("quantity") or 0)) == expected_qty,
+            f"26GN390 quantity {nm_id}",
+        )
+        _assert(
+            abs(Decimal(str((line or {}).get("capital_rub") or 0)) - expected_capital)
+            < Decimal("0.000001"),
+            f"26GN390 capital {nm_id}",
+        )
+        _assert(
+            abs(
+                Decimal(str((line or {}).get("unit_cost_rub") or 0))
+                - Decimal("130.4357210850608995999639293")
+            )
+            < Decimal("1e-20"),
+            f"26GN390 WAC {nm_id}",
+        )
+        _assert(
+            len((line or {}).get("components") or []) >= 7,
+            f"26GN390 document components {nm_id}",
+        )
+    _assert(
+        bool((control_breakdown.get("certification") or {}).get("certified")),
+        "26GN390 source/calculation fingerprints are certified",
+    )
+    control_response = page.goto(
+        _supplier_detail_url(base_url, control_shipment_id, tab="supply"),
+        wait_until="domcontentloaded",
+        timeout=120_000,
+    )
+    _assert(
+        control_response is not None and control_response.status == 200,
+        "26GN390 supplier detail page status",
+    )
+    page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
+    for nm_id in expected_anti_spy:
+        row = page.locator("#productLines tr").filter(
+            has=page.locator(f'input[data-authoritative-nmid][value="{nm_id}"]')
+        )
+        _assert(row.count() == 1, f"26GN390 visible row {nm_id}")
+        _assert(
+            "130,44" in row.locator(".line-cost-value").inner_text(),
+            f"26GN390 visible WAC {nm_id}",
+        )
+        _assert(
+            row.locator(".line-cost-status").inner_text().strip()
+            == "Все расходы учтены",
+            f"26GN390 green status {nm_id}",
+        )
+        row.locator("details.line-cost-proof").click()
+        _assert(
+            row.get_by_text("Контроль:", exact=False).count() >= 1,
+            f"26GN390 human proof {nm_id}",
+        )
+    control_screenshot = evidence_dir / "supplier_26GN390_anti_spy_cost_proof.png"
+    page.screenshot(path=str(control_screenshot), full_page=True)
+
+    partial_column = next(
+        (
+            dict(item)
+            for item in registry_payload.get("columns") or []
+            if str((item or {}).get("invoice_no") or "") == "26GN462"
+        ),
+        None,
+    )
+    _assert(partial_column is not None, "26GN462 supplier registry column")
+    partial_shipment_id = str((partial_column or {}).get("shipment_id") or "")
+    partial_detail = _protected_json_get(
+        context,
+        base_url
+        + "/v1/sheet-vitrina-v1/supply/supplier-shipments/"
+        + quote(partial_shipment_id, safe=""),
+        label="26GN462 supplier detail API",
+    )
+    partial_breakdown = dict(partial_detail.get("supplier_cost_breakdown") or {})
+    _assert(
+        not bool((partial_breakdown.get("certification") or {}).get("certified")),
+        "26GN462 remains provisional",
+    )
+    partial_response = page.goto(
+        _supplier_detail_url(base_url, partial_shipment_id, tab="supply"),
+        wait_until="domcontentloaded",
+        timeout=120_000,
+    )
+    _assert(
+        partial_response is not None and partial_response.status == 200,
+        "26GN462 supplier detail page status",
+    )
+    page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
+    _assert(
+        page.locator("#productLines .line-cost-value.exact-cost-incomplete").count() > 0,
+        "26GN462 yellow cost values",
+    )
+    _assert(
+        page.locator("#productLines .line-cost-status").first.inner_text().strip()
+        == "Предварительная себестоимость — не все расходы учтены",
+        "26GN462 visible provisional explanation",
+    )
+    partial_screenshot = evidence_dir / "supplier_26GN462_provisional_cost.png"
+    page.screenshot(path=str(partial_screenshot), full_page=True)
+    return {
+        "control_26GN390": {
+            "shipment_id": control_shipment_id,
+            "source_fingerprint": control_breakdown.get("source_fingerprint"),
+            "calculation_fingerprint": control_breakdown.get("calculation_fingerprint"),
+            "certification": control_breakdown.get("certification"),
+            "lines": {
+                str(key): value
+                for key, value in control_lines.items()
+                if key in expected_anti_spy
+            },
+            "screenshot": str(control_screenshot),
+        },
+        "control_26GN462": {
+            "shipment_id": partial_shipment_id,
+            "certification": partial_breakdown.get("certification"),
+            "screenshot": str(partial_screenshot),
+        },
+        "screenshots": [str(control_screenshot), str(partial_screenshot)],
+    }
 
 
 def _protected_json_get(
