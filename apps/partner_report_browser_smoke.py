@@ -306,7 +306,7 @@ def _report(*, finalized: bool) -> dict:
         "report_id": "prf_fixture" if finalized else None,
         "finalized": finalized,
         "formula_version": "partner_report_profitability_v1",
-        "source_digest": "sha256:fixture",
+        "source_digest": "sha256:" + "f" * 64,
         "weeks": [
             {"week_start": "2026-07-06", "week_end": "2026-07-12", "label": "06.07–12.07", "values": first},
             {"week_start": "2026-07-13", "week_end": "2026-07-19", "label": "13.07–19.07", "values": second},
