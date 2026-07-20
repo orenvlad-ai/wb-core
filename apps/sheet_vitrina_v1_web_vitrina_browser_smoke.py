@@ -54,6 +54,7 @@ STATUS_HEADER = [
     "missing_nm_ids",
     "note",
 ]
+UNAVAILABLE_STALE_VALUE_METRIC_KEY = "promo_participation"
 
 
 def main() -> None:
@@ -370,6 +371,18 @@ def run_browser_checks(
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
+            if expected_percent_rows is not None:
+                unavailable_cell = page.locator(
+                    f'td.cell-history-unavailable[data-metric-key="{UNAVAILABLE_STALE_VALUE_METRIC_KEY}"]'
+                    '[data-cell-date="2026-04-20"]'
+                )
+                if unavailable_cell.count() != 1:
+                    raise AssertionError("unavailable stale-value fixture cell must render once")
+                if unavailable_cell.inner_text().strip() != "Исторические данные отсутствуют":
+                    raise AssertionError(
+                        "unavailable presentation must suppress a persisted numeric value, got "
+                        f"{unavailable_cell.inner_text()!r}"
+                    )
             auto_schedule_block = _check_auto_schedule_block(page)
             activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)
@@ -4442,6 +4455,18 @@ def _build_plan(
                 column_count=len(STATUS_HEADER),
             ),
         ],
+        metadata={
+            "server_cell_presentation": {
+                f"SKU:{first_nm_id}|{UNAVAILABLE_STALE_VALUE_METRIC_KEY}": {
+                    as_of_date: {
+                        "state": "unavailable",
+                        "tone": "neutral",
+                        "reason": "Тест: numeric value не должен отображаться без доказанного снимка.",
+                        "source": "WebCore",
+                    }
+                }
+            }
+        },
     )
 
 

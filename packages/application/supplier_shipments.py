@@ -239,10 +239,24 @@ class SupplierShipmentsBlock:
     def list_shipments(self) -> dict[str, Any]:
         self.migrate_existing_supplier_shipments_into_trade_documents()
         rows = self.runtime.list_supplier_shipments()
+        from packages.application.warehouse_functional import (
+            load_supplier_cost_summary_fields,
+        )
+
+        cost_summaries = load_supplier_cost_summary_fields(
+            runtime=self.runtime,
+            shipment_ids=[str(row.get("shipment_id") or "") for row in rows],
+        )
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
-            "shipments": [self._with_approx_cost_fields(self._with_document_fields(_with_invoice_download_path(row))) for row in rows],
+            "shipments": [
+                {
+                    **self._with_document_fields(_with_invoice_download_path(row)),
+                    **cost_summaries.get(str(row.get("shipment_id") or ""), {}),
+                }
+                for row in rows
+            ],
         }
 
     def list_shipments_supplier_safe(self) -> dict[str, Any]:
@@ -485,7 +499,9 @@ class SupplierShipmentsBlock:
         payload["extra_lines"] = [
             item for item in payload["lines"] if item.get("line_type") == LINE_TYPE_EXTRA
         ]
-        return self._with_approx_cost_fields(self._with_document_fields(payload))
+        return self._with_supplier_line_costs(
+            self._with_approx_cost_fields(self._with_document_fields(payload))
+        )
 
     def get_shipment_supplier_safe(self, shipment_id: str) -> dict[str, Any]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
@@ -585,11 +601,29 @@ class SupplierShipmentsBlock:
                 raise ValueError(
                     "Статус поставки вычисляется из фактических дат и не может быть задан вручную."
                 )
-        cost_affecting_changed = (
-            [dict(item) for item in existing.get("lines") or []] != [dict(item) for item in lines]
-            or str(existing_header.get("currency") or "") != str(metadata.get("currency") or "")
-            or _optional_number(existing_header.get("approx_yuan_rate")) != _optional_number(approx_yuan_rate)
+        existing_cost_signature = _supplier_cost_input_signature(
+            header=existing_header,
+            lines=existing.get("lines") or [],
         )
+        candidate_cost_signature = _supplier_cost_input_signature(
+            header={
+                **existing_header,
+                "invoice_no": metadata.get("invoice_no") or "",
+                "invoice_date": metadata.get("invoice_date") or "",
+                "currency": metadata.get("currency") or "",
+                "declared_invoice_total": summary.get("declared_invoice_total"),
+                "invoice_amount_total": summary.get("invoice_amount_total"),
+                "match_status": match_status,
+            },
+            lines=lines,
+        )
+        cost_affecting_changed = existing_cost_signature != candidate_cost_signature
+        if existing_ff_acceptance_date and cost_affecting_changed:
+            raise ValueError(
+                "Нельзя изменить состав, количество, стоимость или идентичность invoice после "
+                "зафиксированного прихода на ФФ: требуется отдельная аудируемая корректировка "
+                "append-only ledger."
+            )
         warehouse_affecting_changed = bool(
             cost_affecting_changed
             or actual_shipment_date != str(existing_header.get("actual_shipment_date") or "")
@@ -801,7 +835,10 @@ class SupplierShipmentsBlock:
     def _enqueue_warehouse_recalculation(self, shipment: Mapping[str, Any]) -> dict[str, Any]:
         from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
 
-        header = dict(shipment.get("header") or {})
+        # Public detail is flat while persistence-oriented callers may pass a
+        # nested header. Hash the same bounded source fields in both cases;
+        # otherwise an invoice-metadata-only edit can reuse a completed queue.
+        header = dict(shipment.get("header") or shipment)
         shipment_id = str(header.get("shipment_id") or shipment.get("shipment_id") or "").strip()
         lines = [
             dict(line)
@@ -831,8 +868,39 @@ class SupplierShipmentsBlock:
         )
         revision_payload = {
             "shipment_id": shipment_id,
-            "header": header,
-            "lines": lines,
+            "header": {
+                key: header.get(key)
+                for key in (
+                    "invoice_no",
+                    "invoice_date",
+                    "currency",
+                    "shipment_date",
+                    "actual_shipment_date",
+                    "actual_ff_acceptance_date",
+                    "order_status",
+                    "expenses_complete",
+                    "approx_yuan_rate",
+                    "declared_invoice_total",
+                    "invoice_amount_total",
+                    "match_status",
+                )
+            },
+            "lines": [
+                {
+                    key: line.get(key)
+                    for key in (
+                        "line_id",
+                        "line_type",
+                        "internal_nm_id",
+                        "internal_sku",
+                        "barcode",
+                        "qty",
+                        "unit_price",
+                        "amount",
+                    )
+                }
+                for line in lines
+            ],
         }
         revision = "sha256:" + hashlib.sha256(
             json.dumps(
@@ -1031,6 +1099,27 @@ class SupplierShipmentsBlock:
         )
         _assert_atomic_supplier_product_matching(lines)
         existing_header = dict(existing["header"])
+        source_lines = [dict(item) for item in existing.get("lines") or []]
+        rematch_changed = _supplier_cost_input_signature(
+            header=existing_header,
+            lines=source_lines,
+        ) != _supplier_cost_input_signature(
+            header={
+                **existing_header,
+                "invoice_no": metadata.get("invoice_no") or "",
+                "invoice_date": metadata.get("invoice_date") or "",
+                "currency": metadata.get("currency") or "",
+                "declared_invoice_total": summary.get("declared_invoice_total"),
+                "invoice_amount_total": summary.get("invoice_amount_total"),
+                "match_status": match_status,
+            },
+            lines=lines,
+        )
+        if rematch_changed and str(existing_header.get("actual_ff_acceptance_date") or "").strip():
+            raise ValueError(
+                "Нельзя изменить сопоставление SKU после зафиксированного прихода на ФФ: "
+                "требуется отдельная аудируемая корректировка append-only ledger."
+            )
         now = self.timestamp_factory()
         header = {
             **existing_header,
@@ -1051,8 +1140,31 @@ class SupplierShipmentsBlock:
             "warnings": warnings,
             "errors": errors,
         }
+        if rematch_changed:
+            header["expenses_complete"] = False
         self.runtime.save_supplier_shipment(header=header, lines=lines)
-        return self.get_shipment(shipment_id)
+        if rematch_changed:
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+
+            OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).set_expenses_certification(
+                shipment_id=shipment_id,
+                expenses_complete=False,
+            )
+        result = self.get_shipment(shipment_id)
+        if rematch_changed:
+            # Include both identities so a corrected nmID invalidates the old
+            # projection as well as materialising the new one.
+            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(
+                {
+                    **result,
+                    "header": dict(result.get("header") or result),
+                    "lines": source_lines + [dict(item) for item in lines],
+                }
+            )
+        return result
 
     def download_invoice(self, shipment_id: str) -> tuple[bytes, str, str]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
@@ -2376,6 +2488,45 @@ class SupplierShipmentsBlock:
         enriched["exact_cost_warnings"] = list(per_unit.get("exact_cost_warnings") or [])
         return enriched
 
+    def _with_supplier_line_costs(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        enriched = self._with_supplier_cost_summary(payload)
+        breakdown = dict(enriched.get("supplier_cost_breakdown") or {})
+        by_line = {
+            str(item.get("line_id") or ""): item
+            for item in breakdown.get("lines") or []
+        }
+        enriched["lines"] = [
+            {**item, "cost_breakdown": by_line.get(str(item.get("line_id") or ""), {})}
+            for item in enriched.get("lines") or []
+        ]
+        enriched["product_lines"] = [
+            item for item in enriched["lines"] if item.get("line_type") == LINE_TYPE_PRODUCT
+        ]
+        enriched["extra_lines"] = [
+            item for item in enriched["lines"] if item.get("line_type") == LINE_TYPE_EXTRA
+        ]
+        return enriched
+
+    def _with_supplier_cost_summary(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Gate every registry/detail aggregate through the canonical shipment proof."""
+
+        enriched = dict(payload)
+        shipment_id = str(enriched.get("shipment_id") or "").strip()
+        if not shipment_id:
+            return enriched
+        from packages.application.warehouse_functional import (
+            load_supplier_line_cost_breakdown,
+            supplier_cost_summary_fields,
+        )
+
+        breakdown = load_supplier_line_cost_breakdown(
+            runtime=self.runtime,
+            shipment_id=shipment_id,
+        )
+        enriched["supplier_cost_breakdown"] = breakdown
+        enriched.update(supplier_cost_summary_fields(breakdown))
+        return enriched
+
     def _with_document_download_path(self, document: Mapping[str, Any] | None) -> dict[str, Any]:
         if document is None:
             return {}
@@ -2893,6 +3044,43 @@ def _normalize_metadata(raw: Any) -> dict[str, Any]:
         "customer_name": "",
         "currency": str(metadata.get("currency") or "").strip().upper(),
         "declared_invoice_total": _optional_number(metadata.get("declared_invoice_total")),
+    }
+
+
+def _supplier_cost_input_signature(
+    *,
+    header: Mapping[str, Any],
+    lines: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return only fields that can change canonical supplier-flow capital.
+
+    The FF receipt is append-only.  Once it exists, these inputs may only be
+    changed by an audited correction that also supersedes the frozen receipt;
+    ordinary comments and price-check presentation metadata remain editable.
+    """
+
+    return {
+        "header": {
+            "invoice_no": str(header.get("invoice_no") or "").strip(),
+            "invoice_date": str(header.get("invoice_date") or "").strip(),
+            "currency": str(header.get("currency") or "").strip().upper(),
+            "declared_invoice_total": _optional_number(header.get("declared_invoice_total")),
+            "invoice_amount_total": _optional_number(header.get("invoice_amount_total")),
+            "match_status": str(header.get("match_status") or "").strip(),
+        },
+        "lines": [
+            {
+                "line_id": str(line.get("line_id") or "").strip(),
+                "line_type": str(line.get("line_type") or "").strip(),
+                "internal_nm_id": _optional_int(line.get("internal_nm_id")),
+                "product_type": str(line.get("product_type") or "").strip(),
+                "match_key": str(line.get("match_key") or "").strip(),
+                "qty": _optional_number(line.get("qty")),
+                "unit_price": _optional_number(line.get("unit_price")),
+                "amount": _optional_number(line.get("amount")),
+            }
+            for line in lines
+        ],
     }
 
 
@@ -5658,6 +5846,14 @@ def _read_optional_positive_decimal(value: Any) -> float | None:
         return _validate_optional_positive_decimal(value, field_name="approx_yuan_rate")
     except ValueError:
         return None
+
+
+def _read_canonical_cost_decimal(value: Any) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value).strip().replace(",", "."))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed >= Decimal("0") and parsed.is_finite() else None
 
 
 def _normalize_price_conformity_status(value: Any) -> str:

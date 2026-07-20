@@ -18,6 +18,7 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
     FinanceHttpResult,
     WbFinanceApiClient,
     WbFinanceWeeklyBlock,
+    _functional_wb_cost_state,
     classify_deduction,
     historical_week_bounds,
 )
@@ -26,6 +27,7 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
 def main() -> None:
     _assert_client_contract()
     _assert_schedule_contract()
+    _assert_functional_daily_cost_requires_exact_date()
     with TemporaryDirectory(prefix="wb-finance-weekly-") as tmp:
         block = WbFinanceWeeklyBlock(
             Path(tmp),
@@ -326,6 +328,65 @@ def _assert_schedule_contract() -> None:
         != "transit_logistics"
     ):
         raise AssertionError("transit classifier mismatch")
+
+
+def _assert_functional_daily_cost_requires_exact_date() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
+            cutover_id TEXT,status TEXT,cutover_at TEXT
+        );
+        CREATE TABLE sheet_vitrina_v1_warehouse_functional_versions(
+            version_id TEXT,cutover_id TEXT,status TEXT,effective_at TEXT,
+            created_at TEXT,plan_fingerprint TEXT
+        );
+        CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(
+            version_id TEXT,warehouse_key TEXT,nm_id TEXT,quantity TEXT,
+            cost_covered_quantity TEXT,certified INTEGER,quality TEXT,
+            wac_rub TEXT,provenance_json TEXT
+        );
+        CREATE TABLE sheet_vitrina_v1_warehouse_wb_daily_cost(
+            cutover_id TEXT,as_of_date TEXT,nm_id TEXT,quantity TEXT,
+            quality TEXT,wac_rub TEXT,provenance_json TEXT,fingerprint TEXT
+        );
+        INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers
+        VALUES('warehouse_functional_cutover_v1','posted','2026-07-19T22:00:00Z');
+        INSERT INTO sheet_vitrina_v1_warehouse_functional_versions
+        VALUES('later-version','warehouse_functional_cutover_v1','good',
+               '2026-07-20T12:00:00Z','2026-07-20T12:00:00Z','sha256:later');
+        INSERT INTO sheet_vitrina_v1_warehouse_functional_balances
+        VALUES('later-version','wb','101','10','10',1,'certified','200','{}');
+        """
+    )
+    missing, applies = _functional_wb_cost_state(
+        conn,
+        as_of_date="2026-07-20",
+        nm_id="101",
+    )
+    if not applies or missing is not None:
+        raise AssertionError(
+            "weekly WB cost must stay unknown without an exact-day daily projection; "
+            f"got applies={applies}, state={missing}"
+        )
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost
+           VALUES('warehouse_functional_cutover_v1','2026-07-20','101','10',
+                  'periodic_snapshot_wac_closed','150','{}','sha256:exact')"""
+    )
+    exact, applies = _functional_wb_cost_state(
+        conn,
+        as_of_date="2026-07-20",
+        nm_id="101",
+    )
+    conn.close()
+    if (
+        not applies
+        or exact is None
+        or Decimal(str(exact.get("our_wb_unit_cost_rub"))) != Decimal("150")
+    ):
+        raise AssertionError(f"weekly WB cost must consume its exact-day row: {exact}")
 
 
 def _seed_canonical_cost(db_path: Path) -> None:

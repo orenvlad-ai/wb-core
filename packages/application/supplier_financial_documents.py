@@ -308,7 +308,10 @@ class SupplierFinancialDocumentsBlock:
             "supplier_order_id": supplier_order_id,
             "documents": documents,
             "expense_lines": lines,
-            "summary": build_financial_summary(documents, lines, shipment=shipment),
+            "summary": self._with_canonical_exact_cost(
+                supplier_order_id,
+                build_financial_summary(documents, lines, shipment=shipment),
+            ),
         }
 
     def list_shipment_registry(self) -> dict[str, Any]:
@@ -638,7 +641,10 @@ class SupplierFinancialDocumentsBlock:
         lines = self._with_cny_fee_equivalents(list(document.get("expense_lines") or []))
         payload = matched_document
         payload["expense_lines"] = lines
-        payload["summary"] = build_financial_summary(documents, lines, shipment=shipment)
+        payload["summary"] = self._with_canonical_exact_cost(
+            supplier_order_id,
+            build_financial_summary(documents, lines, shipment=shipment),
+        )
         return payload
 
     def upload_document(
@@ -813,7 +819,14 @@ class SupplierFinancialDocumentsBlock:
             self._reset_own_capital_expense_certification(supplier_order_id)
         payload = self._with_download_path(document)
         shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
-        payload["summary"] = build_financial_summary([payload], list(payload.get("expense_lines") or []), shipment=shipment)
+        payload["summary"] = self._with_canonical_exact_cost(
+            supplier_order_id,
+            build_financial_summary(
+                [payload],
+                list(payload.get("expense_lines") or []),
+                shipment=shipment,
+            ),
+        )
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
@@ -1168,13 +1181,21 @@ class SupplierFinancialDocumentsBlock:
         payload = self._with_download_path(document)
         normalized = dict(payload.get("normalized_parse") or {})
         preview = dict(normalized.get("statement_import") or {})
+        supplier_order_id = str(payload.get("supplier_order_id") or "")
         payload.update(
             {
                 "preview_required": str(preview.get("import_status") or "") != "confirmed",
                 "import_preview": preview,
                 "idempotent": idempotent,
                 "already_added": str(preview.get("import_status") or "") == "confirmed",
-                "summary": build_financial_summary([payload], list(payload.get("expense_lines") or []), shipment=self.runtime.load_supplier_shipment(str(payload.get("supplier_order_id") or "")) or {}),
+                "summary": self._with_canonical_exact_cost(
+                    supplier_order_id,
+                    build_financial_summary(
+                        [payload],
+                        list(payload.get("expense_lines") or []),
+                        shipment=self.runtime.load_supplier_shipment(supplier_order_id) or {},
+                    ),
+                ),
             }
         )
         return payload
@@ -1230,7 +1251,10 @@ class SupplierFinancialDocumentsBlock:
             self.runtime.list_supplier_financial_documents(normalized_shipment_id)
         )
         expense_lines = self.runtime.list_supplier_financial_expense_lines(normalized_shipment_id)
-        summary = build_financial_summary(documents, expense_lines, shipment=detail)
+        summary = self._with_canonical_exact_cost(
+            normalized_shipment_id,
+            build_financial_summary(documents, expense_lines, shipment=detail),
+        )
         try:
             from packages.application.warehouse_functional import load_supplier_flow_cost_state
 
@@ -1251,6 +1275,30 @@ class SupplierFinancialDocumentsBlock:
             "expense_lines": expense_lines,
             "summary": summary,
         }
+
+    def _with_canonical_exact_cost(
+        self,
+        shipment_id: str,
+        summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Replace legacy aggregate exact fields with the warehouse-engine proof."""
+
+        from packages.application.warehouse_functional import (
+            load_supplier_line_cost_breakdown,
+            supplier_cost_summary_fields,
+        )
+
+        result = dict(summary or {})
+        breakdown = load_supplier_line_cost_breakdown(
+            runtime=self.runtime,
+            shipment_id=str(shipment_id or "").strip(),
+        )
+        per_unit = dict(result.get("per_unit") or {})
+        per_unit.update(supplier_cost_summary_fields(breakdown))
+        per_unit["supplier_cost_breakdown"] = breakdown
+        result["per_unit"] = per_unit
+        result["supplier_cost_breakdown"] = breakdown
+        return result
 
     def _write_document_file(self, *, supplier_order_id: str, document_id: str, filename: str, body: bytes) -> str:
         safe_filename = _safe_filename(filename)

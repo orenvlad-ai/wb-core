@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -29,7 +31,16 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
     BUYER_PRICE_RUB_METRIC_KEY,
     SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
 )
-from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.application.sheet_vitrina_v1_own_product_capital import (
+    own_stage_metric_key,
+    own_stage_total_metric_key,
+)
+from packages.application.sheet_vitrina_v1_web_vitrina import (
+    SheetVitrinaV1WebVitrinaBlock,
+    _PeriodDateBinding,
+    _merge_period_server_cell_presentation,
+    _merge_period_warehouse_history_coverage,
+)
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -205,6 +216,269 @@ def main() -> None:
         print("web_vitrina_schema: ok ->", len(payload.schema.columns), "columns")
         print("web_vitrina_rows: ok ->", total_row.row_id, first_sku_row.row_id, second_sku_row.row_id)
         print("web_vitrina_capabilities: ok -> grid-library-agnostic read-only contract")
+
+    _test_read_time_warehouse_certification_revalidation(bundle)
+    _test_period_warehouse_presentation_is_preserved()
+
+
+def _test_read_time_warehouse_certification_revalidation(bundle: dict[str, object]) -> None:
+    business_date = "2026-07-20"
+    stage = "PRODUCTION_TO_FF"
+    sku_metric_key = own_stage_metric_key(stage, "unit_cost_rub")
+    total_metric_key = own_stage_total_metric_key(stage, "unit_cost_rub")
+    with TemporaryDirectory(prefix="web-vitrina-read-time-certification-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(bundle, activated_at="2026-07-20T08:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
+        current_state = runtime.load_current_state()
+        enabled = [item for item in current_state.config_v2 if item.enabled]
+        nm_id = int(enabled[0].nm_id)
+        snapshot_only_nm_id = 999999999
+        stale_green = {
+            "state": "confirmed",
+            "tone": "green",
+            "reason": "Все расходы учтены / Подтверждено документами",
+            "source": "WebCore",
+        }
+        plan = SheetVitrinaV1Envelope(
+            plan_version="delivery_contract_v1__read_time_revalidation_smoke",
+            snapshot_id="web-vitrina-read-time-revalidation",
+            as_of_date=business_date,
+            date_columns=[business_date],
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(
+                    slot_key="today_current",
+                    slot_label="Today current",
+                    column_date=business_date,
+                )
+            ],
+            source_temporal_policies={},
+            sheets=[
+                SheetVitrinaWriteTarget(
+                    sheet_name="DATA_VITRINA",
+                    write_start_cell="A1",
+                    write_rect="A1:C2",
+                    clear_range="A:Z",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=["label", "key", business_date],
+                    rows=[
+                        ["SKU: WAC Китай → FF", f"SKU:{nm_id}|{sku_metric_key}", 130.435721],
+                        ["Архивная SKU: WAC Китай → FF", f"SKU:{snapshot_only_nm_id}|{sku_metric_key}", 99.5],
+                        ["Итого: WAC Китай → FF", f"TOTAL|{total_metric_key}", 113.422195],
+                    ],
+                    row_count=3,
+                    column_count=3,
+                ),
+                SheetVitrinaWriteTarget(
+                    sheet_name="STATUS",
+                    write_start_cell="A1",
+                    write_rect="A1:K1",
+                    clear_range="A:Z",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=STATUS_HEADER,
+                    rows=[],
+                    row_count=0,
+                    column_count=len(STATUS_HEADER),
+                ),
+            ],
+            metadata={
+                "server_cell_presentation": {
+                    f"SKU:{nm_id}|{sku_metric_key}": {business_date: stale_green},
+                    f"SKU:{snapshot_only_nm_id}|{sku_metric_key}": {business_date: stale_green},
+                    f"TOTAL|{total_metric_key}": {business_date: stale_green},
+                },
+                # A period envelope can contain rows from older snapshots.  The
+                # active date must revalidate only the SKU scope frozen into its
+                # own source snapshot, not the unioned historical template.
+                "warehouse_nm_ids_by_date": {business_date: [nm_id]},
+                "warehouse_history_coverage": {
+                    business_date: {
+                        "status": "live",
+                        "functional_version_id": "whfv_published",
+                    }
+                },
+            },
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-07-20T08:05:00Z",
+            plan=plan,
+        )
+        exact_state = {
+            int(item.nm_id): {
+                "presentation_state": "confirmed",
+                "presentation_reason": "",
+                "stage_presentation": {stage: {"state": "confirmed", "reason": ""}},
+                "_warehouse_version_id": "whfv_published",
+                "_warehouse_version_is_active": True,
+            }
+            for item in enabled
+        }
+        exact_state[nm_id] = {
+            "presentation_state": "unconfirmed",
+            "presentation_reason": "source_changed_provisional",
+            "stage_presentation": {
+                stage: {
+                    "state": "unconfirmed",
+                    "reason": "source_changed_provisional",
+                }
+            },
+            "_warehouse_version_id": "whfv_published",
+            "_warehouse_version_is_active": True,
+        }
+        exact_state[snapshot_only_nm_id] = exact_state[nm_id]
+        with (
+            patch.object(
+                OwnProductCapitalBlock,
+                "functional_warehouse_cutover_date",
+                return_value="2026-07-18",
+            ),
+            patch.object(
+                OwnProductCapitalBlock,
+                "load_daily_metric_lookup",
+                return_value=exact_state,
+            ) as load_daily,
+        ):
+            payload = SheetVitrinaV1WebVitrinaBlock(
+                runtime=runtime,
+                now_factory=lambda: datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+            ).build(
+                page_route="/sheet-vitrina-v1/vitrina",
+                read_route="/v1/sheet-vitrina-v1/web-vitrina",
+                as_of_date=business_date,
+            )
+        load_daily.assert_called_once_with(
+            business_date,
+            requested_nm_ids=[nm_id],
+            revalidate_current_sources=True,
+        )
+        rows = {row.row_id: row for row in payload.rows}
+        for row_id in (
+            f"SKU:{nm_id}|{sku_metric_key}",
+            f"TOTAL|{total_metric_key}",
+        ):
+            presentation = rows[row_id].presentation_by_date[business_date]
+            if (
+                presentation.get("state") != "unconfirmed"
+                or presentation.get("tone") != "yellow"
+                or "источники изменились" not in presentation.get("reason", "")
+            ):
+                raise AssertionError(
+                    f"read-time certification must fail closed for {row_id}: {presentation}"
+                )
+        historical_only = rows[
+            f"SKU:{snapshot_only_nm_id}|{sku_metric_key}"
+        ].presentation_by_date.get(business_date)
+        if historical_only is not None:
+            raise AssertionError(
+                "a historical-only SKU must not participate in current-date revalidation: "
+                f"{historical_only}"
+            )
+        mismatched_state = {
+            key: {
+                **value,
+                "_warehouse_version_id": "whfv_newer_active",
+                "_warehouse_version_is_active": True,
+            }
+            for key, value in exact_state.items()
+        }
+        with (
+            patch.object(
+                OwnProductCapitalBlock,
+                "functional_warehouse_cutover_date",
+                return_value="2026-07-18",
+            ),
+            patch.object(
+                OwnProductCapitalBlock,
+                "load_daily_metric_lookup",
+                return_value=mismatched_state,
+            ),
+        ):
+            mismatched = SheetVitrinaV1WebVitrinaBlock(
+                runtime=runtime,
+                now_factory=lambda: datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+            ).build(
+                page_route="/sheet-vitrina-v1/vitrina",
+                read_route="/v1/sheet-vitrina-v1/web-vitrina",
+                as_of_date=business_date,
+            )
+        mismatched_rows = {row.row_id: row for row in mismatched.rows}
+        for row_id in (
+            f"SKU:{nm_id}|{sku_metric_key}",
+            f"TOTAL|{total_metric_key}",
+        ):
+            presentation = mismatched_rows[row_id].presentation_by_date[business_date]
+            if (
+                presentation.get("state") != "unavailable"
+                or "одним согласованным снимком" not in presentation.get("reason", "")
+            ):
+                raise AssertionError(
+                    "a newer active warehouse version must not certify an older ready value: "
+                    f"{row_id}={presentation}"
+                )
+        print("web_vitrina_read_time_certification_revalidation: ok")
+
+
+def _test_period_warehouse_presentation_is_preserved() -> None:
+    metric_key = own_stage_metric_key("PRODUCTION_TO_FF", "unit_cost_rub")
+    row_id = f"SKU:104|{metric_key}"
+    source_date = "2026-07-18"
+    missing_date = "2026-07-19"
+    presentation = {
+        "state": "unavailable",
+        "tone": "neutral",
+        "reason": "Исторические данные отсутствуют: exact-date источник не доказан.",
+        "source": "WebCore",
+    }
+    snapshot = SheetVitrinaV1Envelope(
+        plan_version="period-presentation-source",
+        snapshot_id="period-presentation-source",
+        as_of_date=source_date,
+        date_columns=[source_date],
+        temporal_slots=[],
+        source_temporal_policies={},
+        sheets=[],
+        metadata={
+            "server_cell_presentation": {row_id: {source_date: presentation}},
+            "warehouse_history_coverage": {
+                source_date: {
+                    "status": "closed",
+                    "functional_version_id": "whfv_20260718",
+                }
+            },
+        },
+    )
+    merged = _merge_period_server_cell_presentation(
+        period_date_bindings=[
+            _PeriodDateBinding(source_date, source_date, source_date),
+            _PeriodDateBinding(missing_date, "", "", missing=True),
+        ],
+        snapshots_by_as_of_date={source_date: snapshot},
+        template_rows=[["SKU WAC", row_id]],
+    )
+    if merged[row_id][source_date] != presentation:
+        raise AssertionError(f"period view must preserve exact-date reason, got {merged}")
+    missing = merged[row_id][missing_date]
+    if missing.get("state") != "unavailable" or "Нулевое значение не предполагается" not in missing.get("reason", ""):
+        raise AssertionError(f"missing period date must have an explicit non-zero-assuming reason, got {missing}")
+    coverage = _merge_period_warehouse_history_coverage(
+        period_date_bindings=[
+            _PeriodDateBinding(source_date, source_date, source_date),
+            _PeriodDateBinding(missing_date, "", "", missing=True),
+        ],
+        snapshots_by_as_of_date={source_date: snapshot},
+    )
+    if coverage != {
+        source_date: {
+            "status": "closed",
+            "functional_version_id": "whfv_20260718",
+        }
+    }:
+        raise AssertionError(f"period envelope must preserve the numeric version binding, got {coverage}")
+    print("web_vitrina_period_warehouse_presentation: ok")
 
 
 def _build_plan(

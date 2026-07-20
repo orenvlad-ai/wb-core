@@ -18,6 +18,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Callable, Iterable, Mapping
 
+from packages.business_time import business_date_from_timestamp
 from packages.application.calculation_parameters import CalculationParametersBlock
 from packages.application.canonical_cost_engine import CanonicalCostEngine
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -85,8 +86,12 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
         "Фактические платежи и банковские комиссии учтены; не все расходы этапа подтверждены.",
     ),
     "certified": (
-        "Подтверждено документами",
+        "Все расходы учтены / Подтверждено документами",
         "Платежи и расходы этапа подтверждены первичными документами.",
+    ),
+    "source_changed_provisional": (
+        "Предварительная себестоимость — источники изменились",
+        "После сертификации изменился учитываемый документ; зелёный статус снят до успешного targeted replay.",
     ),
     "primary_documents": (
         "Подтверждено первичными документами",
@@ -171,6 +176,19 @@ class WarehouseFunctionalError(WarehouseOpeningSnapshotError):
     """Fail-closed functional warehouse invariant error."""
 
 
+def _current_snapshot_effective_date(*, captured_at: str, snapshot_date: Any) -> str:
+    """Bind a current-state version only to its canonical capture business date."""
+
+    candidate = str(snapshot_date or "")[:10]
+    capture_business_date = business_date_from_timestamp(captured_at)
+    if candidate != capture_business_date:
+        raise WarehouseFunctionalError(
+            "current warehouse source capture cannot be published with a stale WB snapshot date: "
+            f"captured_business_date={capture_business_date}, snapshot_date={candidate or 'missing'}"
+        )
+    return candidate
+
+
 def enqueue_warehouse_targeted_recalculation(
     *,
     runtime: RegistryUploadDbBackedRuntime,
@@ -236,24 +254,74 @@ def load_supplier_flow_cost_state(
         ).fetchone()
         if active is None:
             return {}
-        rows = conn.execute(
+        stored_rows = conn.execute(
             """SELECT warehouse_key,quantity,capital_rub,certified,quality,provenance_json
                FROM sheet_vitrina_v1_warehouse_functional_balances
                WHERE version_id=? AND warehouse_key IN (?,?)""",
             (active["version_id"], STAGE_PRODUCTION, STAGE_CHINA_TO_FF),
         ).fetchall()
+    selected_rows: list[dict[str, Any]] = []
+    for stored_row in stored_rows:
+        provenance = _loads(stored_row["provenance_json"], {})
+        selected_sources = [
+            dict(source)
+            for source in provenance.get("source_records") or []
+            if str(source.get("shipment_id") or "") == str(shipment_id or "")
+        ]
+        if not selected_sources:
+            continue
+        selected_quality_codes = sorted(
+            {
+                str(source.get("quality") or "").strip()
+                for source in selected_sources
+                if str(source.get("quality") or "").strip()
+            }
+        )
+        selected_quality = (
+            selected_quality_codes[0]
+            if len(selected_quality_codes) == 1
+            else (
+                "mixed:" + ",".join(selected_quality_codes)
+                if selected_quality_codes
+                else str(stored_row["quality"] or "")
+            )
+        )
+        selected_rows.append(
+            {
+                "warehouse_key": stored_row["warehouse_key"],
+                "quantity": stored_row["quantity"],
+                "capital_rub": stored_row["capital_rub"],
+                # Aggregate balance flags describe every party of this SKU.
+                # The supplier registry asks for one shipment, whose frozen
+                # certification/quality is carried by its own flow records.
+                "certified": all(
+                    bool(source.get("expenses_complete_certification"))
+                    for source in selected_sources
+                ),
+                "quality": selected_quality,
+                # Revalidate only the shipment requested by the supplier
+                # registry.  A balance can combine several shipments of one
+                # SKU, but another shipment must not decide this card's tone.
+                "provenance": {**provenance, "source_records": selected_sources},
+            }
+        )
+    rows = _revalidate_balance_certifications(
+        runtime=runtime,
+        balances=selected_rows,
+        active_version_id=str(active["version_id"]),
+    )
     totals: defaultdict[str, dict[str, Any]] = defaultdict(
         lambda: {"quantity": ZERO, "capital": ZERO, "certified": True, "quality": set()}
     )
     for row in rows:
-        for source in _loads(row["provenance_json"], {}).get("source_records") or []:
-            if str(source.get("shipment_id") or "") != str(shipment_id or ""):
-                continue
+        for source in dict(row.get("provenance") or {}).get("source_records") or []:
             stage = str(row["warehouse_key"])
             totals[stage]["quantity"] += _decimal(source.get("flow_quantity"))
             totals[stage]["capital"] += _decimal(source.get("flow_capital_rub"))
             totals[stage]["certified"] = totals[stage]["certified"] and bool(row["certified"])
             totals[stage]["quality"].add(str(row["quality"] or ""))
+            if row.get("certification_revalidation_failed"):
+                totals[stage]["quality"].add("source_changed_provisional")
     result: dict[str, Any] = {}
     for stage, item in totals.items():
         qty = _decimal(item["quantity"])
@@ -266,6 +334,386 @@ def load_supplier_flow_cost_state(
             "quality": sorted(item["quality"]),
         }
     return result
+
+
+def load_supplier_line_cost_breakdown(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    shipment_id: str,
+) -> dict[str, Any]:
+    """Expose the exact canonical supplier allocation used by warehouse replay.
+
+    The read is deliberately calculated from primary sources, then compared
+    with the fingerprints stored by the active immutable warehouse version.
+    A closed shipment is green only while both fingerprints still match.
+    """
+
+    selected_id = str(shipment_id or "").strip()
+    if not selected_id:
+        return {}
+    with _connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        required = {
+            "sheet_vitrina_v1_supplier_shipments",
+            "sheet_vitrina_v1_supplier_shipment_lines",
+            "sheet_vitrina_v1_cny_ledger_operations",
+            "sheet_vitrina_v1_supplier_financial_documents",
+            "sheet_vitrina_v1_supplier_financial_expense_lines",
+        }
+        if not required.issubset(tables):
+            return {}
+        # Keep every primary-source row and the active certification pointer
+        # in one SQLite read snapshot.  Without an explicit transaction a
+        # concurrent document commit could make the explanation combine
+        # revisions that the canonical warehouse calculation never observed
+        # together.
+        conn.execute("BEGIN")
+        sources = {
+            "shipments": [dict(row) for row in conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                (selected_id,),
+            ).fetchall()],
+            "shipment_lines": [dict(row) for row in conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines
+                   WHERE shipment_id=? ORDER BY sort_order,line_id""",
+                (selected_id,),
+            ).fetchall()],
+            "cny_operations": [dict(row) for row in conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_cny_ledger_operations
+                   WHERE source_order_id=? ORDER BY sequence_key,operation_id""",
+                (selected_id,),
+            ).fetchall()],
+            "financial_documents": [dict(row) for row in conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_supplier_financial_documents
+                   WHERE supplier_order_id=? ORDER BY document_date,document_id""",
+                (selected_id,),
+            ).fetchall()],
+            "financial_expense_lines": [dict(row) for row in conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                   WHERE supplier_order_id=? ORDER BY financial_document_id,sort_order,line_id""",
+                (selected_id,),
+            ).fetchall()],
+            "cny_documents": (
+                [dict(row) for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_cny_documents
+                       WHERE source_order_id=? ORDER BY operation_date,operation_datetime,document_id""",
+                    (selected_id,),
+                ).fetchall()]
+                if "sheet_vitrina_v1_cny_documents" in tables
+                else []
+            ),
+        }
+        active = conn.execute(
+            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+        ).fetchone()
+        active_version_id = str(active["version_id"]) if active is not None else ""
+        active_fingerprints: tuple[str, str] | None = None
+        if active is not None:
+            certified_row = conn.execute(
+                """SELECT source_fingerprint,calculation_fingerprint
+                   FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+                   WHERE version_id=? AND shipment_id=? AND expenses_complete=1
+                         AND calculation_available=1""",
+                (active["version_id"], selected_id),
+            ).fetchone()
+            if certified_row is not None:
+                active_fingerprints = (
+                    str(certified_row["source_fingerprint"]),
+                    str(certified_row["calculation_fingerprint"]),
+                )
+    allocation = _supplier_cost_allocations(sources).get(selected_id)
+    if allocation is None:
+        return {}
+    return _supplier_allocation_with_certification(
+        allocation,
+        active_version_id=active_version_id,
+        active_fingerprints=active_fingerprints,
+    )
+
+
+def load_supplier_cost_summary_fields(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    shipment_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Batch compact registry summaries in one coherent read snapshot.
+
+    Full per-line/document proof stays on the shipment detail route.  The
+    unpaginated collection receives only the aggregate fields it renders, so
+    it never opens one connection or embeds one proof graph per row.
+    """
+
+    selected_ids = sorted({str(value or "").strip() for value in shipment_ids if str(value or "").strip()})
+    if not selected_ids:
+        return {}
+    selected = set(selected_ids)
+    with _connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        required = {
+            "sheet_vitrina_v1_supplier_shipments",
+            "sheet_vitrina_v1_supplier_shipment_lines",
+            "sheet_vitrina_v1_cny_ledger_operations",
+            "sheet_vitrina_v1_supplier_financial_documents",
+            "sheet_vitrina_v1_supplier_financial_expense_lines",
+        }
+        if not required.issubset(tables):
+            return {}
+        conn.execute("BEGIN")
+        sources = {
+            "shipments": [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_supplier_shipments ORDER BY shipment_id"
+                ).fetchall()
+                if str(row["shipment_id"] or "") in selected
+            ],
+            "shipment_lines": [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines
+                       ORDER BY shipment_id,sort_order,line_id"""
+                ).fetchall()
+                if str(row["shipment_id"] or "") in selected
+            ],
+            "cny_operations": [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_cny_ledger_operations
+                       ORDER BY sequence_key,operation_id"""
+                ).fetchall()
+                if str(row["source_order_id"] or "") in selected
+            ],
+            "financial_documents": [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_supplier_financial_documents
+                       ORDER BY supplier_order_id,document_date,document_id"""
+                ).fetchall()
+                if str(row["supplier_order_id"] or "") in selected
+            ],
+            "financial_expense_lines": [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                       ORDER BY supplier_order_id,financial_document_id,sort_order,line_id"""
+                ).fetchall()
+                if str(row["supplier_order_id"] or "") in selected
+            ],
+            "cny_documents": (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """SELECT * FROM sheet_vitrina_v1_cny_documents
+                           ORDER BY source_order_id,operation_date,operation_datetime,document_id"""
+                    ).fetchall()
+                    if str(row["source_order_id"] or "") in selected
+                ]
+                if "sheet_vitrina_v1_cny_documents" in tables
+                else []
+            ),
+        }
+        active = conn.execute(
+            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+        ).fetchone()
+        active_version_id = str(active["version_id"]) if active is not None else ""
+        active_fingerprints_by_shipment: dict[str, tuple[str, str]] = {}
+        if active is not None:
+            for row in conn.execute(
+                """SELECT shipment_id,source_fingerprint,calculation_fingerprint
+                   FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+                   WHERE version_id=? AND expenses_complete=1 AND calculation_available=1""",
+                (active["version_id"],),
+            ).fetchall():
+                shipment_id = str(row["shipment_id"] or "")
+                if shipment_id in selected:
+                    active_fingerprints_by_shipment[shipment_id] = (
+                        str(row["source_fingerprint"]),
+                        str(row["calculation_fingerprint"]),
+                    )
+    allocations = _supplier_cost_allocations(sources)
+    shipments_by_id = {
+        str(item.get("shipment_id") or ""): item for item in sources["shipments"]
+    }
+    lines_by_id: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    documents_by_id: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    expense_lines_by_id: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in sources["shipment_lines"]:
+        lines_by_id[str(item.get("shipment_id") or "")].append(item)
+    for item in sources["financial_documents"]:
+        documents_by_id[str(item.get("supplier_order_id") or "")].append(item)
+    for item in sources["financial_expense_lines"]:
+        expense_lines_by_id[str(item.get("supplier_order_id") or "")].append(item)
+
+    # Keep legacy approximate columns available without returning to per-row
+    # runtime queries.  Exact fields below always come from the canonical proof
+    # and deliberately overwrite any legacy exact-looking values.
+    from packages.application.supplier_financial_documents import build_financial_summary
+
+    result: dict[str, dict[str, Any]] = {}
+    for shipment_id in selected_ids:
+        header = shipments_by_id.get(shipment_id, {})
+        financial_summary = build_financial_summary(
+            documents_by_id.get(shipment_id, []),
+            expense_lines_by_id.get(shipment_id, []),
+            shipment={"header": header, "lines": lines_by_id.get(shipment_id, [])},
+        )
+        per_unit = (
+            dict(financial_summary.get("per_unit") or {})
+            if isinstance(financial_summary.get("per_unit"), Mapping)
+            else {}
+        )
+        allocation = allocations.get(shipment_id)
+        canonical_summary = supplier_cost_summary_fields(
+            _supplier_allocation_with_certification(
+                allocation,
+                active_version_id=active_version_id,
+                active_fingerprints=active_fingerprints_by_shipment.get(shipment_id),
+            )
+            if allocation is not None
+            else {}
+        )
+        result[shipment_id] = {
+            "approx_invoice_cost_rub": per_unit.get("approx_invoice_cost_rub"),
+            "approx_landed_cost_per_unit_rub": per_unit.get(
+                "approx_landed_cost_per_unit_rub"
+            ),
+            **canonical_summary,
+        }
+    return result
+
+
+def _supplier_allocation_with_certification(
+    allocation: Mapping[str, Any],
+    *,
+    active_version_id: str,
+    active_fingerprints: tuple[str, str] | None,
+) -> dict[str, Any]:
+    result = json.loads(json.dumps(dict(allocation), ensure_ascii=False, default=str))
+    matches_active = bool(
+        active_fingerprints
+        and active_fingerprints
+        == (
+            str(result.get("source_fingerprint") or ""),
+            str(result.get("calculation_fingerprint") or ""),
+        )
+    )
+    expenses_complete = bool(result.get("expenses_complete"))
+    certified = expenses_complete and matches_active
+    result["certification"] = {
+        "certified": certified,
+        "source_fingerprint_matches": matches_active,
+        "source_fingerprint": result.get("source_fingerprint"),
+        "calculation_fingerprint": result.get("calculation_fingerprint"),
+        "certified_source_fingerprint": active_fingerprints[0] if active_fingerprints else None,
+        "certified_calculation_fingerprint": active_fingerprints[1] if active_fingerprints else None,
+        "active_version_id": active_version_id or None,
+        "status_code": "certified" if certified else "provisional",
+        "status_label_ru": (
+            "Все расходы учтены"
+            if certified
+            else "Предварительная себестоимость — не все расходы учтены"
+        ),
+        "reason_ru": (
+            "Актуальные source/calculation fingerprints совпадают с сертифицированной версией."
+            if certified
+            else (
+                "Поставка отмечена закрытой, но актуальный расчёт ещё не совпал с сертифицированной версией."
+                if expenses_complete
+                else "Не все расходы поставки подтверждены."
+            )
+        ),
+    }
+    return result
+
+
+def _revalidate_balance_certifications(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    balances: Iterable[Mapping[str, Any]],
+    active_version_id: str,
+) -> list[dict[str, Any]]:
+    """Fail closed when mutable supplier evidence no longer matches the active version.
+
+    Balance rows intentionally retain the certification bit frozen in their
+    immutable functional version.  Presentation cannot rely on that bit alone:
+    a source mutation clears current shipment certification before targeted
+    replay publishes a replacement version.  Reuse the canonical supplier
+    allocation/fingerprint projection and require it to refer to the exact
+    version whose balances are being rendered.
+    """
+
+    rows = [dict(item) for item in balances]
+    shipment_ids_by_index = [
+        _shipment_ids_from_provenance(item.get("provenance")) for item in rows
+    ]
+    shipment_ids = sorted(
+        {
+            shipment_id
+            for item_ids in shipment_ids_by_index
+            for shipment_id in item_ids
+        }
+    )
+    certification_by_shipment: dict[str, bool] = {}
+    for shipment_id in shipment_ids:
+        proof = load_supplier_line_cost_breakdown(
+            runtime=runtime,
+            shipment_id=shipment_id,
+        )
+        certification = dict(proof.get("certification") or {})
+        certification_by_shipment[shipment_id] = bool(
+            certification.get("certified")
+            and active_version_id
+            and str(certification.get("active_version_id") or "")
+            == active_version_id
+        )
+
+    result: list[dict[str, Any]] = []
+    for item, item_shipment_ids in zip(rows, shipment_ids_by_index, strict=True):
+        persisted_certified = bool(item.get("certified"))
+        current_sources_certified = bool(
+            not item_shipment_ids
+            or all(
+                certification_by_shipment.get(shipment_id, False)
+                for shipment_id in item_shipment_ids
+            )
+        )
+        item["persisted_certified"] = persisted_certified
+        item["certified"] = persisted_certified and current_sources_certified
+        item["certification_revalidated"] = bool(item["certified"])
+        item["certification_source_shipments"] = item_shipment_ids
+        item["certification_revalidation_failed"] = bool(
+            persisted_certified and not current_sources_certified
+        )
+        result.append(item)
+    return result
+
+
+def _shipment_ids_from_provenance(value: Any) -> list[str]:
+    """Collect supplier identities carried through nested warehouse provenance."""
+
+    result: set[str] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            shipment_id = str(item.get("shipment_id") or "").strip()
+            if shipment_id:
+                result.add(shipment_id)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, (list, tuple)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return sorted(result)
 
 
 @dataclass(frozen=True)
@@ -390,6 +838,558 @@ def allocate_capital(
         remainder -= allocated
         result[nm_id] += allocated
     return dict(result)
+
+
+def _allocate_supplier_component(
+    lines: list[Mapping[str, Any]],
+    *,
+    total_capital: Decimal,
+    method: str,
+) -> dict[str, Decimal]:
+    """Allocate one document component to invoice lines with exact conservation."""
+
+    if total_capital < ZERO:
+        raise ValueError("supplier component capital cannot be negative")
+    weighted: list[tuple[str, Decimal]] = []
+    for row in lines:
+        line_id = str(row.get("line_id") or "").strip()
+        weight = (
+            _decimal(row.get("quantity"))
+            if method == "quantity"
+            else _decimal(row.get("invoice_value_cny"))
+        )
+        if not line_id or weight <= ZERO:
+            raise ValueError("supplier allocation requires a stable line id and positive weight")
+        weighted.append((line_id, weight))
+    denominator = sum((weight for _, weight in weighted), ZERO)
+    if not weighted or denominator <= ZERO:
+        raise ValueError("supplier allocation denominator must be positive")
+    result: dict[str, Decimal] = {}
+    remainder = total_capital
+    for index, (line_id, weight) in enumerate(weighted):
+        value = remainder if index == len(weighted) - 1 else total_capital * weight / denominator
+        remainder -= value
+        result[line_id] = value
+    if not _decimal_conserves(sum(result.values(), ZERO), total_capital):
+        raise WarehouseFunctionalError("supplier document allocation does not conserve capital")
+    return result
+
+
+def _decimal_conserves(left: Any, right: Any) -> bool:
+    """Compare at the documented sub-kopeck Decimal audit precision."""
+
+    return abs(_decimal(left) - _decimal(right)) <= Decimal("0.000000000000000001")
+
+
+def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build the canonical per-line supplier cost proof used by warehouse replay and UI."""
+
+    shipments = {str(row["shipment_id"]): dict(row) for row in sources.get("shipments") or []}
+    product_lines: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_product_lines: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
+    for raw in sources.get("shipment_lines") or []:
+        row = dict(raw)
+        if str(row.get("line_type") or "") != "product":
+            continue
+        shipment_id = str(row.get("shipment_id") or "")
+        line_id = str(row.get("line_id") or "").strip()
+        nm_id = int(row.get("internal_nm_id") or 0)
+        quantity = _decimal(row.get("qty"))
+        invoice_value = _line_value(row)
+        reasons: list[str] = []
+        if not line_id:
+            reasons.append("нет устойчивого ID строки")
+        if nm_id <= 0:
+            reasons.append("нет однозначного сопоставления с nmID")
+        if quantity <= ZERO:
+            reasons.append("количество не положительное")
+        if invoice_value <= ZERO:
+            reasons.append("стоимость строки invoice не положительная")
+        if reasons:
+            invalid_product_lines[shipment_id].append(
+                {
+                    "line_id": line_id or "без ID",
+                    "reason_ru": ", ".join(reasons),
+                }
+            )
+            continue
+        product_lines[shipment_id].append(
+            {
+                **row,
+                "line_id": line_id,
+                "nm_id": nm_id,
+                "quantity": quantity,
+                "unit_price_cny": _decimal(row.get("unit_price")),
+                "invoice_value_cny": invoice_value,
+            }
+        )
+    cny_documents = {
+        str(row.get("document_id") or ""): dict(row)
+        for row in sources.get("cny_documents") or []
+    }
+    operations: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw in sources.get("cny_operations") or []:
+        source_document = cny_documents.get(str(raw.get("source_document_id") or ""))
+        if _counted_cny_operation(raw, document=source_document):
+            operations[str(raw.get("source_order_id") or "")].append(dict(raw))
+    financial_documents = {
+        str(row.get("document_id") or ""): dict(row)
+        for row in sources.get("financial_documents") or []
+    }
+    expenses: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw in sources.get("financial_expense_lines") or []:
+        expenses[str(raw.get("supplier_order_id") or "")].append(dict(raw))
+    for rows in product_lines.values():
+        rows.sort(
+            key=lambda item: (
+                int(item.get("sort_order") or 0),
+                str(item.get("line_id") or ""),
+            )
+        )
+    for rows in operations.values():
+        rows.sort(
+            key=lambda item: (
+                str(item.get("sequence_key") or ""),
+                str(item.get("operation_id") or ""),
+            )
+        )
+    for rows in expenses.values():
+        rows.sort(
+            key=lambda item: (
+                str(item.get("financial_document_id") or ""),
+                int(item.get("sort_order") or 0),
+                str(item.get("line_id") or ""),
+            )
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+    for shipment_id, shipment in shipments.items():
+        if str(shipment.get("order_status") or "").lower() in INACTIVE_SUPPLIER_STATUSES:
+            continue
+        rows = product_lines.get(shipment_id, [])
+        payment_rows = [
+            row for row in operations.get(shipment_id, [])
+            if str(row.get("operation_type") or "") == "supplier_payment_out"
+        ]
+        fee_rows = [
+            row for row in operations.get(shipment_id, [])
+            if str(row.get("operation_type") or "") == "transfer_fee"
+        ]
+        stage = (
+            STAGE_CHINA_TO_FF
+            if str(shipment.get("actual_shipment_date") or "")[:10]
+            else STAGE_PRODUCTION
+        )
+        blockers: list[dict[str, str]] = []
+        if str(shipment.get("match_status") or "").strip() == "checksum_error":
+            blockers.append(
+                {
+                    "code": "invoice_checksum_mismatch",
+                    "reason_ru": (
+                        "Итог строк invoice не совпадает с заявленным итогом документа. "
+                        "Себестоимость не публикуется до исправления контрольной суммы."
+                    ),
+                }
+            )
+        for invalid_line in invalid_product_lines.get(shipment_id, []):
+            blockers.append(
+                {
+                    "code": "invalid_invoice_product_line",
+                    "reason_ru": (
+                        f"Товарная строка {invalid_line['line_id']} не включена в расчёт: "
+                        f"{invalid_line['reason_ru']}. Себестоимость поставки не публикуется."
+                    ),
+                }
+            )
+        if not rows:
+            blockers.append(
+                {
+                    "code": "invoice_product_lines_unavailable",
+                    "reason_ru": "Нет однозначно сопоставленных товарных строк invoice.",
+                }
+            )
+        if not payment_rows:
+            blockers.append(
+                {
+                    "code": "confirmed_supplier_payment_unavailable",
+                    "reason_ru": "Нет подтверждённого платежа поставщику, связанного с invoice.",
+                }
+            )
+        else:
+            for payment in payment_rows:
+                if abs(_decimal(payment.get("rub_value_delta"))) > ZERO:
+                    continue
+                blockers.append(
+                    {
+                        "code": "supplier_payment_rub_valuation_unavailable",
+                        "reason_ru": (
+                            "Подтверждённый платёж "
+                            f"{str(payment.get('operation_id') or 'без ID')} не имеет положительной "
+                            "фактической RUB-стоимости использованных юаней. Нулевая себестоимость "
+                            "не предполагается."
+                        ),
+                    }
+                )
+        for fee in fee_rows:
+            if abs(_decimal(fee.get("rub_value_delta"))) > ZERO:
+                continue
+            blockers.append(
+                {
+                    "code": "bank_fee_rub_valuation_unavailable",
+                    "reason_ru": (
+                        "Банковская комиссия "
+                        f"{str(fee.get('operation_id') or 'без ID')} не имеет положительной "
+                        "RUB-стоимости и не может быть молча исключена из себестоимости."
+                    ),
+                }
+            )
+        line_components: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        component_controls: list[dict[str, Any]] = []
+        seen_source_components: set[str] = set()
+
+        def add_component(
+            *,
+            source_component_id: str,
+            component_key: str,
+            label_ru: str,
+            amount_rub: Decimal,
+            method: str,
+            document: Mapping[str, Any],
+            source_amount_cny: Decimal | None = None,
+            effective_rate: Decimal | None = None,
+        ) -> None:
+            if amount_rub <= ZERO or not rows:
+                return
+            if source_component_id in seen_source_components:
+                raise WarehouseFunctionalError(
+                    f"supplier component counted twice: {source_component_id}"
+                )
+            seen_source_components.add(source_component_id)
+            allocated = _allocate_supplier_component(
+                rows,
+                total_capital=amount_rub,
+                method=method,
+            )
+            document_payload = {
+                "document_id": str(document.get("document_id") or document.get("source_document_id") or ""),
+                "number": str(document.get("document_number") or document.get("number") or ""),
+                "date": str(document.get("document_date") or document.get("operation_date") or "")[:10],
+                "status": str(document.get("parse_status") or document.get("status") or ""),
+                "type": str(document.get("document_type") or document.get("operation_type") or ""),
+            }
+            for row in rows:
+                line_id = str(row["line_id"])
+                line_components[line_id].append(
+                    {
+                        "source_component_id": source_component_id,
+                        "component_key": component_key,
+                        "label_ru": label_ru,
+                        "amount_rub": _text(allocated[line_id]),
+                        "source_amount_rub": _text(amount_rub),
+                        "source_amount_cny": (
+                            _text(source_amount_cny) if source_amount_cny is not None else None
+                        ),
+                        "effective_rate_rub_per_cny": (
+                            _text(effective_rate) if effective_rate is not None else None
+                        ),
+                        "allocation_method": method,
+                        "allocation_method_ru": (
+                            "Пропорционально количеству"
+                            if method == "quantity"
+                            else "Пропорционально стоимости строк invoice"
+                        ),
+                        "document": document_payload,
+                    }
+                )
+            component_controls.append(
+                {
+                    "source_component_id": source_component_id,
+                    "component_key": component_key,
+                    "source_amount_rub": _text(amount_rub),
+                    "allocated_amount_rub": _text(sum(allocated.values(), ZERO)),
+                    "conserved": _decimal_conserves(sum(allocated.values(), ZERO), amount_rub),
+                }
+            )
+
+        for operation in payment_rows:
+            rub = abs(_decimal(operation.get("rub_value_delta")))
+            cny = abs(_decimal(operation.get("cny_delta")))
+            document = cny_documents.get(str(operation.get("source_document_id") or ""), operation)
+            add_component(
+                source_component_id="cny_operation:" + str(operation.get("operation_id") or ""),
+                component_key="supplier_payment",
+                label_ru="Фактический платёж поставщику",
+                amount_rub=rub,
+                method="invoice_value",
+                document={**operation, **document},
+                source_amount_cny=cny,
+                effective_rate=(rub / cny if cny > ZERO else None),
+            )
+        for operation in fee_rows:
+            rub = abs(_decimal(operation.get("rub_value_delta")))
+            cny = abs(_decimal(operation.get("cny_delta")))
+            document = cny_documents.get(str(operation.get("source_document_id") or ""), operation)
+            add_component(
+                source_component_id="cny_operation:" + str(operation.get("operation_id") or ""),
+                component_key="bank_fee",
+                label_ru="Комиссия банка",
+                amount_rub=rub,
+                method="invoice_value",
+                document={**operation, **document},
+                source_amount_cny=cny,
+                effective_rate=(rub / cny if cny > ZERO else None),
+            )
+        for expense in expenses.get(shipment_id, []):
+            document = financial_documents.get(str(expense.get("financial_document_id") or ""), {})
+            if not _validated_financial_expense(document=document, expense=expense):
+                continue
+            doc_type = str(document.get("document_type") or "")
+            category = str(expense.get("category") or "")
+            currency = str(expense.get("currency") or "").upper()
+            amount = _decimal(expense.get("amount_rub"))
+            component_key = ""
+            label_ru = ""
+            method = "invoice_value"
+            if doc_type == "bank_fee_statement" and category in BANK_FEE_CATEGORIES and currency == "RUB":
+                component_key, label_ru = "bank_fee", "Комиссия банка"
+            elif stage == STAGE_CHINA_TO_FF and doc_type == LOGISTICS_DOCUMENT_TYPE:
+                component_key, label_ru, method = "logistics", "Логистика Китай → FF", "quantity"
+            elif stage == STAGE_CHINA_TO_FF and doc_type == CUSTOMS_DOCUMENT_TYPE:
+                if category in CUSTOMS_BY_QUANTITY:
+                    component_key, label_ru, method = "customs_fee_1010", "Таможенный сбор 1010", "quantity"
+                elif category in CUSTOMS_BY_VALUE:
+                    component_key = category
+                    label_ru = "Пошлина 2010" if category == "import_duty_2010" else "Импортный НДС 5010"
+            if not component_key or amount <= ZERO:
+                continue
+            add_component(
+                source_component_id="expense_line:" + str(expense.get("line_id") or ""),
+                component_key=component_key,
+                label_ru=label_ru,
+                amount_rub=amount,
+                method=method,
+                document=document,
+            )
+
+        public_lines: list[dict[str, Any]] = []
+        total_quantity = ZERO
+        total_capital = ZERO
+        for row in rows:
+            line_id = str(row["line_id"])
+            components = line_components.get(line_id, [])
+            capital = sum((_decimal(item["amount_rub"]) for item in components), ZERO)
+            quantity = _decimal(row["quantity"])
+            total_quantity += quantity
+            total_capital += capital
+            public_lines.append(
+                {
+                    "line_id": line_id,
+                    "nm_id": int(row["nm_id"]),
+                    "sku": str(row.get("internal_sku") or ""),
+                    "nomenclature_name": str(row.get("internal_name") or ""),
+                    "barcode": str(row.get("barcode") or ""),
+                    "quantity": _text(quantity),
+                    "unit_price_cny": _text(row["unit_price_cny"]),
+                    "invoice_value_cny": _text(row["invoice_value_cny"]),
+                    "components": components,
+                    "capital_rub": _text(capital) if not blockers else None,
+                    "unit_cost_rub": _text(capital / quantity) if quantity > ZERO and not blockers else None,
+                    "arithmetic": (
+                        f"{_text(capital)} ₽ / {_text(quantity)} шт. = {_text(capital / quantity)} ₽/шт."
+                        if quantity > ZERO and not blockers
+                        else None
+                    ),
+                }
+            )
+        calculation_payload = {
+            "shipment_id": shipment_id,
+            "stage": stage,
+            "invoice_currency": str(shipment.get("currency") or "").strip().upper(),
+            "lines": public_lines,
+            "component_controls": component_controls,
+        }
+        source_components: dict[str, dict[str, Any]] = {}
+        for line in public_lines:
+            for component in line.get("components") or []:
+                source_components.setdefault(
+                    str(component.get("source_component_id") or ""),
+                    {
+                        key: component.get(key)
+                        for key in (
+                            "source_component_id",
+                            "component_key",
+                            "source_amount_rub",
+                            "source_amount_cny",
+                            "effective_rate_rub_per_cny",
+                            "allocation_method",
+                            "document",
+                        )
+                    },
+                )
+        source_payload = {
+            "shipment": {
+                key: shipment.get(key)
+                for key in (
+                    "shipment_id",
+                    "invoice_no",
+                    "invoice_date",
+                    "currency",
+                    "actual_shipment_date",
+                    "actual_ff_acceptance_date",
+                    "order_status",
+                    "expenses_complete",
+                    "declared_invoice_total",
+                    "invoice_amount_total",
+                    "match_status",
+                )
+            },
+            "lines": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "line_id",
+                        "nm_id",
+                        "quantity",
+                        "unit_price_cny",
+                        "invoice_value_cny",
+                    )
+                }
+                for row in rows
+            ],
+            "recognized_components": [
+                source_components[key] for key in sorted(source_components)
+            ],
+            "stage": stage,
+        }
+        source_fingerprint = "sha256:" + _hash(source_payload)
+        calculation_fingerprint = "sha256:" + _hash(calculation_payload)
+        result[shipment_id] = {
+            "shipment_id": shipment_id,
+            "invoice_no": str(shipment.get("invoice_no") or ""),
+            "invoice_date": str(shipment.get("invoice_date") or "")[:10],
+            "invoice_currency": str(shipment.get("currency") or "").strip().upper(),
+            "first_payment_date": min(
+                (
+                    str(row.get("operation_date") or "")[:10]
+                    for row in payment_rows
+                    if str(row.get("operation_date") or "")
+                ),
+                default="",
+            ),
+            "actual_shipment_date": str(shipment.get("actual_shipment_date") or "")[:10],
+            "actual_ff_acceptance_date": str(shipment.get("actual_ff_acceptance_date") or "")[:10],
+            "stage": stage,
+            "expenses_complete": bool(shipment.get("expenses_complete")),
+            "source_fingerprint": source_fingerprint,
+            "calculation_fingerprint": calculation_fingerprint,
+            "quantity": _text(total_quantity),
+            "capital_rub": _text(total_capital) if not blockers else None,
+            "average_unit_cost_rub": (
+                _text(total_capital / total_quantity)
+                if total_quantity > ZERO and not blockers
+                else None
+            ),
+            "lines": public_lines,
+            "blockers": blockers,
+            "component_controls": component_controls,
+            "controls": {
+                "document_allocation_conserved": all(item["conserved"] for item in component_controls),
+                "document_counted_once": len(seen_source_components) == len(component_controls),
+                "line_components_equal_capital": all(
+                    _decimal_conserves(
+                        sum((_decimal(item["amount_rub"]) for item in line["components"]), ZERO),
+                        line.get("capital_rub"),
+                    )
+                    for line in public_lines
+                    if line.get("capital_rub") is not None
+                ),
+                "shipment_lines_equal_capital": (
+                    _decimal_conserves(
+                        sum((_decimal(line.get("capital_rub")) for line in public_lines), ZERO),
+                        total_capital,
+                    )
+                ),
+            },
+        }
+    return result
+
+
+def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]:
+    """Project every exact-cost UI surface from one canonical proof."""
+
+    canonical = dict(breakdown or {})
+    blockers = list(canonical.get("blockers") or [])
+    if not canonical or blockers:
+        return {
+            "exact_bank_fees_rub": None,
+            "exact_currency_payment_cost_rub": None,
+            "exact_landed_cost_total_rub": None,
+            "exact_landed_cost_per_unit_rub": None,
+            "exact_cost_status": "unavailable",
+            "exact_cost_blockers": [
+                str(item.get("reason_ru") or item.get("code") or "Недостающие данные")
+                for item in blockers
+            ] or ["Каноническая расшифровка себестоимости недоступна."],
+            "exact_cost_warnings": [],
+        }
+    controls = list(canonical.get("component_controls") or [])
+    certification = dict(canonical.get("certification") or {})
+    return {
+        "exact_bank_fees_rub": float(sum(
+            (
+                _decimal(item.get("source_amount_rub"))
+                for item in controls
+                if str(item.get("component_key") or "") == "bank_fee"
+            ),
+            ZERO,
+        )),
+        "exact_currency_payment_cost_rub": float(sum(
+            (
+                _decimal(item.get("source_amount_rub"))
+                for item in controls
+                if str(item.get("component_key") or "") == "supplier_payment"
+            ),
+            ZERO,
+        )),
+        "exact_landed_cost_total_rub": (
+            float(_decimal(canonical.get("capital_rub")))
+            if canonical.get("capital_rub") is not None
+            else None
+        ),
+        "exact_landed_cost_per_unit_rub": (
+            float(_decimal(canonical.get("average_unit_cost_rub")))
+            if canonical.get("average_unit_cost_rub") is not None
+            else None
+        ),
+        "exact_cost_status": (
+            "certified" if certification.get("certified") else "provisional"
+        ),
+        "exact_cost_blockers": [],
+        "exact_cost_warnings": [],
+    }
+
+
+def _supplier_cost_version_states(sources: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Freeze every active shipment's cost fingerprints in one functional version.
+
+    This version-scoped state remains available after goods leave the supplier
+    transit warehouses and their proof becomes nested inside the append-only FF
+    ledger.  It therefore avoids inferring certification from the current
+    warehouse location.
+    """
+
+    return [
+        {
+            "shipment_id": shipment_id,
+            "source_fingerprint": str(allocation.get("source_fingerprint") or ""),
+            "calculation_fingerprint": str(
+                allocation.get("calculation_fingerprint") or ""
+            ),
+            "expenses_complete": bool(allocation.get("expenses_complete")),
+            "calculation_available": not bool(allocation.get("blockers")),
+        }
+        for shipment_id, allocation in sorted(_supplier_cost_allocations(sources).items())
+    ]
 
 
 def reconcile_discrepancies(
@@ -1090,7 +2090,7 @@ def _build_versioned_historical_correction(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build an append-only correction for absent dates without rewriting frozen rows."""
 
-    cutover_date = str(cutover.get("cutover_at") or "")[:10]
+    cutover_date = _business_date_value(cutover.get("cutover_at"))
     if not cutover_date:
         raise WarehouseFunctionalError("historical correction has no cutover date")
     frozen = _canonical_daily_projection_rows(frozen_rows)
@@ -1408,15 +2408,15 @@ class WarehouseFunctionalBlock:
         kind: str,
         wb_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        captured_at = self.timestamp_factory()
         if wb_payload is None:
             nomenclature = self.opening._opening_nomenclature_request()  # noqa: SLF001
             wb_payload = self.opening._fetch_wb_stock_snapshot(nomenclature)  # noqa: SLF001
         capture = self._capture_sources(
-            captured_at=captured_at,
+            captured_at=None,
             wb_payload=wb_payload,
             include_historical_correction=kind == "emergency_rebuild",
         )
+        captured_at = str(capture["captured_at"])
         ff_debit_coverage = (
             validate_cutover_ff_debit_coverage(capture) if kind == "functional_cutover" else None
         )
@@ -1429,10 +2429,19 @@ class WarehouseFunctionalBlock:
             cutover=cutover,
             cutover_mode=kind == "functional_cutover",
         )
+        supplier_cost_states = _supplier_cost_version_states(capture)
+        effective_date = _current_snapshot_effective_date(
+            captured_at=captured_at,
+            snapshot_date=capture["wb_snapshot"]["snapshot_date"],
+        )
         projection_cutoff = (
-            captured_at[:10]
+            effective_date
             if kind == "functional_cutover"
-            else str((cutover or {}).get("cutover_at") or captured_at)[:10]
+            else (
+                business_date_from_timestamp(str((cutover or {}).get("cutover_at")))
+                if str((cutover or {}).get("cutover_at") or "")
+                else effective_date
+            )
         )
         if cutover is None:
             pre_cutover_wb_cost_projection = build_historical_wb_cost_projection(
@@ -1490,12 +2499,12 @@ class WarehouseFunctionalBlock:
         )
         historical_calendar = _validate_historical_projection_calendar(
             historical_wb_cost_projection,
-            effective_date=captured_at[:10],
+            effective_date=effective_date,
         )
         lines = _replace_current_wb_costs(
             lines,
             daily_projection=post_cutover_wb_cost_projection,
-            current_date=captured_at[:10],
+            current_date=effective_date,
         )
         summaries = _summaries(lines)
         positive = [line for line in lines if line.quantity > ZERO]
@@ -1515,7 +2524,7 @@ class WarehouseFunctionalBlock:
             "kind": kind,
             "cutover_id": FUNCTIONAL_CUTOVER_ID,
             "captured_at": captured_at,
-            "effective_date": captured_at[:10],
+            "effective_date": effective_date,
             "base_active_version_id": base_active_version_id,
             "local_source_digest": capture["local_source_digest"],
             "wb_supply_source_digest": capture["wb_supply_source_digest"],
@@ -1530,6 +2539,7 @@ class WarehouseFunctionalBlock:
             "unmatched_doprinato": unmatched,
             "new_events": events,
             "movement_documents": movement_documents,
+            "supplier_cost_states": supplier_cost_states,
             "diff": _balance_diff(previous, lines),
             "invariants": {
                 "warehouse_count": len(STAGES),
@@ -1574,6 +2584,20 @@ class WarehouseFunctionalBlock:
             return {**self.readback(), "idempotent": True}
         if self._version_exists(fingerprint):
             return {**self.readback(), "idempotent": True}
+        planned_effective_date = _current_snapshot_effective_date(
+            captured_at=str(normalized.get("captured_at") or ""),
+            snapshot_date=(normalized.get("wb_snapshot") or {}).get("snapshot_date"),
+        )
+        if planned_effective_date != str(normalized.get("effective_date") or "")[:10]:
+            raise WarehouseFunctionalError(
+                "functional plan effective date differs from its coherent source capture"
+            )
+        apply_business_date = business_date_from_timestamp(self.timestamp_factory())
+        if apply_business_date != planned_effective_date:
+            raise WarehouseFunctionalError(
+                "functional plan crossed the canonical business-date boundary before apply: "
+                f"planned={planned_effective_date}, apply={apply_business_date}"
+            )
         if kind != "functional_cutover" and self._active_version_id() != str(
             normalized.get("base_active_version_id") or ""
         ):
@@ -1642,6 +2666,14 @@ class WarehouseFunctionalBlock:
                     raise WarehouseFunctionalError(
                         "active functional warehouse version drifted while acquiring apply lock"
                     )
+                locked_apply_business_date = business_date_from_timestamp(
+                    self.timestamp_factory()
+                )
+                if locked_apply_business_date != planned_effective_date:
+                    raise WarehouseFunctionalError(
+                        "functional plan crossed the canonical business-date boundary "
+                        "while acquiring apply lock"
+                    )
                 if self._local_source_digest(
                     connection=conn,
                     recovery_end_date=recovery_end_date,
@@ -1705,7 +2737,7 @@ class WarehouseFunctionalBlock:
                     ).fetchone()
                     if cutover_date_row is None:
                         raise WarehouseFunctionalError("functional daily replay has no cutover row")
-                    cutover_date = str(cutover_date_row["cutover_at"])[:10]
+                    cutover_date = _business_date_value(cutover_date_row["cutover_at"])
                     planned_frozen = _canonical_daily_projection_rows(
                         item
                         for item in normalized.get("historical_wb_cost_projection") or []
@@ -1838,6 +2870,22 @@ class WarehouseFunctionalBlock:
                     ),
                 )
                 self._insert_snapshot(conn, version_id=version_id, payload=normalized["wb_snapshot"])
+                for item in normalized.get("supplier_cost_states") or []:
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
+                               version_id,shipment_id,source_fingerprint,calculation_fingerprint,
+                               expenses_complete,calculation_available,created_at
+                           ) VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            version_id,
+                            str(item["shipment_id"]),
+                            str(item["source_fingerprint"]),
+                            str(item["calculation_fingerprint"]),
+                            int(bool(item["expenses_complete"])),
+                            int(bool(item["calculation_available"])),
+                            now,
+                        ),
+                    )
                 for item in normalized["lines"]:
                     conn.execute(
                         """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
@@ -1934,6 +2982,10 @@ class WarehouseFunctionalBlock:
                        WHERE status IN ('queued','running')""",
                     (now,),
                 )
+                if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
+                    raise WarehouseFunctionalError(
+                        "functional plan crossed the canonical business-date boundary before commit"
+                    )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -2005,6 +3057,10 @@ class WarehouseFunctionalBlock:
                         "DELETE FROM sheet_vitrina_v1_warehouse_functional_documents WHERE version_id=?",
                         (version_id,),
                     )
+                    conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_states WHERE version_id=?",
+                        (version_id,),
+                    )
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1")
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1")
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue")
@@ -2054,7 +3110,11 @@ class WarehouseFunctionalBlock:
         readback = self.readback()
         if readback.get("status") != "ready":
             return readback
-        lines = readback["balances"]
+        lines = _revalidate_balance_certifications(
+            runtime=self.runtime,
+            balances=readback["balances"],
+            active_version_id=str((readback.get("active_version") or {}).get("version_id") or ""),
+        )
         summaries = _summaries([_line_from_payload(item) for item in lines])
         return {
             "contract_name": CONTRACT_NAME,
@@ -2082,7 +3142,13 @@ class WarehouseFunctionalBlock:
         readback = self.readback()
         if readback.get("status") != "ready":
             return readback
-        balances = [item for item in readback["balances"] if item["warehouse_key"] == warehouse_key]
+        balances = _revalidate_balance_certifications(
+            runtime=self.runtime,
+            balances=[
+                item for item in readback["balances"] if item["warehouse_key"] == warehouse_key
+            ],
+            active_version_id=str((readback.get("active_version") or {}).get("version_id") or ""),
+        )
         summary = _summaries([_line_from_payload(item) for item in balances])[warehouse_key]
         names = self._nomenclature_names()
         documents = self._warehouse_documents(warehouse_key)
@@ -2091,11 +3157,20 @@ class WarehouseFunctionalBlock:
             nm_id = int(item["nm_id"])
             identity = names.get(nm_id, {})
             quality_presentation = _warehouse_quality_presentation(item.get("quality"))
-            warning_parts = []
-            if not bool(item.get("certified")):
+            cost_status_presentation = _warehouse_balance_status_presentation(
+                (
+                    "source_changed_provisional"
+                    if item.get("certification_revalidation_failed")
+                    else item.get("quality")
+                ),
+                certified=bool(item.get("certified")),
+            )
+            warning_parts = [cost_status_presentation["label_ru"]]
+            if quality_presentation["label_ru"] != cost_status_presentation["label_ru"]:
                 warning_parts.append(quality_presentation["label_ru"])
-            if identity.get("warning"):
-                warning_parts.append(str(identity["warning"]))
+            identity_warning = str(identity.get("warning") or "")
+            if identity_warning:
+                warning_parts.append(identity_warning)
             public_balances.append(
                 {
                     **item,
@@ -2106,6 +3181,11 @@ class WarehouseFunctionalBlock:
                     "identity_source": identity.get("source") or "nm_id",
                     "average_unit_cost_rub": item.get("wac_rub"),
                     "quality_presentation": quality_presentation,
+                    "cost_status_presentation": cost_status_presentation,
+                    "identity_warning": identity_warning,
+                    "quality_tone": (
+                        "warning" if identity_warning else cost_status_presentation["tone"]
+                    ),
                     "human_evidence": _warehouse_human_evidence(
                         item.get("provenance"),
                         quantity=item.get("quantity"),
@@ -2213,6 +3293,10 @@ class WarehouseFunctionalBlock:
                     "in_way_to_client": summary["wb_in_way_to_client"],
                     "in_way_from_client": summary["wb_in_way_from_client"],
                     "total": summary["quantity"],
+                    "formula_ru": (
+                        "Всего в контуре WB = На складах WB + В пути к покупателям "
+                        "+ В пути возврата на WB."
+                    ),
                 } if warehouse_key == STAGE_WB else None,
             },
             "balances": public_balances,
@@ -2356,6 +3440,15 @@ class WarehouseFunctionalBlock:
                     (FUNCTIONAL_CUTOVER_ID,),
                 ).fetchall()
             ]
+            historical_quantity_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT as_of_date,nm_id,quantity
+                       FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                       WHERE cutover_id=? ORDER BY as_of_date,nm_id""",
+                    (FUNCTIONAL_CUTOVER_ID,),
+                ).fetchall()
+            ]
             historical_corrections = [
                 {
                     **dict(row),
@@ -2389,17 +3482,54 @@ class WarehouseFunctionalBlock:
                 if cutover_version is not None
                 else []
             )
+            active_snapshot = conn.execute(
+                """SELECT *
+                   FROM sheet_vitrina_v1_warehouse_wb_snapshots
+                   WHERE version_id=? ORDER BY created_at DESC LIMIT 1""",
+                (active["version_id"],),
+            ).fetchone()
+            recent_versions = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT version.version_id,version.version_kind,version.effective_at,
+                              version.created_at,version.status,version.plan_fingerprint,
+                              snapshot.snapshot_date,snapshot.snapshot_id
+                       FROM sheet_vitrina_v1_warehouse_functional_versions version
+                       LEFT JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+                         ON snapshot.version_id=version.version_id
+                       WHERE version.cutover_id=?
+                       ORDER BY version.created_at DESC,version.version_id DESC LIMIT 24""",
+                    (FUNCTIONAL_CUTOVER_ID,),
+                ).fetchall()
+            ]
             sync = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1").fetchone()
         public_balances = [_balance_public(item) for item in balances]
         expected_historical_dates = _date_range(
             "2026-07-01",
-            str(active["effective_at"])[:10],
+            (
+                str(active_snapshot["snapshot_date"])
+                if active_snapshot is not None
+                else business_date_from_timestamp(str(active["effective_at"]))
+            ),
         )
         missing_historical_dates = sorted(
             set(expected_historical_dates) - set(historical_dates)
         )
         historical_public = dict(historical_cost) if historical_cost else {}
         value_gap_count = int(historical_public.get("gap_count") or 0)
+        contour_quantities_by_date: dict[str, dict[str, str]] = {}
+        for row in historical_quantity_rows:
+            day = str(row.get("as_of_date") or "")[:10]
+            if not day:
+                continue
+            day_values = contour_quantities_by_date.setdefault(day, {})
+            day_values[f"SKU:{int(row.get('nm_id') or 0)}"] = _text(
+                _decimal(row.get("quantity"))
+            )
+        for day_values in contour_quantities_by_date.values():
+            day_values["TOTAL"] = _text(
+                sum((_decimal(value) for value in day_values.values()), ZERO)
+            )
         historical_public.update(
             {
                 "expected_day_count": len(expected_historical_dates),
@@ -2407,6 +3537,7 @@ class WarehouseFunctionalBlock:
                 "missing_dates": missing_historical_dates,
                 "value_gap_count": value_gap_count,
                 "gap_count": value_gap_count + len(missing_historical_dates),
+                "contour_quantities_by_date": contour_quantities_by_date,
             }
         )
         return {
@@ -2416,6 +3547,12 @@ class WarehouseFunctionalBlock:
             "cutover": _cutover_public(cutover_row),
             "active_version": _version_public(active),
             "sync": dict(sync) if sync else {},
+            "recent_versions": recent_versions,
+            "wb_snapshot": (
+                _wb_snapshot_integrity(dict(active_snapshot))
+                if active_snapshot is not None
+                else {}
+            ),
             "balances": public_balances,
             "documents": [_document_public(item) for item in documents],
             "unmatched_doprinato": [_unmatched_public(item) for item in unmatched],
@@ -2444,19 +3581,27 @@ class WarehouseFunctionalBlock:
     def _capture_sources(
         self,
         *,
-        captured_at: str,
+        captured_at: str | None,
         wb_payload: Mapping[str, Any],
         include_historical_correction: bool = False,
     ) -> dict[str, Any]:
+        capture_started_at = captured_at or self.timestamp_factory()
+        snapshot_business_date = str(wb_payload.get("snapshot_date") or "").strip()
+        if not snapshot_business_date:
+            snapshot_business_date = business_date_from_timestamp(capture_started_at)
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
             conn.execute("BEGIN")
             sources = _source_rows(
                 conn,
-                recovery_end_date=captured_at[:10],
+                recovery_end_date=snapshot_business_date,
                 include_historical_correction=include_historical_correction,
             )
             conn.commit()
+        # The version timestamp describes the completed coherent local capture,
+        # not the instant before the (potentially slow) WB fetch or DB read.  A
+        # midnight boundary therefore fails closed against snapshot_date.
+        captured_at = captured_at or self.timestamp_factory()
         sources = _functional_local_source_view(sources)
         local_digest = "sha256:" + _hash(_guarded_local_sources(sources))
         wb_data = dict(wb_payload.get("data") or {})
@@ -2471,7 +3616,7 @@ class WarehouseFunctionalBlock:
                 }
             )[:24],
             "fetched_at": str(wb_data.get("fetched_at") or captured_at),
-            "snapshot_date": str(wb_payload.get("snapshot_date") or captured_at[:10]),
+            "snapshot_date": snapshot_business_date,
             "requested_nm_ids": list(wb_payload.get("requested_nm_ids") or []),
             "pagination_complete": bool(wb_data.get("pagination_complete")),
             "page_count": int(wb_data.get("page_count") or 0),
@@ -2562,114 +3707,96 @@ class WarehouseFunctionalBlock:
         buckets: defaultdict[tuple[str, int], dict[str, Any]] = defaultdict(
             lambda: {"quantity": ZERO, "capital": ZERO, "covered": ZERO, "quality": [], "provenance": []}
         )
-        shipment_by_id = {str(row["shipment_id"]): row for row in capture["shipments"]}
-        shipment_lines: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in capture["shipment_lines"]:
-            if str(row.get("line_type") or "") == "product" and int(row.get("internal_nm_id") or 0) > 0:
-                shipment_lines[str(row["shipment_id"])].append(dict(row))
-        payments: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-        transfer_fees: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in capture["cny_operations"]:
-            if not _counted_cny_operation(row):
-                continue
-            operation_type = str(row.get("operation_type") or "")
-            if operation_type == "supplier_payment_out":
-                payments[str(row.get("source_order_id") or "")].append(dict(row))
-            elif operation_type == "transfer_fee":
-                transfer_fees[str(row.get("source_order_id") or "")].append(dict(row))
-        docs = {str(row["document_id"]): row for row in capture["financial_documents"]}
-        expense_lines: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in capture["financial_expense_lines"]:
-            expense_lines[str(row["supplier_order_id"])].append(dict(row))
         supplier_flow_costs: dict[tuple[str, int], tuple[Decimal, Decimal, str, dict[str, Any]]] = {}
-
-        for shipment_id, shipment in shipment_by_id.items():
-            if str(shipment.get("order_status") or "").lower() in INACTIVE_SUPPLIER_STATUSES:
+        for shipment_id, allocation in _supplier_cost_allocations(capture).items():
+            if allocation.get("blockers"):
+                if str(allocation.get("first_payment_date") or ""):
+                    blocker_codes = ",".join(
+                        sorted(
+                            str(item.get("code") or "unknown")
+                            for item in allocation.get("blockers") or []
+                        )
+                    )
+                    raise WarehouseFunctionalError(
+                        "activated supplier shipment "
+                        f"{shipment_id} has unavailable canonical cost proof: {blocker_codes}"
+                    )
                 continue
-            lines = shipment_lines.get(shipment_id, [])
-            if not lines or not payments.get(shipment_id):
-                continue
-            stage = STAGE_CHINA_TO_FF if str(shipment.get("actual_shipment_date") or "")[:10] else STAGE_PRODUCTION
-            payment_capital = sum((abs(_decimal(row.get("rub_value_delta"))) for row in payments[shipment_id]), ZERO)
-            cny_fee_capital = sum((abs(_decimal(row.get("rub_value_delta"))) for row in transfer_fees[shipment_id]), ZERO)
-            direct_rub_fees = ZERO
-            china_pools: list[tuple[Decimal, str, str]] = []
-            for expense in expense_lines.get(shipment_id, []):
-                document = docs.get(str(expense.get("financial_document_id") or ""), {})
-                if not _validated_financial_expense(document=document, expense=expense):
-                    continue
-                doc_type = str(document.get("document_type") or "")
-                currency = str(expense.get("currency") or "").upper()
-                amount = _decimal(expense.get("amount_rub"))
-                category = str(expense.get("category") or "")
-                if doc_type == "bank_fee_statement" and category in BANK_FEE_CATEGORIES and currency == "RUB":
-                    direct_rub_fees += amount
-                elif stage == STAGE_CHINA_TO_FF and doc_type == LOGISTICS_DOCUMENT_TYPE and amount > ZERO:
-                    china_pools.append((amount, "quantity", f"{document.get('document_id')}:{expense.get('line_id')}"))
-                elif stage == STAGE_CHINA_TO_FF and doc_type == CUSTOMS_DOCUMENT_TYPE and amount > ZERO:
-                    if category in CUSTOMS_BY_QUANTITY:
-                        china_pools.append((amount, "quantity", f"{document.get('document_id')}:{expense.get('line_id')}"))
-                    elif category in CUSTOMS_BY_VALUE:
-                        china_pools.append((amount, "invoice_value", f"{document.get('document_id')}:{expense.get('line_id')}"))
-            production_total = payment_capital + cny_fee_capital + direct_rub_fees
-            allocation_lines = [
-                {
-                    "nm_id": int(row["internal_nm_id"]),
-                    "quantity": _decimal(row.get("qty")),
-                    "invoice_value": _line_value(row),
-                }
-                for row in lines
-            ]
-            capital_by_nm = allocate_capital(allocation_lines, total_capital=production_total, method="invoice_value")
-            china_by_nm: defaultdict[int, Decimal] = defaultdict(Decimal)
-            china_sources: list[str] = []
-            for total, method, source_id in china_pools:
-                for nm_id, allocated in allocate_capital(allocation_lines, total_capital=total, method=method).items():
-                    china_by_nm[nm_id] += allocated
-                china_sources.append(source_id)
-            quantity_by_nm: defaultdict[int, Decimal] = defaultdict(Decimal)
-            for row in allocation_lines:
-                quantity_by_nm[int(row["nm_id"])] += _decimal(row["quantity"])
+            stage = str(allocation["stage"])
+            lines_by_nm: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+            for line in allocation.get("lines") or []:
+                lines_by_nm[int(line["nm_id"])].append(dict(line))
             flow_id = _supplier_flow_id(shipment_id)
-            for nm_id, quantity in quantity_by_nm.items():
-                capital = capital_by_nm.get(nm_id, ZERO) + china_by_nm.get(nm_id, ZERO)
+            for nm_id, line_rows in lines_by_nm.items():
+                quantity = sum((_decimal(row["quantity"]) for row in line_rows), ZERO)
+                capital = sum((_decimal(row["capital_rub"]) for row in line_rows), ZERO)
                 if quantity <= ZERO or capital <= ZERO:
                     raise WarehouseFunctionalError(f"activated supplier flow {flow_id} has incomplete capital")
                 quality = (
                     "certified"
-                    if bool(shipment.get("expenses_complete"))
+                    if bool(allocation.get("expenses_complete"))
                     else "confirmed_payments_provisional_expenses"
                 )
+                payment_components = [
+                    component
+                    for row in line_rows
+                    for component in row.get("components") or []
+                    if component.get("component_key") == "supplier_payment"
+                ]
+                bank_fee_components = [
+                    component
+                    for row in line_rows
+                    for component in row.get("components") or []
+                    if component.get("component_key") == "bank_fee"
+                ]
+                china_components = [
+                    component
+                    for row in line_rows
+                    for component in row.get("components") or []
+                    if component.get("component_key") not in {"supplier_payment", "bank_fee"}
+                ]
                 flow_provenance = {
                     "supplier_flow_id": flow_id,
                     "shipment_id": shipment_id,
-                    "invoice_no": str(shipment.get("invoice_no") or ""),
-                    "invoice_date": str(shipment.get("invoice_date") or "")[:10],
+                    "invoice_no": str(allocation.get("invoice_no") or ""),
+                    "invoice_date": str(allocation.get("invoice_date") or "")[:10],
                     "business_date": (
-                        str(shipment.get("actual_shipment_date") or "")[:10]
+                        str(allocation.get("actual_shipment_date") or "")[:10]
                         if stage == STAGE_CHINA_TO_FF
-                        else min(
-                            (
-                                str(row.get("operation_date") or "")[:10]
-                                for row in payments[shipment_id]
-                                if str(row.get("operation_date") or "")
-                            ),
-                            default=str(shipment.get("invoice_date") or "")[:10],
-                        )
+                        else str(allocation.get("first_payment_date") or allocation.get("invoice_date") or "")[:10]
                     ),
-                    "actual_shipment_date": str(shipment.get("actual_shipment_date") or "")[:10],
+                    "actual_shipment_date": str(allocation.get("actual_shipment_date") or "")[:10],
                     "flow_quantity": _text(quantity),
                     "flow_capital_rub": _text(capital),
                     "quality": quality,
-                    "expenses_complete_certification": bool(shipment.get("expenses_complete")),
-                    "payment_operation_ids": [str(row["operation_id"]) for row in payments[shipment_id]],
-                    "cny_fee_operation_ids": [str(row["operation_id"]) for row in transfer_fees[shipment_id]],
-                    "direct_rub_bank_fees": _text(direct_rub_fees),
-                    "china_expense_sources": china_sources,
+                    "expenses_complete_certification": bool(allocation.get("expenses_complete")),
+                    "source_fingerprint": str(allocation["source_fingerprint"]),
+                    "calculation_fingerprint": str(allocation["calculation_fingerprint"]),
+                    "certified_source_fingerprint": (
+                        str(allocation["source_fingerprint"])
+                        if bool(allocation.get("expenses_complete"))
+                        else None
+                    ),
+                    "certified_calculation_fingerprint": (
+                        str(allocation["calculation_fingerprint"])
+                        if bool(allocation.get("expenses_complete"))
+                        else None
+                    ),
+                    "payment_operation_ids": sorted(
+                        {str(item["source_component_id"]).split(":", 1)[-1] for item in payment_components}
+                    ),
+                    "bank_fee_source_ids": sorted(
+                        {str(item["source_component_id"]) for item in bank_fee_components}
+                    ),
+                    "china_expense_sources": sorted(
+                        {str(item["source_component_id"]) for item in china_components}
+                    ),
                     "allocation": "supplier/payment/bank fee by invoice value; logistics/1010 by quantity; 2010/5010 by invoice value",
+                    "line_cost_breakdown": line_rows,
+                    "conservation_controls": allocation.get("controls") or {},
                 }
                 supplier_flow_costs[(shipment_id, nm_id)] = (quantity, capital, quality, flow_provenance)
-                if str(shipment.get("actual_ff_acceptance_date") or "")[:10]:
+                if str(allocation.get("actual_ff_acceptance_date") or "")[:10]:
                     continue
                 _add_bucket(
                     buckets,
@@ -2811,7 +3938,7 @@ class WarehouseFunctionalBlock:
                     provenance={
                         "source": "canonical_append_only_ff_ledger_replay",
                         "cutover_opening": True,
-                        "cutover_date": str((cutover or {}).get("cutover_at") or "")[:10],
+                        "cutover_date": _business_date_value((cutover or {}).get("cutover_at")),
                         "opening_version_id": str(pool.get("opening_version_id") or ""),
                         "operations": pool["operations"],
                     },
@@ -2848,7 +3975,7 @@ class WarehouseFunctionalBlock:
                 before_boundary = bool(
                     cutover
                     and business_date
-                    and business_date < str(cutover["cutover_at"])[:10]
+                    and business_date < business_date_from_timestamp(str(cutover["cutover_at"]))
                 )
                 needs_supply_cost = bool(
                     not is_doprinato
@@ -3292,7 +4419,9 @@ class WarehouseFunctionalBlock:
         deterministically rewrites only the derived daily cost history.
         """
 
-        current_date = captured_at[:10]
+        current_date = str(candidate_snapshot.get("snapshot_date") or "")[:10]
+        if len(current_date) != 10:
+            current_date = business_date_from_timestamp(captured_at)
         opening_cost_rows = [dict(item) for item in opening_cost_map]
         seed_wac = {
             int(item["nm_id"]): _decimal(item["wb_unit_cost_rub"])
@@ -3355,7 +4484,7 @@ class WarehouseFunctionalBlock:
             ).fetchone()
             version_snapshots = conn.execute(
                 """SELECT version.version_id,version.effective_at,version.created_at,snapshot.items_json,
-                          snapshot.snapshot_id
+                          snapshot.snapshot_id,snapshot.snapshot_date
                    FROM sheet_vitrina_v1_warehouse_functional_versions version
                    JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
                      ON snapshot.version_id=version.version_id
@@ -3381,7 +4510,7 @@ class WarehouseFunctionalBlock:
             ).fetchall()
         if cutover is None or cutover_version is None:
             raise WarehouseFunctionalError("functional daily WAC replay has no cutover baseline")
-        cutover_date = str(cutover["cutover_at"])[:10]
+        cutover_date = business_date_from_timestamp(str(cutover["cutover_at"]))
         if current_date < cutover_date:
             raise WarehouseFunctionalError("functional daily WAC replay date precedes cutover")
 
@@ -3401,7 +4530,9 @@ class WarehouseFunctionalBlock:
 
         snapshots_by_day: dict[str, dict[str, Any]] = {}
         for row in version_snapshots:
-            day = str(row["effective_at"])[:10]
+            day = str(row["snapshot_date"] or "")[:10]
+            if len(day) != 10:
+                day = business_date_from_timestamp(str(row["effective_at"]))
             if not cutover_date <= day <= current_date:
                 continue
             snapshots_by_day[day] = {
@@ -3956,6 +5087,14 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS warehouse_functional_balance_stage
         ON sheet_vitrina_v1_warehouse_functional_balances(version_id,warehouse_key,nm_id);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_cost_states(
+            version_id TEXT NOT NULL,shipment_id TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,calculation_fingerprint TEXT NOT NULL,
+            expenses_complete INTEGER NOT NULL,calculation_available INTEGER NOT NULL,
+            created_at TEXT NOT NULL,PRIMARY KEY(version_id,shipment_id)
+        );
+        CREATE INDEX IF NOT EXISTS warehouse_supplier_cost_state_shipment
+        ON sheet_vitrina_v1_warehouse_supplier_cost_states(shipment_id,version_id);
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_wb_snapshots(
             snapshot_id TEXT PRIMARY KEY,version_id TEXT NOT NULL,fetched_at TEXT NOT NULL,
             snapshot_date TEXT NOT NULL,requested_nm_ids_json TEXT NOT NULL,pagination_complete INTEGER NOT NULL,
@@ -4045,7 +5184,7 @@ def _source_rows(
         (FUNCTIONAL_CUTOVER_ID,),
     ).fetchone()
     recovery_boundary = (
-        str(cutover_row["cutover_at"] or "")[:10]
+        _business_date_value(cutover_row["cutover_at"])
         if cutover_row is not None
         else str(recovery_end_date or "")[:10]
     )
@@ -4063,7 +5202,7 @@ def _source_rows(
         "shipment_lines": "SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines ORDER BY shipment_id,sort_order,line_id",
         "cny_operations": "SELECT * FROM sheet_vitrina_v1_cny_ledger_operations ORDER BY sequence_key,operation_id",
         "financial_documents": "SELECT * FROM sheet_vitrina_v1_supplier_financial_documents ORDER BY document_date,document_id",
-        "financial_expense_lines": "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines ORDER BY supplier_order_id,financial_document_id,sort_order",
+        "financial_expense_lines": "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines ORDER BY supplier_order_id,financial_document_id,sort_order,line_id",
         "ff_operations": "SELECT * FROM sheet_vitrina_v1_ff_stock_operations ORDER BY created_at,operation_id",
         "ff_lines": "SELECT * FROM sheet_vitrina_v1_ff_stock_operation_lines ORDER BY operation_id,line_no",
         "ff_auto_writeoff_checkpoint": "SELECT * FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint ORDER BY slot",
@@ -4074,10 +5213,16 @@ def _source_rows(
         "downstream_cost_rows": "SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id",
         "historical_wb_daily_quantities": "SELECT as_of_date,nm_id,physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE stage='WB' AND as_of_date>='2026-07-01' ORDER BY as_of_date,nm_id",
     }
+    if "sheet_vitrina_v1_cny_documents" in tables:
+        queries["cny_documents"] = (
+            "SELECT * FROM sheet_vitrina_v1_cny_documents "
+            "ORDER BY operation_date,operation_datetime,document_id"
+        )
     result = {
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
+    result.setdefault("cny_documents", [])
     ready_snapshots, frozen_projection = _historical_recovery_source_rows(
         conn,
         cutover_at=(str(cutover_row["cutover_at"]) if cutover_row is not None else ""),
@@ -4088,7 +5233,7 @@ def _source_rows(
     correction_missing_dates = (
         _missing_pre_cutover_historical_dates(
             frozen_projection,
-            cutover_date=str(cutover_row["cutover_at"] or "")[:10],
+            cutover_date=_business_date_value(cutover_row["cutover_at"]),
         )
         if cutover_row is not None
         else []
@@ -4210,7 +5355,7 @@ def _historical_recovery_source_rows(
         [],
         _frozen_pre_cutover_wb_cost_projection(
             conn,
-            cutover_date=str(cutover_at)[:10],
+            cutover_date=_business_date_value(cutover_at),
         ),
     )
 
@@ -4668,6 +5813,92 @@ def _wb_snapshot_quantities(items: Iterable[Mapping[str, Any]]) -> dict[int, Dec
     return result
 
 
+def _wb_snapshot_integrity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    raw_rows = [dict(item) for item in _loads(snapshot.get("raw_rows_json"), [])]
+    items = [dict(item) for item in _loads(snapshot.get("items_json"), [])]
+    raw_by_nm: defaultdict[int, dict[str, Decimal]] = defaultdict(
+        lambda: {"physical": ZERO, "to_client": ZERO, "from_client": ZERO}
+    )
+    exact_rows: set[str] = set()
+    source_keys: set[tuple[int, int, int, str, str]] = set()
+    exact_duplicate_count = 0
+    source_key_duplicate_count = 0
+    for row in raw_rows:
+        nm_id = int(row.get("nmId") or row.get("nm_id") or 0)
+        if nm_id <= 0:
+            continue
+        raw_by_nm[nm_id]["physical"] += _decimal(
+            row.get("stockCount")
+            if row.get("stockCount") is not None
+            else row.get("quantity")
+        )
+        raw_by_nm[nm_id]["to_client"] += _decimal(
+            row.get("inWayToClient") if row.get("inWayToClient") is not None else row.get("in_way_to_client")
+        )
+        raw_by_nm[nm_id]["from_client"] += _decimal(
+            row.get("inWayFromClient") if row.get("inWayFromClient") is not None else row.get("in_way_from_client")
+        )
+        exact_key = _json(row)
+        exact_duplicate_count += int(exact_key in exact_rows)
+        exact_rows.add(exact_key)
+        warehouse_id = int(row.get("warehouseId") or row.get("warehouse_id") or 0)
+        warehouse_name = str(row.get("warehouseName") or row.get("warehouse_name") or "").strip()
+        region_name = str(row.get("regionName") or row.get("region_name") or "").strip()
+        source_key = (
+            nm_id,
+            int(row.get("chrtId") or row.get("chrt_id") or 0),
+            warehouse_id,
+            warehouse_name.casefold() if warehouse_id == 0 else "",
+            region_name.casefold() if warehouse_id == 0 else "",
+        )
+        source_key_duplicate_count += int(source_key in source_keys)
+        source_keys.add(source_key)
+    canonical_by_nm = {
+        int(item.get("nm_id") or 0): {
+            "physical": _decimal(item.get("quantity")),
+            "to_client": _decimal(item.get("in_way_to_client")),
+            "from_client": _decimal(item.get("in_way_from_client")),
+        }
+        for item in items
+        if int(item.get("nm_id") or 0) > 0
+    }
+    zero_components = {"physical": ZERO, "to_client": ZERO, "from_client": ZERO}
+    normalized_raw_by_nm = {
+        nm_id: dict(raw_by_nm.get(nm_id, zero_components))
+        for nm_id in canonical_by_nm
+    }
+    mapping_matches = (
+        set(raw_by_nm).issubset(canonical_by_nm)
+        and normalized_raw_by_nm == canonical_by_nm
+    )
+    physical = sum((item["physical"] for item in canonical_by_nm.values()), ZERO)
+    to_client = sum((item["to_client"] for item in canonical_by_nm.values()), ZERO)
+    from_client = sum((item["from_client"] for item in canonical_by_nm.values()), ZERO)
+    contour = physical + to_client + from_client
+    return {
+        "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+        "version_id": str(snapshot.get("version_id") or ""),
+        "snapshot_date": str(snapshot.get("snapshot_date") or ""),
+        "fetched_at": str(snapshot.get("fetched_at") or ""),
+        "pagination_complete": bool(snapshot.get("pagination_complete")),
+        "page_count": int(snapshot.get("page_count") or 0),
+        "page_offsets": _loads(snapshot.get("page_offsets_json"), []),
+        "raw_row_count": len(raw_rows),
+        "raw_rows_digest": str(snapshot.get("raw_rows_digest") or ""),
+        "sku_count": len(canonical_by_nm),
+        "physical_quantity": _text(physical),
+        "in_way_to_client": _text(to_client),
+        "in_way_from_client": _text(from_client),
+        "wb_contour_quantity": _text(contour),
+        "arithmetic": (
+            f"{_text(physical)} + {_text(to_client)} + {_text(from_client)} = {_text(contour)}"
+        ),
+        "exact_duplicate_count": exact_duplicate_count,
+        "source_key_duplicate_count": source_key_duplicate_count,
+        "raw_to_canonical_mapping_matches": mapping_matches,
+    }
+
+
 def _daily_wb_cost_row(
     *,
     day: str,
@@ -4829,6 +6060,30 @@ def _warehouse_quality_presentation(value: Any) -> dict[str, str]:
     }
 
 
+def _warehouse_balance_status_presentation(
+    value: Any,
+    *,
+    certified: bool,
+) -> dict[str, str]:
+    """Central row-level cost status; quality remains supporting provenance."""
+
+    quality = _warehouse_quality_presentation(value)
+    if certified:
+        return {
+            "code": "certified",
+            "tone": "success",
+            "label_ru": "Все расходы учтены / Подтверждено документами",
+            "description_ru": (
+                "Сертифицированный source fingerprint совпадает с текущим расчётом. "
+                + quality["description_ru"]
+            ),
+        }
+    return {
+        **quality,
+        "tone": "warning",
+    }
+
+
 def _warehouse_status_presentation(
     *,
     status: str,
@@ -4851,7 +6106,7 @@ def _warehouse_status_presentation(
         return {
             "code": status,
             "tone": "success",
-            "label_ru": "Подтверждено документами",
+            "label_ru": "Все расходы учтены / Подтверждено документами",
             "description_ru": (
                 "Все строки склада подтверждены применимыми документами."
                 + _warehouse_sync_success_suffix(sync)
@@ -5145,7 +6400,11 @@ def _warehouse_evidence_contribution(
 def _warehouse_cost_source_label(record: Mapping[str, Any]) -> str:
     if record.get("payment_operation_ids") or record.get("cny_fee_operation_ids"):
         parts = ["Фактические CNY-платежи в RUB"]
-        if record.get("cny_fee_operation_ids") or _decimal(record.get("direct_rub_bank_fees")) > ZERO:
+        if (
+            record.get("bank_fee_source_ids")
+            or record.get("cny_fee_operation_ids")
+            or _decimal(record.get("direct_rub_bank_fees")) > ZERO
+        ):
             parts.append("связанные банковские комиссии")
         if record.get("china_expense_sources"):
             parts.append("документы расходов этапа Китай → FF")
@@ -5294,18 +6553,38 @@ def _validated_financial_expense(
     )
 
 
-def _counted_cny_operation(operation: Mapping[str, Any]) -> bool:
-    """Mirror counted ledger semantics without admitting review documents."""
+def _counted_cny_operation(
+    operation: Mapping[str, Any],
+    *,
+    document: Mapping[str, Any] | None = None,
+) -> bool:
+    """Mirror ledger replay while excluding genuinely reviewable documents."""
 
     operation_status = str(operation.get("status") or "").strip().lower()
-    document_status = str(operation.get("document_status") or "").strip().lower()
-    return operation_status in {"posted", "needs_review"} and document_status in {"", "posted"}
+    document_status = str(
+        operation.get("document_status")
+        or (document or {}).get("status")
+        or ""
+    ).strip().lower()
+    error_reason = str(operation.get("error_reason") or "").strip().lower()
+    if document_status not in {"", "posted"}:
+        return False
+    if operation_status == "posted":
+        return True
+    return (
+        operation_status == "needs_review"
+        and document_status == "posted"
+        and error_reason == "date_only_deterministic_sequence"
+    )
 
 
 def _line_value(row: Mapping[str, Any]) -> Decimal:
-    amount = _decimal(row.get("amount"))
-    if amount > ZERO:
-        return amount
+    raw_amount = row.get("amount")
+    if raw_amount is not None and str(raw_amount).strip():
+        # A parser-supplied amount is primary invoice evidence.  In particular,
+        # an explicit zero/negative amount must fail closed upstream rather than
+        # being silently reconstructed from quantity and unit price.
+        return _decimal(raw_amount)
     return _decimal(row.get("qty")) * _decimal(row.get("unit_price"))
 
 
@@ -5445,6 +6724,7 @@ def _calculation_digest(plan: Mapping[str, Any]) -> str:
         "unmatched_doprinato": unmatched,
         "new_events": events,
         "movement_documents": movement_documents,
+        "supplier_cost_states": plan.get("supplier_cost_states") or [],
         "invariants": plan.get("invariants") or {},
     }
     return "sha256:" + _hash(payload)
@@ -5522,3 +6802,12 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _business_date_value(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if len(normalized) == 10:
+        return normalized
+    return business_date_from_timestamp(normalized)

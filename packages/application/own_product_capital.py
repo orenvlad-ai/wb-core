@@ -14,6 +14,7 @@ import json
 import sqlite3
 from typing import Any, Callable, Iterable, Mapping
 
+from packages.business_time import business_date_from_timestamp
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
     _connect,
@@ -102,6 +103,22 @@ class OwnProductCapitalBlock:
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
             _ensure_own_capital_schema(conn)
+
+    def functional_warehouse_cutover_date(self) -> str:
+        """Return the canonical business date of the active warehouse boundary."""
+
+        with _connect(self.runtime.db_path) as conn:
+            table = conn.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='sheet_vitrina_v1_warehouse_functional_cutovers'"""
+            ).fetchone()
+            if table is None:
+                return ""
+            row = conn.execute(
+                """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                   WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+            ).fetchone()
+        return business_date_from_timestamp(str(row["cutover_at"])) if row is not None else ""
 
     def has_supplier_payment_layer(self, payment_id: str) -> bool:
         """Return whether a durable capital layer already depends on a payment document."""
@@ -1794,9 +1811,19 @@ class OwnProductCapitalBlock:
         )
         return OwnProductCapitalRebuildResult(len(events), len(dates), changed, blockers, run_fingerprint)
 
-    def load_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:
+    def load_daily_metric_lookup(
+        self,
+        as_of_date: str,
+        *,
+        requested_nm_ids: Iterable[int] | None = None,
+        revalidate_current_sources: bool = False,
+    ) -> dict[int, dict[str, Any]]:
         as_of_date = _iso_date(as_of_date, "as_of_date")
-        functional = self._load_functional_daily_metric_lookup(as_of_date)
+        functional = self._load_functional_daily_metric_lookup(
+            as_of_date,
+            requested_nm_ids=requested_nm_ids,
+            revalidate_current_sources=revalidate_current_sources,
+        )
         if functional is not None:
             return functional
         if as_of_date >= "2026-07-01":
@@ -1874,6 +1901,9 @@ class OwnProductCapitalBlock:
     def _load_functional_daily_metric_lookup(
         self,
         as_of_date: str,
+        *,
+        requested_nm_ids: Iterable[int] | None = None,
+        revalidate_current_sources: bool = False,
     ) -> dict[int, dict[str, Any]] | None:
         """Read product-capital metrics from the sole post-cutover read model.
 
@@ -1910,18 +1940,31 @@ class OwnProductCapitalBlock:
             ).fetchone()
             if cutover is None:
                 return None
-            if as_of_date < str(cutover["cutover_at"])[:10]:
+            cutover_date = business_date_from_timestamp(str(cutover["cutover_at"]))
+            if as_of_date < cutover_date:
                 # Full warehouse/product-capital history is intentionally not
                 # reconstructed behind the functional boundary.  The separately
                 # authorized 01.07 backfill is limited to WB cost/Proxy read models.
                 return {} if as_of_date >= "2026-07-01" else None
-            version = conn.execute(
-                """SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_versions
-                   WHERE cutover_id='warehouse_functional_cutover_v1'
-                     AND status='good' AND substr(effective_at,1,10)<=?
-                   ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
+            version_candidates = conn.execute(
+                """SELECT version.version_id,version.effective_at,
+                          snapshot.requested_nm_ids_json,snapshot.items_json
+                   FROM sheet_vitrina_v1_warehouse_functional_versions version
+                   JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+                     ON snapshot.version_id=version.version_id
+                   WHERE version.cutover_id='warehouse_functional_cutover_v1'
+                     AND version.status='good' AND snapshot.snapshot_date=?
+                   ORDER BY snapshot.snapshot_date DESC,version.created_at DESC""",
                 (as_of_date,),
-            ).fetchone()
+            ).fetchall()
+            version = next(
+                (
+                    row
+                    for row in version_candidates
+                    if business_date_from_timestamp(str(row["effective_at"])) == as_of_date
+                ),
+                None,
+            )
             if version is None:
                 return {}
             rows = conn.execute(
@@ -1929,8 +1972,93 @@ class OwnProductCapitalBlock:
                    WHERE version_id=? ORDER BY nm_id,warehouse_key""",
                 (version["version_id"],),
             ).fetchall()
+            active = (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()
+                if "sheet_vitrina_v1_warehouse_functional_active" in tables
+                else None
+            )
+
+        if (
+            revalidate_current_sources
+            and as_of_date == business_date_from_timestamp(self.timestamp_factory())
+            and active is not None
+            and str(active["version_id"]) == str(version["version_id"])
+        ):
+            # A functional version is immutable, but its green presentation is
+            # not allowed to survive a later source mutation while targeted
+            # replay is queued or failed.  Reuse the same canonical supplier
+            # fingerprint check as warehouse detail/overview and fail closed.
+            from packages.application.warehouse_functional import (
+                _revalidate_balance_certifications,
+            )
+
+            rows = _revalidate_balance_certifications(
+                runtime=self.runtime,
+                balances=[
+                    {
+                        **dict(row),
+                        "provenance": _json_loads(row["provenance_json"]),
+                    }
+                    for row in rows
+                ],
+                active_version_id=str(active["version_id"]),
+            )
+
+        # A zero is evidence only for an SKU that belonged to this exact
+        # functional snapshot.  The live planner passes today's enabled SKU
+        # registry even for older dates, so seeding every requested id would
+        # silently turn a later-added SKU into a historical zero.
+        covered_nm_ids = {
+            int(row["nm_id"])
+            for row in rows
+            if int(row["nm_id"] or 0) > 0
+        }
+        for raw_value in _json_array(version["requested_nm_ids_json"]):
+            try:
+                nm_id = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if nm_id > 0:
+                covered_nm_ids.add(nm_id)
+        for raw_item in _json_array(version["items_json"]):
+            if not isinstance(raw_item, Mapping):
+                continue
+            try:
+                nm_id = int(raw_item.get("nm_id") or raw_item.get("nmId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if nm_id > 0:
+                covered_nm_ids.add(nm_id)
 
         result: dict[int, dict[str, Any]] = {}
+        for requested_nm_id in sorted(
+            {
+                int(value)
+                for value in requested_nm_ids or []
+                if int(value) > 0
+            }
+            & covered_nm_ids
+        ):
+            target: dict[str, Any] = {
+                "presentation_reasons": [],
+                "stage_presentation": {},
+            }
+            for public_stage in OWN_PRODUCT_CAPITAL_STAGES:
+                target[own_stage_metric_key(public_stage, "qty")] = 0.0
+                target[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = 0.0
+                target[own_stage_metric_key(public_stage, "capital_rub")] = 0.0
+                target[own_stage_metric_key(public_stage, "unit_cost_rub")] = None
+                target[own_stage_metric_key(public_stage, "cost_coverage_pct")] = None
+                target[own_stage_metric_key(public_stage, "confirmed_share_pct")] = None
+                target[own_stage_metric_key(public_stage, "confirmed_qty")] = 0.0
+                target[own_stage_metric_key(public_stage, "cost_covered_qty")] = 0.0
+                target["stage_presentation"][public_stage] = {
+                    "state": "confirmed",
+                    "reason": "",
+                }
+            result[requested_nm_id] = target
         for raw in rows:
             row = dict(raw)
             public_stage = stage_map.get(str(row["warehouse_key"]))
@@ -1961,7 +2089,11 @@ class OwnProductCapitalBlock:
                 float(qty) if certified else 0.0
             )
             target[own_stage_metric_key(public_stage, "cost_covered_qty")] = float(covered)
-            quality = str(row.get("quality") or "coverage_gap")
+            quality = (
+                "source_changed_provisional"
+                if row.get("certification_revalidation_failed")
+                else str(row.get("quality") or "coverage_gap")
+            )
             reasons = [] if certified else [quality]
             target["presentation_reasons"].extend(reasons)
             target["stage_presentation"][public_stage] = {
@@ -2003,6 +2135,15 @@ class OwnProductCapitalBlock:
             )
             target["presentation_reason"] = "; ".join(
                 sorted(set(target["presentation_reasons"]))
+            )
+            # Consumers that combine an immutable ready-snapshot value with a
+            # read-time certification check must prove that both came from the
+            # same functional version.  These private fields are provenance,
+            # not public metric keys.
+            target["_warehouse_version_id"] = str(version["version_id"])
+            target["_warehouse_version_is_active"] = bool(
+                active is not None
+                and str(active["version_id"]) == str(version["version_id"])
             )
         return result
 
@@ -3038,6 +3179,16 @@ def _json_loads(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return list(parsed) if isinstance(parsed, list) else []
 
 
 def _literal_like_prefix(value: str) -> str:

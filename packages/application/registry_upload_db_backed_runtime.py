@@ -554,14 +554,31 @@ class RegistryUploadDbBackedRuntime:
                                 "warehouse_cutover_id": str(row["cutover_id"]),
                             }
                         return result
-                if cutover is not None and date_key >= str(cutover["cutover_at"])[:10]:
-                    version = conn.execute(
-                        """SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions
-                           WHERE cutover_id='warehouse_functional_cutover_v1'
-                             AND status='good' AND substr(effective_at,1,10)<=?
-                           ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
+                cutover_date = (
+                    business_date_from_timestamp(str(cutover["cutover_at"]))
+                    if cutover is not None
+                    else ""
+                )
+                if cutover is not None and date_key >= cutover_date:
+                    version_candidates = conn.execute(
+                        """SELECT version.*
+                           FROM sheet_vitrina_v1_warehouse_functional_versions version
+                           JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+                             ON snapshot.version_id=version.version_id
+                           WHERE version.cutover_id='warehouse_functional_cutover_v1'
+                             AND version.status='good' AND snapshot.snapshot_date=?
+                           ORDER BY snapshot.snapshot_date DESC,version.created_at DESC""",
                         (date_key,),
-                    ).fetchone()
+                    ).fetchall()
+                    version = next(
+                        (
+                            row
+                            for row in version_candidates
+                            if business_date_from_timestamp(str(row["effective_at"]))
+                            == date_key
+                        ),
+                        None,
+                    )
                     if version is not None:
                         functional_rows = conn.execute(
                             """SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
@@ -598,7 +615,7 @@ class RegistryUploadDbBackedRuntime:
                                 }
                             return result
                     return {}
-                if cutover is not None and "2026-07-01" <= date_key < str(cutover["cutover_at"])[:10]:
+                if cutover is not None and "2026-07-01" <= date_key < cutover_date:
                     return {}
             canonical_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_daily_state'"

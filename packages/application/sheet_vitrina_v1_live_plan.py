@@ -123,6 +123,7 @@ from packages.application.sheet_vitrina_v1_temporal_policy import (
     TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
     source_policy_supports_slot as _canonical_source_policy_supports_slot,
 )
+from packages.application.warehouse_functional import _warehouse_balance_status_presentation
 from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
@@ -387,6 +388,7 @@ class SlotLookups:
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    own_product_capital_cutover_date: str = ""
     sku_action_lookup: dict[int, dict[str, float]] = field(default_factory=dict)
     sku_action_error: str = ""
     column_date: str = ""
@@ -1297,6 +1299,13 @@ class SheetVitrinaV1LivePlanBlock:
         )
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
+        own_product_capital_block = OwnProductCapitalBlock(runtime=self.runtime)
+        try:
+            own_product_capital_cutover_date = (
+                own_product_capital_block.functional_warehouse_cutover_date()
+            )
+        except Exception:
+            own_product_capital_cutover_date = ""
         statuses: list[LiveSourceStatus] = []
         slot_lookups: dict[str, SlotLookups] = {
             slot.slot_key: SlotLookups(
@@ -1313,6 +1322,7 @@ class SheetVitrinaV1LivePlanBlock:
                 onec_stocks_lookup={},
                 our_wb_cost_lookup={},
                 own_product_capital_lookup={},
+                own_product_capital_cutover_date=own_product_capital_cutover_date,
                 sku_action_lookup={},
                 sku_action_error="",
                 ads_compact_lookup={},
@@ -1578,9 +1588,11 @@ class SheetVitrinaV1LivePlanBlock:
             except Exception:
                 current_lookups.our_wb_cost_lookup = {}
             try:
-                current_lookups.own_product_capital_lookup = OwnProductCapitalBlock(
-                    runtime=self.runtime
-                ).load_daily_metric_lookup(slot.column_date)
+                current_lookups.own_product_capital_lookup = own_product_capital_block.load_daily_metric_lookup(
+                    slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                    revalidate_current_sources=True,
+                )
             except Exception:
                 current_lookups.own_product_capital_lookup = {}
             try:
@@ -2782,7 +2794,11 @@ class _MetricEvaluator:
             elif metric.metric_key == TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
                 value = self._aggregate_our_wb_confirmed_share(temporal_slot)
             elif metric.metric_key == OWN_TOTAL_QTY_TOTAL_METRIC_KEY:
-                value = self._aggregate_sum(OWN_TOTAL_QTY_METRIC_KEY, self.enabled_config, temporal_slot)
+                value = self._aggregate_complete_sum(
+                    OWN_TOTAL_QTY_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
             elif metric.metric_key == OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY:
                 value = self._aggregate_sum(
                     OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
@@ -2790,7 +2806,11 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY:
-                value = self._aggregate_sum(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, self.enabled_config, temporal_slot)
+                value = self._aggregate_complete_sum(
+                    OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
             elif metric.metric_key == OWN_AVG_COST_RUB_TOTAL_METRIC_KEY:
                 value = _divide_or_none(
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
@@ -2817,6 +2837,22 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key in {
+                own_stage_total_metric_key(stage, field)
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+                for field in ("qty", "capital_rub")
+            }:
+                stage, field = next(
+                    (stage, field)
+                    for stage in OWN_PRODUCT_CAPITAL_STAGES
+                    for field in ("qty", "capital_rub")
+                    if metric.metric_key == own_stage_total_metric_key(stage, field)
+                )
+                value = self._aggregate_complete_sum(
+                    own_stage_metric_key(stage, field),
+                    self.enabled_config,
+                    temporal_slot,
+                )
+            elif metric.metric_key in {
                 own_stage_total_metric_key(stage, "unit_cost_rub")
                 for stage in OWN_PRODUCT_CAPITAL_STAGES
             }:
@@ -2825,8 +2861,16 @@ class _MetricEvaluator:
                     if metric.metric_key == own_stage_total_metric_key(item, "unit_cost_rub")
                 )
                 value = _divide_or_none(
-                    self._aggregate_sum(own_stage_metric_key(stage, "capital_rub"), self.enabled_config, temporal_slot),
-                    self._aggregate_sum(own_stage_metric_key(stage, "qty"), self.enabled_config, temporal_slot),
+                    self._aggregate_complete_sum(
+                        own_stage_metric_key(stage, "capital_rub"),
+                        self.enabled_config,
+                        temporal_slot,
+                    ),
+                    self._aggregate_complete_sum(
+                        own_stage_metric_key(stage, "qty"),
+                        self.enabled_config,
+                        temporal_slot,
+                    ),
                 )
             elif metric.metric_key in {
                 own_stage_total_metric_key(stage, "confirmed_share_pct")
@@ -4554,6 +4598,56 @@ def _own_product_capital_cell_presentation(
         lookup = live_sources.slot_lookups.get(slot.slot_key)
         if lookup is None:
             continue
+        if slot.column_date >= "2026-07-01" and not lookup.own_product_capital_lookup:
+            reason = _warehouse_history_unavailable_reason(
+                column_date=slot.column_date,
+                cutover_date=lookup.own_product_capital_cutover_date,
+            )
+            for item in enabled_config:
+                for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
+                    result.setdefault(f"SKU:{item.nm_id}|{metric_key}", {})[slot.column_date] = {
+                        "state": "unavailable",
+                        "tone": "neutral",
+                        "reason": reason,
+                        "source": "WebCore",
+                    }
+            for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS):
+                result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": reason,
+                    "source": "WebCore",
+                }
+            continue
+        missing_items = [
+            item
+            for item in enabled_config
+            if item.nm_id not in lookup.own_product_capital_lookup
+        ]
+        if missing_items:
+            reason = (
+                "Исторические данные отсутствуют: SKU не входила в requested nmID scope "
+                "и canonical balances точного складского снимка этой даты. Нулевой остаток не предполагается."
+            )
+            for item in missing_items:
+                for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
+                    result.setdefault(f"SKU:{item.nm_id}|{metric_key}", {})[slot.column_date] = {
+                        "state": "unavailable",
+                        "tone": "neutral",
+                        "reason": reason,
+                        "source": "WebCore",
+                    }
+            total_reason = (
+                "Исторические итоги недоступны: не все SKU активной витрины входили в scope "
+                "точного складского снимка этой даты. Частичная сумма не публикуется."
+            )
+            for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS):
+                result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": total_reason,
+                    "source": "WebCore",
+                }
         unconfirmed_rows = {
             item.nm_id: row
             for item in enabled_config
@@ -4564,7 +4658,9 @@ def _own_product_capital_cell_presentation(
             row = unconfirmed_rows.get(item.nm_id)
             if row is None:
                 continue
-            reason = str(row.get("presentation_reason") or "полнота расходов не подтверждена")
+            reason = _warehouse_quality_reason_ru(
+                row.get("presentation_reason") or "provisional"
+            )
             for metric_key in metric_keys:
                 if metric_key not in set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
                     continue
@@ -4577,8 +4673,8 @@ def _own_product_capital_cell_presentation(
                     }:
                         stage_presentation = (row.get("stage_presentation") or {}).get(stage, {})
                         should_mark = str(stage_presentation.get("state") or "") == "unconfirmed"
-                        metric_reason = str(
-                            stage_presentation.get("reason") or "полнота расходов не подтверждена"
+                        metric_reason = _warehouse_quality_reason_ru(
+                            stage_presentation.get("reason") or "provisional"
                         )
                         break
                 if not should_mark:
@@ -4589,11 +4685,13 @@ def _own_product_capital_cell_presentation(
                     "reason": metric_reason,
                     "source": "WebCore",
                 }
-        if unconfirmed_rows:
+        if unconfirmed_rows and not missing_items:
             total_reason = "; ".join(
                 sorted(
                     {
-                        str(row.get("presentation_reason") or "полнота расходов не подтверждена")
+                        _warehouse_quality_reason_ru(
+                            row.get("presentation_reason") or "provisional"
+                        )
                         for row in unconfirmed_rows.values()
                     }
                 )
@@ -4625,9 +4723,9 @@ def _own_product_capital_cell_presentation(
                         metric_reason = "; ".join(
                             sorted(
                                 {
-                                    str(
+                                    _warehouse_quality_reason_ru(
                                         ((row.get("stage_presentation") or {}).get(stage, {})).get("reason")
-                                        or "полнота расходов не подтверждена"
+                                        or "provisional"
                                     )
                                     for row in affected
                                 }
@@ -4643,6 +4741,29 @@ def _own_product_capital_cell_presentation(
                     "source": "WebCore",
                 }
     return result
+
+
+def _warehouse_quality_reason_ru(value: Any) -> str:
+    codes = [item.strip() for item in str(value or "").split(";") if item.strip()]
+    presentations = [
+        _warehouse_balance_status_presentation(code, certified=False)
+        for code in (codes or ["provisional"])
+    ]
+    return "; ".join(
+        f"{item['label_ru']}. {item['description_ru']}" for item in presentations
+    )
+
+
+def _warehouse_history_unavailable_reason(*, column_date: str, cutover_date: str) -> str:
+    if cutover_date and column_date < cutover_date:
+        return (
+            "Исторические данные отсутствуют: до функционального cutover не сохранялся "
+            "полный согласованный шестиступенчатый складской снимок; текущий snapshot назад не копируется."
+        )
+    return (
+        "Исторические данные отсутствуют: для этой даты нет точной успешной "
+        "функциональной версии склада; last-good или snapshot другой даты сюда не переносится."
+    )
 
 
 def _evaluate_formula(expression: str, resolver: Callable[[str], float | None]) -> float | None:

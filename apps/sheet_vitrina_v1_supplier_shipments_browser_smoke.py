@@ -439,6 +439,8 @@ def main() -> None:
                 expect(frame.get_by_text("Штрихкод", exact=True)).to_be_visible()
                 expect(frame.get_by_text("Номенклатура", exact=True)).to_be_visible()
                 expect(frame.get_by_text("Соответствие цены", exact=True)).to_be_visible()
+                expect(frame.get_by_text("Себестоимость, ₽/шт.", exact=True)).to_be_visible()
+                expect(frame.locator("#productLines .line-cost-value").first).to_have_text("—")
                 expect(frame.get_by_text("平台ID / nmId / nmId")).to_have_count(0)
                 expect(frame.get_by_text("我方品名 / Our item name / Номенклатура")).to_have_count(0)
                 expect(frame.get_by_text("价格匹配 / Price check / Соответствие цены")).to_have_count(0)
@@ -479,7 +481,9 @@ def main() -> None:
                 exact_cost_tile = frame.locator("#financialSummaryGroups .total", has_text="Себестоимость на единицу товара")
                 expect(exact_cost_tile).to_be_visible(timeout=5000)
                 expect(exact_cost_tile.locator("strong")).to_have_text("—")
-                expect(exact_cost_tile).to_have_attribute("title", "cny_payment_cost_unavailable")
+                expect(exact_cost_tile).to_have_attribute(
+                    "title", "Нет подтверждённого платежа поставщику, связанного с invoice."
+                )
                 _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
                 _seed_first_supplier_exact_cny_cost(runtime, payment_cost_rub=200000.0)
                 frame.get_by_role("tab", name="Состав поставки").click()
@@ -490,7 +494,9 @@ def main() -> None:
                 exact_cost_value = exact_cost_tile.locator("strong").inner_text(timeout=5000).strip()
                 if exact_cost_value in {"—", "-", "0", "0,00 ₽"}:
                     raise AssertionError(f"documents tab exact cost tile must show money value, got {exact_cost_value!r}")
-                expect(exact_cost_tile).to_have_attribute("title", "по CNY ledger и подтверждённым документам")
+                expect(exact_cost_tile).to_have_attribute(
+                    "title", "Предварительная себестоимость — не все расходы учтены"
+                )
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel .document-label-primary")).to_contain_text("26GN390")
                 expect(frame.locator("#invoiceDocumentLabel")).to_contain_text("ID документа:")
@@ -622,8 +628,66 @@ def main() -> None:
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
+                frame.get_by_role("tab", name="Состав поставки").click()
+                frame.get_by_label("Плановая дата отгрузки").fill("2026-05-18")
+                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-18")
+                dirty_date_cost_cell = frame.locator("#productLines .line-cost-cell").first
+                expect(dirty_date_cost_cell.locator(".line-cost-value")).to_have_text("—")
+                expect(dirty_date_cost_cell.locator(".line-cost-status")).to_contain_text(
+                    "Сохраните изменения"
+                )
+                expect(dirty_date_cost_cell.locator("details.line-cost-proof")).to_have_count(0)
+                frame.get_by_label("Примерный курс юаня, ₽/¥").fill("14.321")
+                frame.locator("#invoiceNoInput").fill("DRAFT-INVOICE-NO")
+                dirty_comment = frame.locator("#productLines input[data-line-field='comment']").first
+                dirty_comment.fill("несохранённый draft при обновлении cost-proof")
+                dirty_qty = frame.locator("#productLines input[data-line-field='qty']").first
+                original_qty = float(dirty_qty.input_value())
+                dirty_qty.fill(str(original_qty + 1))
+                _seed_first_supplier_cny_failure(runtime)
+                frame.get_by_role("tab", name="Документы").click()
+                expense_row = frame.locator(
+                    "#financialDocumentsRows tr[data-financial-document-row]",
+                    has_text="BROWSER-EXPENSE",
+                ).first
+                expect(expense_row).to_be_visible(timeout=5000)
+                page.once("dialog", lambda dialog: dialog.accept())
+                expense_row.locator("[data-delete-financial-document]").click()
+                expect(frame.locator("#financialDocumentsMessage")).to_contain_text(
+                    "Документ удалён.", timeout=5000
+                )
+                dirty_exact_cost_tile = frame.locator(
+                    "#financialSummaryGroups .total", has_text="Себестоимость на единицу товара"
+                )
+                expect(dirty_exact_cost_tile.locator("strong")).to_have_text("—")
+                expect(dirty_exact_cost_tile).to_have_attribute(
+                    "title",
+                    "Сохраните изменения состава или дат поставки, чтобы пересчитать себестоимость и её расшифровку.",
+                )
+                frame.get_by_role("tab", name="Состав поставки").click()
+                expect(frame.get_by_label("Плановая дата отгрузки")).to_have_value("2026-05-18")
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-18")
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("14.321")
+                expect(frame.locator("#invoiceNoInput")).to_have_value("DRAFT-INVOICE-NO")
+                expect(frame.locator("#cnyCalculationStatus")).to_contain_text("Нет оплаты CNY")
+                expect(frame.locator("#productLines input[data-line-field='comment']").first).to_have_value(
+                    "несохранённый draft при обновлении cost-proof"
+                )
+                expect(frame.locator("#productLines input[data-line-field='qty']").first).to_have_value(
+                    str(original_qty + 1)
+                )
+                first_cost_cell = frame.locator("#productLines .line-cost-cell").first
+                expect(first_cost_cell.locator(".line-cost-value")).to_have_text("—")
+                expect(first_cost_cell.locator(".line-cost-status")).to_contain_text(
+                    "Сохраните изменения состава или дат поставки"
+                )
+                expect(first_cost_cell.locator("details.line-cost-proof")).to_have_count(0)
+                expect(frame.locator("#exactLandedCostPerUnit")).to_have_text("—")
+                page.once("dialog", lambda dialog: dialog.accept())
                 frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
+                _seed_first_supplier_exact_cny_cost(runtime, payment_cost_rub=200000.0)
+                _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
                 _seed_first_supplier_quote_and_customs_documents(runtime)
                 production_shipment_id = _seed_production_supplier_order(entrypoint, invoice_path)
 
@@ -777,7 +841,10 @@ def main() -> None:
                 expect(supplier_page.get_by_role("button", name="Проверить цены")).to_have_count(0)
                 expect(supplier_page.locator(".registry-wrap thead")).to_contain_text("预估成本 / Est. cost / Ориент. себестоимость, ₽/шт")
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
-                expect(supplier_page.locator("#shipmentRows")).to_contain_text(re.compile(r"10\s*560,42"), timeout=5000)
+                expect(supplier_page.locator("#shipmentRows")).to_contain_text(
+                    re.compile(r"10\s*560,42"), timeout=5000
+                )
+                expect(supplier_page.locator("#shipmentRows")).to_contain_text("57,03")
                 expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
                 frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.locator("[data-delete-shipment]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
@@ -1220,6 +1287,54 @@ def _seed_first_supplier_exact_cny_cost(runtime: RegistryUploadDbBackedRuntime, 
                 "cny_calculation_status": "ok",
                 "cny_calculation_error": "",
                 "cny_calculated_at": "2026-05-30T08:00:00Z",
+            }
+        ]
+    )
+    existing_operations = [
+        item
+        for item in runtime.list_cny_ledger_operations()
+        if str(item.get("source_order_id") or "") != shipment_id
+    ]
+    runtime.replace_cny_ledger_operations(
+        existing_operations
+        + [
+            {
+                "operation_id": f"browser-payment-{shipment_id}",
+                "operation_type": "supplier_payment_out",
+                "source_document_id": f"browser-payment-document-{shipment_id}",
+                "source_order_id": shipment_id,
+                "operation_date": "2026-05-20",
+                "operation_datetime": "2026-05-20T08:00:00Z",
+                "sequence_key": f"20260520:{shipment_id}",
+                "cny_delta": str(-(payment_cost_rub / 10)),
+                "rub_value_delta": str(-payment_cost_rub),
+                "effective_rate_before": "10",
+                "status": "posted",
+                "created_at": "2026-05-30T08:00:00Z",
+                "updated_at": "2026-05-30T08:00:00Z",
+            }
+        ]
+    )
+
+
+def _seed_first_supplier_cny_failure(runtime: RegistryUploadDbBackedRuntime) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed CNY failure without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"cannot seed CNY failure for shipment without id: {shipments[0]}")
+    runtime.update_supplier_shipments_cny_calculations(
+        [
+            {
+                "shipment_id": shipment_id,
+                "cny_ledger_effective_rate": "",
+                "cny_payment_currency_rub_cost": "",
+                "cny_paid_amount": "",
+                "cny_bank_fee_rub": "",
+                "cny_calculation_status": "no_supplier_payment_yet",
+                "cny_calculation_error": "",
+                "cny_calculated_at": "2026-05-30T08:01:00Z",
             }
         ]
     )
