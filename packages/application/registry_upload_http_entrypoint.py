@@ -2601,14 +2601,22 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_financial_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.list_documents(shipment_id)
 
-    def handle_supplier_order_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
+    def handle_supplier_order_documents_list_request(
+        self,
+        shipment_id: str,
+        *,
+        refresh_saved_parses: bool = True,
+    ) -> dict[str, Any]:
         shipment = self.supplier_shipments_block.get_shipment(shipment_id)
         for prefix in ("invoice", "contract"):
             document_id = str(shipment.get(f"{prefix}_document_id") or "")
             document = self.runtime.load_trade_document(document_id) if document_id else None
             if document is not None:
                 shipment[f"{prefix}_file_sha256"] = str(document.get("file_sha256") or "")
-        financial_payload = self.supplier_financial_documents_block.list_documents(shipment_id)
+        financial_payload = self.supplier_financial_documents_block.list_documents(
+            shipment_id,
+            refresh_saved_parses=refresh_saved_parses,
+        )
         financial_documents = [
             apply_supplier_order_document_match(dict(item), shipment)
             for item in financial_payload.get("documents") or []
@@ -2673,7 +2681,10 @@ class RegistryUploadHttpEntrypoint:
         *,
         package_kind: str,
     ) -> tuple[bytes, str, dict[str, Any]]:
-        documents_payload = self.handle_supplier_order_documents_list_request(shipment_id)
+        documents_payload = self.handle_supplier_order_documents_list_request(
+            shipment_id,
+            refresh_saved_parses=False,
+        )
         package_type = {
             "logistics-package.zip": "logistics",
             "accounting-package.zip": "accounting",
@@ -6313,6 +6324,8 @@ def _build_supplier_order_documents_archive(
         if isinstance(item, Mapping)
         and str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_PACKING_LIST
         and bool(item.get("is_uploaded"))
+        and str(item.get("parse_status") or "").strip().lower()
+        != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
     ]
     shipment = dict(payload.get("shipment") or {})
     shipment_lines = list(shipment.get("lines") or shipment.get("product_lines") or [])

@@ -92,6 +92,9 @@ def _assert_matching_and_workbook() -> None:
         _goods("4", "Unknown exact source", 7),
         model_only,
     ]
+    goods_items[0]["identifiers"].update(
+        {"source_model": "DT-MODEL-ALPHA", "customs_code": "7020008000"}
+    )
     matching = match_customs_goods_items(
         goods_items=goods_items,
         shipment_lines=SHIPMENT_LINES,
@@ -148,6 +151,11 @@ def _assert_matching_and_workbook() -> None:
     barcode = sheet.cell(row=header_row + 1, column=10)
     if barcode.value != "4600000000001" or barcode.data_type != "s":
         raise AssertionError(f"DT workbook barcode must be lossless text: {barcode.value} {barcode.data_type}")
+    if (
+        sheet.cell(row=header_row + 1, column=11).value != "DT-MODEL-ALPHA"
+        or sheet.cell(row=header_row + 1, column=12).value != "7020008000"
+    ):
+        raise AssertionError("DT workbook must retain available deterministic identifiers")
 
 
 def _assert_logistics_assemblies() -> None:

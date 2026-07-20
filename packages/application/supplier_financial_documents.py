@@ -292,13 +292,23 @@ class SupplierFinancialDocumentsBlock:
         self.usd_rate_provider = usd_rate_provider or CbrUsdRateProvider()
         self.pdf_text_extractor = pdf_text_extractor or extract_pdf_text_layer
 
-    def list_documents(self, supplier_order_id: str) -> dict[str, Any]:
+    def list_documents(
+        self,
+        supplier_order_id: str,
+        *,
+        refresh_saved_parses: bool = True,
+    ) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         shipment = _supplier_order_shipment_with_linked_contract(self.runtime, self.runtime.load_supplier_shipment(supplier_order_id) or {})
+        stored_documents = self.runtime.list_supplier_financial_documents(
+            supplier_order_id
+        )
         documents = [
             apply_supplier_order_document_match(self._with_download_path(item), shipment)
-            for item in self._refresh_saved_document_parses(
-                self.runtime.list_supplier_financial_documents(supplier_order_id)
+            for item in (
+                self._refresh_saved_document_parses(stored_documents)
+                if refresh_saved_parses
+                else stored_documents
             )
         ]
         lines = self._with_cny_fee_equivalents(self.runtime.list_supplier_financial_expense_lines(supplier_order_id))

@@ -22,6 +22,8 @@ WORKBOOK_HEADERS = (
     "Основание сопоставления",
     "Количество позиции ДТ",
     "Штрихкод",
+    "Модель/артикул из ДТ",
+    "Код ТН ВЭД",
 )
 
 
@@ -413,12 +415,14 @@ def _render_workbook(*, metadata: Mapping[str, Any], matching: Mapping[str, Any]
                 str(row.get("basis") or ""),
                 source_quantity,
                 str(row.get("barcode") or ""),
+                str(row.get("source_model") or ""),
+                str(row.get("customs_code") or ""),
             ]
         )
         worksheet.cell(row=worksheet.max_row, column=10).number_format = "@"
     worksheet.freeze_panes = f"A{header_row + 1}"
-    worksheet.auto_filter.ref = f"A{header_row}:J{worksheet.max_row}"
-    widths = (16, 46, 15, 12, 15, 34, 24, 70, 22, 24)
+    worksheet.auto_filter.ref = f"A{header_row}:L{worksheet.max_row}"
+    widths = (16, 46, 15, 12, 15, 34, 24, 70, 22, 24, 28, 18)
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[chr(64 + index)].width = width
     for row in worksheet.iter_rows(min_row=header_row + 1):
@@ -454,6 +458,7 @@ def _mapping_row(
     source_quantity: Decimal | None = None,
 ) -> dict[str, Any]:
     nm_id = int(line.get("internal_nm_id") or 0)
+    identifiers = _mapping(item.get("identifiers"))
     return {
         "position_number": str(item.get("position_number") or ""),
         "source_name": str(item.get("source_name") or ""),
@@ -461,6 +466,8 @@ def _mapping_row(
         "source_quantity": _decimal_text(source_quantity if source_quantity is not None else quantity) if (source_quantity is not None or quantity is not None) else None,
         "unit": str(item.get("unit") or ""),
         "barcode": barcode,
+        "source_model": str(identifiers.get("source_model") or ""),
+        "customs_code": str(identifiers.get("customs_code") or ""),
         "nm_id": nm_id,
         "nomenclature_name": str(line.get("internal_name") or nomenclature_name_by_nm.get(nm_id) or ""),
         "status": status,
@@ -477,6 +484,7 @@ def _unmatched_row(
     basis: str,
     barcode: str,
 ) -> dict[str, Any]:
+    identifiers = _mapping(item.get("identifiers"))
     return {
         "position_number": str(item.get("position_number") or ""),
         "source_name": str(item.get("source_name") or ""),
@@ -484,6 +492,8 @@ def _unmatched_row(
         "source_quantity": _decimal_text(quantity) if quantity is not None else None,
         "unit": str(item.get("unit") or ""),
         "barcode": barcode,
+        "source_model": str(identifiers.get("source_model") or ""),
+        "customs_code": str(identifiers.get("customs_code") or ""),
         "nm_id": None,
         "nomenclature_name": "",
         "status": status,

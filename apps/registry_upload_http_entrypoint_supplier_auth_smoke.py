@@ -237,6 +237,10 @@ def main() -> None:
                     "Соответствие цены",
                     "Комиссия банка",
                     "Курс CNY",
+                    "Распределение расходов",
+                    "Скачать пакет для бухгалтерии",
+                    "operator:registry-columns",
+                    "package-receipt",
                     ">Документы<",
                 )
                 if any(token in supplier_page for token in forbidden_supplier_markup):

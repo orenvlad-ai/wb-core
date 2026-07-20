@@ -2384,6 +2384,12 @@ def _assert_http_api_smoke() -> None:
             payment_rows = [item for item in document_rows if item.get("document_type") == "bank_transfer_application"]
             if len(payment_rows) != 1:
                 raise AssertionError(f"linked CNY supplier payment must not duplicate order document rows: {bank_order_documents}")
+            def _unexpected_package_parse_refresh(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+                raise AssertionError("package assembly must not refresh or persist parser state")
+
+            entrypoint.supplier_financial_documents_block._refresh_saved_document_parses = (  # type: ignore[method-assign]
+                _unexpected_package_parse_refresh
+            )
             logistics_status, logistics_bytes, logistics_headers = _get_bytes(f"{documents_url}/logistics-package.zip")
             if logistics_status != 200:
                 raise AssertionError(f"logistics package route failed: {logistics_status}")
