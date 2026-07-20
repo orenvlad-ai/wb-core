@@ -66,6 +66,28 @@ class ActivationTest(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
+    def test_prepare_deploy_preserves_active_manual_mode_after_schema_v2(self, _dependency: object) -> None:
+        repository = AutoanswersRepository(runtime_dir=self.runtime_dir, now_factory=MutableClock(), env={})
+        repository.update_settings(master_enabled=True, mode="manual", actor_id="release-train")
+
+        with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "true"}, clear=False):
+            result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["runtime"]["settings"]["master_enabled"])
+        self.assertEqual(result["runtime"]["settings"]["mode"], "manual")
+        self.assertTrue(result["runtime"]["settings"]["force_off"])
+        self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
+        persisted = AutoanswersRepository(
+            runtime_dir=self.runtime_dir,
+            now_factory=MutableClock(),
+            env={"WB_AUTOANSWERS_FORCE_OFF": "false"},
+        ).operational_status()
+        self.assertTrue(persisted["settings"]["master_enabled"])
+        self.assertEqual(persisted["settings"]["mode"], "manual")
+        self.assertTrue(persisted["settings"]["effective_enabled"])
+
+    @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
     def test_activate_manual_is_idempotent_and_deactivate_returns_off(self, _dependency: object) -> None:
         AutoanswersRepository(runtime_dir=self.runtime_dir, now_factory=MutableClock(), env={})
         with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "false"}, clear=False):
