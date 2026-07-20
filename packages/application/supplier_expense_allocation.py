@@ -46,7 +46,31 @@ def project_supplier_document_expense_allocation(
             ),
             None,
         )
-    if control is None or not bool(control.get("cost_affecting")):
+    if control is None:
+        cost_affecting_types = {
+            str(value or "")
+            for value in canonical_breakdown.get("cost_affecting_document_types") or []
+        }
+        if document_type in cost_affecting_types:
+            return _projection(
+                "none",
+                eligible_documents=1,
+                eligible_components=0,
+                allocated_components=0,
+                eligible_amount_rub=None,
+                allocated_amount_rub=None,
+                reasons=["Расходный документ не загружен или не дал распознанных cost-компонентов"],
+            )
+        return _projection(
+            "not_applicable",
+            eligible_documents=0,
+            eligible_components=0,
+            allocated_components=0,
+            eligible_amount_rub=None,
+            allocated_amount_rub=None,
+            reasons=[],
+        )
+    if not bool(control.get("cost_affecting")):
         return _projection(
             "not_applicable",
             eligible_documents=0,

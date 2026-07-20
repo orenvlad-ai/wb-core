@@ -22,6 +22,12 @@ def main() -> None:
     packing = {"document_id": "packing", "document_type": "packing_list"}
     if project_supplier_document_expense_allocation(packing, {})["status"] != "not_applicable":
         raise AssertionError("packing list must not affect the expense allocation aggregate")
+    missing_customs = project_supplier_document_expense_allocation(
+        {"document_id": "", "document_type": "customs_declaration"},
+        {"cost_affecting_document_types": ["customs_declaration"]},
+    )
+    if missing_customs["status"] != "none":
+        raise AssertionError(f"a missing cost-affecting document must not render not-applicable: {missing_customs}")
 
     none_breakdown = _breakdown(
         controls=[_document_control("customs", eligible=2, allocated=0, conserved=False, reasons=["parse needs review"])],
