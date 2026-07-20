@@ -28,12 +28,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository, SCHEMA_VERSION
+from packages.application.wb_autoanswers_runtime import (
+    COMPRESSED_SCHEMA_BACKUP_CONTRACT,
+    AutoanswersRepository,
+    SCHEMA_VERSION,
+    _verified_compressed_schema_backup_status,
+)
 from packages.contracts.wb_autoanswers import MODE_MANUAL
 
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 BACKUP_FREE_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024
+BACKUP_OPERATIONAL_HEADROOM_BYTES = 256 * 1024 * 1024
 CAPACITY_HEARTBEAT_SECONDS = 20
 
 
@@ -226,12 +232,193 @@ def _compress_verified_backup(source: Path) -> dict[str, Any]:
     }
 
 
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _integrity_check(path: Path) -> str:
+    with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=60) as conn:
+        return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+
+
+def _create_current_compressed_schema_backup(
+    runtime_dir: Path,
+    *,
+    legacy_source: Path | None,
+) -> dict[str, Any]:
+    """Replace the old backup only after a newer coherent snapshot is recoverable."""
+
+    database = runtime_dir / "registry_upload_runtime.sqlite3"
+    staging_dir = runtime_dir / ".wb_autoanswers_capacity_recovery"
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(staging_dir, 0o700)
+    staging = staging_dir / "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+    staging_manifest = staging.with_suffix(staging.suffix + ".manifest.json")
+    backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
+    archive = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__capacity_recovery.sqlite3.zst"
+    manifest = archive.with_suffix(archive.suffix + ".manifest.json")
+
+    existing = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
+    if int(existing.get("count") or 0) > 0:
+        if legacy_source is not None and legacy_source.exists():
+            legacy_source.unlink()
+        staging.unlink(missing_ok=True)
+        staging_manifest.unlink(missing_ok=True)
+        return {"status": "already_verified", **existing, "legacy_raw_replaced": True}
+
+    snapshot_metadata: dict[str, Any] | None = None
+    if staging.is_file() and staging_manifest.is_file():
+        candidate = json.loads(staging_manifest.read_text(encoding="utf-8"))
+        if (
+            candidate.get("contract") == "wb_autoanswers_capacity_snapshot_v1"
+            and int(candidate.get("size") or -1) == staging.stat().st_size
+            and candidate.get("sha256") == _sha256_file(staging)
+            and _integrity_check(staging) == "ok"
+        ):
+            snapshot_metadata = candidate
+    if snapshot_metadata is None:
+        staging.unlink(missing_ok=True)
+        staging_manifest.unlink(missing_ok=True)
+        root_free = shutil.disk_usage(runtime_dir).free
+        root_required = database.stat().st_size + BACKUP_OPERATIONAL_HEADROOM_BYTES
+        if root_free < root_required:
+            raise RuntimeError("insufficient root-volume capacity for coherent replacement backup")
+        source_uri = f"file:{database.resolve()}?mode=ro"
+        try:
+            with sqlite3.connect(source_uri, uri=True, timeout=60) as source:
+                with sqlite3.connect(staging, timeout=60) as target:
+                    source.backup(target, pages=4096)
+            os.chmod(staging, 0o600)
+            integrity = _integrity_check(staging)
+            if integrity != "ok":
+                raise RuntimeError("current replacement backup failed integrity_check")
+            snapshot_metadata = {
+                "contract": "wb_autoanswers_capacity_snapshot_v1",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "size": staging.stat().st_size,
+                "sha256": _sha256_file(staging),
+                "sqlite_integrity_check": integrity,
+            }
+            _write_json_atomic(staging_manifest, snapshot_metadata)
+        except Exception:
+            staging.unlink(missing_ok=True)
+            staging_manifest.unlink(missing_ok=True)
+            raise
+
+    # The newer current snapshot is now coherent, integrity-checked and hashed.
+    # Only at this point may the older autoanswers-owned raw backup be replaced.
+    if legacy_source is not None and legacy_source.exists():
+        legacy_source.unlink()
+
+    archive_temporary = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
+    manifest_temporary = manifest.with_name(f".{manifest.name}.tmp-{os.getpid()}")
+    try:
+        if archive.exists() and not manifest.exists():
+            if _zstd_decompressed_sha256(archive) != str(snapshot_metadata["sha256"]):
+                raise RuntimeError("partial current compressed backup has a different restore hash")
+        elif not archive.exists():
+            completed = subprocess.run(
+                [
+                    "zstd",
+                    "-T1",
+                    "-6",
+                    "--no-progress",
+                    "--force",
+                    "-o",
+                    str(archive_temporary),
+                    str(staging),
+                ],
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=7200,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "current backup compression failed: " + completed.stderr.strip()
+                )
+            os.chmod(archive_temporary, 0o600)
+            subprocess.run(
+                ["zstd", "--test", "--quiet", str(archive_temporary)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=7200,
+                check=True,
+            )
+            if _zstd_decompressed_sha256(archive_temporary) != str(snapshot_metadata["sha256"]):
+                raise RuntimeError("current compressed backup does not restore exact snapshot bytes")
+            os.replace(archive_temporary, archive)
+
+        metadata = {
+            "contract": COMPRESSED_SCHEMA_BACKUP_CONTRACT,
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot_filename": staging.name,
+            "snapshot_size": int(snapshot_metadata["size"]),
+            "snapshot_sha256": str(snapshot_metadata["sha256"]),
+            "compressed_filename": archive.name,
+            "compressed_size": archive.stat().st_size,
+            "compressed_sha256": _sha256_file(archive),
+            "sqlite_integrity_check": "ok",
+            "restore_command": f"zstd --decompress --stdout {archive.name} > {staging.name}",
+            "replaces_legacy_autoanswers_backup": legacy_source.name if legacy_source else None,
+        }
+        manifest_temporary.write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(manifest_temporary, 0o600)
+        os.replace(manifest_temporary, manifest)
+        verified = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
+        if int(verified.get("count") or 0) < 1:
+            raise RuntimeError("current compressed schema backup readback is missing")
+    finally:
+        archive_temporary.unlink(missing_ok=True)
+        manifest_temporary.unlink(missing_ok=True)
+
+    orphan_journals_removed = 0
+    for journal in backup_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3-journal"):
+        database_candidate = Path(str(journal).removesuffix("-journal"))
+        if not database_candidate.exists():
+            journal.unlink()
+            orphan_journals_removed += 1
+    staging.unlink()
+    staging_manifest.unlink(missing_ok=True)
+    return {
+        "status": "replaced_with_current_compressed_backup",
+        **verified,
+        "legacy_raw_replaced": True,
+        "snapshot_raw_removed_after_verification": True,
+        "orphan_autoanswers_journals_removed": orphan_journals_removed,
+    }
+
+
 def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     database = runtime_dir / "registry_upload_runtime.sqlite3"
     if not database.is_file():
         return {"status": "not_required", "reason": "database_missing"}
+    backup_root = runtime_dir / "backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
     required_free = database.stat().st_size + BACKUP_FREE_HEADROOM_BYTES
-    free_before = shutil.disk_usage(runtime_dir).free
+    free_before = shutil.disk_usage(backup_root).free
+    compressed = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
+    if int(compressed.get("count") or 0) > 0:
+        return {
+            "status": "ready",
+            "free_before": free_before,
+            "required_free": required_free,
+            "compaction": compressed,
+        }
     if free_before >= required_free:
         return {
             "status": "ready",
@@ -244,13 +431,19 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
             "registry_upload_runtime__pre_autoanswers_v1__*.sqlite3"
         )
     )
-    if not candidates:
-        raise RuntimeError("insufficient backup capacity and no raw schema-v1 backup is available")
+    staging = runtime_dir / ".wb_autoanswers_capacity_recovery" / (
+        "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+    )
+    if not candidates and not staging.is_file():
+        raise RuntimeError("insufficient backup capacity and no recoverable autoanswers backup exists")
     with _capacity_heartbeat():
-        compaction = _compress_verified_backup(candidates[-1])
-    free_after = shutil.disk_usage(runtime_dir).free
-    if free_after < required_free:
-        raise RuntimeError("verified schema-v1 compression did not create enough backup capacity")
+        compaction = _create_current_compressed_schema_backup(
+            runtime_dir,
+            legacy_source=candidates[-1] if candidates else None,
+        )
+    free_after = shutil.disk_usage(backup_root).free
+    if free_after < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+        raise RuntimeError("verified replacement backup left insufficient operational headroom")
     return {
         "status": "ready",
         "free_before": free_before,
@@ -344,20 +537,19 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             "capacity": _prepare_backup_capacity(runtime_dir),
         }
 
-    repository = AutoanswersRepository(runtime_dir=runtime_dir)
-    status_before = repository.operational_status()
-
     if action == "prepare-deploy":
-        dependencies = _dependency_status(verify_boundary=True)
-        status_after = repository.operational_status()
-        if SCHEMA_VERSION not in {
-            int(row.get("version") or 0) for row in status_after["schema_migrations"]
-        }:
-            raise RuntimeError("schema v2 migration marker is missing")
-        backup = repository.verified_schema_backup_status()
-        if before.get("database_exists") and not before.get("schema_v2_applied"):
-            if int(backup.get("count") or 0) < 1 or backup.get("integrity_check") != "ok":
-                raise RuntimeError("verified pre-schema-v2 backup is missing")
+        with _capacity_heartbeat():
+            repository = AutoanswersRepository(runtime_dir=runtime_dir)
+            dependencies = _dependency_status(verify_boundary=True)
+            status_after = repository.operational_status()
+            if SCHEMA_VERSION not in {
+                int(row.get("version") or 0) for row in status_after["schema_migrations"]
+            }:
+                raise RuntimeError("schema v2 migration marker is missing")
+            backup = repository.verified_schema_backup_status()
+            if before.get("database_exists") and not before.get("schema_v2_applied"):
+                if int(backup.get("count") or 0) < 1 or backup.get("integrity_check") != "ok":
+                    raise RuntimeError("verified pre-schema-v2 backup is missing")
         return {
             "status": "ready",
             "action": action,
@@ -365,6 +557,9 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             "schema_backup": backup,
             "dependencies": dependencies,
         }
+
+    repository = AutoanswersRepository(runtime_dir=runtime_dir)
+    status_before = repository.operational_status()
 
     if action == "status":
         return {
