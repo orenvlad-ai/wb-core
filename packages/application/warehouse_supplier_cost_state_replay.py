@@ -1009,11 +1009,14 @@ def _legacy_balance_proof_matches_allocation(
                 components.setdefault(component_id, dict(component))
     if set(current_lines) != set(frozen_lines):
         return False
-    stage = str(allocation.get("stage") or "")
     for nm_id, current in current_lines.items():
         frozen_line = frozen_lines[nm_id]
-        if str(frozen_line.get("warehouse_key") or "") != stage:
-            return False
+        # ``warehouse_key`` is the current outer bucket that carries the
+        # immutable supplier-flow record.  After FF acceptance the exact same
+        # flow proof is nested under the append-only FF ledger, so that outer
+        # bucket no longer equals the original supplier allocation stage.
+        # Quantity/capital and source-document identities below are the stable
+        # proof; comparing the carrier bucket would reject valid legacy state.
         if not _decimal_equal(current["quantity"], frozen_line.get("quantity")):
             return False
         if not _decimal_equal(current["capital_rub"], frozen_line.get("capital_rub")):

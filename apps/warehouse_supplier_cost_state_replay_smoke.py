@@ -66,6 +66,13 @@ def main() -> int:
             _legacy_balance_proof_matches_allocation(frozen, allocation),
             "legacy per-SKU capital and document identities match",
         )
+        ff_nested_frozen = json.loads(json.dumps(frozen))
+        for line in ff_nested_frozen["proof"]["balance_lines"].values():
+            line["warehouse_key"] = "ff"
+        _assert(
+            _legacy_balance_proof_matches_allocation(ff_nested_frozen, allocation),
+            "FF-nested legacy proof does not depend on its outer carrier bucket",
+        )
         mismatched_frozen = json.loads(json.dumps(frozen))
         mismatched_frozen["proof"]["balance_lines"]["391660889"]["capital_rub"] = "101"
         _assert(
