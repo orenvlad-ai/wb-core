@@ -142,6 +142,7 @@ def build_supplier_cost_state_replay_plan(
         )
         corrections: list[dict[str, Any]] = []
         blocked_shipments: list[dict[str, str]] = []
+        legacy_target_revision_proofs: dict[str, dict[str, Any]] = {}
         for shipment_id in target_ids:
             desired = eligible[shipment_id]
             desired_fingerprint = target_state_fingerprints[shipment_id]
@@ -186,21 +187,37 @@ def build_supplier_cost_state_replay_plan(
             if proof_kind == "explicit_fingerprints":
                 proof_matches = _state_fingerprint(frozen) == desired_fingerprint
             elif proof_kind == "legacy_balance_conservation":
-                if not immutable_supplier_source_watermarks_match:
-                    mismatch_code = "immutable_supplier_source_watermarks_changed"
-                    mismatch_reason = (
-                        "the canonical supplier, CNY or financial source watermark no longer "
-                        "matches the watermark captured by the immutable warehouse version"
-                    )
-                else:
+                # Legacy versions persisted only version-wide source-group
+                # watermarks.  A later upload/reparse of an unrelated or
+                # informational financial document legitimately changes that
+                # global watermark without changing this shipment's frozen
+                # supplier flow.  Certify only when every mutable source row
+                # contributing to the target predates the immutable version
+                # and the current allocation still conserves every immutable
+                # per-SKU quantity/capital and contributing source identity.
+                # The complete current source manifest remains pinned by the
+                # plan and is rechecked under BEGIN IMMEDIATE before apply.
+                revision_proof = _legacy_target_source_revision_proof(
+                    sources,
+                    current_allocations[shipment_id],
+                    version_effective_at=str(active["effective_at"]),
+                )
+                legacy_target_revision_proofs[shipment_id] = revision_proof
+                proof_matches = bool(revision_proof["unchanged_since_version"])
+                mismatch_code = "legacy_target_source_revision_after_version"
+                mismatch_reason = (
+                    "a source row contributing to the target allocation was created or "
+                    "updated after the immutable warehouse version"
+                )
+                if proof_matches:
                     proof_matches = _legacy_balance_proof_matches_allocation(
                         frozen,
                         current_allocations[shipment_id],
                     )
-                    mismatch_code = "legacy_balance_proof_mismatch"
+                    mismatch_code = "legacy_target_conservation_proof_mismatch"
                     mismatch_reason = (
-                        "current per-SKU quantity/capital or contributing document IDs do not "
-                        "match immutable legacy balance provenance"
+                        "current per-SKU quantity/capital or contributing source identities do "
+                        "not match immutable legacy balance provenance"
                     )
             if not proof_matches:
                 blocked_shipments.append(
@@ -274,6 +291,7 @@ def build_supplier_cost_state_replay_plan(
                 for shipment_id, state in sorted(frozen_states.items())
                 if shipment_id in target_ids
             },
+            "legacy_target_revision_proofs": legacy_target_revision_proofs,
             "blocked_shipments": blocked_shipments,
             "replay_id": replay_id,
             "replay_sequence_no": replay_sequence_no,
@@ -284,8 +302,8 @@ def build_supplier_cost_state_replay_plan(
                 "reason": "missing supplier certification projection in an immutable active version",
                 "source": "canonical supplier/CNY/financial Decimal allocation",
                 "version_proof": (
-                    "immutable supplier fingerprints or legacy supplier/CNY/financial "
-                    "watermarks plus per-SKU balance/document conservation"
+                    "immutable supplier fingerprints or target-scoped source revision "
+                    "cut plus exact legacy per-SKU balance/document conservation"
                 ),
                 "frozen_version_proofs": {
                     item["shipment_id"]: item["frozen_version_proof"]
@@ -1091,6 +1109,150 @@ def _legacy_balance_proof_matches_allocation(
         and _decimal_equal(proof.get("direct_rub_bank_fees"), direct_rub_fees)
         and sorted(proof.get("china_expense_sources") or []) == sorted(china_sources)
     )
+
+
+def _legacy_target_source_revision_proof(
+    sources: Mapping[str, list[dict[str, Any]]],
+    allocation: Mapping[str, Any],
+    *,
+    version_effective_at: str,
+) -> dict[str, Any]:
+    """Prove that every mutable row driving one legacy allocation is not newer.
+
+    Legacy versions did not persist target-scoped source fingerprints.  Their
+    exact balance provenance proves the arithmetic and contributing IDs; the
+    server-owned revision timestamps prove those contributing mutable rows
+    were strictly older than the immutable version.  Equality is ambiguous at
+    whole-second precision and therefore fails closed.  Informational
+    documents outside the canonical allocation are deliberately not targets.
+    """
+
+    boundary = _timestamp(version_effective_at)
+    shipment_id = str(allocation.get("shipment_id") or "")
+    target_rows: list[tuple[str, str, Mapping[str, Any]]] = []
+    blockers: list[dict[str, str]] = []
+
+    shipments = {
+        str(row.get("shipment_id") or ""): row
+        for row in sources.get("shipments") or []
+    }
+    shipment = shipments.get(shipment_id)
+    if shipment is None:
+        blockers.append({"source_kind": "shipment", "source_id": shipment_id, "code": "missing"})
+    else:
+        target_rows.append(("shipment", shipment_id, shipment))
+
+    operation_ids: set[str] = set()
+    expense_line_ids: set[str] = set()
+    for line in allocation.get("lines") or []:
+        for component in line.get("components") or []:
+            component_id = str(component.get("source_component_id") or "")
+            if component_id.startswith("cny_operation:"):
+                operation_ids.add(component_id.split(":", 1)[1])
+            elif component_id.startswith("expense_line:"):
+                expense_line_ids.add(component_id.split(":", 1)[1])
+
+    operations = {
+        str(row.get("operation_id") or ""): row
+        for row in sources.get("cny_operations") or []
+    }
+    cny_document_ids: set[str] = set()
+    for operation_id in sorted(operation_ids):
+        operation = operations.get(operation_id)
+        if operation is None:
+            blockers.append(
+                {"source_kind": "cny_operation", "source_id": operation_id, "code": "missing"}
+            )
+            continue
+        target_rows.append(("cny_operation", operation_id, operation))
+        source_document_id = str(operation.get("source_document_id") or "")
+        if source_document_id:
+            cny_document_ids.add(source_document_id)
+
+    cny_documents = {
+        str(row.get("document_id") or ""): row
+        for row in sources.get("cny_documents") or []
+    }
+    for document_id in sorted(cny_document_ids):
+        document = cny_documents.get(document_id)
+        if document is None:
+            blockers.append(
+                {"source_kind": "cny_document", "source_id": document_id, "code": "missing"}
+            )
+        else:
+            target_rows.append(("cny_document", document_id, document))
+
+    expense_lines = {
+        str(row.get("line_id") or ""): row
+        for row in sources.get("financial_expense_lines") or []
+    }
+    financial_document_ids: set[str] = set()
+    for line_id in sorted(expense_line_ids):
+        expense = expense_lines.get(line_id)
+        if expense is None:
+            blockers.append(
+                {"source_kind": "financial_expense_line", "source_id": line_id, "code": "missing"}
+            )
+            continue
+        financial_document_ids.add(str(expense.get("financial_document_id") or ""))
+    financial_documents = {
+        str(row.get("document_id") or ""): row
+        for row in sources.get("financial_documents") or []
+    }
+    for document_id in sorted(financial_document_ids):
+        document = financial_documents.get(document_id)
+        if not document_id or document is None:
+            blockers.append(
+                {
+                    "source_kind": "financial_document",
+                    "source_id": document_id or "missing-id",
+                    "code": "missing",
+                }
+            )
+        else:
+            target_rows.append(("financial_document", document_id, document))
+
+    if boundary is None:
+        blockers.append(
+            {
+                "source_kind": "warehouse_version",
+                "source_id": "effective_at",
+                "code": "invalid_timestamp",
+            }
+        )
+    for source_kind, source_id, row in target_rows:
+        updated_at = _timestamp(row.get("updated_at"))
+        if updated_at is None:
+            blockers.append(
+                {"source_kind": source_kind, "source_id": source_id, "code": "invalid_timestamp"}
+            )
+        elif boundary is not None and updated_at >= boundary:
+            blockers.append(
+                {
+                    "source_kind": source_kind,
+                    "source_id": source_id,
+                    "code": "not_strictly_older_than_version",
+                }
+            )
+    return {
+        "unchanged_since_version": not blockers,
+        "version_effective_at": str(version_effective_at),
+        "checked_source_count": len(target_rows),
+        "blockers": blockers,
+    }
+
+
+def _timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _decimal_equal(left: Any, right: Any) -> bool:

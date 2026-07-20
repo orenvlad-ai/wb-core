@@ -39,6 +39,7 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
 
 
 NOW = "2026-07-20T10:00:00Z"
+VERSION_EFFECTIVE_AT = "2026-07-20T10:00:01Z"
 
 
 def main() -> int:
@@ -110,13 +111,74 @@ def main() -> int:
             "legacy capital mismatch fails closed",
         )
 
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_financial_documents(
+                       document_id,supplier_order_id,document_type,original_filename,
+                       stored_file_path,file_content_type,file_sha256,uploaded_at,updated_at,
+                       parse_status,raw_parse_json,normalized_parse_json,warnings_json,errors_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "informational-contract-after-version",
+                    "26GN390",
+                    "contract",
+                    "sanitized-contract.pdf",
+                    "/sanitized/contract.pdf",
+                    "application/pdf",
+                    "sha256:sanitized",
+                    "2026-07-20T10:01:00Z",
+                    "2026-07-20T10:01:00Z",
+                    "stored",
+                    "{}",
+                    "{}",
+                    "[]",
+                    "[]",
+                ),
+            )
+            conn.commit()
+
         plan = build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         _assert(plan["correction_count"] == 1, "dry-run finds one bounded correction")
         _assert(
-            plan["immutable_supplier_source_watermarks_match"] is True,
-            "legacy proof uses unchanged persisted supplier source watermarks",
+            plan["immutable_supplier_source_watermarks_match"] is False,
+            "unrelated informational document changes only the global diagnostic watermark",
+        )
+        _assert(
+            plan["corrections"][0]["shipment_id"] == "26GN390",
+            "exact target conservation admits the unchanged legacy supplier flow",
+        )
+        _assert(
+            plan["legacy_target_revision_proofs"]["26GN390"]["unchanged_since_version"]
+            is True,
+            "only source rows contributing to the target are revision-gated",
         )
         _assert(plan["corrections"][0]["supersedes_state_fingerprint"] == "missing", "supersedes is explicit")
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_cny_ledger_operations
+                   SET cny_delta='-11',updated_at=?
+                   WHERE operation_id='payment-390'""",
+                (VERSION_EFFECTIVE_AT,),
+            )
+            conn.commit()
+        try:
+            build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
+        except WarehouseSupplierCostStateReplayError as exc:
+            _assert(
+                "legacy_target_source_revision_after_version" in str(exc),
+                "fingerprint-driving target drift fails even when RUB capital is unchanged",
+            )
+        else:
+            raise AssertionError("target CNY source drift unexpectedly certified a legacy version")
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_cny_ledger_operations
+                   SET cny_delta='-10',updated_at=? WHERE operation_id='payment-390'""",
+                (NOW,),
+            )
+            conn.commit()
+        plan = build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         original_backup = runtime.backup_database
         invalid_backup_paths: list[Path] = []
 
@@ -229,7 +291,7 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='110',updated_at='2026-07-20T11:00:00Z'
+                   SET rub_value_delta='110'
                    WHERE operation_id='payment-390'"""
             )
             conn.commit()
@@ -240,7 +302,7 @@ def main() -> int:
             build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         except WarehouseSupplierCostStateReplayError as exc:
             _assert(
-                "immutable_supplier_source_watermarks_changed" in str(exc),
+                "legacy_target_conservation_proof_mismatch" in str(exc),
                 "changed source cannot certify stale immutable balances",
             )
         else:
@@ -248,9 +310,8 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='-100',updated_at=?
+                   SET rub_value_delta='-100'
                    WHERE operation_id='payment-390'""",
-                (NOW,),
             )
             conn.commit()
 
@@ -317,7 +378,7 @@ def main() -> int:
             )
         except WarehouseSupplierCostStateReplayError as exc:
             _assert(
-                "immutable_supplier_source_watermarks_changed" in str(exc),
+                "legacy_target_source_revision_after_version" in str(exc),
                 "optimistic source conflict fails closed against immutable proof",
             )
         else:
@@ -466,7 +527,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
                 "whfv_smoke",
                 "warehouse_functional_cutover_v1",
                 "hourly_wb_sync",
-                NOW,
+                VERSION_EFFECTIVE_AT,
                 "good",
                 "sha256:immutable-version",
                 "sha256:legacy-source-capture",
