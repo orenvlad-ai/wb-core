@@ -9,6 +9,7 @@ return the persisted master switch to OFF.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from typing import Any
 
 
@@ -32,6 +34,7 @@ from packages.contracts.wb_autoanswers import MODE_MANUAL
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 BACKUP_FREE_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024
+CAPACITY_HEARTBEAT_SECONDS = 20
 
 
 def _truthy(value: str | None) -> bool:
@@ -40,6 +43,25 @@ def _truthy(value: str | None) -> bool:
 
 def _sum_counts(values: dict[str, int]) -> int:
     return sum(int(value) for value in values.values())
+
+
+@contextmanager
+def _capacity_heartbeat() -> Any:
+    """Keep the bounded production SSH operation observable without leaking paths."""
+
+    stopped = threading.Event()
+
+    def emit() -> None:
+        while not stopped.wait(CAPACITY_HEARTBEAT_SECONDS):
+            print("wb-autoanswers backup capacity verification in progress", file=sys.stderr, flush=True)
+
+    thread = threading.Thread(target=emit, name="wb-autoanswers-capacity-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1)
 
 
 def _sha256_file(path: Path) -> str:
@@ -224,7 +246,8 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     )
     if not candidates:
         raise RuntimeError("insufficient backup capacity and no raw schema-v1 backup is available")
-    compaction = _compress_verified_backup(candidates[-1])
+    with _capacity_heartbeat():
+        compaction = _compress_verified_backup(candidates[-1])
     free_after = shutil.disk_usage(runtime_dir).free
     if free_after < required_free:
         raise RuntimeError("verified schema-v1 compression did not create enough backup capacity")
