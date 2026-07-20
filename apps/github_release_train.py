@@ -2259,6 +2259,12 @@ def resume_halted_release(
         return "production"
     if task_class == LOOP_TASK_LABEL:
         _, status = mark_loop_awaiting_ui(api, number, merge_sha)
+        if status == "superseded-iteration":
+            # Exact-SHA reconciliation proved this merged recovery healthy, but a
+            # previous iteration still owns the active UI gate.  Keeping the
+            # recovered iteration halted would globally deadlock the next
+            # same-root recovery even though the durable gate remains intact.
+            api.remove_label(number, HALTED_LABEL)
         return status
     raise ReleaseBlocked("unsupported halted task class")
 

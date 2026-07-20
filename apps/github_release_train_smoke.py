@@ -1369,6 +1369,48 @@ def _assert_halted_exact_evidence_resume() -> None:
         raise AssertionError("wrong exact-SHA evidence must retain release:halted")
     assert HALTED_LABEL in _labels(halted2)
 
+    root = _pull(
+        112,
+        labels=[AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(112)],
+        created_at="2026-07-20T02:02:00Z",
+        sha=SHA_C,
+    )
+    root["state"] = "closed"
+    root["merged"] = True
+    root["merge_commit_sha"] = SHA_C
+    api.pulls[112] = root
+    _add_new_root_proof(api, 112)
+    api.add_comment(
+        112,
+        f"<!-- wb-core-loop-deploy-proof merge={SHA_C} pr=112 root=112 -->",
+    )
+    recovery = _pull(
+        113,
+        labels=[HALTED_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(112)],
+        created_at="2026-07-20T02:03:00Z",
+        sha=SHA_B,
+    )
+    recovery["state"] = "closed"
+    recovery["merged"] = True
+    recovery["merge_commit_sha"] = SHA_A
+    api.pulls[113] = recovery
+    api.add_comment(
+        113,
+        f"<!-- wb-core-loop-recovery-proof gate=112 head={SHA_B} pr=113 root=112 -->",
+    )
+    recovery_evidence = {
+        "status": "reconciled",
+        "healthy": True,
+        "pr": 113,
+        "head": SHA_B,
+        "merge": SHA_A,
+        "expected_sha": SHA_A,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+    }
+    assert resume_halted_release(api, 113, recovery_evidence) == "superseded-iteration"
+    assert HALTED_LABEL not in _labels(recovery)
+    assert AWAITING_UI_LABEL in _labels(root)
+
 
 def _terminal_loop_fixture(api: FakeApi, number: int, *, merge_sha: str = SHA_A) -> dict[str, Any]:
     pull = _pull(
