@@ -1464,6 +1464,20 @@ def _visible_optional_decimal(value: str) -> Decimal | None:
         raise AssertionError(f"visible metric value is not numeric: {value!r}") from exc
 
 
+def _allocated_amount_matches_eligible(
+    eligible_amount: object,
+    allocated_amount: object,
+) -> bool:
+    """Compare serialized Decimal allocations without requiring scale-identical text."""
+
+    try:
+        eligible = Decimal(str(eligible_amount))
+        allocated = Decimal(str(allocated_amount))
+    except Exception:
+        return False
+    return abs(eligible - allocated) < Decimal("0.000001")
+
+
 def _registry_cell_display(
     registry: Mapping[str, Any],
     *,
@@ -1549,7 +1563,10 @@ def _assert_supplier_cost_transparency_profile(
         bool(control_document_controls)
         and all(
             bool(item.get("conserved"))
-            and item.get("eligible_amount_rub") == item.get("allocated_amount_rub")
+            and _allocated_amount_matches_eligible(
+                item.get("eligible_amount_rub"),
+                item.get("allocated_amount_rub"),
+            )
             and not list(item.get("incomplete_reasons") or [])
             for item in control_document_controls
         ),
@@ -1713,7 +1730,10 @@ def _assert_supplier_cost_transparency_profile(
         bool(payment_document_controls)
         and all(
             bool(item.get("conserved"))
-            and item.get("eligible_amount_rub") == item.get("allocated_amount_rub")
+            and _allocated_amount_matches_eligible(
+                item.get("eligible_amount_rub"),
+                item.get("allocated_amount_rub"),
+            )
             and not list(item.get("incomplete_reasons") or [])
             for item in payment_document_controls
         ),

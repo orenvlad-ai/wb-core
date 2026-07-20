@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
 from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
+    _allocated_amount_matches_eligible,
     _metric_date_coverage,
     _supplier_financial_detail_url,
     _visible_money,
@@ -49,6 +50,16 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert(
+        _allocated_amount_matches_eligible(
+            "120899.32", "120899.3199999999999999999999"
+        ),
+        "serialized Decimal allocation residue is conserved",
+    )
+    _assert(
+        not _allocated_amount_matches_eligible("120899.32", "120899.31"),
+        "material allocation drift remains rejected",
+    )
     _assert(_visible_money("78\u00a0086,09 RUB") == Decimal("78086.09"), "localized RUB money")
     _assert(_visible_money("1\u202f234,50 CNY") == Decimal("1234.50"), "localized CNY money")
     _assert(
