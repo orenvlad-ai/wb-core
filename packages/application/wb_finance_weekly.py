@@ -1580,7 +1580,6 @@ class WbFinanceWeeklyBlock:
             (date.fromisoformat(row["week_start"]), date.fromisoformat(row["week_end"]))
             for row in candidate_rows
         ]
-        cost_movement_rows: list[dict[str, Any]] = []
         finance_weeks: list[dict[str, Any]] = []
         union_nm_ids: set[str] = set()
         identity_issues: list[dict[str, str]] = []
@@ -1597,13 +1596,6 @@ class WbFinanceWeeklyBlock:
                 (self.seller_id, *key),
             ).fetchall()
             parsed = [json.loads(row["raw_json"]) for row in raw_rows]
-            cost_movement_rows.extend(
-                row
-                for row in parsed
-                if str(row.get("docTypeName") or "").casefold()
-                in {"продажа", "возврат"}
-                and int(_decimal(row.get("quantity"))) != 0
-            )
             raw_week_nm_ids = {
                 str(row.get("nmId") or "").strip()
                 for row in parsed
@@ -1725,10 +1717,11 @@ class WbFinanceWeeklyBlock:
                     "report_digest": f"sha256:{report_digest}",
                 }
             )
+            del parsed, raw_rows
 
         proposed_rows, retro_blockers = self._build_retro_cost_rows(
             conn,
-            rows=cost_movement_rows,
+            rows=self._iter_retro_cost_movement_rows(conn, candidates=candidates),
         )
         persisted_map = self._load_retro_cost_map(conn)
         projected_map = {**persisted_map, **{row["nm_id"]: row for row in proposed_rows}}
@@ -1858,6 +1851,7 @@ class WbFinanceWeeklyBlock:
                         },
                     }
                 )
+            del parsed
 
         target_keys = {
             (self.seller_id, item["week_start"], item["week_end"])
@@ -1996,11 +1990,34 @@ class WbFinanceWeeklyBlock:
         ).hexdigest()
         return plan
 
+    def _iter_retro_cost_movement_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        candidates: Iterable[tuple[date, date]],
+    ) -> Iterable[dict[str, Any]]:
+        """Stream only cost-bearing Finance movements one row at a time."""
+
+        for start, end in candidates:
+            for raw_row in conn.execute(
+                """SELECT raw_json FROM wb_finance_weekly_raw_rows
+                   WHERE seller_id=? AND week_start=? AND week_end=?
+                   ORDER BY report_id,rrd_id""",
+                (self.seller_id, start.isoformat(), end.isoformat()),
+            ):
+                row = json.loads(raw_row["raw_json"])
+                if (
+                    str(row.get("docTypeName") or "").casefold()
+                    in {"продажа", "возврат"}
+                    and int(_decimal(row.get("quantity"))) != 0
+                ):
+                    yield row
+
     def _build_retro_cost_rows(
         self,
         conn: sqlite3.Connection,
         *,
-        rows: list[dict[str, Any]],
+        rows: Iterable[Mapping[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
         required: set[str] = set()

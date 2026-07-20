@@ -50,7 +50,7 @@ The output file must stay outside the Git checkout and is written with mode `060
 
 Block apply for missing/ambiguous SKU identity, missing/non-positive canonical cost, missing operation date at a temporal boundary, immutable-map conflict or incomplete Finance cost coverage. `confirmed_share_pct=0` alone is not a cost gap.
 
-Identity blockers apply only to non-zero sale/return quantity movements. Zero-quantity Finance rows retain count/digest provenance and account-level allocation evidence, but do not require a unit cost. The runner scans full production scope with bounded per-week raw memory so the dry-run remains viable for large historical Finance datasets.
+Identity blockers apply only to non-zero sale/return quantity movements. Zero-quantity Finance rows retain count/digest provenance and account-level allocation evidence, but do not require a unit cost. The runner scans full production scope with bounded per-week raw memory; cost-bearing movements are re-read through a row iterator rather than retained across weeks, so the dry-run remains viable for large historical Finance datasets.
 
 Record the plan file SHA-256, exact plan fingerprint, week/SKU counts, blockers and before/expected controls in the release evidence. No production data is changed in this phase.
 
@@ -90,6 +90,14 @@ Required evidence:
 ## UI and artifact acceptance
 
 After deploy/data readback, run authenticated production UI Flow in a fresh isolated Chromium context. It must be read-only or use a disposable contour that is cleaned and proves non-target preservation; it must not leave a real partner finalized report.
+
+The canonical read-only command is:
+
+```bash
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
+  finance-ui-flow \
+  --evidence-dir /ABSOLUTE/OUTSIDE-REPO/finance-ui
+```
 
 Accept only when Finance weeks/COGS/profit/margin, clean headers, no-marketing metric, amount/percentage arrows and no-double-count semantics render correctly on desktop/narrow, and Partner Report preview/source blockers/ROI/layout work. Render the generated main XLSX to PDF/PNG and compare it to the supplied desktop reference. Inspect the preview ZIP and prove weekly Finance file count, selected-SKU-only content, ads/COGS/common-expense reconciliation, no hidden sheets/macros/external links/other-SKU data and stable finalized source digests.
 
