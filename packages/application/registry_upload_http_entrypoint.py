@@ -68,6 +68,10 @@ from packages.application.supplier_financial_documents import (
     parse_financial_document_pdf,
 )
 from packages.application.supplier_customs_breakdown import build_customs_breakdown_xlsx
+from packages.application.supplier_expense_allocation import (
+    attach_supplier_document_expense_allocations,
+    project_supplier_order_expense_allocation,
+)
 from packages.application.cny_ledger import CnyLedgerBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -2351,7 +2355,18 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_list_request(self, *, supplier_safe: bool = False) -> dict[str, Any]:
         if supplier_safe:
             return self.supplier_shipments_block.list_shipments_supplier_safe()
-        return self.supplier_shipments_block.list_shipments()
+        payload = self.supplier_shipments_block.list_shipments()
+        payload["shipments"] = [
+            {
+                **dict(item),
+                "expense_allocation": project_supplier_order_expense_allocation(
+                    dict(item.get("supplier_cost_breakdown") or {})
+                ),
+            }
+            for item in payload.get("shipments") or []
+            if isinstance(item, Mapping)
+        ]
+        return payload
 
     def handle_supplier_shipments_parse_request(
         self,
@@ -2400,6 +2415,10 @@ class RegistryUploadHttpEntrypoint:
             if supplier_safe
             else correction
         )
+        if not supplier_safe:
+            detail["expense_allocation"] = project_supplier_order_expense_allocation(
+                dict(detail.get("supplier_cost_breakdown") or {})
+            )
         return detail
 
     def handle_supplier_shipments_patch_request(
@@ -2595,11 +2614,19 @@ class RegistryUploadHttpEntrypoint:
             shipment=shipment,
             financial_documents=financial_documents,
         )
+        canonical_breakdown = dict(shipment.get("supplier_cost_breakdown") or {})
+        checklist = attach_supplier_document_expense_allocations(checklist, canonical_breakdown)
+        cny_documents = attach_supplier_document_expense_allocations(cny_documents, canonical_breakdown)
+        financial_documents = attach_supplier_document_expense_allocations(
+            financial_documents,
+            canonical_breakdown,
+        )
         return {
             "contract_name": "sheet_vitrina_v1_supplier_order_documents",
             "status": "ok",
             "supplier_order_id": shipment_id,
             "shipment": shipment,
+            "expense_allocation": project_supplier_order_expense_allocation(canonical_breakdown),
             "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
             "required_documents": [*checklist, *cny_documents],
             "documents": [*financial_documents, *cny_documents],
