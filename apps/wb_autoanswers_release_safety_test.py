@@ -159,9 +159,10 @@ class ReleaseSafetyTest(unittest.TestCase):
         source = (ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"autoanswers-capacity"', source)
         self.assertIn('"autoanswers-schema-preflight"', source)
-        self.assertGreaterEqual(source.count("allow_transport_reconciliation=False"), 2)
+        self.assertGreaterEqual(source.count("allow_transport_reconciliation=False"), 1)
+        deploy_sequence = source[source.index('run_stage("dependencies", autoanswers_node_dependencies_command)') :]
+        self.assertNotIn('run_stage(\n        "autoanswers-capacity"', deploy_sequence)
         activation_source = (ROOT / "apps" / "wb_autoanswers_activation.py").read_text(
             encoding="utf-8"
         )
