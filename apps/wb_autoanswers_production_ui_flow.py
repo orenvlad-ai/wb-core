@@ -74,6 +74,7 @@ def run_autoanswers_ui_flow(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
         context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        context.grant_permissions(["clipboard-read", "clipboard-write"], origin=normalized_base_url)
         context.add_cookies(
             [
                 {
@@ -167,8 +168,20 @@ def run_autoanswers_ui_flow(
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
         _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
         runtime_before = dict(settings.get("runtime") or {})
-        _assert(not (runtime_before.get("ai_jobs") or {}), "production acceptance requires zero AI jobs")
-        _assert(not (runtime_before.get("publication_jobs") or {}), "production acceptance requires zero publication jobs")
+        ai_states_before = dict(runtime_before.get("ai_jobs") or {})
+        publication_states_before = dict(runtime_before.get("publication_jobs") or {})
+        _assert(
+            sum(int(ai_states_before.get(state) or 0) for state in ("queued", "processing", "retryable_error")) == 0,
+            "manual production acceptance requires zero claimable AI jobs",
+        )
+        _assert(
+            sum(
+                int(publication_states_before.get(state) or 0)
+                for state in ("approved", "publishing", "publish_pending_readback", "retryable_error")
+            )
+            == 0,
+            "manual production acceptance requires zero active publication attempts",
+        )
         filter_names = (
             "unanswered",
             "status",
@@ -237,8 +250,9 @@ def run_autoanswers_ui_flow(
                 all(bool(row.get(media_filter)) for row in media_rows),
                 f"{media_filter} filter returned a non-matching feedback",
             )
+        flag_rows: dict[str, list[dict[str, Any]]] = {}
         for flag_filter in ("needs_review", "published", "error"):
-            filtered_feedbacks(flag_filter, **{flag_filter: "true"})
+            flag_rows[flag_filter] = filtered_feedbacks(flag_filter, **{flag_filter: "true"})
         if items:
             sample = dict(items[0])
             rating = int(sample.get("productValuation") or 0)
@@ -311,9 +325,29 @@ def run_autoanswers_ui_flow(
             _assert(isinstance(detail_row.get("audit"), list), "detail audit must be a list")
             page.locator("[data-autoanswers-open]").first.click()
             page.locator("[data-autoanswers-detail-dialog][open]").wait_for(timeout=60_000)
-            detail_text = page.locator("[data-autoanswers-detail-body]").inner_text()
-            for marker in ("Отзыв", "Товар", "AI / публикация", "Медиа", "Проверки", "Ответ Wildberries", "Audit trail"):
+            detail_body = page.locator("[data-autoanswers-detail-body]")
+            detail_text = detail_body.inner_text()
+            for marker in ("Товар", "Ответ Wildberries", "Статус", "Техническая информация"):
                 _assert(marker in detail_text, f"detail drawer misses {marker}")
+            technical = page.locator(".autoanswers-technical")
+            _assert(not technical.evaluate("node => node.open"), "technical information must be closed by default")
+            for technical_marker in ("Route:", "JSON contract", "Hard gates", "Audit trail"):
+                _assert(technical_marker not in detail_text, f"closed detail leaked {technical_marker}")
+            for optional_label, source_value in (
+                ("Плюсы:", first_item.get("pros")),
+                ("Минусы:", first_item.get("cons")),
+                ("Теги:", first_item.get("tags")),
+            ):
+                if not source_value:
+                    _assert(optional_label not in detail_text, f"empty {optional_label} occupies detail space")
+            editor = page.locator("[data-autoanswers-manual-reply]")
+            if editor.count():
+                dimensions = editor.evaluate("node => ({client: node.clientHeight, scroll: node.scrollHeight})")
+                _assert(dimensions["client"] + 2 >= dimensions["scroll"], "ready answer textarea did not auto-grow")
+            technical.locator("summary").click()
+            expanded_text = detail_body.inner_text()
+            for technical_marker in ("Route:", "JSON contract", "Hard gates", "Audit trail"):
+                _assert(technical_marker in expanded_text, f"technical spoiler misses {technical_marker}")
             if expected_state == "manual" and not str((first_item.get("answer") or {}).get("text") or "").strip():
                 _assert(
                     page.locator("[data-autoanswers-generate]").count() == 1,
@@ -333,7 +367,104 @@ def run_autoanswers_ui_flow(
                 "has_existing_answer": bool((first_item.get("answer") or {}).get("text")),
                 "processing_status": first_item.get("processing_status"),
                 "publication_status": first_item.get("publication_status"),
+                "technical_closed_by_default": True,
+                "technical_expands": True,
+                "textarea_auto_grow": not editor.count() or dimensions["client"] + 2 >= dimensions["scroll"],
             }
+            page.locator("[data-autoanswers-detail-dialog]").evaluate("node => node.close()")
+
+        table_answer_evidence: dict[str, Any] = {"present": False}
+        answer_candidate = next(
+            (
+                row
+                for row in [*flag_rows.get("published", []), *flag_rows.get("needs_review", []), *items]
+                if str(row.get("generated_reply") or "").strip()
+            ),
+            None,
+        )
+        if answer_candidate:
+            page.evaluate(
+                """row => {
+                  state.feedbacks.server.items = [row];
+                  state.feedbacks.server.loaded = true;
+                  state.feedbacks.server.loading = false;
+                  state.feedbacks.server.total = 1;
+                  renderAutoanswersServer();
+                }""",
+                answer_candidate,
+            )
+            answer_box = page.locator(".autoanswers-answer-box")
+            answer_box.wait_for(timeout=30_000)
+            before_copy = answer_box.inner_text()
+            dimensions = answer_box.evaluate(
+                "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY})"
+            )
+            _assert(dimensions["height"] <= 90, "table answer expanded the row")
+            _assert(dimensions["overflowY"] in {"auto", "scroll"}, "table answer does not scroll internally")
+            page.locator("[data-autoanswers-copy]").click()
+            page.get_by_role("button", name="Скопировано").wait_for(timeout=10_000)
+            after_copy = answer_box.inner_text().replace("Скопировано", "Копировать")
+            _assert(after_copy == before_copy, "copy action changed the displayed answer")
+            table_answer_evidence = {"present": True, "fixed_height": True, "copy_without_mutation": True}
+
+        media_evidence: dict[str, Any] = {}
+        media_candidates: list[dict[str, Any]] = []
+        seen_media_ids: set[str] = set()
+        for candidate in [*flag_rows.get("needs_review", []), *unanswered_rows, *items]:
+            candidate_id = str(candidate.get("id") or "")
+            if candidate_id and candidate_id not in seen_media_ids:
+                seen_media_ids.add(candidate_id)
+                media_candidates.append(candidate)
+        ready_by_kind: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for candidate in media_candidates:
+            if len(ready_by_kind) == 2:
+                break
+            detail = _json_get(
+                context,
+                normalized_base_url
+                + "/v1/sheet-vitrina-v1/feedbacks/detail?id="
+                + quote(str(candidate["id"]), safe=""),
+                label="media-ready feedback detail",
+            )
+            detail_row = dict(detail.get("feedback") or {})
+            for media in detail_row.get("media") or []:
+                kind = str(media.get("kind") or "")
+                available = bool(media.get("primary_available")) if kind == "photo" else bool(
+                    media.get("preview_available")
+                )
+                if kind in {"photo", "video"} and available and kind not in ready_by_kind:
+                    ready_by_kind[kind] = (candidate, detail_row)
+        for kind in ("photo", "video"):
+            _assert(kind in ready_by_kind, f"production UI has no prepared real {kind} candidate")
+            candidate, detail_row = ready_by_kind[kind]
+            page.evaluate("id => openAutoanswersDetail(id)", str(candidate["id"]))
+            page.locator("[data-autoanswers-detail-dialog][open]").wait_for(timeout=60_000)
+            image = page.locator(
+                '.autoanswers-media-item[alt="Фото покупателя"]'
+                if kind == "photo"
+                else '.autoanswers-media-item[alt="Превью видео покупателя"]'
+            )
+            image.wait_for(timeout=60_000)
+            image_state = image.evaluate("node => ({complete: node.complete, width: node.naturalWidth})")
+            _assert(image_state["complete"] and image_state["width"] > 0, f"real {kind} did not render")
+            media_evidence[kind] = {
+                "feedback_id_sha256": hashlib.sha256(str(candidate["id"]).encode("utf-8")).hexdigest(),
+                "rendered": True,
+                "metadata_count": len(detail_row.get("media") or []),
+            }
+            page.locator("[data-autoanswers-detail-dialog]").evaluate("node => node.close()")
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.evaluate(
+            """() => {
+              state.feedbacks.server.items = state.feedbacks.server.items.slice(0, 1);
+              renderAutoanswersServer();
+            }"""
+        )
+        narrow_overflow = page.evaluate(
+            "document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
+        )
+        _assert(not narrow_overflow, "autoanswers narrow layout causes document-level horizontal overflow")
 
         body_text = page.locator("body").inner_text()
         for marker in ("Internal Server Error", "Traceback", "Unexpected token", "Данные отзывов не загружены"):
@@ -382,6 +513,8 @@ def run_autoanswers_ui_flow(
         },
         "expected_state": expected_state,
         "jobs_unchanged": True,
+        "active_ai_jobs": 0,
+        "active_publication_jobs": 0,
         "list": {
             "total": int(first.get("total") or 0),
             "page_1_count": len(items),
@@ -393,6 +526,9 @@ def run_autoanswers_ui_flow(
             "filter_counts": filter_checks,
         },
         "detail": detail_evidence,
+        "table_answer": table_answer_evidence,
+        "media": media_evidence,
+        "narrow_layout": {"document_overflow": False},
         "screenshot": str(screenshot_path),
     }
     evidence_path = evidence_dir / "wb_autoanswers_ui_evidence.json"

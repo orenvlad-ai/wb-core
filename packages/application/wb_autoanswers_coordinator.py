@@ -31,7 +31,14 @@ class AutoanswersCoordinator:
     def run_once(self) -> dict[str, Any]:
         coordinator = self.repository.sync_cursor("wb_autoanswers_coordinator")
         tick = int((coordinator or {}).get("cursor", {}).get("tick") or 0) + 1
-        report: dict[str, Any] = {"tick": tick, "sync": [], "processing": None, "publication": None, "errors": []}
+        report: dict[str, Any] = {
+            "tick": tick,
+            "sync": [],
+            "reconciliation": None,
+            "processing": None,
+            "publication": None,
+            "errors": [],
+        }
         command = self.repository.claim_sync_command(worker_id=self.worker_id)
         try:
             # Two steady pages plus one rotating reconciliation/backfill page
@@ -55,6 +62,14 @@ class AutoanswersCoordinator:
         self.repository.save_sync_cursor(
             "wb_autoanswers_coordinator", cursor={"tick": tick}, successful=not report["errors"]
         )
+        try:
+            report["reconciliation"] = self.repository.reconcile_policy_sweep_once(
+                worker_id=self.worker_id,
+                batch_size=25,
+            )
+        except AutoanswersRuntimeError as exc:
+            if exc.code not in {"master_switch_off", "emergency_force_off"}:
+                report["errors"].append({"stage": "reconciliation", "code": exc.code})
         try:
             report["processing"] = self.processing_worker.run_once()
         except AutoanswersRuntimeError as exc:

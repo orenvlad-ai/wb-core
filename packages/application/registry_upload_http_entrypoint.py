@@ -1290,7 +1290,7 @@ class RegistryUploadHttpEntrypoint:
         }
 
     def handle_sheet_feedbacks_detail_request(self, feedback_id: str) -> dict[str, Any]:
-        payload = self.autoanswers_repository.get_feedback(feedback_id)
+        payload = self.autoanswers_repository.public_feedback(feedback_id)
         if payload is None:
             raise KeyError("feedback_not_found")
         return {
@@ -1308,6 +1308,7 @@ class RegistryUploadHttpEntrypoint:
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),
+            "reconciliation": self.autoanswers_repository.reconciliation_status(),
         }
 
     def handle_sheet_feedbacks_autoanswers_settings_update_request(
@@ -1317,6 +1318,20 @@ class RegistryUploadHttpEntrypoint:
         if selector_state:
             if selector_state != "off" and selector_state not in AUTOANSWER_MODES:
                 raise ValueError("unsupported autoanswers selector state")
+            if selector_state in {"draft_only", "auto_safe", "auto_all"}:
+                transition = self.autoanswers_repository.apply_mode_transition(
+                    selector_state,
+                    actor_id=actor_id,
+                    preview_id=str(payload.get("preview_id") or "") or None,
+                )
+                settings = transition["settings"]
+                return {
+                    "settings": asdict(settings),
+                    "budget": self.autoanswers_repository.budget_status(),
+                    "selector_state": settings.mode if settings.master_enabled else "off",
+                    "runtime": self.autoanswers_repository.operational_status(),
+                    "reconciliation": transition["sweep"],
+                }
             master_enabled: bool | None = selector_state != "off"
             mode: str | None = None if selector_state == "off" else selector_state
         else:
@@ -1335,7 +1350,18 @@ class RegistryUploadHttpEntrypoint:
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),
+            "reconciliation": self.autoanswers_repository.reconciliation_status(),
         }
+
+    def handle_sheet_feedbacks_autoanswers_transition_preview_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        return self.autoanswers_repository.preview_mode_transition(
+            str(payload.get("selector_state") or ""),
+            actor_id=actor_id,
+            scope_from=str(payload.get("scope_from") or "2026-01-01"),
+            scope_to=str(payload.get("scope_to") or "") or None,
+        )
 
     def handle_sheet_feedbacks_autoanswers_sync_request(
         self, payload: Mapping[str, Any], *, actor_id: str
@@ -1380,6 +1406,32 @@ class RegistryUploadHttpEntrypoint:
             actor_id=actor_id,
         )
         return {"accepted": True, "job": job}
+
+    def handle_sheet_feedbacks_autoanswers_regenerate_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        job = self.autoanswers_repository.request_regeneration(
+            str(payload.get("processing_key") or ""),
+            actor_id=actor_id,
+        )
+        return {"accepted": True, "job": job}
+
+    def handle_sheet_feedbacks_media_asset_request(
+        self,
+        feedback_id: str,
+        *,
+        content_version: int,
+        kind: str,
+        ordinal: int,
+        asset: str,
+    ) -> tuple[Path, str] | None:
+        return self.autoanswers_repository.media_asset(
+            feedback_id,
+            content_version=content_version,
+            kind=kind,
+            ordinal=ordinal,
+            asset=asset,
+        )
 
     def handle_sheet_feedbacks_autoanswers_manual_edit_request(
         self, payload: Mapping[str, Any], *, actor_id: str

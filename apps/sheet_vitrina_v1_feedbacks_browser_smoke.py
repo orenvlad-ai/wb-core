@@ -638,16 +638,21 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if "Отклонена" not in page.locator("[data-feedbacks-complaints-table]").inner_text():
                 raise AssertionError("complaints table must render refreshed rows after status sync")
             page.locator("[data-feedbacks-subtab='reviews']").click()
+            page.wait_for_selector('[data-feedbacks-subpanel="reviews"]:not([hidden])')
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-range-label]')?.textContent.includes('24.04.2026 - 30.04.2026')"
+            )
             feedbacks_dark_layout = page.evaluate(
                 """() => {
                     const numbers = (value) => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
                     const bodyBg = getComputedStyle(document.body).backgroundColor;
                     const bodyRgb = numbers(bodyBg);
                     const tabStrip = document.querySelector(".unified-tab-strip");
-                    const actionToolbar = document.querySelector(".feedbacks-action-toolbar");
-                    const tableTools = document.querySelector(".feedbacks-table-tools");
-                    const resetButton = document.querySelector("[data-feedbacks-reset-widths]");
-                    const sourceNote = document.querySelector("[data-feedbacks-source-note]");
+                    const reviewPanel = document.querySelector('[data-feedbacks-subpanel="reviews"]:not([hidden])');
+                    const actionToolbar = reviewPanel ? reviewPanel.querySelector(".feedbacks-action-toolbar") : null;
+                    const tableTools = reviewPanel ? reviewPanel.querySelector(".feedbacks-table-tools") : null;
+                    const resetButton = reviewPanel ? reviewPanel.querySelector("[data-feedbacks-reset-widths]") : null;
+                    const sourceNote = reviewPanel ? reviewPanel.querySelector("[data-feedbacks-source-note]") : null;
                     const actionButtons = actionToolbar ? Array.from(actionToolbar.querySelectorAll("button")) : [];
                     const buttonHeights = actionButtons
                         .map((node) => Math.round(node.getBoundingClientRect().height))
@@ -659,12 +664,12 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         tabStripDisplay: tabStrip ? getComputedStyle(tabStrip).display : "",
                         tabStripFlexDirection: tabStrip ? getComputedStyle(tabStrip).flexDirection : "",
                         hasActionToolbar: Boolean(actionToolbar),
-                        hasFilterPanel: Boolean(document.querySelector(".feedbacks-filter-panel")),
+                        hasFilterPanel: Boolean(reviewPanel && reviewPanel.querySelector(".feedbacks-filter-panel")),
                         sourceNoteInFilterPanel: Boolean(sourceNote && sourceNote.closest(".feedbacks-filter-panel")),
                         tableToolsContainsReset: Boolean(tableTools && resetButton && tableTools.contains(resetButton)),
                         actionToolbarContainsReset: Boolean(actionToolbar && resetButton && actionToolbar.contains(resetButton)),
-                        dangerGroupSeparated: Boolean(document.querySelector(".feedbacks-action-group.is-danger [data-feedbacks-submit-selected]")),
-                        selectedPillVisible: Boolean(document.querySelector(".feedbacks-selection-pill[data-feedbacks-submit-selected-count]")),
+                        dangerGroupSeparated: Boolean(reviewPanel && reviewPanel.querySelector(".feedbacks-action-group.is-danger [data-feedbacks-submit-selected]")),
+                        selectedPillVisible: Boolean(reviewPanel && reviewPanel.querySelector(".feedbacks-selection-pill[data-feedbacks-submit-selected-count]")),
                         buttonHeights,
                         equalActionButtonHeights: buttonHeights.length >= 4 && Math.max(...buttonHeights) - Math.min(...buttonHeights) <= 2,
                     };
