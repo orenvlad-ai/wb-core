@@ -170,6 +170,22 @@ def _assert_logistics_assemblies() -> None:
         or sorted(names) != sorted(item["archive_name"] for item in manifest["included"])
     ):
         raise AssertionError(f"complete logistics package mismatch: {receipt} {names}")
+    reversed_bytes, _ = _build_supplier_order_documents_archive(
+        {**payload, "required_documents": list(reversed(rows))},
+        package_type="logistics",
+        file_loader=_fixture_loader,
+    )
+    reversed_manifest, _ = _manifest_and_names(reversed_bytes)
+    names_by_document = {
+        str(item.get("document_id") or ""): str(item.get("archive_name") or "")
+        for item in manifest.get("included") or []
+    }
+    reversed_names_by_document = {
+        str(item.get("document_id") or ""): str(item.get("archive_name") or "")
+        for item in reversed_manifest.get("included") or []
+    }
+    if reversed_names_by_document != names_by_document:
+        raise AssertionError("archive names must remain deterministic when source row order changes")
 
     failed_bytes, failed_receipt = _build_supplier_order_documents_archive(
         payload,

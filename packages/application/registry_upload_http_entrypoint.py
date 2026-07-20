@@ -6237,6 +6237,16 @@ def _build_supplier_order_documents_archive(
         for item in payload.get("required_documents") or []
         if isinstance(item, Mapping) and str(item.get("document_type") or "") in required_types
     ]
+    type_order = {document_type: index for index, document_type in enumerate(required_types)}
+    rows.sort(
+        key=lambda item: (
+            type_order.get(str(item.get("document_type") or ""), len(type_order)),
+            str(item.get("document_date") or ""),
+            str(item.get("document_number") or ""),
+            str(item.get("document_id") or ""),
+            str(item.get("file_original_name") or ""),
+        )
+    )
     uploaded_rows = [item for item in rows if bool(item.get("is_uploaded"))]
     expected: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
