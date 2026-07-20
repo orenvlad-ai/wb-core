@@ -8,21 +8,31 @@ from io import BytesIO
 import re
 from typing import Any, Iterable, Mapping
 
+from packages.application.supplier_customs_dt_matching_policy import (
+    DT_ANNEX_MATCHING_POLICY_VERSION,
+    canonical_dt_series,
+    normalized_model_key_set,
+    resolve_dt_annex_series_model,
+)
+
 
 ZERO = Decimal("0")
 MATCHED_STATUSES = {"matched", "matched_by_barcode", "matched_by_compatibility"}
 WORKBOOK_HEADERS = (
     "№ позиции ДТ",
+    "№ строки приложения",
     "Наименование из ДТ",
+    "Артикул из ДТ",
+    "Модель из ДТ",
+    "Определённая серия",
     "Количество",
     "Ед. изм.",
     "nmID",
     "Наша номенклатура",
+    "Штрихкод",
+    "Штрихкод из ДТ",
     "Статус сопоставления",
     "Основание сопоставления",
-    "Количество позиции ДТ",
-    "Штрихкод",
-    "Модель/артикул из ДТ",
     "Код ТН ВЭД",
 )
 
@@ -39,12 +49,23 @@ def build_customs_breakdown_xlsx(
 
     normalized = _mapping(customs_document.get("normalized_parse"))
     goods_items = [dict(item) for item in normalized.get("goods_items") or [] if isinstance(item, Mapping)]
-    matching = match_customs_goods_items(
-        goods_items=goods_items,
-        shipment_lines=shipment_lines,
-        nomenclature_items=nomenclature_items,
-        packing_documents=packing_documents,
-    )
+    annex_items = [dict(item) for item in normalized.get("annex_items") or [] if isinstance(item, Mapping)]
+    if annex_items:
+        matching = match_customs_annex_items(
+            annex_items=annex_items,
+            goods_items=goods_items,
+            shipment_lines=shipment_lines,
+            nomenclature_items=nomenclature_items,
+            expected_quantity_total=normalized.get("annex_quantity_total"),
+            parser_quantity_conserved=normalized.get("annex_quantity_conserved"),
+        )
+    else:
+        matching = _upgrade_legacy_matching(match_customs_goods_items(
+            goods_items=goods_items,
+            shipment_lines=shipment_lines,
+            nomenclature_items=nomenclature_items,
+            packing_documents=packing_documents,
+        ))
     declaration_number = str(
         normalized.get("declaration_number")
         or normalized.get("document_number")
@@ -91,6 +112,164 @@ def build_customs_breakdown_xlsx(
         "review_message": "Расшифровка ДТ требует проверки" if matching["requires_review"] else "",
     }
     return workbook_bytes, customs_breakdown_filename(declaration_number), receipt
+
+
+def match_customs_annex_items(
+    *,
+    annex_items: Iterable[Mapping[str, Any]],
+    goods_items: Iterable[Mapping[str, Any]],
+    shipment_lines: Iterable[Mapping[str, Any]],
+    nomenclature_items: Iterable[Mapping[str, Any]],
+    expected_quantity_total: Any = None,
+    parser_quantity_conserved: Any = None,
+) -> dict[str, Any]:
+    """Match DT annex rows only inside the current authoritative supplier order."""
+
+    annex_items = [dict(item) for item in annex_items if isinstance(item, Mapping)]
+    goods_items = [dict(item) for item in goods_items if isinstance(item, Mapping)]
+    product_lines = [
+        dict(line)
+        for line in shipment_lines
+        if str(line.get("line_type") or "") == "product"
+        and int(line.get("internal_nm_id") or 0) > 0
+        and str(line.get("match_status") or "") in MATCHED_STATUSES
+    ]
+    product_lines.sort(key=lambda item: (int(item.get("sort_order") or 0), str(item.get("line_id") or "")))
+    nomenclature_by_nm: dict[int, dict[str, Any]] = {}
+    for raw in nomenclature_items:
+        item = dict(raw)
+        if not bool(item.get("is_active", True)):
+            continue
+        nm_id = int(item.get("nm_id") or item.get("internal_nm_id") or 0)
+        if nm_id > 0:
+            nomenclature_by_nm[nm_id] = item
+
+    candidates = [_dt_order_candidate(line, nomenclature_by_nm) for line in product_lines]
+    candidates = [candidate for candidate in candidates if candidate["nm_id"] > 0]
+    by_barcode: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_series_models: defaultdict[tuple[str, tuple[str, ...]], list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        for barcode in candidate["barcodes"]:
+            by_barcode[barcode].append(candidate)
+        for model_keys in candidate["model_key_sets"]:
+            if candidate["series"] and model_keys:
+                by_series_models[(candidate["series"], model_keys)].append(candidate)
+
+    rows: list[dict[str, Any]] = []
+    status_counts: defaultdict[str, int] = defaultdict(int)
+    dt_quantity_total = ZERO
+    output_quantity_total = ZERO
+    quantity_complete = True
+    for item in annex_items:
+        quantity = _decimal_or_none(item.get("quantity"))
+        if quantity is None:
+            quantity_complete = False
+        else:
+            dt_quantity_total += quantity
+            output_quantity_total += quantity
+        source_barcode = _digits(item.get("barcode") or _mapping(item.get("identifiers")).get("barcode"))
+        policy = resolve_dt_annex_series_model(item)
+        row_candidates: list[dict[str, Any]] = []
+        basis = ""
+        if source_barcode:
+            row_candidates = _unique_dt_owners(by_barcode.get(source_barcode, []))
+            if row_candidates:
+                basis = "точный barcode из ДТ внутри текущего заказа"
+        if source_barcode and len(row_candidates) > 1:
+            row = _annex_mapping_row(
+                item=item,
+                policy=policy,
+                quantity=quantity,
+                source_barcode=source_barcode,
+                status="ambiguous",
+                status_ru="Неоднозначно",
+                basis="barcode из ДТ принадлежит нескольким nmID текущего заказа",
+            )
+        else:
+            if not row_candidates and policy.get("status") == "confirmed":
+                key = (
+                    str(policy.get("series") or ""),
+                    tuple(str(value) for value in policy.get("model_keys") or []),
+                )
+                row_candidates = _unique_dt_owners(by_series_models.get(key, []))
+                if row_candidates:
+                    basis = (
+                        f"{DT_ANNEX_MATCHING_POLICY_VERSION}: точная серия и полный набор iPhone model keys "
+                        "внутри текущего заказа"
+                    )
+            if len(row_candidates) == 1:
+                row = _annex_mapping_row(
+                    item=item,
+                    policy=policy,
+                    quantity=quantity,
+                    source_barcode=source_barcode,
+                    candidate=row_candidates[0],
+                    status="matched",
+                    status_ru="Сопоставлено",
+                    basis=basis,
+                )
+            elif len(row_candidates) > 1:
+                row = _annex_mapping_row(
+                    item=item,
+                    policy=policy,
+                    quantity=quantity,
+                    source_barcode=source_barcode,
+                    status="ambiguous",
+                    status_ru="Неоднозначно",
+                    basis="точная серия и набор моделей принадлежат нескольким nmID текущего заказа",
+                )
+            elif policy.get("status") == "ambiguous":
+                row = _annex_mapping_row(
+                    item=item,
+                    policy=policy,
+                    quantity=quantity,
+                    source_barcode=source_barcode,
+                    status="ambiguous",
+                    status_ru="Неоднозначно",
+                    basis="противоречивые Артикул/Модель или признаки серии в строке ДТ",
+                )
+            else:
+                row = _annex_mapping_row(
+                    item=item,
+                    policy=policy,
+                    quantity=quantity,
+                    source_barcode=source_barcode,
+                    status="unmatched",
+                    status_ru="Не сопоставлено",
+                    basis="нет единственного точного barcode либо exact series/model-key владельца в текущем заказе",
+                )
+        rows.append(row)
+        status_counts[str(row["status"])] += 1
+
+    expected_total = _decimal_or_none(expected_quantity_total)
+    quantity_conserved = bool(
+        quantity_complete
+        and dt_quantity_total == output_quantity_total
+        and (expected_total is None or expected_total == dt_quantity_total)
+        and parser_quantity_conserved is not False
+    )
+    requires_review = bool(
+        not annex_items
+        or status_counts.get("ambiguous")
+        or status_counts.get("unmatched")
+        or not quantity_conserved
+    )
+    return {
+        "rows": rows,
+        "position_count": len(goods_items),
+        "annex_item_count": len(annex_items),
+        "output_row_count": len(rows),
+        "status_counts": dict(sorted(status_counts.items())),
+        "matched_count": status_counts.get("matched", 0),
+        "ambiguous_count": status_counts.get("ambiguous", 0),
+        "unmatched_count": status_counts.get("unmatched", 0),
+        "dt_quantity_total": _decimal_text(dt_quantity_total) if quantity_complete else None,
+        "output_quantity_total": _decimal_text(output_quantity_total) if quantity_complete else None,
+        "quantity_conserved": quantity_conserved,
+        "matching_policy_version": DT_ANNEX_MATCHING_POLICY_VERSION,
+        "reconciliation_status": "ok" if not requires_review else "requires_review",
+        "requires_review": requires_review,
+    }
 
 
 def match_customs_goods_items(
@@ -314,6 +493,156 @@ def match_customs_goods_items(
     }
 
 
+def _dt_order_candidate(
+    line: Mapping[str, Any],
+    nomenclature_by_nm: Mapping[int, Mapping[str, Any]],
+) -> dict[str, Any]:
+    nm_id = int(line.get("internal_nm_id") or 0)
+    nomenclature = _mapping(nomenclature_by_nm.get(nm_id))
+    group_key = str(
+        line.get("group_key")
+        or line.get("product_type")
+        or nomenclature.get("group_key")
+        or nomenclature.get("product_type")
+        or ""
+    ).strip()
+    model_key_sets: list[tuple[str, ...]] = []
+
+    def add_model_key_set(values: Iterable[Any]) -> None:
+        keys = tuple(sorted({str(value).strip() for value in values if str(value or "").strip()}))
+        if keys and keys not in model_key_sets:
+            model_key_sets.append(keys)
+
+    for raw_keys in (line.get("compatible_model_keys"), nomenclature.get("compatible_model_keys")):
+        if isinstance(raw_keys, list):
+            add_model_key_set(raw_keys)
+    for source in (
+        line.get("model_raw"),
+        _mapping(line.get("raw")).get("model_raw"),
+        nomenclature.get("compatible_models_text"),
+        nomenclature.get("match_key"),
+        nomenclature.get("nomenclature_name"),
+    ):
+        add_model_key_set(normalized_model_key_set(source))
+    additional_barcodes = nomenclature.get("barcodes")
+    if not isinstance(additional_barcodes, list):
+        additional_barcodes = []
+    barcodes = {
+        barcode
+        for value in (
+            line.get("barcode"),
+            nomenclature.get("barcode"),
+            *additional_barcodes,
+        )
+        if (barcode := _digits(value))
+    }
+    canonical_barcode = _digits(line.get("barcode")) or _digits(nomenclature.get("barcode"))
+    if not canonical_barcode and barcodes:
+        canonical_barcode = sorted(barcodes)[0]
+    return {
+        "nm_id": nm_id,
+        "line_id": str(line.get("line_id") or ""),
+        "sort_order": int(line.get("sort_order") or 0),
+        "nomenclature_name": str(
+            line.get("internal_name")
+            or nomenclature.get("nomenclature_name")
+            or nomenclature.get("internal_name")
+            or ""
+        ),
+        "canonical_barcode": canonical_barcode,
+        "barcodes": tuple(sorted(barcodes)),
+        "group_key": group_key,
+        "series": canonical_dt_series(group_key),
+        "model_keys": model_key_sets[0] if model_key_sets else (),
+        "model_key_sets": tuple(model_key_sets),
+    }
+
+
+def _unique_dt_owners(candidates: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    owners: dict[int, dict[str, Any]] = {}
+    for raw in candidates:
+        candidate = dict(raw)
+        nm_id = int(candidate.get("nm_id") or 0)
+        if nm_id <= 0:
+            continue
+        current = owners.get(nm_id)
+        candidate_key = (int(candidate.get("sort_order") or 0), str(candidate.get("line_id") or ""))
+        current_key = (
+            int((current or {}).get("sort_order") or 0),
+            str((current or {}).get("line_id") or ""),
+        )
+        if current is None or candidate_key < current_key:
+            owners[nm_id] = candidate
+    return [owners[nm_id] for nm_id in sorted(owners)]
+
+
+def _annex_mapping_row(
+    *,
+    item: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    quantity: Decimal | None,
+    source_barcode: str,
+    status: str,
+    status_ru: str,
+    basis: str,
+    candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate = dict(candidate or {})
+    identifiers = _mapping(item.get("identifiers"))
+    return {
+        "position_number": str(item.get("parent_position_number") or item.get("position_number") or ""),
+        "annex_row_number": str(item.get("annex_row_number") or ""),
+        "source_name": str(item.get("source_name") or ""),
+        "source_article": str(item.get("article") or identifiers.get("article") or ""),
+        "source_model": str(item.get("source_model") or identifiers.get("source_model") or ""),
+        "determined_series": _dt_series_label(policy.get("series")),
+        "canonical_group": str(candidate.get("group_key") or ""),
+        "quantity": _decimal_text(quantity) if quantity is not None else None,
+        "unit": str(item.get("unit") or ""),
+        "nm_id": int(candidate.get("nm_id") or 0) or None,
+        "nomenclature_name": str(candidate.get("nomenclature_name") or ""),
+        "barcode": str(candidate.get("canonical_barcode") or ""),
+        "source_barcode": source_barcode,
+        "status": status,
+        "status_ru": status_ru,
+        "basis": basis,
+        "customs_code": str(identifiers.get("customs_code") or item.get("customs_code") or ""),
+    }
+
+
+def _upgrade_legacy_matching(matching: Mapping[str, Any]) -> dict[str, Any]:
+    upgraded = dict(matching)
+    upgraded["rows"] = [
+        {
+            **dict(row),
+            "annex_row_number": "",
+            "source_article": "",
+            "determined_series": "",
+            "source_barcode": str(row.get("barcode") or ""),
+        }
+        for row in matching.get("rows") or []
+        if isinstance(row, Mapping)
+    ]
+    upgraded["annex_item_count"] = 0
+    upgraded["matched_count"] = sum(
+        int(value)
+        for key, value in dict(upgraded.get("status_counts") or {}).items()
+        if key in {"matched", "reconciled_group"}
+    )
+    upgraded["ambiguous_count"] = int(dict(upgraded.get("status_counts") or {}).get("ambiguous") or 0)
+    upgraded["unmatched_count"] = int(dict(upgraded.get("status_counts") or {}).get("unmatched") or 0)
+    upgraded["matching_policy_version"] = "supplier_customs_legacy_exact_v1"
+    return upgraded
+
+
+def _dt_series_label(value: Any) -> str:
+    return {
+        "clean": "Clean",
+        "anti_spy": "Anti-spy",
+        "matte": "Matte",
+    }.get(str(value or "").strip(), "")
+
+
 def validate_customs_breakdown_workbook(
     workbook_bytes: bytes,
     *,
@@ -346,19 +675,20 @@ def validate_customs_breakdown_workbook(
         if position in (None, ""):
             continue
         row_count += 1
-        quantity = worksheet.cell(row=row_index, column=3).value
+        quantity = worksheet.cell(row=row_index, column=7).value
         if quantity in (None, ""):
             errors.append(f"row {row_index} quantity is missing")
         elif not isinstance(quantity, int | float):
             errors.append(f"row {row_index} quantity is not numeric")
         else:
             quantity_total += Decimal(str(quantity))
-        unit = worksheet.cell(row=row_index, column=4).value
+        unit = worksheet.cell(row=row_index, column=8).value
         if unit in (None, ""):
             errors.append(f"row {row_index} quantity unit is missing")
-        barcode_cell = worksheet.cell(row=row_index, column=10)
-        if barcode_cell.value not in (None, "") and barcode_cell.data_type != "s":
-            errors.append(f"row {row_index} barcode is not stored as text")
+        for column, label in ((11, "canonical barcode"), (12, "source barcode")):
+            barcode_cell = worksheet.cell(row=row_index, column=column)
+            if barcode_cell.value not in (None, "") and barcode_cell.data_type != "s":
+                errors.append(f"row {row_index} {label} is not stored as text")
     if row_count != expected_row_count:
         errors.append(f"row count {row_count} != expected {expected_row_count}")
     expected_total = _decimal_or_none(expected_quantity_total)
@@ -396,6 +726,7 @@ def _render_workbook(*, metadata: Mapping[str, Any], matching: Mapping[str, Any]
         ("Контроль количества", matching.get("reconciliation_status")),
         ("Итого количество по ДТ", matching.get("dt_quantity_total")),
         ("Итого количество в расшифровке", matching.get("output_quantity_total")),
+        ("Version matching policy", matching.get("matching_policy_version")),
     )
     for label, value in metadata_rows:
         worksheet.append([label, value if value not in (None, "") else "—"])
@@ -408,27 +739,30 @@ def _render_workbook(*, metadata: Mapping[str, Any], matching: Mapping[str, Any]
         cell.alignment = Alignment(wrap_text=True, vertical="top")
     for row in matching.get("rows") or []:
         quantity = _excel_number(row.get("quantity"))
-        source_quantity = _excel_number(row.get("source_quantity"))
         worksheet.append(
             [
                 str(row.get("position_number") or ""),
+                str(row.get("annex_row_number") or ""),
                 str(row.get("source_name") or ""),
+                str(row.get("source_article") or ""),
+                str(row.get("source_model") or ""),
+                str(row.get("determined_series") or ""),
                 quantity,
                 str(row.get("unit") or ""),
                 int(row["nm_id"]) if row.get("nm_id") not in (None, "") else None,
                 str(row.get("nomenclature_name") or ""),
+                str(row.get("barcode") or ""),
+                str(row.get("source_barcode") or ""),
                 str(row.get("status_ru") or ""),
                 str(row.get("basis") or ""),
-                source_quantity,
-                str(row.get("barcode") or ""),
-                str(row.get("source_model") or ""),
                 str(row.get("customs_code") or ""),
             ]
         )
-        worksheet.cell(row=worksheet.max_row, column=10).number_format = "@"
+        worksheet.cell(row=worksheet.max_row, column=11).number_format = "@"
+        worksheet.cell(row=worksheet.max_row, column=12).number_format = "@"
     worksheet.freeze_panes = f"A{header_row + 1}"
-    worksheet.auto_filter.ref = f"A{header_row}:L{worksheet.max_row}"
-    widths = (16, 46, 15, 12, 15, 34, 24, 70, 22, 24, 28, 18)
+    worksheet.auto_filter.ref = f"A{header_row}:O{worksheet.max_row}"
+    widths = (16, 18, 42, 30, 30, 22, 15, 12, 15, 34, 24, 24, 24, 70, 18)
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[chr(64 + index)].width = width
     for row in worksheet.iter_rows(min_row=header_row + 1):
@@ -438,10 +772,15 @@ def _render_workbook(*, metadata: Mapping[str, Any], matching: Mapping[str, Any]
     control.append(["Показатель", "Значение"])
     control.append(["Статус reconciliation", matching.get("reconciliation_status")])
     control.append(["Позиций ДТ", matching.get("position_count")])
+    control.append(["Строк приложения", matching.get("annex_item_count")])
     control.append(["Строк в расшифровке", matching.get("output_row_count")])
+    control.append(["Сопоставлено", matching.get("matched_count")])
+    control.append(["Неоднозначно", matching.get("ambiguous_count")])
+    control.append(["Не сопоставлено", matching.get("unmatched_count")])
     control.append(["Итого количество ДТ", _excel_number(matching.get("dt_quantity_total"))])
     control.append(["Итого количество расшифровки", _excel_number(matching.get("output_quantity_total"))])
     control.append(["Количество сохранено", "Да" if matching.get("quantity_conserved") else "Нет"])
+    control.append(["Version matching policy", matching.get("matching_policy_version")])
     for cell in control[1]:
         cell.font = Font(bold=True)
     control.column_dimensions["A"].width = 34

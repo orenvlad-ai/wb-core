@@ -767,6 +767,10 @@ def _assert_parser_smoke() -> None:
         {
             "normalized_parse": {
                 "document_type": "customs_declaration",
+                "total_goods_count": 1,
+                "customs_gross_weight_kg": 2.0,
+                "customs_net_weight_kg": 1.5,
+                "total_customs_payments_rub": 123.45,
                 "goods_items": [
                     {
                         "position_number": "1",
@@ -782,15 +786,32 @@ def _assert_parser_smoke() -> None:
         annex_rows,
     )
     enriched_item = annex_enriched.get("normalized_parse", {}).get("goods_items", [{}])[0]
+    projected_annex = annex_enriched.get("normalized_parse", {}).get("annex_items", [])
     if (
         enriched_item.get("source_name") != "Sanitized Alpha | Sanitized Beta"
         or enriched_item.get("quantity") != 15.0
         or enriched_item.get("unit") != "шт"
         or enriched_item.get("quantity_evidence") != "dt_box_31_annex_quantity_total"
         or enriched_item.get("identifiers", {}).get("annex_source_models") != ["A-1", "B-2"]
+        or len(projected_annex) != 2
+        or projected_annex[0].get("parent_position_number") != "1"
+        or projected_annex[0].get("annex_row_number") != "1"
+        or projected_annex[0].get("article") != "ART-1"
+        or projected_annex[0].get("source_model") != "A-1"
+        or projected_annex[0].get("quantity") != 10.0
+        or projected_annex[0].get("unit") != "ШТ"
+        or projected_annex[0].get("identifiers", {}).get("customs_code") != "7020008000"
+        or annex_enriched.get("normalized_parse", {}).get("annex_item_count") != 2
+        or annex_enriched.get("normalized_parse", {}).get("annex_quantity_total") != 15.0
+        or annex_enriched.get("normalized_parse", {}).get("annex_quantity_conserved") is not True
+        or annex_enriched.get("normalized_parse", {}).get("annex_items_parser_version") != "supplier_customs_annex_items_v1"
+        or annex_enriched.get("normalized_parse", {}).get("total_goods_count") != 1
+        or annex_enriched.get("normalized_parse", {}).get("customs_gross_weight_kg") != 2.0
+        or annex_enriched.get("normalized_parse", {}).get("customs_net_weight_kg") != 1.5
+        or annex_enriched.get("normalized_parse", {}).get("total_customs_payments_rub") != 123.45
         or annex_enriched.get("raw_parse", {}).get("customs_annex_row_count") != 2
     ):
-        raise AssertionError(f"customs box-31 annex evidence was not aggregated deterministically: {annex_enriched}")
+        raise AssertionError(f"customs box-31 annex evidence was not projected deterministically: {annex_enriched}")
 
     customs_with_old_ref = parse_financial_document_text(
         CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT,
