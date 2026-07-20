@@ -155,6 +155,13 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("wb_autoanswers_activation.py prepare-capacity", capacity_command)
         self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", migration_command)
         self.assertIn("wb_autoanswers_activation.py prepare-deploy", migration_command)
+        self.assertIn("ServerAliveInterval=30", capacity_command)
+        source = (ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"autoanswers-capacity"', source)
+        self.assertIn('"autoanswers-schema-preflight"', source)
+        self.assertGreaterEqual(source.count("allow_transport_reconciliation=False"), 2)
 
     def test_manual_activation_uses_get_only_canary_before_enabling_worker_timer(self) -> None:
         original = hosted.load_hosted_runtime_target(TARGET)

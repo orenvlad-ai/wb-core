@@ -3,16 +3,19 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+from io import StringIO
 import os
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
 
-from apps.wb_autoanswers_activation import _compress_verified_backup, run
+from apps.wb_autoanswers_activation import _capacity_heartbeat, _compress_verified_backup, run
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
 
@@ -33,6 +36,13 @@ class ActivationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_capacity_heartbeat_keeps_long_remote_verification_observable(self) -> None:
+        output = StringIO()
+        with patch("apps.wb_autoanswers_activation.CAPACITY_HEARTBEAT_SECONDS", 0.01):
+            with redirect_stderr(output), _capacity_heartbeat():
+                time.sleep(0.03)
+        self.assertIn("backup capacity verification in progress", output.getvalue())
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
     def test_prepare_deploy_migrates_with_verified_backup_while_force_off(self, _dependency: object) -> None:

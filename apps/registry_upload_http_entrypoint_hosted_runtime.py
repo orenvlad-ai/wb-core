@@ -921,12 +921,21 @@ def deploy_current_checkout(
     if dry_run:
         return summary
 
-    def run_stage(stage: str, command: list[str]) -> None:
+    def run_stage(
+        stage: str,
+        command: list[str],
+        *,
+        allow_transport_reconciliation: bool = True,
+    ) -> None:
         try:
             _run_command(command)
         except subprocess.CalledProcessError as exc:
             if exc.returncode != 255:
                 raise
+            if not allow_transport_reconciliation:
+                raise RuntimeError(
+                    f"transport-indeterminate during {stage}; mutation preflight must be rerun idempotently"
+                ) from exc
             release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
             release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
             release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
@@ -967,8 +976,16 @@ def deploy_current_checkout(
     run_stage("dependencies", seller_recovery_playwright_browser_command)
     run_stage("dependencies", autoanswers_os_dependencies_command)
     run_stage("dependencies", autoanswers_node_dependencies_command)
-    run_stage("readback", autoanswers_prepare_capacity_command)
-    run_stage("readback", autoanswers_prepare_deploy_command)
+    run_stage(
+        "autoanswers-capacity",
+        autoanswers_prepare_capacity_command,
+        allow_transport_reconciliation=False,
+    )
+    run_stage(
+        "autoanswers-schema-preflight",
+        autoanswers_prepare_deploy_command,
+        allow_transport_reconciliation=False,
+    )
     if systemd_commands["install"]:
         run_stage("systemd-install", systemd_commands["install"])
         run_stage("daemon-reload", systemd_commands["daemon_reload"])
@@ -4355,7 +4372,15 @@ def _probe_system_ca_context() -> ssl.SSLContext | None:
 
 
 def _ssh_command() -> list[str]:
-    command = ["ssh", "-o", "BatchMode=yes"]
+    command = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=20",
+    ]
     identity = os.environ.get(SSH_IDENTITY_FILE_ENV, "").strip()
     if identity:
         command.extend(["-i", identity])
