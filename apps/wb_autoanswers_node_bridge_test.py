@@ -10,6 +10,7 @@ import unittest
 
 from packages.application.wb_autoanswers_node_bridge import (
     NodeAutoanswersBridge,
+    NodeBoundaryError,
     build_frozen_raw_input,
 )
 from packages.contracts.wb_autoanswers import EVALUATION_SIGNATURE, PROMPT_BUNDLE_VERSION
@@ -122,6 +123,22 @@ class NodeBridgeTest(unittest.TestCase):
         )
         self.assertFalse(unsafe["passed"])
         self.assertTrue(unsafe["errors"])
+
+    def test_partial_provider_usage_crosses_failed_node_boundary(self) -> None:
+        runner = Path(__file__).resolve().parent / "fixtures" / "wb_autoanswers_node_partial_error.mjs"
+        bridge = NodeAutoanswersBridge(runner_path=runner, env=os.environ)
+        with self.assertRaises(NodeBoundaryError) as raised:
+            bridge.run(
+                processing_key="partial|1|1.4.2",
+                raw_input={"review_id": "partial", "review_version": "1"},
+            )
+        self.assertEqual(raised.exception.code, "OPENAI_OUTPUT_NOT_JSON")
+        self.assertEqual(raised.exception.partial_cost_usd, 0.03125)
+        self.assertEqual(raised.exception.partial_role_calls, 1)
+        self.assertEqual(
+            raised.exception.partial_usage["classifier"]["input_tokens"],
+            100,
+        )
 
 
 if __name__ == "__main__":

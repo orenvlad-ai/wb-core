@@ -147,10 +147,14 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 answer_box = page.locator(".autoanswers-answer-box")
                 before_text = answer_box.inner_text()
                 box_metrics = answer_box.evaluate(
-                    "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY})"
+                    "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})"
                 )
                 self.assertLessEqual(box_metrics["height"], 90)
                 self.assertIn(box_metrics["overflowY"], {"auto", "scroll"})
+                self.assertNotEqual(box_metrics["background"], "rgb(248, 250, 252)")
+                self.assertNotEqual(box_metrics["color"], "rgb(0, 0, 0)")
+                self.assertEqual(page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count(), 18)
+                self.assertEqual(page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count(), 2)
                 page.locator("[data-autoanswers-copy]").click()
                 page.get_by_role("button", name="Скопировано").wait_for()
                 self.assertEqual(answer_box.inner_text().replace("Скопировано", "Копировать"), before_text)

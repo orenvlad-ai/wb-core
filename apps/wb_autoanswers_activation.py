@@ -387,7 +387,7 @@ def _prune_superseded_compressed_backups(
     current_backup: dict[str, Any],
     required_free: int,
 ) -> dict[str, Any]:
-    """Remove the minimum older owned archives after current v3 restore proof."""
+    """Remove the minimum older owned archives after current-schema restore proof."""
 
     snapshot_sha256 = str(current_backup.get("snapshot_sha256") or "")
     current_filename = str(current_backup.get("latest_filename") or "")
@@ -930,8 +930,10 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             if settings.mode == MODE_MANUAL and settings.effective_enabled:
                 return {"status": "already_active", "action": action, "runtime": status_before}
             raise RuntimeError("manual activation requires persisted master-switch OFF")
-        if _sum_counts(status_before["ai_jobs"]) or _sum_counts(status_before["publication_jobs"]):
-            raise RuntimeError("manual activation requires an empty AI/publication queue")
+        if int(status_before.get("ai_jobs", {}).get("processing") or 0):
+            raise RuntimeError("manual activation requires no actively processing AI lease")
+        if int(status_before.get("publication_jobs", {}).get("publishing") or 0):
+            raise RuntimeError("manual activation requires no actively publishing WB write")
         _dependency_status(verify_boundary=True)
         repository.update_settings(master_enabled=True, mode=MODE_MANUAL, actor_id="release-train")
         status_after = repository.operational_status()
@@ -944,6 +946,10 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             raise RuntimeError("manual activation changed AI jobs")
         if status_after["publication_jobs"] != status_before["publication_jobs"]:
             raise RuntimeError("manual activation changed publication jobs")
+        if int(status_after.get("claimable_ai_jobs") or 0):
+            raise RuntimeError("manual activation left a claimable background AI job")
+        if int(status_after.get("claimable_publication_writes") or 0):
+            raise RuntimeError("manual activation left a claimable WB write")
         return {"status": "activated", "action": action, "runtime": status_after}
 
     if action == "deactivate":

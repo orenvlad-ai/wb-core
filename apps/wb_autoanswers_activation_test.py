@@ -29,7 +29,7 @@ from apps.wb_autoanswers_activation import (
     run,
 )
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+from packages.application.wb_autoanswers_runtime import AutoanswersRepository, SCHEMA_VERSION
 
 
 GOOD_DEPENDENCIES = {
@@ -66,7 +66,10 @@ class ActivationTest(unittest.TestCase):
             result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["schema_backup"]["integrity_check"], "ok")
-        self.assertIn(3, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
+        self.assertIn(
+            SCHEMA_VERSION,
+            {int(row["version"]) for row in result["runtime"]["schema_migrations"]},
+        )
         with sqlite3.connect(db_path) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
 
@@ -106,7 +109,7 @@ class ActivationTest(unittest.TestCase):
         self.assertFalse(deactivated["runtime"]["settings"]["master_enabled"])
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
-    def test_force_off_and_existing_work_fail_closed(self, _dependency: object) -> None:
+    def test_force_off_fails_closed_and_manual_preserves_existing_work(self, _dependency: object) -> None:
         repo = AutoanswersRepository(runtime_dir=self.runtime_dir, now_factory=MutableClock(), env={})
         with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "true"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "FORCE_OFF=false"):
@@ -117,8 +120,12 @@ class ActivationTest(unittest.TestCase):
         repo.enqueue_processing(outcome["feedback_id"], trigger_source="automatic", actor_id="sync")
         repo.update_settings(master_enabled=False, actor_id="admin")
         with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "false"}, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "empty AI/publication queue"):
-                run(action="activate-manual", runtime_dir=self.runtime_dir)
+            activated = run(action="activate-manual", runtime_dir=self.runtime_dir)
+        self.assertEqual(activated["status"], "activated")
+        self.assertEqual(activated["runtime"]["settings"]["mode"], "manual")
+        self.assertEqual(activated["runtime"]["ai_jobs"]["queued"], 1)
+        self.assertEqual(activated["runtime"]["claimable_ai_jobs"], 0)
+        self.assertEqual(activated["runtime"]["claimable_publication_writes"], 0)
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for backup compaction acceptance")
     def test_schema_v1_backup_is_removed_only_after_verified_byte_exact_compression(self) -> None:
@@ -145,7 +152,7 @@ class ActivationTest(unittest.TestCase):
         self.assertTrue(result["raw_source_removed_after_verification"])
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for backup replacement acceptance")
-    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_schema_v3(self) -> None:
+    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_current_schema(self) -> None:
         database = self.runtime_dir / "registry_upload_runtime.sqlite3"
         with sqlite3.connect(database) as conn:
             conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
@@ -172,8 +179,10 @@ class ActivationTest(unittest.TestCase):
         with sqlite3.connect(database) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "current")
 
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
-        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__redundant.sqlite3"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        redundant = backup_dir / (
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__redundant.sqlite3"
+        )
         shutil.copy2(database, redundant)
         sidecar = redundant.with_name(redundant.name + "-journal")
         sidecar.write_bytes(b"orphan")
@@ -189,9 +198,11 @@ class ActivationTest(unittest.TestCase):
         with sqlite3.connect(database) as conn:
             conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
             conn.execute("INSERT INTO live_marker VALUES('live')")
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backup_dir.mkdir(parents=True)
-        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__interrupted.sqlite3"
+        raw = backup_dir / (
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__interrupted.sqlite3"
+        )
         shutil.copy2(database, raw)
         raw.with_name(raw.name + "-shm").write_bytes(b"sidecar")
 
@@ -214,9 +225,11 @@ class ActivationTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
     def test_current_schema_raw_backup_survives_failed_canonical_readback(self) -> None:
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backup_dir.mkdir(parents=True)
-        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__recoverable.sqlite3"
+        raw = backup_dir / (
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__recoverable.sqlite3"
+        )
         with sqlite3.connect(raw) as conn:
             conn.execute("CREATE TABLE backup_marker(value TEXT NOT NULL)")
             conn.execute("INSERT INTO backup_marker VALUES('recoverable')")
@@ -245,9 +258,11 @@ class ActivationTest(unittest.TestCase):
             conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
             conn.execute("INSERT INTO live_marker VALUES('live')")
 
-        current_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        current_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         current_dir.mkdir(parents=True)
-        current_raw = current_dir / "registry_upload_runtime__pre_autoanswers_v3__current.sqlite3"
+        current_raw = current_dir / (
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
+        )
         shutil.copy2(database, current_raw)
         _compress_verified_current_schema_backup(current_raw)
 

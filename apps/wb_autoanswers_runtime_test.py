@@ -110,7 +110,7 @@ class RuntimeTest(unittest.TestCase):
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
-            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v3").glob("*.sqlite3"))
+            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v4").glob("*.sqlite3"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
@@ -120,7 +120,7 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v3").glob("*.sqlite3"))),
+                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v4").glob("*.sqlite3"))),
                 1,
             )
             evidence = AutoanswersRepository(
@@ -145,7 +145,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3);
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4);
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -249,12 +249,15 @@ class RuntimeTest(unittest.TestCase):
             self.repo.enqueue_processing(
                 "off-review", trigger_source="automatic", actor_id="sync"
             )
-        preview = self.repo.preview_backlog(actor_id="test-admin")
-        self.assertEqual(preview["count"], 1)
-        self.assertEqual(
-            self.repo.enqueue_backlog_from_preview(preview["preview_id"], actor_id="test-admin")["enqueued"],
-            1,
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "capped mode-transition"):
+            self.repo.preview_backlog(actor_id="test-admin")
+        preview = self.repo.preview_mode_transition(
+            "auto_safe", actor_id="test-admin", run_max_paid_reviews=1
         )
+        applied = self.repo.apply_mode_transition(
+            "auto_safe", actor_id="test-admin", preview_id=preview["preview_id"]
+        )
+        self.assertIsNotNone(applied["sweep"])
 
     def test_reenable_does_not_resume_old_epoch_queue_automatically(self) -> None:
         self.enable()
@@ -267,7 +270,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
         self.assertEqual(
             self.repo.get_feedback("queued-before-off")["ai_jobs"][0]["state"],
-            "needs_review",
+            "queued",
         )
 
     def test_backfill_never_auto_enqueues(self) -> None:
@@ -405,7 +408,7 @@ class RuntimeTest(unittest.TestCase):
     def test_manual_mode_disables_backlog_preview(self) -> None:
         self.enable("manual")
         self.repo.upsert_feedback(feedback("history"), source_stream="archive", run_kind="backfill")
-        with self.assertRaisesRegex(AutoanswersRuntimeError, "manual"):
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "capped mode-transition"):
             self.repo.preview_backlog(actor_id="admin")
 
     def test_fallback_media_uncertainty_and_invalid_contract_need_review(self) -> None:
@@ -463,8 +466,12 @@ class RuntimeTest(unittest.TestCase):
     def test_budget_hard_cap_includes_reservations(self) -> None:
         self.repo.update_settings(
             master_enabled=True,
+            hourly_cap_usd="0.15",
             daily_cap_usd="1.40",
             monthly_cap_usd="5.00",
+            global_paid_review_concurrency=2,
+            max_inflight_role_calls=2,
+            warning_ratio="0.60",
             actor_id="admin",
         )
         for feedback_id in ("one", "two"):
@@ -472,8 +479,8 @@ class RuntimeTest(unittest.TestCase):
             self.repo.enqueue_processing(feedback_id, trigger_source="automatic", actor_id="sync")
         self.assertIsNotNone(self.repo.claim_processing_job(worker_id="w1"))
         self.assertTrue(self.repo.budget_status()["warning"])
-        with self.assertRaisesRegex(AutoanswersRuntimeError, "daily"):
-            self.repo.claim_processing_job(worker_id="w2")
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="w2"))
+        self.assertEqual(self.repo.progress_status()["stop_reason"], "hourly_budget_reached")
 
     def test_local_list_defaults_to_50_and_supports_server_pagination_filters(self) -> None:
         for index in range(55):
@@ -515,7 +522,7 @@ class RuntimeTest(unittest.TestCase):
         )
 
         before = self.repo.settings().policy_epoch
-        preview = self.repo.preview_mode_transition("auto_safe", actor_id="admin")
+        preview = self.repo.preview_mode_transition("auto_safe", actor_id="admin", run_max_usd="0.50")
         self.assertEqual(preview["counts"]["unanswered_total"], 3)
         self.assertEqual(preview["counts"]["current_ready"], 1)
         self.assertEqual(preview["counts"]["needs_generation"], 1)
@@ -546,13 +553,13 @@ class RuntimeTest(unittest.TestCase):
     def test_mode_transition_preview_is_snapshot_bound_and_idempotent(self) -> None:
         self.enable("manual")
         self.insert_new("scope")
-        preview = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        preview = self.repo.preview_mode_transition("draft_only", actor_id="admin", run_max_usd="0.50")
         self.insert_new("scope-changed")
         with self.assertRaisesRegex(AutoanswersRuntimeError, "scope changed"):
             self.repo.apply_mode_transition(
                 "draft_only", actor_id="admin", preview_id=preview["preview_id"]
             )
-        fresh = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        fresh = self.repo.preview_mode_transition("draft_only", actor_id="admin", run_max_usd="0.50")
         first = self.repo.apply_mode_transition(
             "draft_only", actor_id="admin", preview_id=fresh["preview_id"]
         )
@@ -561,13 +568,13 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertEqual(first["sweep"]["sweep_id"], second["sweep"]["sweep_id"])
 
-        same_mode_preview = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        same_mode_preview = self.repo.preview_mode_transition("draft_only", actor_id="admin", run_max_usd="0.50")
         policy_before = self.repo.settings().policy_epoch
         same_mode = self.repo.apply_mode_transition(
             "draft_only", actor_id="admin", preview_id=same_mode_preview["preview_id"]
         )
-        self.assertEqual(same_mode["settings"].policy_epoch, policy_before)
-        self.assertEqual(same_mode["sweep"]["sweep_id"], first["sweep"]["sweep_id"])
+        self.assertEqual(same_mode["settings"].policy_epoch, policy_before + 1)
+        self.assertNotEqual(same_mode["sweep"]["sweep_id"], first["sweep"]["sweep_id"])
 
     def test_all_five_state_transitions_and_force_off_are_fail_closed(self) -> None:
         states = ("off", "manual", "draft_only", "auto_safe", "auto_all")
@@ -576,7 +583,7 @@ class RuntimeTest(unittest.TestCase):
             if target in {"off", "manual"}:
                 repo.apply_mode_transition(target, actor_id=actor)
                 return
-            preview = repo.preview_mode_transition(target, actor_id=actor)
+            preview = repo.preview_mode_transition(target, actor_id=actor, run_max_usd="0.50")
             repo.apply_mode_transition(target, actor_id=actor, preview_id=preview["preview_id"])
 
         for source in states:
@@ -596,7 +603,7 @@ class RuntimeTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             env = {}
             repo = AutoanswersRepository(runtime_dir=Path(directory), now_factory=self.clock, env=env)
-            preview = repo.preview_mode_transition("auto_safe", actor_id="admin")
+            preview = repo.preview_mode_transition("auto_safe", actor_id="admin", run_max_usd="0.50")
             env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
             with self.assertRaisesRegex(AutoanswersRuntimeError, "forced OFF"):
                 repo.apply_mode_transition(
@@ -605,7 +612,7 @@ class RuntimeTest(unittest.TestCase):
 
     def test_transition_preview_is_actor_bound(self) -> None:
         self.enable("manual")
-        preview = self.repo.preview_mode_transition("auto_safe", actor_id="first-admin")
+        preview = self.repo.preview_mode_transition("auto_safe", actor_id="first-admin", run_max_usd="0.50")
         with self.assertRaisesRegex(AutoanswersRuntimeError, "another actor"):
             self.repo.apply_mode_transition(
                 "auto_safe", actor_id="second-admin", preview_id=preview["preview_id"]

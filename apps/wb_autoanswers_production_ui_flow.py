@@ -181,19 +181,13 @@ def run_autoanswers_ui_flow(
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
         _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
         runtime_before = dict(settings.get("runtime") or {})
-        ai_states_before = dict(runtime_before.get("ai_jobs") or {})
-        publication_states_before = dict(runtime_before.get("publication_jobs") or {})
         _assert(
-            sum(int(ai_states_before.get(state) or 0) for state in ("queued", "processing", "retryable_error")) == 0,
+            int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
             "manual production acceptance requires zero claimable AI jobs",
         )
         _assert(
-            sum(
-                int(publication_states_before.get(state) or 0)
-                for state in ("approved", "publishing", "publish_pending_readback", "retryable_error")
-            )
-            == 0,
-            "manual production acceptance requires zero active publication attempts",
+            int(runtime_before.get("claimable_publication_writes") or 0) == 0,
+            "manual production acceptance requires zero claimable publication writes",
         )
         filter_names = (
             "unanswered",
@@ -204,12 +198,25 @@ def run_autoanswers_ui_flow(
             "date_from",
             "date_to",
             "flag",
+            "system_answer",
         )
         for filter_name in filter_names:
             _assert(
                 page.locator(f'[data-autoanswers-filter="{filter_name}"]').count() == 1,
                 f"feedback filter {filter_name} must be rendered exactly once",
             )
+        _assert(
+            page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count() == 18,
+            "queue dashboard metrics are incomplete",
+        )
+        _assert(
+            page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count() == 2,
+            "preparation/publication progress bars are missing",
+        )
+        _assert(
+            bool(page.locator("[data-autoanswers-stop-reason]").inner_text().strip()),
+            "queue stop reason must be visible",
+        )
 
         first = _json_get(
             context,
@@ -257,6 +264,11 @@ def run_autoanswers_ui_flow(
             all(not str((row.get("answer") or {}).get("text") or "").strip() for row in unanswered_rows),
             "unanswered filter returned a feedback with an existing answer",
         )
+        for system_filter in (
+            "created", "missing", "awaiting_generation", "processing", "needs_review",
+            "ready_publication", "publication_queue", "published", "error",
+        ):
+            filtered_feedbacks("system_" + system_filter, system_answer=system_filter)
         for media_filter in ("has_photo", "has_video"):
             media_rows = filtered_feedbacks(media_filter, **{media_filter: "true"})
             _assert(
@@ -410,10 +422,12 @@ def run_autoanswers_ui_flow(
             answer_box.wait_for(timeout=30_000)
             before_copy = answer_box.inner_text()
             dimensions = answer_box.evaluate(
-                "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY})"
+                "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})"
             )
             _assert(dimensions["height"] <= 90, "table answer expanded the row")
             _assert(dimensions["overflowY"] in {"auto", "scroll"}, "table answer does not scroll internally")
+            _assert(dimensions["background"] != "rgb(248, 250, 252)", "table answer retained the light background")
+            _assert(dimensions["color"] != "rgb(0, 0, 0)", "table answer contrast is invalid")
             page.locator("[data-autoanswers-copy]").click()
             page.get_by_role("button", name="Скопировано").wait_for(timeout=10_000)
             after_copy = answer_box.inner_text().replace("Скопировано", "Копировать")

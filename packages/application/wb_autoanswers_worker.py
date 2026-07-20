@@ -11,6 +11,7 @@ from packages.application.wb_autoanswers_node_bridge import (
     build_frozen_raw_input,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
+from packages.contracts.wb_autoanswers import PROCESSING_KIND_RATING_ONLY_TEMPLATE
 
 
 class AutoanswersProcessingWorker:
@@ -38,7 +39,20 @@ class AutoanswersProcessingWorker:
             return None
         key = str(claimed["processing_key"])
         try:
-            self.repository.assert_effective_on(operation="media processing")
+            # Recheck the exact enable/policy epoch for every processing kind,
+            # including the zero-cost deterministic path.  A claim made before
+            # an OFF/downgrade transition must not complete under stale policy.
+            self.repository.assert_processing_execution_allowed(key)
+            if str(claimed.get("processing_kind") or "") == PROCESSING_KIND_RATING_ONLY_TEMPLATE:
+                stored = self.repository.complete_rating_only_template(key, worker_id=self.worker_id)
+                return {
+                    "processing_key": key,
+                    "state": stored["state"],
+                    "route": stored["final_route"],
+                    "cost_usd": 0.0,
+                    "model_calls": 0,
+                    "processing_kind": PROCESSING_KIND_RATING_ONLY_TEMPLATE,
+                }
             media = self.media_processor.process(
                 feedback_id=str(claimed["feedback_id"]),
                 content_version=int(claimed["content_version"]),
@@ -55,11 +69,12 @@ class AutoanswersProcessingWorker:
                     "regeneration_required": True,
                     "model_calls": 0,
                 }
-            self.repository.assert_effective_on(operation="frozen AI invocation")
+            self.repository.assert_processing_execution_allowed(key)
             detail = self.repository.get_feedback(str(claimed["feedback_id"]))
             if detail is None:
                 raise AutoanswersRuntimeError("feedback not found", code="feedback_not_found")
             raw_input = build_frozen_raw_input(detail, processing_key=key)
+            self.repository.mark_provider_call_started(key, worker_id=self.worker_id)
             node = self.bridge.run(
                 processing_key=key,
                 raw_input=raw_input,
@@ -101,6 +116,15 @@ class AutoanswersProcessingWorker:
                 "model_calls": int(pipeline.get("model_calls_this_run") or 0),
             }
         except NodeBoundaryError as exc:
+            if exc.partial_cost_usd > 0:
+                self.repository.record_failed_processing_usage(
+                    key,
+                    actual_cost_usd=exc.partial_cost_usd,
+                    usage=exc.partial_usage,
+                    role_calls=exc.partial_role_calls,
+                    error_code=exc.code,
+                    worker_id=self.worker_id,
+                )
             if exc.retryable:
                 self.repository.record_processing_retry(
                     key,
@@ -112,7 +136,13 @@ class AutoanswersProcessingWorker:
                 self.repository.record_processing_terminal(key, error_code=exc.code, worker_id=self.worker_id)
             raise
         except AutoanswersRuntimeError as exc:
-            if exc.code in {"master_switch_off", "emergency_force_off"}:
+            if exc.code in {
+                "master_switch_off",
+                "emergency_force_off",
+                "enable_epoch_stale",
+                "policy_epoch_stale",
+                "manual_pause",
+            }:
                 self.repository.record_processing_retry(
                     key,
                     error_code=exc.code,
