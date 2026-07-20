@@ -12677,8 +12677,8 @@
         (row.cons ? '<p class="autoanswers-optional-line"><strong>Минусы:</strong> ' + escapeHtml(row.cons) + '</p>' : '') +
         ((row.tags || []).length ? '<p class="autoanswers-optional-line"><strong>Теги:</strong> ' + escapeHtml(row.tags.join(", ")) + '</p>' : '');
       const mediaItems = media.filter(function(item) { return item.kind !== "video_frame"; }).map(function(item) {
-        if (item.kind === "photo" && item.primary_available) return '<img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "primary")) + '" alt="Фото покупателя" loading="lazy">';
-        if (item.kind === "video" && item.preview_available) return '<figure><img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "preview")) + '" alt="Превью видео покупателя" loading="lazy"><figcaption>Видео · до 4 кадров подготовлено</figcaption></figure>';
+        if (item.kind === "photo" && item.primary_available) return '<img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "primary")) + '" alt="Фото покупателя">';
+        if (item.kind === "video" && item.preview_available) return '<figure><img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "preview")) + '" alt="Превью видео покупателя"><figcaption>Видео · до 4 кадров подготовлено</figcaption></figure>';
         return '<span class="autoanswers-answer-empty">' + escapeHtml(item.kind === "video" ? "Видео недоступно" : "Фото недоступно") + '</span>';
       }).join("");
       const mainStatus = answerText ? "В Wildberries уже есть ответ" : (regenerationRequired ? "Нужно перегенерировать с учётом медиа" : friendlyAutoanswersStatus(row.processing_status || "synced"));

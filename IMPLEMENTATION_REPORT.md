@@ -98,7 +98,7 @@ git diff --check                               -> PASS
 
 Coverage includes compact/conditional detail layout, closed technical disclosure, textarea auto-grow, fixed scroll/copy cell, copy immutability, desktop/narrow rendering, real-format WebP and HLS fetches, redirect/DNS/host/MIME/size/time guards, expired URL refresh, preview/frame extraction, mock classifier media inputs after cache breakpoint, TTL cleanup, regeneration invalidation, all 25 mode pairs, preview counts, actor/snapshot binding, policy epochs, restart/lease recovery, budgets, duplicate suppression, external answers, OFF/force-off and stale-write blocking.
 
-The browser test uses a local authenticated HTTP server and Chromium. Media tests use local fake transports and ffmpeg; frozen role execution uses spies. No live model or WB write capability is present in these tests.
+The browser test uses a local authenticated HTTP server and Chromium, including decoded private photo/preview evidence after opening the detail card. Media tests use local fake transports and ffmpeg; frozen role execution uses spies. No live model or WB write capability is present in these tests.
 
 ## Production acceptance contract
 

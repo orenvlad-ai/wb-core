@@ -166,7 +166,14 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 for omitted in ("Плюсы:", "Минусы:", "Теги:", "Route:", "JSON contract", "Audit trail"):
                     self.assertNotIn(omitted, visible)
                 self.assertEqual(dialog.locator(".autoanswers-media-item").count(), 2)
-                dialog.locator(".autoanswers-media-item").first.wait_for(state="visible")
+                media_items = dialog.locator(".autoanswers-media-item")
+                media_items.first.wait_for(state="visible")
+                page.wait_for_function(
+                    "node => node.complete && node.naturalWidth > 0",
+                    arg=media_items.first.element_handle(),
+                )
+                self.assertGreater(media_items.first.evaluate("node => node.naturalWidth"), 0)
+                self.assertEqual(media_items.first.get_attribute("loading"), None)
 
                 editor = dialog.locator("[data-autoanswers-manual-reply]")
                 initial = editor.evaluate("node => ({client: node.clientHeight, scroll: node.scrollHeight})")
