@@ -33,9 +33,8 @@ WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
-FINANCE_RETRO_READ_TIMEOUT_SECONDS = 900.0
-FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS = 1800.0
-FINANCE_RETRO_FIRST_WEEK_START = "2026-04-27"
+FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
+FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -2273,20 +2272,18 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_finance_retro_command(args: argparse.Namespace) -> int:
+def run_finance_canonical_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
-    action = str(args.finance_retro_action)
+    action = str(args.finance_canonical_action)
     plan_path = (
         Path(str(args.plan_file)).resolve() if action == "apply" else None
     )
     if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
-        raise ValueError("Finance retro reviewed plan must stay outside the Git checkout")
-    payload = _run_remote_finance_retro_action(
+        raise ValueError("Finance canonical reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_finance_canonical_action(
         target,
         action=action,
-        date_from=str(args.date_from),
-        date_to=str(args.date_to or ""),
         plan_path=plan_path,
         fingerprint=str(getattr(args, "fingerprint", "") or ""),
         approval_reference=str(getattr(args, "approval_reference", "") or ""),
@@ -2295,7 +2292,7 @@ def run_finance_retro_command(args: argparse.Namespace) -> int:
     if action == "dry-run" and output:
         output_path = Path(output).resolve()
         if output_path == ROOT or ROOT in output_path.parents:
-            raise ValueError("Finance retro evidence output must stay outside the Git checkout")
+            raise ValueError("Finance canonical evidence output must stay outside the Git checkout")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -2314,69 +2311,54 @@ def run_finance_retro_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_remote_finance_retro_action(
+def _run_remote_finance_canonical_action(
     target: HostedRuntimeTarget,
     *,
     action: str,
-    date_from: str,
-    date_to: str,
     plan_path: Path | None,
     fingerprint: str,
     approval_reference: str,
 ) -> dict[str, Any]:
-    _ensure_active_hosted_runtime_target(target, action=f"finance-retro-{action}")
+    _ensure_active_hosted_runtime_target(target, action=f"finance-canonical-{action}")
     if action == "apply":
-        _ensure_target_allows_mutation(target, action="finance-retro-apply", dry_run=False)
+        _ensure_target_allows_mutation(target, action="finance-canonical-apply", dry_run=False)
     if action not in {"dry-run", "apply", "readback"}:
-        raise ValueError(f"unsupported Finance retro action: {action}")
+        raise ValueError(f"unsupported Finance canonical action: {action}")
     runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
     if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("Finance retro runner requires the canonical active runtime dir")
+        raise ValueError("Finance canonical runner requires the canonical active runtime dir")
     if not target.environment_file:
-        raise ValueError("Finance retro runner requires the hosted environment file")
-    try:
-        date.fromisoformat(date_from)
-        if date_to:
-            date.fromisoformat(date_to)
-    except ValueError as exc:
-        raise ValueError("Finance retro scope dates must be ISO dates") from exc
-    if date_from != FINANCE_RETRO_FIRST_WEEK_START:
-        raise ValueError(
-            "Finance retro production scope must start at the first affected week "
-            f"{FINANCE_RETRO_FIRST_WEEK_START}"
-        )
+        raise ValueError("Finance canonical runner requires the hosted environment file")
     runner_args = [
         "python3",
         "apps/wb_finance_weekly.py",
-        "business-approved-backfill",
+        "canonical-cost-backfill",
         "--runtime-dir",
         runtime_dir,
         "--env-file",
         target.environment_file,
-        "--date-from",
-        date_from,
     ]
-    if date_to:
-        runner_args.extend(["--date-to", date_to])
     if action == "apply":
         if plan_path is None or not plan_path.is_file():
-            raise ValueError("Finance retro apply requires an existing --plan-file")
+            raise ValueError("Finance canonical apply requires an existing --plan-file")
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
-            raise ValueError("Finance retro plan and --fingerprint do not match")
-        if str(plan.get("date_from") or "") != date_from or (
-            date_to and str(plan.get("date_to") or "") != date_to
+            raise ValueError("Finance canonical plan and --fingerprint do not match")
+        if (
+            str(plan.get("schema_version") or "") != "wb_finance_canonical_cost_backfill_v2"
+            or plan.get("dry_run") is not True
+            or not bool(plan.get("apply_allowed"))
         ):
-            raise ValueError("Finance retro reviewed plan scope does not match command scope")
+            raise ValueError("Finance canonical reviewed plan is not ready for apply")
         if not approval_reference.strip():
-            raise ValueError("Finance retro apply requires --approval-reference")
+            raise ValueError("Finance canonical apply requires --approval-reference")
         runner_args.extend(
             [
                 "--apply",
                 "--confirm-fingerprint",
                 fingerprint,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/wb-finance-retro",
+                "/opt/wb-core-runtime/backups/wb-finance-canonical",
                 "--approval-reference",
                 approval_reference.strip(),
             ]
@@ -2393,26 +2375,39 @@ def _run_remote_finance_retro_action(
         capture_output=True,
         cwd=ROOT,
         timeout=(
-            FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS
+            FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS
             if action == "apply"
-            else FINANCE_RETRO_READ_TIMEOUT_SECONDS
+            else FINANCE_CANONICAL_READ_TIMEOUT_SECONDS
         ),
         check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"Finance retro {action} failed: "
+            f"Finance canonical {action} failed: "
             + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
         )
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Finance retro runner returned invalid JSON") from exc
+        raise RuntimeError("Finance canonical runner returned invalid JSON") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("Finance retro runner returned a non-object JSON payload")
+        raise RuntimeError("Finance canonical runner returned a non-object JSON payload")
     if action == "readback":
-        if payload.get("blockers") or int(payload.get("target_week_count") or 0) != 0:
-            raise RuntimeError("Finance retro readback did not reconcile to zero pending targets")
+        nonzero_deltas = [
+            {
+                "week_start": week.get("week_start"),
+                "delta": week.get("delta"),
+            }
+            for week in payload.get("weeks") or []
+            if any(
+                value not in {None, "0.0000"}
+                for value in (week.get("delta") or {}).values()
+            )
+        ]
+        if payload.get("blockers") or nonzero_deltas:
+            raise RuntimeError(
+                "Finance canonical readback has blockers or non-zero derived deltas"
+            )
         return {**payload, "status": "ready", "readback": True}
     return payload
 
@@ -2973,41 +2968,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_lifecycle.add_argument("action", choices=("status", "activate-manual", "deactivate"))
     autoanswers_lifecycle.set_defaults(handler=run_autoanswers_lifecycle_command)
 
-    finance_retro_dry_run = subparsers.add_parser(
-        "finance-retro-dry-run",
-        help="Build the read-only Finance/ads/cost manifest and exact retro-cost backfill plan.",
+    finance_canonical_dry_run = subparsers.add_parser(
+        "finance-canonical-dry-run",
+        help="Build the read-only all-history Finance/ads/canonical-cost plan.",
     )
-    finance_retro_dry_run.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
-    finance_retro_dry_run.add_argument("--date-to", default="")
-    finance_retro_dry_run.add_argument("--output", default="")
-    finance_retro_dry_run.set_defaults(
-        handler=run_finance_retro_command,
-        finance_retro_action="dry-run",
+    finance_canonical_dry_run.add_argument("--output", default="")
+    finance_canonical_dry_run.set_defaults(
+        handler=run_finance_canonical_command,
+        finance_canonical_action="dry-run",
     )
 
-    finance_retro_apply = subparsers.add_parser(
-        "finance-retro-apply",
-        help="Apply one exact reviewed Finance retro-cost plan with backup and human gate.",
+    finance_canonical_apply = subparsers.add_parser(
+        "finance-canonical-apply",
+        help="Apply one exact reviewed all-history canonical Finance plan.",
     )
-    finance_retro_apply.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
-    finance_retro_apply.add_argument("--date-to", default="")
-    finance_retro_apply.add_argument("--plan-file", required=True)
-    finance_retro_apply.add_argument("--fingerprint", required=True)
-    finance_retro_apply.add_argument("--approval-reference", required=True)
-    finance_retro_apply.set_defaults(
-        handler=run_finance_retro_command,
-        finance_retro_action="apply",
+    finance_canonical_apply.add_argument("--plan-file", required=True)
+    finance_canonical_apply.add_argument("--fingerprint", required=True)
+    finance_canonical_apply.add_argument("--approval-reference", required=True)
+    finance_canonical_apply.set_defaults(
+        handler=run_finance_canonical_command,
+        finance_canonical_action="apply",
     )
 
-    finance_retro_readback = subparsers.add_parser(
-        "finance-retro-readback",
-        help="Prove zero pending Finance retro targets/blockers after apply.",
+    finance_canonical_readback = subparsers.add_parser(
+        "finance-canonical-readback",
+        help="Prove zero all-history Finance deltas/blockers after canonical apply.",
     )
-    finance_retro_readback.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
-    finance_retro_readback.add_argument("--date-to", default="")
-    finance_retro_readback.set_defaults(
-        handler=run_finance_retro_command,
-        finance_retro_action="readback",
+    finance_canonical_readback.set_defaults(
+        handler=run_finance_canonical_command,
+        finance_canonical_action="readback",
     )
 
     warehouse_dry_run = subparsers.add_parser(

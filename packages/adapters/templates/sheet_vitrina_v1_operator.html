@@ -903,7 +903,8 @@
     .wb-finance-trend-down { color: #4d9a78; }
     .wb-finance-trend-flat { color: #b48b2b; }
 
-    .partner-report-settings { display: grid; grid-template-columns: repeat(3,minmax(180px,1fr)); gap: 12px; margin-top: 14px; }
+    [data-report-section-panel="partner"] .block { min-width: 0; overflow: hidden; }
+    .partner-report-settings { display: grid; grid-template-columns: repeat(3,minmax(180px,1fr)); gap: 12px; margin-top: 14px; min-width: 0; }
     .partner-report-settings label { display: grid; gap: 6px; color: var(--muted-strong); font-size: 12px; font-weight: 700; }
     .partner-report-settings input,
     .partner-report-settings select { width: 100%; min-height: 38px; border: 1px solid var(--border); border-radius: 7px; background: var(--control-bg); color: var(--text); padding: 7px 9px; }
@@ -914,6 +915,7 @@
     .partner-report-week-list { display: grid; grid-template-columns: repeat(4,minmax(150px,1fr)); gap: 7px 12px; max-height: 210px; overflow: auto; }
     .partner-report-week-list label { display: flex; align-items: center; gap: 7px; font-size: 12px; }
     .partner-report-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .partner-report-blockers { margin-top: 12px; }
     .partner-report-table-wrap { margin-top: 14px; width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
     .partner-report-table { border-collapse: separate; border-spacing: 0; min-width: max(100%, 920px); font-size: 12px; }
     .partner-report-table th,
@@ -932,6 +934,14 @@
       .wb-finance-table td:first-child,
       .partner-report-table th:first-child,
       .partner-report-table td:first-child { min-width: 210px; max-width: 240px; }
+      .partner-report-actions .action-button { flex: 1 1 180px; min-width: 0; }
+    }
+
+    @media (max-width: 430px) {
+      .partner-report-week-list { grid-template-columns: 1fr; }
+      .partner-report-actions { display: grid; grid-template-columns: 1fr; }
+      .partner-report-actions .action-button { width: 100%; }
+      .partner-report-table-wrap { max-width: 100%; }
     }
 
     .stock-report-sort-button {
@@ -3958,7 +3968,7 @@
             <section class="block">
               <h2 class="block-title">Финотчёт ВБ</h2>
               <p id="wbFinanceReportPeriod" class="report-period">Еженедельные отчёты Wildberries с начала 2026 года.</p>
-              <p class="field-note">Официальный Finance API WB; legacy-метод до 01.05.2026, business-approved retro projection с 01.05 по 30.06 и canonical exact-date «Себестоимость WB наша, ₽/шт» с 01.07 — по дате каждой операции.</p>
+              <p class="field-note">Официальный Finance API WB и единая каноническая «Себестоимость WB наша»: для операций до 01.07.2026 — утверждённая ретроспективная проекция стоимости того же nmId на 01.07, начиная с 01.07 — exact-date стоимость по дате операции.</p>
               <p id="wbFinanceReportStatus" class="section-message">Читаем финансовые отчёты...</p>
               <div id="wbFinanceReportContent" hidden>
                 <div id="wbFinanceReportTableWrap" class="wb-finance-table-wrap"></div>
@@ -3972,7 +3982,7 @@
           <div class="grid">
             <section class="block">
               <h2 class="block-title">Отчёт о доходности карточки</h2>
-              <p class="field-note">Расчёт для одного nmId. Параметры и finalized-версии хранятся server-side; browser storage не используется.</p>
+              <p class="field-note">Расчёт для одного nmId. Параметры хранятся server-side; browser storage не используется. Excel экспортирует уже показанный preview.</p>
               <p id="partnerReportStatus" class="section-message">Загружаем карточки и недели...</p>
               <div id="partnerReportControls" hidden>
                 <div class="partner-report-settings">
@@ -4012,9 +4022,10 @@
                 <div class="partner-report-actions">
                   <button id="partnerReportSaveSettings" class="action-button secondary-button" type="button">Сохранить настройки</button>
                   <button id="partnerReportGenerate" class="action-button primary-button" type="button">Сформировать</button>
-                  <button id="partnerReportFinalize" class="action-button secondary-button" type="button" disabled>Сохранить finalized report</button>
-                  <button id="partnerReportDownload" class="action-button secondary-button" type="button" disabled>Скачать пакет для партнёра</button>
+                  <button id="partnerReportCancel" class="action-button secondary-button" type="button" hidden>Отменить</button>
+                  <button id="partnerReportDownload" class="action-button secondary-button" type="button" disabled>Скачать Excel</button>
                 </div>
+                <div id="partnerReportBlockers" class="partner-report-blockers"></div>
                 <div id="partnerReportTableWrap" class="partner-report-table-wrap" hidden></div>
                 <div id="partnerReportNotes" class="report-notes"></div>
               </div>
@@ -5258,8 +5269,9 @@
       const partnerReportWeeksLast4 = document.getElementById("partnerReportWeeksLast4");
       const partnerReportSaveSettings = document.getElementById("partnerReportSaveSettings");
       const partnerReportGenerate = document.getElementById("partnerReportGenerate");
-      const partnerReportFinalize = document.getElementById("partnerReportFinalize");
+      const partnerReportCancel = document.getElementById("partnerReportCancel");
       const partnerReportDownload = document.getElementById("partnerReportDownload");
+      const partnerReportBlockers = document.getElementById("partnerReportBlockers");
       const partnerReportTableWrap = document.getElementById("partnerReportTableWrap");
       const partnerReportNotes = document.getElementById("partnerReportNotes");
       const stockReportPeriod = document.getElementById("stockReportPeriod");
@@ -5546,7 +5558,7 @@
       let partnerReportLoaded = false;
       let partnerReportOptions = null;
       let partnerReportPreview = null;
-      let partnerReportFinalizedId = "";
+      let partnerReportAbortController = null;
       const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "fulfillment", "shipment-registry", "cny-account", "supplier"]);
       const DEFAULT_FF_SECTION = "services";
       const VALID_FF_SECTIONS = new Set(["services", "stocks", "operations"]);
@@ -6716,11 +6728,13 @@
       if (partnerReportGenerate) {
         partnerReportGenerate.addEventListener("click", generatePartnerReportPreview);
       }
-      if (partnerReportFinalize) {
-        partnerReportFinalize.addEventListener("click", finalizePartnerReport);
+      if (partnerReportCancel) {
+        partnerReportCancel.addEventListener("click", () => {
+          if (partnerReportAbortController) partnerReportAbortController.abort();
+        });
       }
       if (partnerReportDownload) {
-        partnerReportDownload.addEventListener("click", downloadPartnerReportPackage);
+        partnerReportDownload.addEventListener("click", downloadPartnerReportExcel);
       }
 
       if (fulfillmentTemplateButton) {
@@ -12824,9 +12838,8 @@
 
       function invalidatePartnerReportPreview() {
         partnerReportPreview = null;
-        partnerReportFinalizedId = "";
-        partnerReportFinalize.disabled = true;
         partnerReportDownload.disabled = true;
+        partnerReportBlockers.innerHTML = "";
         partnerReportTableWrap.hidden = true;
         partnerReportTableWrap.innerHTML = "";
       }
@@ -12900,7 +12913,7 @@
           if (weeks.length) selectPartnerWeeks("last4");
           applyPartnerSavedSettings();
           partnerReportStatus.textContent = cards.length && weeks.length
-            ? "Карточек: " + cards.length + "; недель: " + weeks.length + ". Finalized-период должен быть непрерывным."
+            ? "Карточек: " + cards.length + "; недель: " + weeks.length + ". Выберите одну или несколько недель для preview."
             : "Для отчёта пока недостаточно карточек или Finance-недель.";
           partnerReportStatus.className = cards.length && weeks.length ? "section-message success" : "section-message";
           scheduleEmbeddedHeightPost();
@@ -12927,15 +12940,47 @@
         return {nm_id:String(partnerReportNmId.value || ""), selected_weeks:partnerReportSelectedWeeks()};
       }
 
-      async function partnerReportJsonRequest(path, body) {
+      function formatPartnerBlocker(item) {
+        const labels = {
+          ads_date_missing:"Нет принятого рекламного snapshot",
+          ads_sku_coverage_missing:"Нет рекламы выбранного nmId в snapshot",
+          ads_value_invalid:"Некорректное значение рекламы",
+          finance_week_missing:"Finance-неделя не загружена",
+          finance_week_not_final:"Finance-неделя ещё не закрыта",
+          finance_sku_aggregate_missing:"Нет рассчитанной Finance-проекции SKU",
+          finance_sku_aggregate_formula_stale:"Finance-проекция SKU требует пересчёта",
+          finance_sku_aggregate_raw_stale:"Finance-проекция SKU не совпадает с raw source",
+          finance_sku_aggregate_cost_stale:"Каноническая себестоимость изменилась после расчёта",
+          partner_cost_coverage_incomplete:"Не хватает канонической себестоимости",
+          finance_identity_ambiguous:"Неоднозначная идентификация Finance-строк",
+          common_expense_zero_revenue_base:"Общие расходы нельзя распределить при нулевой общей выручке"
+        };
+        const details = [];
+        if (item.date) details.push(String(item.date));
+        if (item.week_start) details.push("неделя " + String(item.week_start));
+        if (item.nm_id) details.push("nmId " + String(item.nm_id));
+        const problems = Array.isArray(item.problem_skus) ? item.problem_skus : [];
+        if (problems.length) {
+          details.push(problems.map((problem) => {
+            const sku = problem.nm_id || problem.sku || "неизвестный SKU";
+            const day = problem.operation_date ? " · " + problem.operation_date : "";
+            const reason = problem.reason ? " · " + problem.reason : "";
+            return "nmId " + sku + day + reason;
+          }).join("; "));
+        }
+        return (labels[item.code] || item.code || "Неполные исходные данные") + (details.length ? ": " + details.join(" · ") : "");
+      }
+
+      async function partnerReportJsonRequest(path, body, signal) {
         const response = await fetch(path, {
           method:"POST",
           headers:{"Accept":"application/json", "Content-Type":"application/json"},
-          body:JSON.stringify(body)
+          body:JSON.stringify(body),
+          signal:signal
         });
         const payload = await readJson(response);
         if (!response.ok) {
-          const blockers = Array.isArray(payload.blockers) && payload.blockers.length ? " · " + payload.blockers.map((item) => item.code + (item.date ? " " + item.date : item.week_start ? " " + item.week_start : "")).join(", ") : "";
+          const blockers = Array.isArray(payload.blockers) && payload.blockers.length ? " · " + payload.blockers.map(formatPartnerBlocker).join("; ") : "";
           throw new Error(valueOrDash(payload.error) + blockers + " (HTTP " + response.status + ")");
         }
         return payload;
@@ -12962,83 +13007,70 @@
 
       function renderPartnerReport(report) {
         const rows = [
-          ["net_revenue","Чистая выручка","money"], ["cogs","Себестоимость продаж","money"], ["commission","Комиссия WB","money"],
-          ["logistics","Логистика WB","money"], ["ads","Реклама WB","money"], ["storage","Хранение WB","money"],
-          ["other_direct_expenses","Прочие прямые расходы WB","money"], ["allocated_common_expenses","Общие расходы WB, распределённые по выручке","money"],
-          ["positive_adjustments","Положительные корректировки","money"], ["card_margin","Маржа карточки","money"], ["office","Офис","money"],
-          ["estimated_tax","Расчётный налог","money"], ["replenishment_reserve","Резерв на пополнение товарных остатков","money"],
-          ["distributable_profit","Распределяемая прибыль","money"], ["partner_payout","Выплата партнёру","money"],
-          ["period_roi_pct","ROI выбранного периода","percent"], ["annualized_return_pct","Расчётная годовая доходность на вложенный капитал","percent"]
+          ["net_revenue","Чистая выручка","money"], ["cogs","Себестоимость","money"],
+          ["agent_remuneration","Агентское вознаграждение WB","money"], ["acquiring","Эквайринг","money"],
+          ["logistics","Логистика WB","money"], ["storage","Хранение WB","money"],
+          ["acceptance","Платная приёмка","money"], ["ads","Маркетинг WB","money"],
+          ["penalties_and_adjustments","Штрафы/корректировки","money"], ["other_attributable_expenses","Прочие атрибутируемые расходы","money"],
+          ["finance_margin","Маржа по финотчёту","money"], ["office","Офисные расходы","money"],
+          ["estimated_tax","Налог","money"], ["replenishment_reserve","На пополнение товарных остатков","money"],
+          ["net_profit","Чистая прибыль","money"], ["dividends","Дивиденды","money"],
+          ["annualized_return_pct","Расчётная годовая доходность инвестора, %","percent"]
         ];
         const head = "<thead><tr><th>Показатель</th>" + (report.weeks || []).map((week) => "<th>" + escapeHtml(week.label) + "</th>").join("") + "<th>Итого за период</th></tr></thead>";
         const body = rows.map((row) => {
           const key = row[0];
           const values = (report.weeks || []).map((week) => "<td>" + escapeHtml(formatFinanceMetric(week.values[key], row[2])) + "</td>").join("");
-          const className = key === "partner_payout" ? " class=\"partner-report-payout-row\"" : "";
-          return "<tr" + className + "><td>" + escapeHtml(row[1]) + "</td>" + values + "<td>" + escapeHtml(formatFinanceMetric(report.totals && report.totals[key], row[2])) + "</td></tr>";
+          const className = ["dividends","annualized_return_pct"].includes(key) ? " class=\"partner-report-payout-row\"" : "";
+          const tooltip = key === "annualized_return_pct" ? " title=\"" + escapeHtml(report.annualized_return_formula || "Средние недельные дивиденды × 52 / вложенный капитал × 100%. Расчётная, не гарантированная доходность.") + "\"" : "";
+          return "<tr" + className + "><td" + tooltip + ">" + escapeHtml(row[1]) + "</td>" + values + "<td>" + escapeHtml(formatFinanceMetric(report.totals && report.totals[key], row[2])) + "</td></tr>";
         }).join("");
         partnerReportTableWrap.innerHTML = "<table class=\"partner-report-table\">" + head + "<tbody>" + body + "</tbody></table>";
         partnerReportTableWrap.hidden = false;
         const blockers = Array.isArray(report.blockers) ? report.blockers : [];
+        partnerReportBlockers.innerHTML = blockers.length ? "<p class=\"section-message error\">Недостаточно данных: " + escapeHtml(blockers.map(formatPartnerBlocker).join("; ")) + ".</p>" : "";
         partnerReportNotes.innerHTML = "<p>Formula: " + escapeHtml(report.formula_version) + " · source digest: " + escapeHtml(report.source_digest) + ".</p>" +
-          "<p>Реклама — только accepted ads_compact выбранного nmId; отрицательные недели уменьшают выплату периода, а persisted loss переносится в следующий contiguous finalized period.</p>" +
-          (blockers.length ? "<p class=\"wb-finance-warning\">Finalization заблокирована: " + escapeHtml(blockers.map((item) => item.code + (item.date ? " " + item.date : item.week_start ? " " + item.week_start : "")).join(", ")) + ".</p>" : "");
-        partnerReportFinalize.disabled = report.status !== "ready";
+          "<p>Маркетинг — только accepted ads_compact выбранного nmId. Отсутствующие источники не заменяются нулями.</p>";
         partnerReportDownload.disabled = report.status !== "ready";
         scheduleEmbeddedHeightPost();
       }
 
       async function generatePartnerReportPreview() {
+        if (partnerReportAbortController) partnerReportAbortController.abort();
+        partnerReportAbortController = new AbortController();
+        const timeoutId = window.setTimeout(() => partnerReportAbortController && partnerReportAbortController.abort(), 30000);
         partnerReportGenerate.disabled = true;
+        partnerReportCancel.hidden = false;
         partnerReportStatus.textContent = "Формируем preview...";
+        partnerReportStatus.className = "section-message";
+        partnerReportBlockers.innerHTML = "";
         try {
-          const report = await partnerReportJsonRequest(config.partner_report_preview_path, partnerSelectionPayload());
+          const report = await partnerReportJsonRequest(config.partner_report_preview_path, partnerSelectionPayload(), partnerReportAbortController.signal);
           partnerReportPreview = report;
-          partnerReportFinalizedId = "";
           renderPartnerReport(report);
           partnerReportStatus.textContent = report.status === "ready" ? "Preview сформирован; источники покрыты полностью." : "Preview сформирован, но есть source blockers.";
           partnerReportStatus.className = report.status === "ready" ? "section-message success" : "section-message error";
         } catch (error) {
-          partnerReportStatus.textContent = "Не удалось сформировать preview: " + (error instanceof Error ? error.message : String(error));
+          const aborted = error && error.name === "AbortError";
+          partnerReportStatus.textContent = aborted ? "Формирование отчёта отменено или превысило 30 секунд. Повторите запрос." : "Не удалось сформировать preview: " + (error instanceof Error ? error.message : String(error));
           partnerReportStatus.className = "section-message error";
-          partnerReportFinalize.disabled = true;
           partnerReportDownload.disabled = true;
         } finally {
+          window.clearTimeout(timeoutId);
+          partnerReportAbortController = null;
+          partnerReportCancel.hidden = true;
           partnerReportGenerate.disabled = false;
         }
       }
 
-      async function finalizePartnerReport() {
-        if (!partnerReportPreview || partnerReportPreview.status !== "ready") return;
-        partnerReportFinalize.disabled = true;
-        partnerReportStatus.textContent = "Фиксируем immutable finalized report...";
-        try {
-          const report = await partnerReportJsonRequest(config.partner_report_finalize_path, partnerSelectionPayload());
-          partnerReportPreview = report;
-          partnerReportFinalizedId = String(report.report_id || "");
-          renderPartnerReport(report);
-          partnerReportFinalize.disabled = true;
-          partnerReportDownload.disabled = !partnerReportFinalizedId;
-          partnerReportStatus.textContent = "Finalized report сохранён: " + partnerReportFinalizedId + ".";
-          partnerReportStatus.className = "section-message success";
-        } catch (error) {
-          partnerReportStatus.textContent = "Не удалось сохранить finalized report: " + (error instanceof Error ? error.message : String(error));
-          partnerReportStatus.className = "section-message error";
-          partnerReportFinalize.disabled = false;
-        }
-      }
-
-      async function downloadPartnerReportPackage() {
+      async function downloadPartnerReportExcel() {
         if (!partnerReportPreview || partnerReportPreview.status !== "ready") return;
         partnerReportDownload.disabled = true;
-        partnerReportStatus.textContent = "Проверяем и собираем конфиденциальный ZIP...";
+        partnerReportStatus.textContent = "Формируем Excel из показанного preview...";
         try {
-          const isFinalized = Boolean(partnerReportFinalizedId);
-          const path = isFinalized
-            ? config.partner_report_finalized_path + "/" + encodeURIComponent(partnerReportFinalizedId) + "/package.zip"
-            : config.partner_report_preview_package_path;
-          const response = await fetch(path, isFinalized ? {method:"GET"} : {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(partnerSelectionPayload())
+          const payload = {...partnerSelectionPayload(), expected_source_digest:String(partnerReportPreview.source_digest || "")};
+          const response = await fetch(config.partner_report_preview_xlsx_path, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
           });
           if (!response.ok) {
             const payload = await readJson(response);
@@ -13047,7 +13079,7 @@
           const blob = await response.blob();
           const disposition = response.headers.get("Content-Disposition") || "";
           const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-          const filename = match ? decodeURIComponent(match[1]) : "Пакет_для_партнёра.zip";
+          const filename = match ? decodeURIComponent(match[1]) : "Партнёрский_отчёт.xlsx";
           const url = URL.createObjectURL(blob);
           const link = document.createElement("a");
           link.href = url;
@@ -13056,13 +13088,15 @@
           link.click();
           link.remove();
           URL.revokeObjectURL(url);
-          partnerReportStatus.textContent = "Пакет проверен и передан для скачивания.";
+          partnerReportStatus.textContent = "Excel сформирован из текущего preview.";
           partnerReportStatus.className = "section-message success";
         } catch (error) {
-          partnerReportStatus.textContent = "Пакет не выдан: " + (error instanceof Error ? error.message : String(error));
+          partnerReportPreview = null;
+          partnerReportDownload.disabled = true;
+          partnerReportStatus.textContent = "Excel не сформирован: " + (error instanceof Error ? error.message : String(error));
           partnerReportStatus.className = "section-message error";
         } finally {
-          partnerReportDownload.disabled = false;
+          partnerReportDownload.disabled = !partnerReportPreview || partnerReportPreview.status !== "ready";
         }
       }
 
@@ -13082,18 +13116,17 @@
           {key:"revenue_before_returns", label:"Выручка до возвратов", type:"money"},
           {key:"returns_amount", label:"Возвраты в денежном выражении", type:"money"}, {key:"net_revenue", label:"Чистая выручка", type:"money"},
           {group: "Удержания и расходы Wildberries"},
-          {key:"commission", label:"Агентское вознаграждение / комиссия WB", type:"money", expense:true},
-          {key:"acquiring", label:"Эквайринг · раскрытие внутри комиссии", type:"money", expense:true},
+          {key:"agent_remuneration", label:"Агентское вознаграждение WB", type:"money", expense:true},
+          {key:"acquiring", label:"Эквайринг", type:"money", expense:true},
           {key:"logistics", label:"Логистика", type:"money", expense:true}, {key:"storage", label:"Хранение", type:"money", expense:true},
-          {key:"acceptance", label:"Приёмка · включена в себестоимость с 01.05", type:"money", expense:true}, {key:"marketing", label:"Маркетинг и продвижение", type:"money", expense:true},
-          {key:"transit_logistics", label:"Транзитная логистика · включена в себестоимость с 01.05", type:"money", expense:true}, {key:"penalties", label:"Штрафы", type:"money", expense:true},
+          {key:"acceptance", label:"Платная приёмка", type:"money", expense:true}, {key:"marketing", label:"Маркетинг и продвижение", type:"money", expense:true},
+          {key:"transit_logistics", label:"Транзитная логистика", type:"money", expense:true}, {key:"penalties", label:"Штрафы", type:"money", expense:true},
           {key:"subscriptions", label:"Подписки", type:"money", expense:true}, {key:"paid_services", label:"Платные сервисы", type:"money", expense:true},
           {key:"other_deductions", label:"Прочие удержания", type:"money", expense:true},
+          {key:"wb_remuneration_adjustment", label:"Корректировка Вознаграждения WB · внутри агентского контроля", type:"money"},
           {key:"positive_adjustments", label:"Корректировки и дополнительные выплаты", type:"money"},
-          {key:"total_wb_expenses", label:"Все удержания/расходы WB", type:"money", expense:true},
-          {key:"profit_period_expenses", label:"Расходы периода, учитываемые в прибыли", type:"money", expense:true},
-          {key:"wb_expenses_pct", label:"Расходы WB, % от чистой выручки", type:"percent", relative:true},
-          {key:"wb_expenses_without_marketing_pct", label:"Расходы WB без маркетинга, % от чистой выручки", type:"percent", relative:true},
+          {key:"total_wb_expenses", label:"Расходы WB с маркетингом", type:"money", expense:true},
+          {key:"wb_expenses_without_marketing", label:"Расходы WB без маркетинга", type:"money", expense:true},
           {group: "Результат финансового отчёта WB"},
           {key:"to_seller", label:"К перечислению продавцу", type:"money"},
           {key:"before_cogs_profit", label:"Финансовый результат до себестоимости", type:"money"},
@@ -13142,8 +13175,8 @@
           "; строк: " + new Intl.NumberFormat("ru-RU").format(weeks.reduce((sum, week) => sum + Number(week.raw_row_count || 0), 0)) + ".";
         wbFinanceReportStatus.className = incompleteWeeks.length || sourceProblemWeeks.length ? "section-message error" : "section-message success";
         wbFinanceReportNotes.innerHTML =
-          "<p>Источник себестоимости выбирается построчно: legacy до 01.05.2026; business-approved retro projection 01.05–30.06; canonical exact-date «Себестоимость WB наша» с 01.07. Техническая provenance остаётся в API и tooltip.</p>" +
-          "<p>Эквайринг раскрывается внутри комиссии. Платная приёмка и транзит после 01.05 видимы как cash-control, но повторно из прибыли не вычитаются.</p>" +
+          "<p>Единый источник себестоимости выбирается построчно: стоимость того же nmId на 01.07 проецируется на более ранние операции; с 01.07 используется canonical exact-date cost. Legacy COST_PRICE и отдельный Finance retro-map в расчёте не участвуют.</p>" +
+          "<p>Агентское вознаграждение и эквайринг показаны отдельно и учитываются по одному разу. Приёмка/транзит исключаются из расходов периода только при exact Finance↔supply cost-layer lineage; неподтверждённая сумма остаётся расходом.</p>" +
           (incompleteWeeks.length ? "<p class=\"wb-finance-warning\">Не удалось полностью рассчитать себестоимость для недель: " + incompleteWeeks.map(formatFinanceWeek).join(", ") + ". Откройте tooltip периода для списка SKU и причин.</p>" : "") +
           (sourceProblemWeeks.length ? "<p class=\"wb-finance-warning\">Finance source требует внимания: " + sourceProblemWeeks.map((week) => formatFinanceWeek(week) + " — " + financeStatusLabel(week.status, false)).join("; ") + ".</p>" : "");
         window.requestAnimationFrame(() => { wbFinanceReportTableWrap.scrollLeft = wbFinanceReportTableWrap.scrollWidth; });
@@ -13155,13 +13188,8 @@
         const quality = coverage.quality || {};
         const sources = quality.source_units || {};
         const parts = [];
-        if (Number(sources.cost_price || 0)) parts.push("legacy COST_PRICE: " + formatFinanceMetric(sources.cost_price, "count") + " шт.");
-        if (Number(sources.business_approved_retro || 0)) parts.push("business-approved retro: " + formatFinanceMetric(sources.business_approved_retro, "count") + " шт.");
-        if (String(week && week.week_end || "") >= "2026-07-01") {
-          parts.push("Our WB Cost: " + formatFinanceMetric(sources.our_wb_cost_daily_state || 0, "count") + " шт.");
-          if (quality.confirmed_share_pct !== null && quality.confirmed_share_pct !== undefined) parts.push("подтверждено: " + formatFinanceMetric(quality.confirmed_share_pct, "percent"));
-          parts.push("estimated/fallback: " + formatFinanceQualityUnits(quality.estimated_fallback_units || 0) + " шт.");
-        }
+        if (Number(sources.projected_from_2026_07_01 || 0)) parts.push("проекция от 01.07: " + formatFinanceMetric(sources.projected_from_2026_07_01, "count") + " шт.");
+        if (Number(sources.canonical_exact_date || 0)) parts.push("exact-date Our WB Cost: " + formatFinanceMetric(sources.canonical_exact_date, "count") + " шт.");
         if (Number(coverage.unmatched_units || 0)) parts.push("без себестоимости: " + formatFinanceMetric(coverage.unmatched_units, "count") + " шт.");
         if (Number(quality.operation_date_fallback_rows || 0)) parts.push("fallback даты операции: " + formatFinanceMetric(quality.operation_date_fallback_rows, "count") + " строк");
         return parts.join(" · ");
@@ -13199,7 +13227,7 @@
         if (previousValue === null || previousValue === undefined || !Number.isFinite(Number(previousValue))) return {arrow:"", className:"wb-finance-trend-flat"};
         const delta = Number(value) - Number(previousValue);
         if (Math.abs(delta) < 0.01) return {arrow:"→", className:"wb-finance-trend-flat"};
-        return delta > 0 ? {arrow:"↑", className:"wb-finance-trend-up"} : {arrow:"↓", className:"wb-finance-trend-down"};
+        return delta > 0 ? {arrow:"↓", className:"wb-finance-trend-up"} : {arrow:"↑", className:"wb-finance-trend-down"};
       }
 
       function financeStatusLabel(status, incomplete) {

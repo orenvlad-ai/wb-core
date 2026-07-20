@@ -86,7 +86,7 @@ Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3
 
 Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers). Vitrina does not invent a value when a required persisted source is truly absent. All direct consumers, including товарный капитал, его рентабельность, web-vitrina and `Управление SKU`, resolve the same functional daily projection from `2026-07-01`; hidden fallback to 1C/legacy cost after activation is prohibited.
 
-Finance has one separate, explicit consumer projection for operations dated `2026-05-01..2026-06-30`: `wb_finance_business_approved_retro_cost_v1` freezes exact `2026-07-01` canonical WB WAC (or the first later canonical row of the same `nmId`) with full source-row digest/provenance. This does not backdate warehouse quantity/capital, create a warehouse event or mutate this module's canonical daily state. From `2026-07-01`, Finance and Partner Report continue to require the exact operation-date canonical row.
+Finance has no separately valued cost source. Its shared consumer resolver projects the exact same-`nmId` canonical WB WAC from `2026-07-01` backwards for every Finance operation before that date, and uses the exact canonical operation-date row from `2026-07-01` onward. A missing 01.07 row is a blocker: Finance cannot choose a later/other-SKU/average/legacy/zero value. The backward projection is management metadata only; it does not create warehouse quantity/capital/events or alter this module's daily state. Existing `wb_finance_retro_cost_map` rows from a superseded migration are ignored historical evidence, not a parallel source.
 
 # 5. Migration boundary
 

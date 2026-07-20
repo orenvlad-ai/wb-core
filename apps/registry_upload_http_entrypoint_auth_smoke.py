@@ -29,9 +29,9 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
-    DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
-    DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
-    DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
+    DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+    DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH,
+    DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -106,33 +106,33 @@ def main() -> None:
                     raise AssertionError(
                         f"unauthenticated Partner Report read must return 401 JSON: {partner_code} {partner_payload}"
                     )
-                partner_package_code, partner_package_payload = _post_json(
-                    f"{base_url}{DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH}",
+                partner_preview_code, partner_preview_payload = _post_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_PREVIEW_PATH}",
                     {"nm_id": "101", "selected_weeks": ["2026-07-06"]},
                 )
-                if partner_package_code != 401 or partner_package_payload.get("error") != "authentication_required":
+                if partner_preview_code != 401 or partner_preview_payload.get("error") != "authentication_required":
                     raise AssertionError(
-                        "unauthenticated Partner Report package route must return 401 JSON: "
-                        f"{partner_package_code} {partner_package_payload}"
+                        "unauthenticated Partner Report preview must return 401 JSON: "
+                        f"{partner_preview_code} {partner_preview_payload}"
                     )
-                partner_finalize_code, partner_finalize_payload = _post_json(
-                    f"{base_url}{DEFAULT_PARTNER_REPORT_FINALIZE_PATH}",
+                partner_settings_code, partner_settings_payload = _post_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_SETTINGS_PATH}",
+                    {"nm_id": "101"},
+                )
+                if (
+                    partner_settings_code != 401
+                    or partner_settings_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated Partner Report settings write must be denied")
+                partner_excel_code, partner_excel_payload = _post_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH}",
                     {"nm_id": "101", "selected_weeks": ["2026-07-06"]},
                 )
                 if (
-                    partner_finalize_code != 401
-                    or partner_finalize_payload.get("error") != "authentication_required"
+                    partner_excel_code != 401
+                    or partner_excel_payload.get("error") != "authentication_required"
                 ):
-                    raise AssertionError("unauthenticated Partner Report finalization must be denied")
-                partner_finalized_package_code, partner_finalized_package_payload = _get_json(
-                    f"{base_url}{DEFAULT_PARTNER_REPORT_FINALIZED_PATH}/prf-secret/package.zip"
-                )
-                if (
-                    partner_finalized_package_code != 401
-                    or partner_finalized_package_payload.get("error")
-                    != "authentication_required"
-                ):
-                    raise AssertionError("unauthenticated finalized package download must be denied")
+                    raise AssertionError("unauthenticated Partner Report Excel must be denied")
                 auto_code, auto_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
                 if auto_code != 401 or auto_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation route must return 401 JSON: {auto_code} {auto_payload}")
