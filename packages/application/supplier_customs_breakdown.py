@@ -337,6 +337,8 @@ def validate_customs_breakdown_workbook(
     if header_row is None:
         errors.append("workbook header row is missing")
         return {"valid": False, "errors": errors, "row_count": 0, "quantity_total": None}
+    if expected_row_count <= 0:
+        errors.append("workbook has no customs goods rows")
     row_count = 0
     quantity_total = ZERO
     for row_index in range(header_row + 1, worksheet.max_row + 1):
@@ -345,11 +347,15 @@ def validate_customs_breakdown_workbook(
             continue
         row_count += 1
         quantity = worksheet.cell(row=row_index, column=3).value
-        if quantity not in (None, ""):
-            if not isinstance(quantity, int | float):
-                errors.append(f"row {row_index} quantity is not numeric")
-            else:
-                quantity_total += Decimal(str(quantity))
+        if quantity in (None, ""):
+            errors.append(f"row {row_index} quantity is missing")
+        elif not isinstance(quantity, int | float):
+            errors.append(f"row {row_index} quantity is not numeric")
+        else:
+            quantity_total += Decimal(str(quantity))
+        unit = worksheet.cell(row=row_index, column=4).value
+        if unit in (None, ""):
+            errors.append(f"row {row_index} quantity unit is missing")
         barcode_cell = worksheet.cell(row=row_index, column=10)
         if barcode_cell.value not in (None, "") and barcode_cell.data_type != "s":
             errors.append(f"row {row_index} barcode is not stored as text")

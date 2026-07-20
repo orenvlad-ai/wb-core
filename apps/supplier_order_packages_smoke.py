@@ -77,8 +77,10 @@ NOMENCLATURE = [
 
 def main() -> None:
     _assert_matching_and_workbook()
+    _assert_incomplete_customs_workbook_fails_closed()
     _assert_logistics_assemblies()
     _assert_accounting_multiple_customs()
+    _assert_accounting_refreshes_incomplete_customs_items()
     print("supplier_order_packages_smoke: OK")
 
 
@@ -156,6 +158,34 @@ def _assert_matching_and_workbook() -> None:
         or sheet.cell(row=header_row + 1, column=12).value != "7020008000"
     ):
         raise AssertionError("DT workbook must retain available deterministic identifiers")
+
+
+def _assert_incomplete_customs_workbook_fails_closed() -> None:
+    try:
+        build_customs_breakdown_xlsx(
+            customs_document={
+                "document_id": "dt-incomplete",
+                "normalized_parse": {
+                    "goods_items": [
+                        {
+                            "position_number": "1",
+                            "source_name": "",
+                            "quantity": None,
+                            "unit": "",
+                            "identifiers": {},
+                        }
+                    ]
+                },
+            },
+            shipment={"header": {"shipment_id": "order-safe"}},
+            shipment_lines=SHIPMENT_LINES,
+            nomenclature_items=NOMENCLATURE,
+        )
+    except ValueError as exc:
+        if "quantity is missing" not in str(exc):
+            raise AssertionError(f"invalid DT workbook returned incomplete diagnostics: {exc}") from exc
+    else:
+        raise AssertionError("DT workbook with blank quantity/unit must fail closed")
 
 
 def _assert_logistics_assemblies() -> None:
@@ -296,6 +326,81 @@ def _assert_accounting_multiple_customs() -> None:
             workbook = load_workbook(BytesIO(archive.read(item["archive_name"])), read_only=True, data_only=True)
             if "Контроль" not in workbook.sheetnames:
                 raise AssertionError(f"generated DT workbook is unreadable: {item}")
+
+
+def _assert_accounting_refreshes_incomplete_customs_items() -> None:
+    stale_dt = _document("dt-stale-v1", "customs_declaration", "dt.pdf")
+    stale_dt["normalized_parse"] = {
+        "declaration_number": "10131010/100626/5187132",
+        "declaration_date": "2026-06-10",
+        "goods_items_parser_version": "supplier_customs_goods_items_v1",
+        "goods_items": [
+            {
+                "position_number": "1",
+                "source_name": "Sanitized unknown item",
+                "quantity": None,
+                "unit": "",
+                "barcode": "",
+                "identifiers": {"customs_code": "7020008000"},
+            }
+        ],
+    }
+    payload = {
+        "supplier_order_id": "order-safe",
+        "shipment": {"header": {"shipment_id": "order-safe", "invoice_no": "SAFE-1"}, "lines": SHIPMENT_LINES},
+        "required_documents": [
+            _document("invoice-1", "invoice", "invoice.xlsx"),
+            _document("contract-1", "contract", "contract.pdf"),
+            stale_dt,
+        ],
+    }
+    parser_calls: list[str] = []
+
+    def refreshed_parser(_: bytes, filename: str) -> dict[str, object]:
+        parser_calls.append(filename)
+        return {
+            "normalized_parse": {
+                "goods_items_parser_version": "supplier_customs_goods_items_v2",
+                "goods_items": [
+                    {
+                        "position_number": "1",
+                        "source_name": "Sanitized unknown item",
+                        "quantity": 12.5,
+                        "unit": "кг",
+                        "barcode": "",
+                        "identifiers": {"customs_code": "7020008000"},
+                        "quantity_evidence": "dt_box_38_net_weight_kg",
+                    }
+                ],
+            }
+        }
+
+    archive_bytes, receipt = _build_supplier_order_documents_archive(
+        payload,
+        package_type="accounting",
+        file_loader=_fixture_loader,
+        nomenclature_items=NOMENCLATURE,
+        customs_parser=refreshed_parser,
+    )
+    manifest, _ = _manifest_and_names(archive_bytes)
+    generated = manifest.get("generated_files") or []
+    if (
+        parser_calls != ["dt.pdf"]
+        or receipt.get("status") != "complete"
+        or len(generated) != 1
+        or stale_dt["normalized_parse"]["goods_items"][0]["quantity"] is not None
+    ):
+        raise AssertionError(f"incomplete stored DT item evidence was not refreshed read-only: {receipt}")
+    with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+        workbook = load_workbook(BytesIO(archive.read(generated[0]["archive_name"])), read_only=True, data_only=True)
+        sheet = workbook["Расшифровка ДТ"]
+        header_row = next(
+            row_index
+            for row_index in range(1, sheet.max_row + 1)
+            if sheet.cell(row=row_index, column=1).value == "№ позиции ДТ"
+        )
+        if sheet.cell(row=header_row + 1, column=3).value != 12.5 or sheet.cell(row=header_row + 1, column=4).value != "кг":
+            raise AssertionError("refreshed DT workbook quantity/unit are not exact numeric DT evidence")
 
 
 def _document(document_id: str, document_type: str, filename: str) -> dict[str, object]:

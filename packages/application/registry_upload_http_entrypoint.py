@@ -6237,6 +6237,58 @@ def _supplier_order_documents_archive_path(shipment_id: str, filename: str) -> s
     return f"/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/documents/{filename}"
 
 
+def _customs_goods_items(normalized: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in normalized.get("goods_items") or [] if isinstance(item, Mapping)]
+
+
+def _complete_customs_goods_item_count(items: Iterable[Mapping[str, Any]]) -> int:
+    return sum(
+        1
+        for item in items
+        if item.get("quantity") not in (None, "") and str(item.get("unit") or "").strip()
+    )
+
+
+def _customs_goods_item_boundary(items: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
+    return tuple(str(item.get("position_number") or "").strip() for item in items)
+
+
+def _refresh_customs_goods_items_for_package(
+    *,
+    generation_row: dict[str, Any],
+    file_bytes: bytes,
+    filename: str,
+    customs_parser: Callable[[bytes, str], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Read-only refresh incomplete item evidence without replacing stored aggregate truth."""
+
+    normalized = dict(generation_row.get("normalized_parse") or {})
+    existing_items = _customs_goods_items(normalized)
+    existing_complete = _complete_customs_goods_item_count(existing_items)
+    if existing_items and existing_complete == len(existing_items):
+        return generation_row
+    reparsed = (
+        customs_parser(file_bytes, filename)
+        if customs_parser is not None
+        else parse_financial_document_pdf(file_bytes, filename=filename)
+    )
+    reparsed_normalized = dict(reparsed.get("normalized_parse") or {})
+    reparsed_items = _customs_goods_items(reparsed_normalized)
+    reparsed_complete = _complete_customs_goods_item_count(reparsed_items)
+    same_item_boundary = (
+        not existing_items
+        or _customs_goods_item_boundary(reparsed_items) == _customs_goods_item_boundary(existing_items)
+    )
+    if not reparsed_items or not same_item_boundary or reparsed_complete <= existing_complete:
+        return generation_row
+    normalized["goods_items"] = reparsed_items
+    normalized["goods_item_count"] = len(reparsed_items)
+    if reparsed_normalized.get("goods_items_parser_version"):
+        normalized["goods_items_parser_version"] = reparsed_normalized["goods_items_parser_version"]
+    generation_row["normalized_parse"] = normalized
+    return generation_row
+
+
 def _build_supplier_order_documents_archive(
     payload: Mapping[str, Any],
     *,
@@ -6381,17 +6433,12 @@ def _build_supplier_order_documents_archive(
             and str(item.get("document_id") or "") == str(row.get("document_id") or "")
         )
         try:
-            generation_row = dict(row)
-            normalized = dict(generation_row.get("normalized_parse") or {})
-            if not normalized.get("goods_items"):
-                reparsed = (
-                    customs_parser(file_bytes, filename)
-                    if customs_parser is not None
-                    else parse_financial_document_pdf(file_bytes, filename=filename)
-                )
-                reparsed_normalized = dict(reparsed.get("normalized_parse") or {})
-                if reparsed_normalized:
-                    generation_row["normalized_parse"] = reparsed_normalized
+            generation_row = _refresh_customs_goods_items_for_package(
+                generation_row=dict(row),
+                file_bytes=file_bytes,
+                filename=filename,
+                customs_parser=customs_parser,
+            )
             workbook_bytes, workbook_filename, generation_receipt = build_customs_breakdown_xlsx(
                 customs_document=generation_row,
                 shipment=shipment,

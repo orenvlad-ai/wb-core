@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from uuid import uuid4
@@ -1413,8 +1413,8 @@ def parse_financial_document_pdf(
                 raw_parse["primary_extraction"] = dict(diagnostics)
                 fallback["raw_parse"] = raw_parse
                 fallback["warnings"] = _dedupe_strings(_string_list(fallback.get("warnings")))
-                return fallback
-    return parsed
+                return _enrich_customs_goods_items_from_pdf_layout(fallback, file_bytes)
+    return _enrich_customs_goods_items_from_pdf_layout(parsed, file_bytes)
 
 
 def parse_packing_list_workbook(file_bytes: bytes, *, filename: str = "packing-list.xls") -> dict[str, Any]:
@@ -3636,7 +3636,7 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
         "linked_references": linked_references,
         "goods_items": goods_items,
         "goods_item_count": len(goods_items),
-        "goods_items_parser_version": "supplier_customs_goods_items_v1",
+        "goods_items_parser_version": "supplier_customs_goods_items_v2",
         "currency": "RUB",
         "total_amount": _decimal_to_float(total_payments),
         "total_amount_rub": _decimal_to_float(total_payments),
@@ -5975,23 +5975,30 @@ def _extract_customs_item_weights(text: str) -> tuple[Decimal | None, Decimal | 
     for index, line in enumerate(lines):
         if not re.match(r"^\d{1,3}\s+\d{10}\s+", line):
             continue
-        gross_weight: Decimal | None = None
-        net_weight: Decimal | None = None
-        for nearby in lines[index + 1 : index + 7]:
-            if gross_weight is None:
-                gross_match = re.match(r"^CN\s+([0-9][\d .,]*)\s+", nearby, flags=re.I)
-                if gross_match:
-                    gross_weight = _parse_decimal(gross_match.group(1))
-                    continue
-            if net_weight is None:
-                net_match = re.match(r"^\d{4}\s+\d{3}\s+([0-9][\d .,]*)\s*$", nearby)
-                if net_match:
-                    net_weight = _parse_decimal(net_match.group(1))
+        gross_weight, net_weight = _extract_standard_customs_item_weights(lines[index + 1 : index + 7])
         if gross_weight is not None:
             gross_values.append(gross_weight)
         if net_weight is not None:
             net_values.append(net_weight)
     return _sum_decimal(gross_values), _sum_decimal(net_values), len(gross_values)
+
+
+def _extract_standard_customs_item_weights(lines: Iterable[str]) -> tuple[Decimal | None, Decimal | None]:
+    """Return only explicit box 35/38 weights from one bounded standard-DT item block."""
+
+    gross_weight: Decimal | None = None
+    net_weight: Decimal | None = None
+    for nearby in lines:
+        if gross_weight is None:
+            gross_match = re.match(r"^CN\s+([0-9][\d .,]*)\s+", nearby, flags=re.I)
+            if gross_match:
+                gross_weight = _parse_decimal(gross_match.group(1))
+                continue
+        if net_weight is None:
+            net_match = re.match(r"^\d{4}\s+\d{3}\s+([0-9][\d .,]*)\s*$", nearby)
+            if net_match:
+                net_weight = _parse_decimal(net_match.group(1))
+    return gross_weight, net_weight
 
 
 def _extract_customs_invoice_currency(text: str) -> tuple[str, Decimal | None, Decimal | None]:
@@ -6598,6 +6605,167 @@ def _extract_pdf_text_with_pypdf(file_bytes: bytes, diagnostics: dict[str, Any])
         return ""
 
 
+def _extract_customs_annex_rows_from_layout_pages(page_texts: Iterable[str]) -> list[dict[str, Any]]:
+    """Parse only explicit box-31 annex columns preserved by pypdf layout extraction."""
+
+    rows: list[dict[str, Any]] = []
+    column_labels = ("НАИМЕНОВАНИЕ", "ПРОИЗВОДИТЕЛЬ", "МАРКА", "МОДЕЛЬ", "КОЛ-ВО", "АРТИКУЛ")
+    for page_text in page_texts:
+        lines = str(page_text or "").splitlines()
+        for header_index, header in enumerate(lines):
+            upper_header = header.upper()
+            if not all(label in upper_header for label in column_labels):
+                continue
+            starts = [upper_header.index(label) for label in column_labels]
+            if starts != sorted(starts) or starts[0] <= 0:
+                continue
+            current: dict[str, Any] | None = None
+
+            def append_current() -> None:
+                nonlocal current
+                if current is None:
+                    return
+                quantity_text = _clean_value(" ".join(current.pop("quantity_parts")))
+                quantity_match = re.fullmatch(
+                    r"([0-9][\d\s.,]*)\s*([A-Za-zА-Яа-яЁё.]+)",
+                    quantity_text,
+                )
+                quantity = _parse_decimal(quantity_match.group(1)) if quantity_match else None
+                unit = _clean_value(quantity_match.group(2)).rstrip(".") if quantity_match else ""
+                row = {
+                    key: _clean_value(" ".join(value)) if isinstance(value, list) else value
+                    for key, value in current.items()
+                }
+                row.update({"quantity": _decimal_to_float_raw(quantity), "unit": unit})
+                if row.get("source_name") and quantity is not None and unit:
+                    rows.append(row)
+                current = None
+
+            for line in lines[header_index + 1 :]:
+                padded = line + " " * max(0, starts[-1] + 80 - len(line))
+                prefix = padded[: starts[0]].strip()
+                row_match = re.fullmatch(r"(\d{1,4})[.)]?", prefix)
+                if prefix and row_match is None:
+                    append_current()
+                    continue
+                if row_match is not None:
+                    append_current()
+                    current = {
+                        "annex_row_number": row_match.group(1),
+                        "source_name": [],
+                        "manufacturer": [],
+                        "brand": [],
+                        "source_model": [],
+                        "quantity_parts": [],
+                        "article": [],
+                    }
+                if current is None:
+                    continue
+                values = [
+                    padded[starts[index] : starts[index + 1]].strip()
+                    for index in range(len(starts) - 1)
+                ]
+                values.append(padded[starts[-1] :].strip())
+                for key, value in zip(
+                    ("source_name", "manufacturer", "brand", "source_model", "quantity_parts", "article"),
+                    values,
+                ):
+                    if value:
+                        current[key].append(value)
+            append_current()
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        identity = tuple(
+            str(row.get(key) or "")
+            for key in ("annex_row_number", "source_name", "manufacturer", "brand", "source_model", "quantity", "unit", "article")
+        )
+        if identity not in seen:
+            seen.add(identity)
+            deduped.append(row)
+    return deduped
+
+
+def _extract_customs_annex_rows_from_pdf(file_bytes: bytes) -> list[dict[str, Any]]:
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(BytesIO(file_bytes))
+        page_texts = [page.extract_text(extraction_mode="layout") or "" for page in reader.pages]
+    except Exception:
+        return []
+    return _extract_customs_annex_rows_from_layout_pages(page_texts)
+
+
+def _enrich_customs_goods_items_from_pdf_layout(parsed: dict[str, Any], file_bytes: bytes) -> dict[str, Any]:
+    return _enrich_customs_goods_items_from_annex_rows(
+        parsed,
+        _extract_customs_annex_rows_from_pdf(file_bytes),
+    )
+
+
+def _enrich_customs_goods_items_from_annex_rows(
+    parsed: dict[str, Any],
+    annex_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    normalized = dict(parsed.get("normalized_parse") or {})
+    if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+        return parsed
+    goods_items = [dict(item) for item in normalized.get("goods_items") or [] if isinstance(item, Mapping)]
+    if len(goods_items) != 1:
+        return parsed
+    annex_rows = [dict(row) for row in annex_rows if isinstance(row, Mapping)]
+    quantities = [_parse_decimal(row.get("quantity")) for row in annex_rows]
+    units = {_clean_value(row.get("unit")).casefold() for row in annex_rows if _clean_value(row.get("unit"))}
+    if not annex_rows or any(quantity is None or quantity < 0 for quantity in quantities) or len(units) != 1:
+        return parsed
+
+    def exact_values(key: str) -> list[str]:
+        result: list[str] = []
+        for row in annex_rows:
+            value = _clean_value(row.get(key))
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    source_names = exact_values("source_name")
+    if not source_names:
+        return parsed
+    item = goods_items[0]
+    identifiers = dict(item.get("identifiers") or {})
+    for key, source_key in (
+        ("annex_manufacturers", "manufacturer"),
+        ("annex_brands", "brand"),
+        ("annex_source_models", "source_model"),
+        ("annex_articles", "article"),
+    ):
+        values = exact_values(source_key)
+        if values:
+            identifiers[key] = values
+    source_models = exact_values("source_model")
+    if len(source_models) == 1:
+        identifiers["source_model"] = source_models[0]
+    item.update(
+        {
+            "source_name": " | ".join(source_names),
+            "quantity": _decimal_to_float_raw(sum((quantity for quantity in quantities if quantity is not None), Decimal("0"))),
+            "unit": next(iter(units)),
+            "identifiers": identifiers,
+            "evidence_status": "deterministic_dt_item_fields",
+            "quantity_evidence": "dt_box_31_annex_quantity_total",
+            "source_name_evidence": "dt_box_31_annex_exact_text",
+        }
+    )
+    normalized["goods_items"] = [item]
+    normalized["goods_item_count"] = 1
+    normalized["goods_items_parser_version"] = "supplier_customs_goods_items_v2"
+    parsed["normalized_parse"] = normalized
+    raw_parse = dict(parsed.get("raw_parse") or {})
+    raw_parse["customs_annex_row_count"] = len(annex_rows)
+    parsed["raw_parse"] = raw_parse
+    return parsed
+
+
 def _is_text_layer_sufficient(text: str) -> bool:
     normalized = _normalize_text(text)
     if len(normalized) < 80:
@@ -6751,6 +6919,13 @@ def _extract_customs_goods_items(text: str) -> list[dict[str, Any]]:
             ),
         )
         quantity, unit = _extract_customs_item_quantity(block)
+        quantity_evidence = "explicit_quantity_or_supplementary_unit" if quantity is not None else ""
+        if quantity is None and header_customs_code:
+            _, net_weight = _extract_standard_customs_item_weights(block_lines[1:7])
+            if net_weight is not None:
+                quantity = net_weight
+                unit = "кг"
+                quantity_evidence = "dt_box_38_net_weight_kg"
         barcode = _customs_item_labeled_value(
             block_lines,
             (r"(?:ШТРИХКОД|ШК|BARCODE|EAN|GTIN)",),
@@ -6784,7 +6959,8 @@ def _extract_customs_goods_items(text: str) -> list[dict[str, Any]]:
                 "unit": unit,
                 "barcode": barcode,
                 "identifiers": identifiers,
-                "evidence_status": "labeled_fields_only",
+                "evidence_status": "deterministic_dt_item_fields",
+                "quantity_evidence": quantity_evidence,
             }
         )
     return items

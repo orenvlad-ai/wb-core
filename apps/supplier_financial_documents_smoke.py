@@ -40,6 +40,8 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
+    _enrich_customs_goods_items_from_annex_rows,
+    _extract_customs_annex_rows_from_layout_pages,
     apply_supplier_order_document_match,
     build_financial_summary,
     build_supplier_shipment_registry,
@@ -720,6 +722,10 @@ def _assert_parser_smoke() -> None:
         or not _approx(customs.get("customs_net_weight_kg"), 8806.18, tolerance=0.01)
         or customs.get("total_customs_payments_rub") != 2892511.6
         or customs.get("goods_item_count") != 28
+        or customs.get("goods_items_parser_version") != "supplier_customs_goods_items_v2"
+        or customs.get("goods_items", [{}])[0].get("quantity") != 380.16
+        or customs.get("goods_items", [{}])[0].get("unit") != "кг"
+        or customs.get("goods_items", [{}])[0].get("quantity_evidence") != "dt_box_38_net_weight_kg"
         or customs.get("goods_items", [{}, {}])[1].get("identifiers", {}).get("customs_code") != "7020008000"
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
@@ -733,6 +739,58 @@ def _assert_parser_smoke() -> None:
         or customs_items.get("goods_items", [{}, {}])[1].get("source_name") != "Exact Model Group"
     ):
         raise AssertionError(f"customs item parser must extend, not replace, aggregate contract: {customs_items}")
+
+    annex_header = (
+        f"{'Гр.':<7}{'Наименование':<48}{'Производитель':<29}"
+        f"{'Марка':<15}{'Модель':<15}{'Кол-во':<14}{'Артикул'}"
+    )
+    annex_rows = _extract_customs_annex_rows_from_layout_pages(
+        [
+            "\n".join(
+                (
+                    annex_header,
+                    f"{'1':<7}{'Sanitized Alpha':<48}{'Safe Factory':<29}{'Safe':<15}{'A-1':<15}{'10 ШТ':<14}{'ART-1'}",
+                    f"{'2':<7}{'Sanitized Beta':<48}{'Safe Factory':<29}{'Safe':<15}{'B-2':<15}{'5 ШТ':<14}{'ART-2'}",
+                )
+            )
+        ]
+    )
+    if (
+        len(annex_rows) != 2
+        or annex_rows[0].get("source_name") != "Sanitized Alpha"
+        or annex_rows[0].get("quantity") != 10.0
+        or annex_rows[0].get("unit") != "ШТ"
+        or annex_rows[1].get("source_model") != "B-2"
+    ):
+        raise AssertionError(f"customs box-31 annex layout parser changed: {annex_rows}")
+    annex_enriched = _enrich_customs_goods_items_from_annex_rows(
+        {
+            "normalized_parse": {
+                "document_type": "customs_declaration",
+                "goods_items": [
+                    {
+                        "position_number": "1",
+                        "source_name": "",
+                        "quantity": 1.5,
+                        "unit": "кг",
+                        "identifiers": {"customs_code": "7020008000"},
+                    }
+                ],
+            },
+            "raw_parse": {},
+        },
+        annex_rows,
+    )
+    enriched_item = annex_enriched.get("normalized_parse", {}).get("goods_items", [{}])[0]
+    if (
+        enriched_item.get("source_name") != "Sanitized Alpha | Sanitized Beta"
+        or enriched_item.get("quantity") != 15.0
+        or enriched_item.get("unit") != "шт"
+        or enriched_item.get("quantity_evidence") != "dt_box_31_annex_quantity_total"
+        or enriched_item.get("identifiers", {}).get("annex_source_models") != ["A-1", "B-2"]
+        or annex_enriched.get("raw_parse", {}).get("customs_annex_row_count") != 2
+    ):
+        raise AssertionError(f"customs box-31 annex evidence was not aggregated deterministically: {annex_enriched}")
 
     customs_with_old_ref = parse_financial_document_text(
         CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT,
