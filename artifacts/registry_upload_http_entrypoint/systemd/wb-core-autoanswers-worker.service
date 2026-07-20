@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
 EnvironmentFile=/opt/wb-ai/.env
-ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 WB_AUTOANSWERS_FORCE_OFF=true WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true /usr/bin/python3 /opt/wb-core-runtime/app/apps/wb_autoanswers_worker.py --run-once --runtime-dir /opt/wb-core-runtime/state
+ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 WB_AUTOANSWERS_FORCE_OFF=false WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true /usr/bin/python3 /opt/wb-core-runtime/app/apps/wb_autoanswers_worker.py --run-once --runtime-dir /opt/wb-core-runtime/state
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

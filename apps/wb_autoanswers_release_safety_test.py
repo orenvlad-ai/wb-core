@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static and fake-transport release safety tests for production force-off."""
+"""Static and fake-transport release safety tests for staged manual activation."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ PUBLIC_ROUTES = ROOT / "artifacts/registry_upload_http_entrypoint/nginx/public_r
 
 
 class ReleaseSafetyTest(unittest.TestCase):
-    def test_production_target_and_http_service_pin_force_off_true(self) -> None:
+    def test_production_target_http_and_worker_remove_force_off_for_manual_activation(self) -> None:
         target_payload = json.loads(TARGET.read_text(encoding="utf-8"))
-        self.assertEqual(target_payload["runtime_env"]["WB_AUTOANSWERS_FORCE_OFF"], "true")
+        self.assertEqual(target_payload["runtime_env"]["WB_AUTOANSWERS_FORCE_OFF"], "false")
         service = SERVICE.read_text(encoding="utf-8")
-        self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", service)
+        self.assertIn("WB_AUTOANSWERS_FORCE_OFF=false", service)
         self.assertNotIn("wb_autoanswers_worker.py", service)
         readonly_service = READONLY_SERVICE.read_text(encoding="utf-8")
         self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", readonly_service)
@@ -44,7 +44,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertFalse(managed["wb-core-autoanswers-readonly-sync.timer"]["enable"])
         self.assertFalse(managed["wb-core-autoanswers-readonly-sync.timer"]["restart"])
         worker = WORKER_SERVICE.read_text(encoding="utf-8")
-        self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", worker)
+        self.assertIn("WB_AUTOANSWERS_FORCE_OFF=false", worker)
         self.assertIn("apps/wb_autoanswers_worker.py --run-once", worker)
         self.assertFalse(managed["wb-core-autoanswers-worker.timer"]["enable"])
         self.assertFalse(managed["wb-core-autoanswers-worker.timer"]["restart"])
@@ -85,6 +85,18 @@ class ReleaseSafetyTest(unittest.TestCase):
             ["autoanswers-ui-flow", "--evidence-dir", "/tmp/wb-autoanswers-ui-test"]
         )
         self.assertIs(ui_args.handler, hosted.run_autoanswers_ui_flow_command)
+        self.assertEqual(ui_args.expected_state, "off-force")
+        unforced_ui_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-ui-flow",
+                "--evidence-dir",
+                "/tmp/wb-autoanswers-ui-unforced-test",
+                "--expected-state",
+                "off-unforced",
+            ]
+        )
+        self.assertIs(unforced_ui_args.handler, hosted.run_autoanswers_ui_flow_command)
+        self.assertEqual(unforced_ui_args.expected_state, "off-unforced")
         timer_args = hosted.build_arg_parser().parse_args(["autoanswers-readonly-timer", "enable"])
         self.assertIs(timer_args.handler, hosted.run_autoanswers_readonly_timer_command)
         lifecycle_args = hosted.build_arg_parser().parse_args(

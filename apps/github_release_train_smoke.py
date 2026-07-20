@@ -42,6 +42,7 @@ from apps.github_release_train import (  # noqa: E402
     correct_loop_identity_to_new,
     enqueue_loop_new,
     enqueue_loop_recovery,
+    handle_loop_comment,
     loop_ack_label,
     loop_root_label,
     loop_root_from_labels,
@@ -932,6 +933,30 @@ def _assert_waiter_contract() -> None:
     assert superseded_api.comments == comments_before
     assert any("terminal: release:superseded" in line for line in output)
 
+    classification_api = FakeApi()
+    classification_api.pulls[84] = _pull(
+        84,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(84)],
+        created_at="2026-07-17T09:04:00Z",
+    )
+    labels_before = _labels(classification_api.pulls[84])
+    comments_before = list(classification_api.comments)
+    classification_output: list[str] = []
+    assert (
+        wait_for_release(
+            classification_api,
+            84,
+            status_seconds=0,
+            poll_seconds=0,
+            acknowledge_agent=True,
+            emit=classification_output.append,
+        )
+        == 2
+    )
+    assert _labels(classification_api.pulls[84]) == labels_before
+    assert classification_api.comments == comments_before
+    assert any("fail-closed classification" in line for line in classification_output)
+
 
 def _assert_workflow_contract() -> None:
     baseline = (ROOT / ".github" / "workflows" / "baseline-ci.yml").read_text(encoding="utf-8")
@@ -1661,6 +1686,53 @@ def _assert_continuity_classification_matrix() -> None:
         f"wb-core-loop-new-root-proof head={SHA_B} pr=400 root=400" in body
         for _, body in retry_api.comments
     )
+    set_release_state(retry_api, 400, BLOCKED_LABEL)
+    retry_api.pulls[400]["head"]["sha"] = SHA_C
+    assert handle_loop_comment(
+        retry_api,
+        400,
+        f"/wb-core loop retry-blocked 400 head {SHA_C}",
+        actor="codex",
+        association="OWNER",
+    ) == READY_LABEL
+    assert any(
+        f"wb-core-loop-new-root-proof head={SHA_C} pr=400 root=400" in body
+        for _, body in retry_api.comments
+    )
+    set_release_state(retry_api, 400, BLOCKED_LABEL)
+    try:
+        handle_loop_comment(
+            retry_api,
+            400,
+            f"/wb-core loop retry-blocked 400 head {SHA_C}",
+            actor="outside-user",
+            association="NONE",
+        )
+    except ReleaseBlocked as exc:
+        assert "write association" in str(exc)
+    else:
+        raise AssertionError("trusted retry command must reject an unprivileged actor")
+    standard_retry_api = FakeApi()
+    standard_retry_api.pulls[402] = _pull(
+        402,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-20T04:02:00Z",
+        sha=SHA_C,
+    )
+    standard_retry_api.checks = list(retry_api.checks)
+    try:
+        handle_loop_comment(
+            standard_retry_api,
+            402,
+            f"/wb-core loop retry-blocked 402 head {SHA_C}",
+            actor="codex",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "task:loop" in str(exc)
+    else:
+        raise AssertionError("LOOP retry command must reject a standard PR")
+    set_release_state(retry_api, 400, READY_LABEL)
     completed.append("15_generic_retry_preserves_classification")
 
     classification_api = FakeApi()

@@ -2922,7 +2922,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     autoanswers_ui_flow.add_argument("--headed", action="store_true")
     autoanswers_ui_flow.add_argument(
-        "--expected-state", choices=("off-force", "manual"), default="off-force"
+        "--expected-state", choices=("off-force", "off-unforced", "manual"), default="off-force"
     )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 
@@ -4690,8 +4690,8 @@ def _current_live_publication_invariant_blockers(target: HostedRuntimeTarget) ->
     blockers: list[str] = []
     if target.public_base_url != CURRENT_LIVE_PUBLIC_BASE_URL:
         blockers.append(f"public_base_url={target.public_base_url or '<missing>'}")
-    if str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower() != "true":
-        blockers.append("runtime_env.WB_AUTOANSWERS_FORCE_OFF must be true")
+    if str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower() != "false":
+        blockers.append("runtime_env.WB_AUTOANSWERS_FORCE_OFF must be false")
 
     if not target.nginx_public_routes:
         blockers.append("nginx_public_routes=<missing>")

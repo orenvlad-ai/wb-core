@@ -2,12 +2,12 @@
 title: "WB Autoanswers Server v1"
 doc_id: "49_MODULE__WB_AUTOANSWERS_SERVER"
 doc_type: "module"
-status: "manual_mode_release_candidate_force_off_staged"
+status: "manual_mode_activation_release_candidate"
 purpose: "Server-native synchronization, frozen AI drafting and readback-confirmed WB answer publication"
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Manual mode is implemented; release first deploys force-OFF, then a separate tracked activation release may remove force-off and select manual without running AI or WB writes."
+update_note: "Manual mode is implemented and force-OFF acceptance passed; the tracked activation release removes the environment override while persisted OFF remains authoritative, then selects manual through a guarded lifecycle without running AI or WB writes."
 ---
 
 # WB Autoanswers Server v1
@@ -28,7 +28,7 @@ WB Feedbacks GET
   -> mandatory GET feedback detail readback
 ```
 
-The first deployment stage pins `WB_AUTOANSWERS_FORCE_OFF=true` in the production HTTP unit, target, and installed-but-disabled full worker. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every WB write also require effective ON. `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
+The first deployment stage pinned `WB_AUTOANSWERS_FORCE_OFF=true` in the production HTTP unit, target, and installed-but-disabled full worker. The tracked activation release changes those three pins to `false`, but deploy still leaves persisted master OFF and both autoanswers timers disabled. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every WB write also require effective ON. Whenever present, `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
 
 Deploy has a dedicated idempotent dependency stage. It verifies Node >=20, npm and ffmpeg; if missing, it installs base packages through apt and the official Node `22.21.1` archive from `nodejs.org`, checks exact SHA-256 for amd64/arm64, then performs lockfile `npm ci` and all 28 frozen hash checks before schema migration or restart. A capacity preflight requires free bytes equal to the live DB size plus 2 GiB. If necessary, it compacts only the autoanswers-owned raw pre-v1 backup to zstd after SQLite integrity, compressed-stream and byte-exact hash verification, writes an atomic restore manifest, and only then removes the redundant raw representation. After force-OFF UI acceptance, the tracked activation release changes the same three pins to false. The repo-owned `autoanswers-lifecycle activate-manual` command then requires an empty AI/publication queue, verifies Node >=20, ffmpeg and all 28 frozen hashes, disables the force-OFF-only sync timer, atomically persists `master_enabled=true, mode=manual`, runs one bounded GET-only canary through an entrypoint that imports neither Node/OpenAI nor a WB writer, proves zero AI/publication jobs, and only then enables the full worker timer. It never generates a real answer or calls a WB write during activation.
 
@@ -67,7 +67,7 @@ The packaged `make_mvp/` bytes are preserved. The only new Node code is a siblin
 | Authenticated production browser acceptance | `apps/wb_autoanswers_production_ui_flow.py`, hosted `autoanswers-ui-flow` command |
 | OFF-mode background GET sync | `wb-core-autoanswers-readonly-sync.service/.timer`, hosted timer gate |
 | Manual lifecycle and schema-v2 backup gate | `apps/wb_autoanswers_activation.py`, hosted `autoanswers-lifecycle` command |
-| Full bounded worker, installed disabled in force-OFF stage | `wb-core-autoanswers-worker.service/.timer` |
+| Full bounded worker, installed disabled and enabled only by guarded manual lifecycle | `wb-core-autoanswers-worker.service/.timer` |
 | Backend/UI integration | `packages/application/registry_upload_http_entrypoint.py`, `packages/adapters/registry_upload_http_entrypoint.py`, `packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html` |
 
 ## Local data model
@@ -195,15 +195,15 @@ The frozen package is tested separately with `npm test` from its directory. Fixt
 
 ## Production release posture
 
-- first hosted deployment keeps both persisted master and effective mode OFF;
-- the HTTP systemd unit and active target pin force-off true;
+- the completed first hosted deployment kept both persisted master and effective mode OFF under force-off;
+- the activation deployment changes the HTTP, full-worker and active-target force-off pins to false while persisted master remains OFF;
 - first additive schema takes and integrity-checks a coherent SQLite backup before mutation;
-- the full worker timer is installed disabled and pinned force-OFF;
+- the full worker timer stays disabled through the unforced-OFF acceptance;
 - bounded GET-only canary/backfill is the only production WB capability authorized for this release;
 - the GET-only steady timer is installed disabled and may be enabled only after read acceptance;
 - no OpenAI call;
 - no WB POST;
-- only after force-OFF acceptance may the tracked activation release remove force-off and atomically select manual;
+- only after authenticated unforced-OFF acceptance may the lifecycle atomically select manual and enable its timer;
 - no PATCH of existing WB answers.
 
 After manual activation acceptance, the only next gate is the owner's first explicit click on `Сгенерировать ответ` for one real eligible review. That click is intentionally not part of release acceptance; every WB write remains blocked until the owner separately confirms `Опубликовать` for a guarded result.

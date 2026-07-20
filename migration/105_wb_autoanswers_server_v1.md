@@ -1,6 +1,6 @@
 # WB autoanswers server v1 — activation and rollback runbook
 
-Status: staged manual-mode release train.
+Status: activation release candidate after completed force-OFF deployment acceptance.
 
 ## Preconditions
 
@@ -33,7 +33,8 @@ Status: staged manual-mode release train.
 ### Gate C — remove force-off and activate manual without AI
 
 - merge/deploy the tracked configuration release that changes HTTP, target and full-worker force-off pins to false;
-- keep persisted master OFF through deploy and prove it in the UI;
+- keep persisted master OFF and both autoanswers timers disabled through deploy;
+- prove `master_enabled=false`, `force_off=false`, `effective_enabled=false`, zero jobs and disabled generate/publish controls through authenticated UI acceptance with `--expected-state off-unforced`;
 - run `autoanswers-lifecycle activate-manual`;
 - require Node >=20, ffmpeg, all 28 frozen hashes, an empty AI/publication queue and current schema backup evidence;
 - the command disables the force-OFF timer, persists master ON/manual, runs one bounded GET-only canary with no Node/OpenAI/writer import, proves zero AI/publication jobs and enables the full worker timer;
