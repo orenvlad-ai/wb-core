@@ -25,9 +25,14 @@ from uuid import uuid4
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.operator_instructions import (
+    INSTRUCTION_NEW_BADGE_LABEL,
     InstructionBlock,
+    InstructionUpdate,
     OperatorInstruction,
+    active_operator_instruction_updates,
+    build_instruction_new_state,
     get_operator_instruction,
+    list_operator_instruction_updates,
     list_operator_instructions,
 )
 from packages.application.supplier_shipment_factual_correction import (
@@ -7552,7 +7557,13 @@ def _resolve_operator_instruction_from_query(query: str) -> OperatorInstruction 
     return get_operator_instruction(values[0] if values else "")
 
 
-def _render_sheet_vitrina_instructions_ui(instruction: OperatorInstruction) -> str:
+def _render_sheet_vitrina_instructions_ui(
+    instruction: OperatorInstruction,
+    *,
+    business_date: date | None = None,
+) -> str:
+    resolved_business_date = business_date or date.fromisoformat(current_business_date_iso())
+    instruction_new_state = build_instruction_new_state(instruction, resolved_business_date)
     instruction_list = "".join(
         (
             '<a class="instruction-link" href="'
@@ -7565,7 +7576,14 @@ def _render_sheet_vitrina_instructions_ui(instruction: OperatorInstruction) -> s
             + '"'
             + (' aria-current="page"' if item.instruction_id == instruction.instruction_id else "")
             + ">"
+            + '<span class="label-with-badge">'
             + html.escape(item.title)
+            + (
+                _render_instruction_new_badge(INSTRUCTION_NEW_BADGE_LABEL)
+                if build_instruction_new_state(item, resolved_business_date).instruction_is_new
+                else ""
+            )
+            + "</span>"
             + "</a>"
         )
         for item in list_operator_instructions()
@@ -7574,65 +7592,171 @@ def _render_sheet_vitrina_instructions_ui(instruction: OperatorInstruction) -> s
         '<a class="topic-link" href="#'
         + html.escape(section.anchor, quote=True)
         + '" aria-current="false">'
+        + '<span class="label-with-badge">'
         + html.escape(section.title)
+        + (
+            _render_instruction_new_badge(INSTRUCTION_NEW_BADGE_LABEL)
+            if section.anchor in instruction_new_state.topic_section_anchors
+            else ""
+        )
+        + "</span>"
         + "</a>"
         for section in instruction.sections
     )
     sections_html = "".join(
         '<section class="instruction-section" id="'
         + html.escape(section.anchor, quote=True)
-        + '"><h2>'
+        + '"><h2><span class="label-with-badge">'
         + html.escape(section.title)
-        + "</h2>"
+        + (
+            _render_instruction_new_badge(INSTRUCTION_NEW_BADGE_LABEL)
+            if section.anchor in instruction_new_state.new_section_anchors
+            else ""
+        )
+        + "</span></h2>"
         + (
             '<p class="section-lead">' + html.escape(section.lead) + "</p>"
             if section.lead
             else ""
         )
-        + "".join(_render_operator_instruction_block(block) for block in section.blocks)
+        + "".join(
+            _render_operator_instruction_block(
+                block,
+                is_new=(
+                    block.block_id in instruction_new_state.new_block_ids
+                    and section.anchor not in instruction_new_state.new_section_anchors
+                ),
+            )
+            for block in section.blocks
+        )
         + "</section>"
         for section in instruction.sections
     )
+    updates_html = _render_operator_instruction_updates(resolved_business_date)
     template = INSTRUCTIONS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (
         template.replace("__INSTRUCTION_LIST__", instruction_list)
         .replace("__TOPIC_NAV__", topic_nav)
-        .replace("__INSTRUCTION_TITLE__", html.escape(instruction.title))
+        .replace(
+            "__INSTRUCTION_TITLE__",
+            '<span class="label-with-badge">'
+            + html.escape(instruction.title)
+            + (
+                _render_instruction_new_badge(INSTRUCTION_NEW_BADGE_LABEL)
+                if instruction_new_state.instruction_is_new
+                else ""
+            )
+            + "</span>",
+        )
         .replace("__INSTRUCTION_SUMMARY__", html.escape(instruction.summary))
+        .replace("__INSTRUCTION_UPDATES__", updates_html)
         .replace("__INSTRUCTION_CONTENT__", sections_html)
     )
 
 
-def _render_operator_instruction_block(block: InstructionBlock) -> str:
+def _render_operator_instruction_updates(business_date: date) -> str:
+    active_update_ids = {
+        update.update_id for update in active_operator_instruction_updates(business_date)
+    }
+    items: list[str] = []
+    for update in list_operator_instruction_updates():
+        instruction = get_operator_instruction(update.instruction_id)
+        if instruction is None:  # Registry validation normally makes this unreachable.
+            continue
+        items.append(_render_operator_instruction_update_item(update, instruction))
+    open_attribute = " open" if active_update_ids else ""
+    return (
+        '<details class="instruction-updates"'
+        + open_attribute
+        + '><summary><span>Обновления инструкций</span><span class="instruction-update-count">'
+        + html.escape(str(len(items)))
+        + '</span></summary><ol class="instruction-update-list">'
+        + "".join(items)
+        + "</ol></details>"
+    )
+
+
+def _render_operator_instruction_update_item(
+    update: InstructionUpdate,
+    instruction: OperatorInstruction,
+) -> str:
+    href = (
+        DEFAULT_INSTRUCTIONS_UI_PATH
+        + "?"
+        + urllib_parse.urlencode(
+            {"embedded": "1", "instruction": update.instruction_id}
+        )
+        + "#"
+        + urllib_parse.quote(update.target_id, safe="-")
+    )
+    return (
+        '<li class="instruction-update-item" data-update-id="'
+        + html.escape(update.update_id, quote=True)
+        + '"><div class="instruction-update-meta"><time datetime="'
+        + html.escape(update.published_on.isoformat(), quote=True)
+        + '">'
+        + html.escape(update.published_on.strftime("%d.%m.%Y"))
+        + '</time><a class="instruction-update-link" href="'
+        + html.escape(href, quote=True)
+        + '">'
+        + html.escape(instruction.title)
+        + "</a></div><p>"
+        + html.escape(update.summary)
+        + "</p>"
+        + (
+            '<p class="instruction-update-revisit"><strong>Условие пересмотра:</strong> '
+            + html.escape(update.revisit_condition)
+            + "</p>"
+            if update.revisit_condition
+            else ""
+        )
+        + "</li>"
+    )
+
+
+def _render_instruction_new_badge(label: str) -> str:
+    return '<span class="new-badge" aria-label="Новый материал: ' + html.escape(label, quote=True) + '">' + html.escape(label) + "</span>"
+
+
+def _render_operator_instruction_block(
+    block: InstructionBlock,
+    *,
+    is_new: bool = False,
+    badge_label: str = INSTRUCTION_NEW_BADGE_LABEL,
+) -> str:
     title = html.escape(block.title)
     text = html.escape(block.text)
+    block_id = html.escape(block.block_id, quote=True)
+    badge = _render_instruction_new_badge(badge_label) if is_new else ""
+    titled_heading = '<h3><span class="label-with-badge">' + title + badge + "</span></h3>"
+    untitled_badge = '<div class="block-new-marker">' + badge + "</div>" if badge else ""
     if block.kind == "subheading":
-        return '<div class="block subheading"><h3>' + title + "</h3><p>" + text + "</p></div>"
+        return '<div class="block subheading" id="' + block_id + '">' + titled_heading + "<p>" + text + "</p></div>"
     if block.kind in {"numbered", "checklist"}:
         class_name = "action-list checklist" if block.kind == "checklist" else "action-list"
-        heading = "<h3>" + title + "</h3>" if title else ""
+        heading = titled_heading if title else untitled_badge
         items = "".join("<li>" + html.escape(item) + "</li>" for item in block.items)
-        return '<div class="block">' + heading + '<ul class="' + class_name + '">' + items + "</ul></div>"
+        return '<div class="block" id="' + block_id + '">' + heading + '<ul class="' + class_name + '">' + items + "</ul></div>"
     if block.kind in {"important", "not_responsibility", "escalation"}:
         class_name = {
             "important": "callout-important",
             "not_responsibility": "callout-boundary",
             "escalation": "callout-escalation",
         }[block.kind]
-        heading = "<h3>" + title + "</h3>" if title else ""
+        heading = titled_heading if title else untitled_badge
         body = "<p>" + text + "</p>" if block.text else ""
         if block.items:
             body += '<ul class="action-list checklist">' + "".join(
                 "<li>" + html.escape(item) + "</li>" for item in block.items
             ) + "</ul>"
-        return '<aside class="block callout ' + class_name + '">' + heading + body + "</aside>"
+        return '<aside class="block callout ' + class_name + '" id="' + block_id + '">' + heading + body + "</aside>"
     if block.kind == "table":
         headings = "".join("<th scope=\"col\">" + html.escape(item) + "</th>" for item in block.headers)
         rows = "".join(
             "<tr>" + "".join("<td>" + html.escape(cell) + "</td>" for cell in row) + "</tr>"
             for row in block.rows
         )
-        return '<div class="block instructions-table-wrap"><table><thead><tr>' + headings + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
+        return '<div class="block instructions-table-wrap" id="' + block_id + '">' + untitled_badge + "<table><thead><tr>" + headings + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
     raise ValueError(f"unsupported operator instruction block kind: {block.kind}")
 
 
