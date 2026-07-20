@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sqlite3
 import sys
 
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
             "recalculate",
             "recalculate-all",
             "recalculate-stale-cost",
+            "business-approved-backfill",
             "repair-derived-orphans",
             "tick",
             "status",
@@ -66,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-fingerprint", default="")
     parser.add_argument("--backup-dir", default="")
+    parser.add_argument("--approval-reference", default="")
     parser.add_argument("--min-interval-seconds", type=float, default=60.0)
     args = parser.parse_args(argv)
     _load_env(Path(args.env_file))
@@ -114,6 +117,54 @@ def main(argv: list[str] | None = None) -> int:
                 apply_kwargs["date_from"] = date_from
             result = block.apply_stale_cost_weeks(**apply_kwargs)
             result["backup"] = backup
+    elif args.command == "business-approved-backfill":
+        date_from = (
+            date.fromisoformat(args.date_from)
+            if args.date_from
+            else date(2026, 4, 27)
+        )
+        date_to = date.fromisoformat(args.date_to) if args.date_to else None
+        plan = block.plan_business_approved_backfill(
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if not args.apply:
+            result = plan
+        else:
+            if not args.confirm_fingerprint:
+                parser.error("--apply requires --confirm-fingerprint from dry-run")
+            if not args.backup_dir:
+                parser.error("--apply requires an explicit --backup-dir")
+            if not args.approval_reference:
+                parser.error("--apply requires --approval-reference for the human gate")
+            scope_end = date.fromisoformat(str(plan["date_to"]))
+            already_applied = block.business_approved_fingerprint_applied(
+                fingerprint=args.confirm_fingerprint,
+                date_from=date_from,
+                date_to=scope_end,
+            )
+            if args.confirm_fingerprint != str(plan["fingerprint"]) and not already_applied:
+                parser.error("--confirm-fingerprint does not match current dry-run")
+            if not bool(plan.get("apply_allowed")) and not already_applied:
+                parser.error("dry-run contains blockers; apply is forbidden")
+            backup = (
+                _create_sqlite_backup(
+                    block.db_path,
+                    Path(args.backup_dir),
+                    fingerprint=args.confirm_fingerprint,
+                    prefix="wb-finance-business-approved",
+                )
+                if int(plan["target_week_count"]) > 0
+                or int(plan["source_manifests"]["cost"]["proposed_row_count"]) > 0
+                else None
+            )
+            result = block.apply_business_approved_backfill(
+                expected_fingerprint=args.confirm_fingerprint,
+                approval_reference=args.approval_reference,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            result["backup"] = backup
     elif args.command == "repair-derived-orphans":
         result = block.repair_orphan_derived_rows()
     else:
@@ -145,12 +196,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _create_sqlite_backup(
-    db_path: Path, backup_dir: Path, *, fingerprint: str
+    db_path: Path,
+    backup_dir: Path,
+    *,
+    fingerprint: str,
+    prefix: str = "wb-finance-stale-cost",
 ) -> dict[str, object]:
     backup_dir.mkdir(parents=True, exist_ok=True)
+    source_size = db_path.stat().st_size
+    free_bytes = shutil.disk_usage(backup_dir).free
+    required_free_bytes = max(source_size * 2, 16 * 1024 * 1024)
+    if free_bytes < required_free_bytes:
+        raise ValueError(
+            f"not enough free space for coherent SQLite backup: free={free_bytes}, required={required_free_bytes}"
+        )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffix = fingerprint.removeprefix("sha256:")[:12]
-    backup_path = backup_dir / f"wb-finance-stale-cost-{stamp}-{suffix}.sqlite3"
+    backup_path = backup_dir / f"{prefix}-{stamp}-{suffix}.sqlite3"
     if backup_path.exists():
         raise ValueError(f"backup already exists: {backup_path}")
     source_uri = f"file:{db_path.resolve()}?mode=ro"
@@ -171,6 +233,9 @@ def _create_sqlite_backup(
         "created": True,
         "path": str(backup_path),
         "size_bytes": backup_path.stat().st_size,
+        "source_size_bytes": source_size,
+        "free_space_before_bytes": free_bytes,
+        "required_free_bytes": required_free_bytes,
         "sha256": f"sha256:{sha256.hexdigest()}",
         "integrity_check": integrity,
     }

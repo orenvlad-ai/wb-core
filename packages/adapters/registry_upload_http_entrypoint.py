@@ -57,6 +57,7 @@ from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
 from packages.application.sku_management import SkuManagementError
 from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
+from packages.application.partner_report import PartnerReportError
 from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
@@ -86,6 +87,13 @@ DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
 DEFAULT_SHEET_WB_FINANCE_REPORT_PATH = "/v1/sheet-vitrina-v1/wb-finance-report"
+DEFAULT_PARTNER_REPORT_PREFIX = "/v1/sheet-vitrina-v1/partner-report"
+DEFAULT_PARTNER_REPORT_OPTIONS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/options"
+DEFAULT_PARTNER_REPORT_SETTINGS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/settings"
+DEFAULT_PARTNER_REPORT_PREVIEW_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/preview"
+DEFAULT_PARTNER_REPORT_FINALIZE_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/finalize"
+DEFAULT_PARTNER_REPORT_FINALIZED_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/finalized"
+DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/preview-package.zip"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
@@ -578,6 +586,64 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"calculation parameters failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path in {
+                DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+                DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+                DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
+                DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
+            }:
+                try:
+                    body = _load_request_payload(self)
+                    actor = _current_web_user_config_key(self)
+                    if parsed.path == DEFAULT_PARTNER_REPORT_SETTINGS_PATH:
+                        payload = entrypoint.handle_partner_report_settings_save_request(
+                            body, actor=actor
+                        )
+                    elif parsed.path == DEFAULT_PARTNER_REPORT_PREVIEW_PATH:
+                        payload = entrypoint.handle_partner_report_preview_request(body)
+                    elif parsed.path == DEFAULT_PARTNER_REPORT_FINALIZE_PATH:
+                        payload = entrypoint.handle_partner_report_finalize_request(
+                            body, actor=actor
+                        )
+                    else:
+                        package, filename, _verification = (
+                            entrypoint.partner_report_block.build_preview_package(body)
+                        )
+                        _write_binary_response(
+                            self,
+                            HTTPStatus.OK,
+                            package,
+                            content_type="application/zip",
+                            filename=filename,
+                            as_attachment=True,
+                        )
+                        return
+                except PartnerReportError as exc:
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if exc.code == "report_not_found"
+                        else HTTPStatus.CONFLICT
+                        if exc.code in {
+                            "source_coverage_incomplete",
+                            "package_verification_failed",
+                        }
+                        else HTTPStatus.UNPROCESSABLE_ENTITY
+                    )
+                    _write_json_response(
+                        self,
+                        status,
+                        {"error": str(exc), "code": exc.code, "blockers": exc.blockers},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"partner report operation failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3218,6 +3284,72 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB Finance weekly report runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_PARTNER_REPORT_OPTIONS_PATH:
+                try:
+                    payload = entrypoint.handle_partner_report_options_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"partner report options failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_PARTNER_REPORT_FINALIZED_PATH:
+                try:
+                    payload = entrypoint.handle_partner_report_finalized_list_request(
+                        nm_id=_resolve_single_query_param(parsed.query, "nm_id")
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"partner report finalized list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            finalized_prefix = DEFAULT_PARTNER_REPORT_FINALIZED_PATH + "/"
+            if parsed.path.startswith(finalized_prefix):
+                suffix = parsed.path[len(finalized_prefix) :]
+                try:
+                    if suffix.endswith("/package.zip"):
+                        report_id = suffix[: -len("/package.zip")].strip("/")
+                        package, filename, _verification = (
+                            entrypoint.partner_report_block.build_finalized_package(report_id)
+                        )
+                        _write_binary_response(
+                            self,
+                            HTTPStatus.OK,
+                            package,
+                            content_type="application/zip",
+                            filename=filename,
+                            as_attachment=True,
+                        )
+                        return
+                    report_id = suffix.strip("/")
+                    payload = entrypoint.partner_report_block.finalized_report(report_id)
+                except PartnerReportError as exc:
+                    status = HTTPStatus.NOT_FOUND if exc.code == "report_not_found" else HTTPStatus.CONFLICT
+                    _write_json_response(
+                        self,
+                        status,
+                        {"error": str(exc), "code": exc.code, "blockers": exc.blockers},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"partner report download failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -7031,7 +7163,9 @@ def _required_section_for_path(path: str) -> str:
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
-    }:
+    } or normalized == DEFAULT_PARTNER_REPORT_PREFIX or normalized.startswith(
+        DEFAULT_PARTNER_REPORT_PREFIX + "/"
+    ):
         return WEB_AUTH_SECTION_REPORTS
     if normalized == DEFAULT_SETTINGS_UI_PATH:
         return WEB_AUTH_SECTION_SETTINGS
@@ -7433,6 +7567,12 @@ def _render_sheet_vitrina_operator_ui(
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
         "wb_finance_report_path": wb_finance_report_path,
+        "partner_report_options_path": DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+        "partner_report_settings_path": DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+        "partner_report_preview_path": DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+        "partner_report_finalize_path": DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
+        "partner_report_finalized_path": DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
+        "partner_report_preview_package_path": DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
         "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
         "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
         "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
