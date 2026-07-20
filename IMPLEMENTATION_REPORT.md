@@ -22,10 +22,11 @@ The increment is local-test complete. It does not modify Doctrine, frozen prompt
 
 ## Exact media root cause and repair
 
-Production read-only evidence identified two independent causes:
+Production read-only evidence identified three independent causes across the original implementation and first canary:
 
 1. Buyer photos are served from `*.geobasket.ru`; the old exact host allowlist did not include that official WB CDN family, so the safe fetcher returned `media_url_blocked`.
 2. Feedback video URLs on `*.wbbasket.ru` return HLS playlists (`application/vnd.apple.mpegurl`, `#EXTM3U`) with relative variant/segment URLs. The old implementation treated that response as a monolithic MP4, so ffmpeg returned `video_extract_failed`.
+3. The first production canary after HLS support downloaded valid 4–5 second MPEG-TS/H.264 segments, but the single-segment `fps=1/15` filter exited successfully with zero frames because the segments retain absolute timestamps and are shorter than the cadence. A read-only decoder probe on the same production segment proved `frame=0` for that filter and `frame=1` for first-decodable-frame selection. The bounded HLS path now uses `select=eq(n,0)` per already deterministically spaced segment; multi-frame MP4 sampling retains the bounded cadence.
 
 The repair keeps the security boundary:
 
@@ -85,7 +86,7 @@ The deploy preflight temporarily forces the migration process OFF, takes an inte
 Free local acceptance on the release-candidate tree:
 
 ```text
-python3 -m unittest apps.wb_autoanswers_*_test  -> 96 PASS
+python3 -m unittest apps.wb_autoanswers_*_test  -> 104 PASS
 python3 -m compileall -q apps packages         -> PASS
 frozen make_mvp npm test                       -> 28/28 PASS
 sheet_vitrina_v1_feedbacks_browser_smoke.py    -> PASS
@@ -97,7 +98,7 @@ git diff --check                               -> PASS
 
 Coverage includes compact/conditional detail layout, closed technical disclosure, textarea auto-grow, fixed scroll/copy cell, copy immutability, desktop/narrow rendering, real-format WebP and HLS fetches, redirect/DNS/host/MIME/size/time guards, expired URL refresh, preview/frame extraction, mock classifier media inputs after cache breakpoint, TTL cleanup, regeneration invalidation, all 25 mode pairs, preview counts, actor/snapshot binding, policy epochs, restart/lease recovery, budgets, duplicate suppression, external answers, OFF/force-off and stale-write blocking.
 
-The browser test uses a local authenticated HTTP server and Chromium. Media tests use local fake transports and ffmpeg; frozen role execution uses spies. No live model or WB write capability is present in these tests.
+The browser test uses a local authenticated HTTP server and Chromium, including decoded private photo/preview evidence after opening the detail card. Media tests use local fake transports and ffmpeg; frozen role execution uses spies. No live model or WB write capability is present in these tests.
 
 ## Production acceptance contract
 
@@ -126,6 +127,8 @@ Production release is authorized separately by the current LOOP request. Its rea
 The first deployment of merged PR #694 halted before service restart because the root volume did not have space for another raw database-sized pre-schema snapshot. Read-only inspection proved the live database and both recovery sources remained structurally valid. A lifecycle `status` invocation on the old implementation also exposed that constructing the repository below target schema could apply additive DDL; the database reached schema v3, while persisted `master_enabled=true`, `mode=manual`, the existing owner-published answer and its audit remained unchanged.
 
 The recovery increment makes `status` non-mutating for an old or absent database. It also resumes from the complete current-schema raw snapshot left by the interrupted preparation: only the owned backup filename boundary is accepted; SQLite integrity, compressed integrity, archive SHA-256 and exact decompressed SHA-256 are verified; the canonical v3 manifest is read back; and only then is the raw source removed to recover capacity. Failure before that proof retains the raw snapshot. Targeted tests cover both status cases and low-capacity exact backup compaction. The recovery performs no ad-hoc deletion, SQL mutation, WB/OpenAI call or service action; release remains owned by the standard deploy path.
+
+The first recovery deploy completed that compression/readback but remained below the explicit 256 MiB operational headroom, so it halted before restart. The follow-up keeps the verified current v3 archive and removes only the minimum older compressed autoanswers archive+manifest pair after checking its exact owned path, manifest filename, byte size, SHA-256 and recorded SQLite integrity. A private cleanup audit is persisted before unlink, unrelated files are excluded, and insufficient resulting headroom still fails closed. This second step is covered by a fixture that proves one-pair minimum deletion, current-v3 preservation, unrelated-file preservation and audit permissions.
 
 ## Owner’s first media-aware test after release
 

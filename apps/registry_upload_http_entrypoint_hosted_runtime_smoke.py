@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+import apps.finance_partner_production_ui_flow as finance_ui_flow  # noqa: E402
 import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
 import apps.warehouse_stocks_production_ui_flow as warehouse_ui_flow  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
@@ -73,6 +74,114 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    with TemporaryDirectory(prefix="finance-retro-hosted-smoke-") as finance_temp_dir:
+        finance_plan_path = Path(finance_temp_dir) / "plan.json"
+        finance_plan_path.write_text(
+            json.dumps(
+                {
+                    "fingerprint": "sha256:finance-reviewed",
+                    "date_from": "2026-04-27",
+                    "date_to": "2026-07-19",
+                }
+            ),
+            encoding="utf-8",
+        )
+        for action, expected_timeout in (
+            ("dry-run", hosted_runtime.FINANCE_RETRO_READ_TIMEOUT_SECONDS),
+            ("readback", hosted_runtime.FINANCE_RETRO_READ_TIMEOUT_SECONDS),
+            ("apply", hosted_runtime.FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS),
+        ):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    '{"blockers":[],"target_week_count":0}'
+                    if action == "readback"
+                    else '{"status":"dry_run"}'
+                ),
+                stderr="",
+            )
+            with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+                payload = hosted_runtime._run_remote_finance_retro_action(
+                    active_target,
+                    action=action,
+                    date_from="2026-04-27",
+                    date_to="2026-07-19",
+                    plan_path=finance_plan_path if action == "apply" else None,
+                    fingerprint="sha256:finance-reviewed" if action == "apply" else "",
+                    approval_reference="human-gate-123" if action == "apply" else "",
+                )
+            if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
+                raise AssertionError(f"Finance retro {action} lost its bounded timeout")
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if "business-approved-backfill" not in remote_command:
+                raise AssertionError("Finance retro command bypassed the repo-owned runner")
+            if action == "apply" and not all(
+                token in remote_command
+                for token in (
+                    "--apply",
+                    "--confirm-fingerprint",
+                    "sha256:finance-reviewed",
+                    "--approval-reference",
+                    "human-gate-123",
+                    "/opt/wb-core-runtime/backups/wb-finance-retro",
+                )
+            ):
+                raise AssertionError("Finance retro apply lost fingerprint, backup, or human gate")
+            if action != "apply" and "--apply" in remote_command:
+                raise AssertionError("Finance retro read-only command unexpectedly enables mutation")
+            if action == "readback" and not payload.get("readback"):
+                raise AssertionError("Finance retro readback did not prove zero pending targets")
+        dry_args = hosted_runtime.build_arg_parser().parse_args(
+            ["finance-retro-dry-run", "--output", str(Path(finance_temp_dir) / "review.json")]
+        )
+        apply_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-retro-apply",
+                "--plan-file",
+                str(finance_plan_path),
+                "--fingerprint",
+                "sha256:finance-reviewed",
+                "--approval-reference",
+                "human-gate-123",
+            ]
+        )
+        if (
+            dry_args.handler is not hosted_runtime.run_finance_retro_command
+            or dry_args.finance_retro_action != "dry-run"
+            or apply_args.finance_retro_action != "apply"
+        ):
+            raise AssertionError("hosted runner must expose bounded Finance retro commands")
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_retro_action",
+                return_value={"fingerprint": "sha256:finance-reviewed", "status": "dry_run"},
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_retro_command(dry_args)
+        finance_evidence_path = Path(dry_args.output)
+        if (
+            not finance_evidence_path.is_file()
+            or finance_evidence_path.stat().st_mode & 0o777 != 0o600
+        ):
+            raise AssertionError("Finance retro reviewed evidence must be written with mode 0600")
+        try:
+            hosted_runtime._run_remote_finance_retro_action(
+                active_target,
+                action="dry-run",
+                date_from="2026-05-04",
+                date_to="2026-07-19",
+                plan_path=None,
+                fingerprint="",
+                approval_reference="",
+            )
+        except ValueError as exc:
+            if "first affected week" not in str(exc):
+                raise
+        else:
+            raise AssertionError("hosted Finance runner accepted a partial production scope")
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")
@@ -206,6 +315,31 @@ def main() -> None:
     )
     if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
+        ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]
+    )
+    if finance_ui_flow_args.handler is not hosted_runtime.run_finance_ui_flow_command:
+        raise AssertionError("hosted runner must expose canonical finance-ui-flow command")
+    if finance_ui_flow.REPORTS_PATH != "/sheet-vitrina-v1/vitrina?tab=reports":
+        raise AssertionError("Finance UI Flow must enter through canonical unified navigation")
+    required_partner_fields = ("partner_share_pct", "invested_capital_rub")
+    if not finance_ui_flow._has_complete_partner_settings(
+        {
+            "settings": {
+                "parameters": {
+                    "partner_share_pct": "40",
+                    "invested_capital_rub": "1",
+                }
+            }
+        },
+        required_partner_fields,
+    ):
+        raise AssertionError("Finance UI Flow must recognize complete existing Partner settings")
+    if finance_ui_flow._has_complete_partner_settings(
+        {"settings": {"parameters": {"partner_share_pct": "40"}}},
+        required_partner_fields,
+    ):
+        raise AssertionError("Finance UI Flow must not preview incomplete Partner settings")
     period_vitrina_url = warehouse_ui_flow._period_vitrina_url(
         "https://api.selleros.pro/",
         date_to="2026-07-19",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -33,6 +33,9 @@ WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
+FINANCE_RETRO_READ_TIMEOUT_SECONDS = 900.0
+FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS = 1800.0
+FINANCE_RETRO_FIRST_WEEK_START = "2026-04-27"
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -2270,6 +2273,150 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_finance_retro_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.finance_retro_action)
+    plan_path = (
+        Path(str(args.plan_file)).resolve() if action == "apply" else None
+    )
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("Finance retro reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_finance_retro_action(
+        target,
+        action=action,
+        date_from=str(args.date_from),
+        date_to=str(args.date_to or ""),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if action == "dry-run" and output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("Finance retro evidence output must stay outside the Git checkout")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        output_path.chmod(0o600)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_finance_retro_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    date_from: str,
+    date_to: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"finance-retro-{action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action="finance-retro-apply", dry_run=False)
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Finance retro action: {action}")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Finance retro runner requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("Finance retro runner requires the hosted environment file")
+    try:
+        date.fromisoformat(date_from)
+        if date_to:
+            date.fromisoformat(date_to)
+    except ValueError as exc:
+        raise ValueError("Finance retro scope dates must be ISO dates") from exc
+    if date_from != FINANCE_RETRO_FIRST_WEEK_START:
+        raise ValueError(
+            "Finance retro production scope must start at the first affected week "
+            f"{FINANCE_RETRO_FIRST_WEEK_START}"
+        )
+    runner_args = [
+        "python3",
+        "apps/wb_finance_weekly.py",
+        "business-approved-backfill",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--date-from",
+        date_from,
+    ]
+    if date_to:
+        runner_args.extend(["--date-to", date_to])
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("Finance retro apply requires an existing --plan-file")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
+            raise ValueError("Finance retro plan and --fingerprint do not match")
+        if str(plan.get("date_from") or "") != date_from or (
+            date_to and str(plan.get("date_to") or "") != date_to
+        ):
+            raise ValueError("Finance retro reviewed plan scope does not match command scope")
+        if not approval_reference.strip():
+            raise ValueError("Finance retro apply requires --approval-reference")
+        runner_args.extend(
+            [
+                "--apply",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/wb-finance-retro",
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=(
+            FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS
+            if action == "apply"
+            else FINANCE_RETRO_READ_TIMEOUT_SECONDS
+        ),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Finance retro {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Finance retro runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Finance retro runner returned a non-object JSON payload")
+    if action == "readback":
+        if payload.get("blockers") or int(payload.get("target_week_count") or 0) != 0:
+            raise RuntimeError("Finance retro readback did not reconcile to zero pending targets")
+        return {**payload, "status": "ready", "readback": True}
+    return payload
+
+
 def _run_remote_warehouse_functional_action(
     target: HostedRuntimeTarget,
     *,
@@ -2662,6 +2809,44 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_finance_ui_flow_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="finance-ui-flow")
+    auth_cookie = _build_probe_auth_cookie(
+        target,
+        timeout_seconds=float(args.timeout_seconds),
+    )
+    if not auth_cookie:
+        raise RuntimeError(
+            "Finance UI flow requires safely available production app-session auth"
+        )
+    evidence_dir = Path(str(args.evidence_dir)).resolve()
+    try:
+        evidence_dir.relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Finance UI evidence must be stored outside the repository")
+    from apps.finance_partner_production_ui_flow import run_finance_partner_ui_flow
+
+    result = run_finance_partner_ui_flow(
+        base_url=target.public_base_url,
+        auth_cookie=auth_cookie,
+        evidence_dir=evidence_dir,
+        headless=not bool(args.headed),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "public_base_url": target.public_base_url,
+            "auth": _probe_auth_summary(auth_cookie),
+            "result": result,
+        }
+    )
+    return 0
+
+
 def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2772,6 +2957,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     autoanswers_lifecycle.add_argument("action", choices=("status", "activate-manual", "deactivate"))
     autoanswers_lifecycle.set_defaults(handler=run_autoanswers_lifecycle_command)
+
+    finance_retro_dry_run = subparsers.add_parser(
+        "finance-retro-dry-run",
+        help="Build the read-only Finance/ads/cost manifest and exact retro-cost backfill plan.",
+    )
+    finance_retro_dry_run.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
+    finance_retro_dry_run.add_argument("--date-to", default="")
+    finance_retro_dry_run.add_argument("--output", default="")
+    finance_retro_dry_run.set_defaults(
+        handler=run_finance_retro_command,
+        finance_retro_action="dry-run",
+    )
+
+    finance_retro_apply = subparsers.add_parser(
+        "finance-retro-apply",
+        help="Apply one exact reviewed Finance retro-cost plan with backup and human gate.",
+    )
+    finance_retro_apply.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
+    finance_retro_apply.add_argument("--date-to", default="")
+    finance_retro_apply.add_argument("--plan-file", required=True)
+    finance_retro_apply.add_argument("--fingerprint", required=True)
+    finance_retro_apply.add_argument("--approval-reference", required=True)
+    finance_retro_apply.set_defaults(
+        handler=run_finance_retro_command,
+        finance_retro_action="apply",
+    )
+
+    finance_retro_readback = subparsers.add_parser(
+        "finance-retro-readback",
+        help="Prove zero pending Finance retro targets/blockers after apply.",
+    )
+    finance_retro_readback.add_argument("--date-from", default=FINANCE_RETRO_FIRST_WEEK_START)
+    finance_retro_readback.add_argument("--date-to", default="")
+    finance_retro_readback.set_defaults(
+        handler=run_finance_retro_command,
+        finance_retro_action="readback",
+    )
 
     warehouse_dry_run = subparsers.add_parser(
         "warehouse-opening-dry-run",
@@ -2993,6 +3215,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",
     )
     warehouse_ui_flow.set_defaults(handler=run_warehouse_ui_flow_command)
+
+    finance_ui_flow = subparsers.add_parser(
+        "finance-ui-flow",
+        help="Run authenticated read-only production Playwright acceptance for Finance and Partner reports.",
+    )
+    finance_ui_flow.add_argument("--evidence-dir", required=True)
+    finance_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
+    finance_ui_flow.add_argument("--headed", action="store_true")
+    finance_ui_flow.set_defaults(handler=run_finance_ui_flow_command)
 
     autoanswers_ui_flow = subparsers.add_parser(
         "autoanswers-ui-flow",

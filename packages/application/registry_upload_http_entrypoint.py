@@ -26,6 +26,7 @@ from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.wb_finance_weekly import block_from_env
+from packages.application.partner_report import PartnerReportBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
@@ -757,6 +758,12 @@ class RegistryUploadHttpEntrypoint:
         )
         self.wb_finance_weekly_block = block_from_env(self.runtime.runtime_dir)
         self.wb_finance_weekly_block.ensure_schema()
+        self.partner_report_block = PartnerReportBlock(
+            self.runtime.runtime_dir,
+            seller_id=self.wb_finance_weekly_block.seller_id,
+            now_factory=self.now_factory,
+        )
+        self.partner_report_block.ensure_schema()
         self.web_vitrina_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -933,6 +940,29 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_finance_weekly_request(self) -> dict[str, Any]:
         return self.wb_finance_weekly_block.build_payload()
+
+    def handle_partner_report_options_request(self) -> dict[str, Any]:
+        return self.partner_report_block.options()
+
+    def handle_partner_report_settings_save_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.partner_report_block.save_settings(payload, actor=actor)
+
+    def handle_partner_report_preview_request(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self.partner_report_block.preview(payload)
+
+    def handle_partner_report_finalize_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.partner_report_block.finalize(payload, actor=actor)
+
+    def handle_partner_report_finalized_list_request(
+        self, *, nm_id: str = ""
+    ) -> dict[str, Any]:
+        return self.partner_report_block.list_finalized(nm_id=nm_id)
 
     def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
         return self.runtime.ingest_cost_price_payload(

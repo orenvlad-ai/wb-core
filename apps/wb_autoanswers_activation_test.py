@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr
+import hashlib
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import shutil
@@ -235,6 +237,76 @@ class ActivationTest(unittest.TestCase):
         self.assertTrue(raw.is_file())
         self.assertTrue(sidecar.is_file())
         self.assertEqual(_integrity_check(raw), "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for superseded backup cleanup")
+    def test_verified_current_backup_prunes_minimum_legacy_pair_for_headroom(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('live')")
+
+        current_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        current_dir.mkdir(parents=True)
+        current_raw = current_dir / "registry_upload_runtime__pre_autoanswers_v3__current.sqlite3"
+        shutil.copy2(database, current_raw)
+        _compress_verified_current_schema_backup(current_raw)
+
+        legacy_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v2"
+        legacy_dir.mkdir(parents=True)
+        legacy_raw = legacy_dir / "registry_upload_runtime__pre_autoanswers_v2__legacy.sqlite3"
+        shutil.copy2(database, legacy_raw)
+        legacy_archive = legacy_raw.with_suffix(legacy_raw.suffix + ".zst")
+        subprocess.run(
+            ["zstd", "--quiet", "--force", "-o", str(legacy_archive), str(legacy_raw)],
+            check=True,
+        )
+        archive_sha = hashlib.sha256(legacy_archive.read_bytes()).hexdigest()
+        legacy_manifest = legacy_archive.with_suffix(legacy_archive.suffix + ".manifest.json")
+        legacy_manifest.write_text(
+            json.dumps(
+                {
+                    "contract": "wb_autoanswers_compressed_schema_backup_v2",
+                    "compressed_filename": legacy_archive.name,
+                    "compressed_size": legacy_archive.stat().st_size,
+                    "compressed_sha256": archive_sha,
+                    "snapshot_sha256": hashlib.sha256(legacy_raw.read_bytes()).hexdigest(),
+                    "sqlite_integrity_check": "ok",
+                }
+            ),
+            encoding="utf-8",
+        )
+        legacy_raw.unlink()
+        unrelated = legacy_dir / "keep-unrelated.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+
+        mib = 1024 * 1024
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            side_effect=[
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=400 * mib),
+                SimpleNamespace(free=400 * mib),
+            ],
+        ):
+            result = _prepare_backup_capacity(self.runtime_dir)
+
+        cleanup = result["compaction"]["superseded_cleanup"]
+        self.assertEqual(cleanup["status"], "superseded_backups_removed")
+        self.assertEqual(len(cleanup["removed"]), 1)
+        self.assertFalse(legacy_archive.exists())
+        self.assertFalse(legacy_manifest.exists())
+        self.assertTrue(unrelated.is_file())
+        audit = current_dir / str(cleanup["audit_manifest"])
+        self.assertTrue(audit.is_file())
+        audit_payload = json.loads(audit.read_text(encoding="utf-8"))
+        self.assertEqual(audit_payload["contract"], "wb_autoanswers_superseded_backup_cleanup_v1")
+        self.assertEqual(audit_payload["status"], "applied")
+        self.assertIsNone(audit_payload["planned_removal"])
+        self.assertEqual(len(audit_payload["removed"]), 1)
+        self.assertEqual(audit_payload["current_backup"]["integrity_check"], "ok")
+        self.assertEqual(audit.stat().st_mode & 0o777, 0o600)
 
     def test_status_does_not_migrate_a_database_below_target_schema(self) -> None:
         database = self.runtime_dir / "registry_upload_runtime.sqlite3"

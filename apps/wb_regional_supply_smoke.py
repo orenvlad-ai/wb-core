@@ -24,6 +24,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.wb_supply_overlay import build_warehouse_district_mapping
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock, _allocate_boxes
+from packages.application.wb_regional_supply_export import recommendation_identity, recommendation_prefix
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
@@ -585,15 +586,14 @@ def main() -> None:
             raise AssertionError(f"central district filename must be stable ASCII, got {central_filename!r}")
         if central_rows[0][:2] != ["Федеральный округ", "ЦФО Север"]:
             raise AssertionError("planning-zone workbook must start with direction identification")
-        if central_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
-            raise AssertionError("district workbook must keep compact Russian headers with deficit")
+        if central_rows[2] != ["nmId", "SKU", "Количество к поставке"]:
+            raise AssertionError("district workbook must keep compact Russian headers without deficit")
+        if any(cell == "Дефицит" for row in central_rows for cell in row):
+            raise AssertionError("district workbook must not export the removed deficit column")
         load_workbook(BytesIO(central_workbook), data_only=True)
         central_allocated_sum = sum(int(row[2]) for row in central_rows[3:] if len(row) >= 3 and str(row[2]).strip())
-        central_deficit_sum = sum(int(row[3]) for row in central_rows[3:] if len(row) >= 4 and str(row[3]).strip())
         if central_allocated_sum != districts[PLANNING_ZONE_CENTRAL_NORTH].total_qty:
             raise AssertionError("district workbook sum must equal district total in summary")
-        if central_deficit_sum != districts[PLANNING_ZONE_CENTRAL_NORTH].deficit_qty:
-            raise AssertionError("district workbook deficit sum must equal district deficit in summary")
 
         try:
             regional_block.download_district_recommendation("far_siberia")
@@ -603,16 +603,37 @@ def main() -> None:
         else:
             raise AssertionError("excluded district direct download must be blocked")
 
+        _seed_export_nomenclature(runtime, active_nm_ids=active_nm_ids)
         archive_bytes, archive_filename = regional_block.download_all_recommendations_archive()
-        if archive_filename != "wb_regional_recommendations_2026-04-18.zip" or not _is_ascii(archive_filename):
-            raise AssertionError(f"ZIP filename must be stable ASCII with report date, got {archive_filename!r}")
+        if (
+            not archive_filename.startswith("Рекомендации_поставок_2026-04-18_14-00_")
+            or selected_result.calculation_id not in archive_filename
+            or not archive_filename.endswith(".zip")
+        ):
+            raise AssertionError(f"ZIP filename must carry calculation identity and stable timestamp, got {archive_filename!r}")
+        expected_archive_names: list[str] = []
+        for ordinal, district in enumerate(selected_result.districts, start=1):
+            recommendation_id = recommendation_identity(
+                report_date=selected_result.report_date,
+                calculation_id=selected_result.calculation_id,
+                ordinal=ordinal,
+            )
+            prefix = recommendation_prefix(
+                ordinal=ordinal,
+                recommendation_id=recommendation_id,
+                destination_name=district.planning_zone_label or district.district_name_ru,
+            )
+            expected_archive_names.extend(
+                [
+                    f"{prefix}/{prefix}__01_РЕКОМЕНДАЦИЯ.xlsx",
+                    f"{prefix}/{prefix}__02_ЗАГРУЗКА_WB.xlsx",
+                ]
+            )
         with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
-            archive_names = sorted(archive.namelist())
-            if archive_names != ["wb_regional_central_north_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
-                raise AssertionError(f"ZIP must contain only included district XLSX files, got {archive_names}")
+            archive_names = archive.namelist()
+            if archive_names != expected_archive_names:
+                raise AssertionError(f"ZIP must contain paired district XLSX folders in UI order, got {archive_names}")
             for name in archive_names:
-                if not _is_ascii(name):
-                    raise AssertionError(f"ZIP member filename must be ASCII, got {name!r}")
                 load_workbook(BytesIO(archive.read(name)), data_only=True)
 
         _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
@@ -678,7 +699,6 @@ def main() -> None:
         print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
         print(f"regional_audit: ok -> {latest_audit.get('calculation_id')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
-        print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
         print(f"recommendations_zip: ok -> {archive_names}")
 
 
@@ -794,6 +814,32 @@ def _is_ascii(value: str) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def _seed_export_nomenclature(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+) -> None:
+    runtime.save_nomenclature_items_atomic(
+        [
+            {
+                "item_id": f"regional-export-{int(nm_id)}",
+                "is_active": True,
+                "nm_id": int(nm_id),
+                "barcode": f"46{int(nm_id)}",
+                "barcodes": [f"46{int(nm_id)}"],
+                "barcode_source": "manual",
+                "barcode_status": "manual",
+                "nomenclature_name": f"Regional export SKU {int(nm_id)}",
+                "product_type": "clear",
+                "match_key": f"regional-export-{int(nm_id)}",
+                "created_at": ACTIVATED_AT,
+                "updated_at": ACTIVATED_AT,
+            }
+            for nm_id in active_nm_ids
+        ]
+    )
 
 
 def _seed_runtime_sales_history(

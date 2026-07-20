@@ -86,6 +86,8 @@ Periodic WB WAC получает accepted inbound capital, но quantity все�
 
 Weekly Finance читает WB unit cost только из канонической строки `sheet_vitrina_v1_warehouse_wb_daily_cost` той же business date. После functional cutover отсутствие exact-date строки является явным unknown и не может наследовать текущий, более поздний или last-good functional balance.
 
+Исключение существует только как отдельная Finance consumer projection, а не warehouse history: для Finance operations `2026-05-01..2026-06-30` repo-owned runner immutably snapshots canonical cost `2026-07-01` (или первую более позднюю строку того же `nmId`) в `wb_finance_retro_cost_map`. Это не создаёт backdated warehouse balances/events, не меняет functional rows и не разрешает другим consumers выдавать июльский WAC за фактический майский складской остаток.
+
 # 3. Frozen historical boundary
 
 Новая warehouse history начинается functional cutover timestamp; текущий snapshot не размножается назад. Старые warehouse values остаются audit/empty.

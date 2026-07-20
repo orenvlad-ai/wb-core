@@ -14,6 +14,42 @@ from apps.wb_autoanswers_runtime_test import feedback, successful_result
 
 
 class AutoanswersUiBrowserTest(unittest.TestCase):
+    def test_technical_spoiler_names_not_run_checks_before_generation(self) -> None:
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            repository = fixture.entrypoint.autoanswers_repository
+            repository.update_settings(master_enabled=True, mode="manual", actor_id="local_operator")
+            repository.upsert_feedback(
+                feedback("browser-not-generated", text="Отзыв ещё не отправлялся в AI"),
+                source_stream="steady",
+                run_kind="steady",
+            )
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 1280, "height": 800})
+                page.goto(
+                    base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks",
+                    wait_until="domcontentloaded",
+                )
+                page.locator('[data-feedbacks-subpanel="server-reviews"]:not([hidden])').wait_for()
+                page.wait_for_function("document.querySelectorAll('[data-autoanswers-open]').length === 1")
+                page.locator("[data-autoanswers-open]").click()
+                dialog = page.locator("[data-autoanswers-detail-dialog][open]")
+                dialog.wait_for()
+                dialog.locator(".autoanswers-technical summary").click()
+                expanded = dialog.locator("[data-autoanswers-detail-body]").inner_text()
+                for marker in (
+                    "AI ещё не запускался",
+                    "JSON contract: не запускался",
+                    "Hard gates: не запускались",
+                    "Fallback: не применялся",
+                    "Media uncertainty: не проверялась",
+                ):
+                    self.assertIn(marker, expanded)
+                self.assertEqual(dialog.locator("[data-autoanswers-generate]").count(), 1)
+                self.assertEqual(dialog.locator("[data-autoanswers-publish]").count(), 0)
+                browser.close()
+
     def test_compact_detail_autogrow_fixed_answer_copy_media_and_narrow_layout(self) -> None:
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
         with fixture as base_url:
@@ -104,6 +140,9 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 page.wait_for_function(
                     "document.querySelectorAll('[data-autoanswers-open]').length === 1"
                 )
+                backlog = page.locator("[data-autoanswers-backlog]")
+                self.assertEqual(backlog.count(), 1)
+                self.assertTrue(backlog.is_disabled())
 
                 answer_box = page.locator(".autoanswers-answer-box")
                 before_text = answer_box.inner_text()
@@ -127,7 +166,14 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 for omitted in ("Плюсы:", "Минусы:", "Теги:", "Route:", "JSON contract", "Audit trail"):
                     self.assertNotIn(omitted, visible)
                 self.assertEqual(dialog.locator(".autoanswers-media-item").count(), 2)
-                dialog.locator(".autoanswers-media-item").first.wait_for(state="visible")
+                media_items = dialog.locator(".autoanswers-media-item")
+                media_items.first.wait_for(state="visible")
+                page.wait_for_function(
+                    "node => node.complete && node.naturalWidth > 0",
+                    arg=media_items.first.element_handle(),
+                )
+                self.assertGreater(media_items.first.evaluate("node => node.naturalWidth"), 0)
+                self.assertEqual(media_items.first.get_attribute("loading"), None)
 
                 editor = dialog.locator("[data-autoanswers-manual-reply]")
                 initial = editor.evaluate("node => ({client: node.clientHeight, scroll: node.scrollHeight})")
