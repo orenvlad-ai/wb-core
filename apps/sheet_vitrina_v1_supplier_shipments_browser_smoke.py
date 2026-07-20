@@ -517,6 +517,32 @@ def main() -> None:
                 expect(frame.locator("#supplierOrderDocumentsTable th[data-column-key='counterparty']")).to_be_hidden()
                 frame.locator("#financialDocumentsColumnChooser [data-column-reset]").click()
                 expect(frame.locator("#supplierOrderDocumentsTable th[data-column-key='counterparty']")).to_be_visible()
+                page.set_viewport_size({"width": 390, "height": 844})
+                documents_narrow_layout = frame.locator("body").evaluate(
+                    """() => {
+                        const table = document.querySelector('#supplierOrderDocumentsTable');
+                        const wrap = table ? table.closest('.line-wrap') : null;
+                        const title = document.querySelector('#cardTitle')?.getBoundingClientRect();
+                        const card = document.querySelector('#shipmentCard')?.getBoundingClientRect();
+                        return {
+                            bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                            tableScrolls: !!wrap && wrap.scrollWidth > wrap.clientWidth,
+                            chooserVisible: !!document.querySelector('#financialDocumentsColumnChooser > summary')?.getClientRects().length,
+                            titleContained: !!title && !!card && title.right <= card.right + 1
+                        };
+                    }"""
+                )
+                if (
+                    documents_narrow_layout["bodyOverflow"] > 2
+                    or not documents_narrow_layout["tableScrolls"]
+                    or not documents_narrow_layout["chooserVisible"]
+                    or not documents_narrow_layout["titleContained"]
+                ):
+                    raise AssertionError(
+                        "narrow documents layout must wrap the order identity and keep table scrolling local: "
+                        f"{documents_narrow_layout}"
+                    )
+                page.set_viewport_size({"width": 1440, "height": 1000})
                 with page.expect_download(timeout=5000):
                     frame.get_by_role("link", name="Скачать пакет для логистов").click()
                 expect(frame.locator("#package-receipt-logistics")).to_contain_text("Пакет скачан частично:", timeout=5000)
