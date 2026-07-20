@@ -24,7 +24,10 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 import zlib
 
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.registry_upload_http_entrypoint import (
+    RegistryUploadHttpEntrypoint,
+    SupplierAccountingPackageBlockedError,
+)
 from packages.application.operator_instructions import (
     INSTRUCTION_NEW_BADGE_LABEL,
     InstructionBlock,
@@ -3949,6 +3952,9 @@ def _build_handler(
                         shipment_id,
                         package_kind=package_kind,
                     )
+                except SupplierAccountingPackageBlockedError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, exc.diagnostics)
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return

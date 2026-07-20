@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from http import HTTPStatus
 from io import BytesIO
 import json
 from pathlib import Path
@@ -17,7 +16,7 @@ from urllib import request as urllib_request
 import zipfile
 import zlib
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,6 +36,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.contracts.supplier_financial_documents import FINANCIAL_DOCUMENT_PARSER_VERSION  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_customs_breakdown import DT_ANNEX_ITEMS_PARSER_VERSION  # noqa: E402
 from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
@@ -788,11 +788,10 @@ def _assert_parser_smoke() -> None:
     enriched_item = annex_enriched.get("normalized_parse", {}).get("goods_items", [{}])[0]
     projected_annex = annex_enriched.get("normalized_parse", {}).get("annex_items", [])
     if (
-        enriched_item.get("source_name") != "Sanitized Alpha | Sanitized Beta"
-        or enriched_item.get("quantity") != 15.0
-        or enriched_item.get("unit") != "шт"
-        or enriched_item.get("quantity_evidence") != "dt_box_31_annex_quantity_total"
-        or enriched_item.get("identifiers", {}).get("annex_source_models") != ["A-1", "B-2"]
+        enriched_item.get("source_name") != ""
+        or enriched_item.get("quantity") != 1.5
+        or enriched_item.get("unit") != "кг"
+        or enriched_item.get("identifiers") != {"customs_code": "7020008000"}
         or len(projected_annex) != 2
         or projected_annex[0].get("parent_position_number") != "1"
         or projected_annex[0].get("annex_row_number") != "1"
@@ -804,7 +803,8 @@ def _assert_parser_smoke() -> None:
         or annex_enriched.get("normalized_parse", {}).get("annex_item_count") != 2
         or annex_enriched.get("normalized_parse", {}).get("annex_quantity_total") != 15.0
         or annex_enriched.get("normalized_parse", {}).get("annex_quantity_conserved") is not True
-        or annex_enriched.get("normalized_parse", {}).get("annex_items_parser_version") != "supplier_customs_annex_items_v1"
+        or annex_enriched.get("normalized_parse", {}).get("annex_items_parser_version") != "supplier_customs_annex_items_v2"
+        or annex_enriched.get("normalized_parse", {}).get("annex_parent_positions_complete") is not True
         or annex_enriched.get("normalized_parse", {}).get("total_goods_count") != 1
         or annex_enriched.get("normalized_parse", {}).get("customs_gross_weight_kg") != 2.0
         or annex_enriched.get("normalized_parse", {}).get("customs_net_weight_kg") != 1.5
@@ -2522,28 +2522,38 @@ def _assert_http_api_smoke() -> None:
             ):
                 raise AssertionError(f"logistics HTTP receipt must come from exact ZIP assembly: {logistics_receipt}")
             accounting_status, accounting_bytes, accounting_headers = _get_bytes(f"{documents_url}/accounting-package.zip")
-            if accounting_status != 200:
-                raise AssertionError(f"accounting package route failed: {accounting_status}")
-            accounting_manifest = _zip_manifest(accounting_bytes)
-            accounting_receipt = _package_receipt_header(accounting_headers)
-            accounting_types = [item.get("document_type") for item in accounting_manifest.get("included", [])]
+            if accounting_status != 409:
+                raise AssertionError(f"unreconciled accounting package must return controlled 409: {accounting_status}")
+            accounting_blocked = json.loads(accounting_bytes.decode("utf-8"))
             if (
-                accounting_manifest.get("status") != "complete"
-                or accounting_receipt.get("included") != accounting_manifest.get("included")
-                or set(accounting_types) != {"invoice", "contract", "customs_declaration", "customs_declaration_breakdown_xlsx"}
-                or accounting_types.count("customs_declaration") != 1
-                or accounting_types.count("customs_declaration_breakdown_xlsx") != 1
-                or not accounting_manifest.get("requires_review")
-                or accounting_manifest.get("review_message") != "Расшифровка ДТ требует проверки"
+                accounting_blocked.get("contract_name") != "sheet_vitrina_v1_supplier_accounting_package_blocked"
+                or accounting_blocked.get("status") != "blocked"
+                or accounting_blocked.get("requires_review") is not True
+                or not accounting_blocked.get("blocker_reasons")
+                or accounting_bytes.startswith(b"PK")
+                or "Content-Disposition" in accounting_headers
             ):
-                raise AssertionError(f"accounting package contract mismatch: {accounting_manifest} {accounting_receipt}")
-            with zipfile.ZipFile(BytesIO(accounting_bytes)) as accounting_archive:
-                workbook_names = [name for name in accounting_archive.namelist() if name.endswith(".xlsx") and "rasshifrovka" in name]
-                if len(workbook_names) != 1:
-                    raise AssertionError(f"accounting package must contain one DT workbook: {accounting_archive.namelist()}")
-                workbook = load_workbook(BytesIO(accounting_archive.read(workbook_names[0])), read_only=True, data_only=True)
-                if set(workbook.sheetnames) != {"Расшифровка ДТ", "Контроль"}:
-                    raise AssertionError(f"generated DT workbook sheets changed: {workbook.sheetnames}")
+                raise AssertionError(f"accounting fail-closed contract mismatch: {accounting_blocked} {accounting_headers}")
+            _make_http_accounting_fixture_ready(runtime)
+            accounting_ok_status, accounting_ok_bytes, accounting_ok_headers = _get_bytes(
+                f"{documents_url}/accounting-package.zip"
+            )
+            accounting_ok_receipt = _package_receipt_header(accounting_ok_headers)
+            accounting_ok_manifest = _zip_manifest(accounting_ok_bytes)
+            if (
+                accounting_ok_status != 200
+                or not accounting_ok_bytes.startswith(b"PK")
+                or "attachment" not in accounting_ok_headers.get("Content-Disposition", "")
+                or accounting_ok_receipt.get("status") != "complete"
+                or accounting_ok_receipt.get("requires_review") is not False
+                or accounting_ok_receipt.get("accounting_reconciliation", {}).get("package_ready") is not True
+                or accounting_ok_receipt.get("accounting_reconciliation", {}).get("matched_count") != 1
+                or accounting_ok_manifest.get("requires_review") is not False
+            ):
+                raise AssertionError(
+                    "100% reconciled accounting HTTP response must be the only successful ZIP: "
+                    f"{accounting_ok_status} {accounting_ok_receipt} {accounting_ok_manifest}"
+                )
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
@@ -2658,6 +2668,106 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "errors": [],
         },
         lines=[],
+    )
+
+
+def _make_http_accounting_fixture_ready(runtime: RegistryUploadDbBackedRuntime) -> None:
+    """Promote only the sanitized HTTP fixture to a fully proven accounting package."""
+
+    shipment = runtime.load_supplier_shipment("sup_financial") or {}
+    header = dict(shipment.get("header") or {})
+    invoice_path = runtime.runtime_dir / str(header.get("source_file_path") or "")
+    header.update(
+        {
+            "source_file_sha256": hashlib.sha256(invoice_path.read_bytes()).hexdigest(),
+            "product_qty_total": 116250,
+            "match_status": "all_matched",
+            "warnings": [],
+            "errors": [],
+            "updated_at": "2026-06-19T08:00:00Z",
+        }
+    )
+    runtime.save_supplier_shipment(
+        header=header,
+        lines=[
+            {
+                "line_id": "strict-http-product-1",
+                "line_type": "product",
+                "sort_order": 1,
+                "source_no": "1",
+                "barcode": "0000000000777",
+                "product_type": "clean",
+                "model_raw": "iPhone 13 Pro",
+                "model_normalized": "iphone 13 pro",
+                "internal_nm_id": 777,
+                "internal_name": "Sanitized Clean iPhone 13 Pro",
+                "qty": 116250,
+                "match_status": "matched_by_barcode",
+                "raw": {},
+            }
+        ],
+    )
+    runtime.save_nomenclature_item(
+        {
+            "item_id": "strict-http-nomenclature-777",
+            "is_active": True,
+            "is_hidden": False,
+            "nm_id": 777,
+            "barcode": "0000000000777",
+            "barcodes": ["0000000000777"],
+            "nomenclature_name": "Sanitized Clean iPhone 13 Pro",
+            "product_type": "clean",
+            "compatible_models_text": "iPhone 13 Pro",
+            "compatible_model_keys": ["iphone_13_pro"],
+            "created_at": "2026-06-19T08:00:00Z",
+            "updated_at": "2026-06-19T08:00:00Z",
+        }
+    )
+    customs = next(
+        document
+        for document in runtime.list_supplier_financial_documents("sup_financial")
+        if document.get("document_type") == "customs_declaration"
+    )
+    customs["normalized_parse"] = {
+        **dict(customs.get("normalized_parse") or {}),
+        "goods_items": [
+            {
+                "position_number": "1",
+                "source_name": "Sanitized canonical customs position",
+                "quantity": 8806.18,
+                "unit": "кг",
+                "identifiers": {"customs_code": "7020008000"},
+            }
+        ],
+        "goods_item_count": 1,
+        "annex_items": [
+            {
+                "parent_position_number": "1",
+                "annex_row_number": "1",
+                "source_name": "Sanitized protective glass",
+                "article": "13 Pro",
+                "source_model": "iPhone 13 Pro",
+                "quantity": 116250,
+                "unit": "ШТ",
+                "barcode": "",
+                "identifiers": {
+                    "article": "13 Pro",
+                    "source_model": "iPhone 13 Pro",
+                    "customs_code": "7020008000",
+                },
+            }
+        ],
+        "annex_item_count": 1,
+        "annex_quantity_total": 116250,
+        "annex_quantity_conserved": True,
+        "annex_parent_position_count": 1,
+        "annex_parent_positions_complete": True,
+        "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
+    }
+    customs["parser_version"] = FINANCIAL_DOCUMENT_PARSER_VERSION
+    runtime.save_supplier_financial_document(
+        document=customs,
+        expense_lines=list(customs.get("expense_lines") or []),
     )
 
 

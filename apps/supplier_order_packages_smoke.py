@@ -16,13 +16,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    SupplierAccountingPackageBlockedError,
     _build_supplier_order_documents_archive,
 )
 from packages.application.supplier_customs_breakdown import (  # noqa: E402
+    DT_ANNEX_ITEMS_PARSER_VERSION,
+    STRICT_ACCOUNTING_RECONCILIATION_VERSION,
     WORKBOOK_HEADERS,
     build_customs_breakdown_xlsx,
     match_customs_annex_items,
     match_customs_goods_items,
+)
+from packages.application.supplier_financial_documents import (  # noqa: E402
+    _enrich_customs_goods_items_from_annex_rows,
+    _extract_customs_annex_rows_from_layout_pages,
 )
 from packages.application.supplier_customs_dt_matching_policy import (  # noqa: E402
     DT_ANNEX_MATCHING_POLICY_VERSION,
@@ -83,13 +90,13 @@ NOMENCLATURE = [
 
 def main() -> None:
     _assert_dt_annex_policy()
-    _assert_dt_annex_order_scoped_matching_and_workbook()
-    _assert_matching_and_workbook()
-    _assert_incomplete_customs_workbook_fails_closed()
+    _assert_annex_parser_boundaries()
+    _assert_strict_reconciliation_and_workbook()
+    _assert_strict_reconciliation_blockers()
     _assert_logistics_assemblies()
-    _assert_accounting_complete_annex_package()
-    _assert_accounting_multiple_customs()
-    _assert_accounting_reparses_stored_customs_read_only()
+    _assert_strict_accounting_package()
+    _assert_strict_accounting_multiple_customs()
+    _assert_strict_accounting_reparse_is_read_only()
     print("supplier_order_packages_smoke: OK")
 
 
@@ -204,7 +211,7 @@ def _assert_dt_annex_order_scoped_matching_and_workbook() -> None:
                 "annex_item_count": 4,
                 "annex_quantity_total": 14,
                 "annex_quantity_conserved": True,
-                "annex_items_parser_version": "supplier_customs_annex_items_v1",
+                "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
             },
         },
         shipment={"header": {"shipment_id": "order-safe", "invoice_no": "SAFE-1"}},
@@ -441,7 +448,7 @@ def _assert_accounting_complete_annex_package() -> None:
         "annex_item_count": 2,
         "annex_quantity_total": 10,
         "annex_quantity_conserved": True,
-        "annex_items_parser_version": "supplier_customs_annex_items_v1",
+        "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
     }
     payload = {
         "supplier_order_id": "order-safe",
@@ -480,63 +487,6 @@ def _assert_accounting_complete_annex_package() -> None:
             raise AssertionError("accounting XLSX must contain every annex row, not one aggregate")
         if any(sheet.cell(row, 11).value != "0012345678901" for row in range(header_row + 1, sheet.max_row + 1)):
             raise AssertionError("matched accounting XLSX rows must carry canonical order barcode")
-
-
-def _assert_accounting_multiple_customs() -> None:
-    first_dt = _document("dt-1", "customs_declaration", "dt.pdf")
-    first_dt["document_number"] = "10131010/100626/5187132"
-    first_dt["normalized_parse"] = {
-        "declaration_number": first_dt["document_number"],
-        "declaration_date": "2026-06-10",
-        "goods_items": [_goods("1", "Exact Model Alpha", 10, barcode="4600000000001")],
-    }
-    second_dt = _document("dt-2", "customs_declaration", "dt.pdf")
-    second_dt["document_number"] = "10228010/030726/5211187"
-    second_dt["normalized_parse"] = {
-        "declaration_number": second_dt["document_number"],
-        "declaration_date": "2026-07-03",
-        "goods_items": [_goods("1", "Unknown exact source", 7)],
-    }
-    excluded_dt = _document("dt-excluded", "customs_declaration", "excluded-dt.pdf")
-    excluded_dt["parse_status"] = "excluded"
-    payload = {
-        "supplier_order_id": "order-safe",
-        "shipment": {
-            "header": {"shipment_id": "order-safe", "invoice_no": "SAFE-1"},
-            "lines": SHIPMENT_LINES,
-        },
-        "required_documents": [
-            _document("invoice-1", "invoice", "invoice.xlsx"),
-            _document("contract-1", "contract", "contract.pdf"),
-            first_dt,
-            second_dt,
-            excluded_dt,
-        ],
-    }
-    archive_bytes, receipt = _build_supplier_order_documents_archive(
-        payload,
-        package_type="accounting",
-        file_loader=_fixture_loader,
-        nomenclature_items=NOMENCLATURE,
-    )
-    manifest, names = _manifest_and_names(archive_bytes)
-    generated = manifest.get("generated_files") or []
-    if (
-        receipt.get("status") != "complete"
-        or receipt.get("counts", {}).get("expected") != 6
-        or receipt.get("counts", {}).get("included") != 6
-        or len(generated) != 2
-        or len({item.get("archive_name") for item in generated}) != 2
-        or any(item.get("document_id") == "dt-excluded" for item in manifest.get("included") or [])
-        or not receipt.get("requires_review")
-        or receipt.get("review_message") != "Расшифровка ДТ требует проверки"
-    ):
-        raise AssertionError(f"multi-DT accounting package mismatch: {receipt} {names}")
-    with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
-        for item in generated:
-            workbook = load_workbook(BytesIO(archive.read(item["archive_name"])), read_only=True, data_only=True)
-            if "Контроль" not in workbook.sheetnames:
-                raise AssertionError(f"generated DT workbook is unreadable: {item}")
 
 
 def _assert_accounting_reparses_stored_customs_read_only() -> None:
@@ -583,7 +533,7 @@ def _assert_accounting_reparses_stored_customs_read_only() -> None:
                         "quantity_evidence": "dt_box_38_net_weight_kg",
                     }
                 ],
-                "annex_items_parser_version": "supplier_customs_annex_items_v1",
+                "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
                 "annex_item_count": 2,
                 "annex_quantity_total": 12.5,
                 "annex_quantity_conserved": True,
@@ -621,6 +571,541 @@ def _assert_accounting_reparses_stored_customs_read_only() -> None:
         quantities = [sheet.cell(row=row, column=7).value for row in range(header_row + 1, sheet.max_row + 1)]
         if quantities != [5, 7.5] or any(sheet.cell(row=row, column=8).value != "ШТ" for row in range(header_row + 1, sheet.max_row + 1)):
             raise AssertionError("read-only reparsed DT workbook did not preserve each annex row quantity/unit")
+
+
+def _layout_header() -> str:
+    return (
+        f"{'№':<4}{'НАИМЕНОВАНИЕ':<34}{'ПРОИЗВОДИТЕЛЬ':<20}{'МАРКА':<16}"
+        f"{'МОДЕЛЬ':<28}{'КОЛ-ВО':<16}{'АРТИКУЛ':<28}"
+    )
+
+
+def _layout_row(row_number: int, article: str, quantity: int) -> str:
+    return (
+        f"{row_number:<4}{'Sanitized protective glass':<34}{'Sanitized maker':<20}{'Safe':<16}"
+        f"{article:<28}{f'{quantity} ШТ':<16}{article:<28}"
+    )
+
+
+def _assert_annex_parser_boundaries() -> None:
+    multi_quantities = [5500, *([4100] * 26), 4150]
+    multi_pages = [
+        "\n".join(
+            line
+            for position, quantity in enumerate(multi_quantities, start=1)
+            for line in (
+                f"31 Товар № {position}",
+                _layout_header(),
+                _layout_row(1, f"Safe {13 + position % 4} Pro", quantity),
+            )
+        )
+    ]
+    multi_rows = _extract_customs_annex_rows_from_layout_pages(multi_pages)
+    if (
+        len(multi_rows) != 28
+        or sum(int(item["quantity"]) for item in multi_rows) != 116250
+        or [item.get("annex_row_number") for item in multi_rows] != ["1"] * 28
+        or [item.get("parent_position_number") for item in multi_rows] != [str(index) for index in range(1, 29)]
+    ):
+        raise AssertionError(f"multi-position box-31 projection changed: {multi_rows}")
+    canonical_goods = [
+        {
+            "position_number": str(index),
+            "source_name": f"Canonical safe position {index}",
+            "quantity": float(index),
+            "unit": "кг",
+            "identifiers": {"customs_code": "7000000000"},
+        }
+        for index in range(1, 29)
+    ]
+    original_goods = json.loads(json.dumps(canonical_goods))
+    enriched = _enrich_customs_goods_items_from_annex_rows(
+        {
+            "normalized_parse": {
+                "document_type": "customs_declaration",
+                "goods_items": canonical_goods,
+                "total_goods_count": 28,
+                "gross_weight_kg": 999.5,
+            }
+        },
+        multi_rows,
+    )
+    normalized = enriched["normalized_parse"]
+    if (
+        normalized.get("goods_items") != original_goods
+        or normalized.get("total_goods_count") != 28
+        or normalized.get("gross_weight_kg") != 999.5
+        or normalized.get("annex_item_count") != 28
+        or normalized.get("annex_quantity_total") != 116250
+        or normalized.get("annex_items_parser_version") != DT_ANNEX_ITEMS_PARSER_VERSION
+        or normalized.get("annex_parent_positions_complete") is not True
+        or any(item.get("unit") != "ШТ" for item in normalized.get("annex_items") or [])
+    ):
+        raise AssertionError(f"multi-position enrichment changed canonical aggregates: {normalized}")
+
+    for row_count, quantities, expected_total in (
+        (27, [750, *([3000] * 25), 4500], 80250),
+        (22, [250, *([2500] * 20), 5000], 55250),
+    ):
+        split = row_count // 2
+        pages = [
+            "\n".join(["Товар № 1", _layout_header(), *[
+                _layout_row(index, f"Safe {13 + index % 4}", quantity)
+                for index, quantity in enumerate(quantities[:split], start=1)
+            ]]),
+            "\n".join([_layout_header(), *[
+                _layout_row(index, f"Safe {13 + index % 4}", quantity)
+                for index, quantity in enumerate(quantities[split:], start=split + 1)
+            ]]),
+        ]
+        rows = _extract_customs_annex_rows_from_layout_pages(pages)
+        if len(rows) != row_count or sum(int(item["quantity"]) for item in rows) != expected_total:
+            raise AssertionError(f"single-position multi-row annex changed: {row_count} {rows}")
+        if any(item.get("parent_position_number") != "1" for item in rows):
+            raise AssertionError("parent position was not carried through a page break")
+
+    page_break_rows = _extract_customs_annex_rows_from_layout_pages([
+        "Товар № 7",
+        "\n".join([_layout_header(), _layout_row(1, "Safe 13 Pro", 125)]),
+    ])
+    if len(page_break_rows) != 1 or page_break_rows[0].get("parent_position_number") != "7":
+        raise AssertionError(f"position marker was not carried to the following page: {page_break_rows}")
+
+
+def _strict_fixture(first_quantity: int = 5500) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    lines = [
+        _strict_line("line-clean-wide", 501, "clean", ["iphone_17e", "iphone_16e", "iphone_14", "iphone_13", "iphone_13_pro"], "0000000000501", "Safe Clean Wide", first_quantity, 1),
+        _strict_line("line-anti", 502, "anti_spy", ["iphone_13_pro"], "0000000000502", "Safe Anti 13 Pro", 2000, 2),
+        _strict_line("line-matte", 503, "matte", ["iphone_14_pro_max"], "0000000000503", "Safe Matte 14 Pro Max", 3000, 3),
+        {
+            "line_id": "line-extra",
+            "line_type": "extra",
+            "sort_order": 4,
+            "qty": 999,
+            "match_status": "extra",
+        },
+    ]
+    nomenclature = [_dt_nomenclature(line) for line in lines if line.get("line_type") == "product"]
+    annex = [
+        _annex("1", "1", "14-13-13PRO", "14-13-13PRO", first_quantity),
+        _annex("1", "2", "Anti-spy 13 Pro", "Anti-spy 13 Pro", 2000),
+        _annex("1", "3", "Matte 14 Pro Max", "Matte 14 Pro Max", 3000),
+    ]
+    shipment = {
+        "shipment_id": "order-safe",
+        "invoice_no": "SAFE-1",
+        "product_qty_total": first_quantity + 5000,
+        "match_status": "all_matched",
+        "errors": [],
+        "lines": lines,
+    }
+    return lines, nomenclature, annex, shipment
+
+
+def _strict_line(
+    line_id: str,
+    nm_id: int,
+    product_type: str,
+    model_keys: list[str],
+    barcode: str,
+    name: str,
+    quantity: int,
+    sort_order: int,
+) -> dict[str, object]:
+    line = _dt_line(line_id, nm_id, product_type, model_keys, barcode, name, sort_order)
+    line["qty"] = quantity
+    return line
+
+
+def _assert_strict_reconciliation_and_workbook() -> None:
+    lines, nomenclature, annex, shipment = _strict_fixture()
+    matching = match_customs_annex_items(
+        annex_items=annex,
+        goods_items=[_goods("1", "Canonical aggregate", 1)],
+        shipment_lines=lines,
+        nomenclature_items=nomenclature,
+        expected_quantity_total=10500,
+        parser_quantity_conserved=True,
+        shipment=shipment,
+    )
+    if (
+        not matching.get("package_ready")
+        or matching.get("matched_count") != 3
+        or matching.get("ambiguous_count") != 0
+        or matching.get("unmatched_count") != 0
+        or matching.get("invoice_product_row_count") != 3
+        or matching.get("dt_annex_row_count") != 3
+        or matching.get("invoice_product_quantity_total") != "10500"
+        or matching.get("dt_quantity_total") != "10500"
+        or matching.get("invoice_product_lines_covered") != 3
+        or not matching.get("per_owner_quantity_reconciled")
+        or matching.get("reconciliation_version") != STRICT_ACCOUNTING_RECONCILIATION_VERSION
+    ):
+        raise AssertionError(f"strict three-way reconciliation changed: {matching}")
+    bounded = [row for row in matching["rows"] if row.get("status") == "matched_by_bounded_reconciliation"]
+    if len(bounded) != 1 or bounded[0].get("nm_id") != 501 or "model-key containment" not in str(bounded[0].get("basis")):
+        raise AssertionError(f"bounded 14-13-13PRO proof changed: {bounded}")
+    if any(not row.get("nomenclature_name") or not row.get("barcode") for row in matching["rows"]):
+        raise AssertionError("strict matcher lost server-owned nmID/name/barcode evidence")
+
+    for first_quantity in (5500, 750, 250):
+        quantity_lines, quantity_nomenclature, quantity_annex, quantity_shipment = _strict_fixture(first_quantity)
+        quantity_matching = match_customs_annex_items(
+            annex_items=quantity_annex,
+            goods_items=[_goods("1", "Canonical aggregate", 1)],
+            shipment_lines=quantity_lines,
+            nomenclature_items=quantity_nomenclature,
+            parser_quantity_conserved=True,
+            shipment=quantity_shipment,
+        )
+        bounded_rows = [row for row in quantity_matching["rows"] if row.get("status") == "matched_by_bounded_reconciliation"]
+        if not quantity_matching.get("package_ready") or len(bounded_rows) != 1 or bounded_rows[0].get("quantity") != str(first_quantity):
+            raise AssertionError(f"bounded first-row quantity {first_quantity} changed: {quantity_matching}")
+
+    barcode_item = _annex("1", "1", "Anti-spy 13 Pro", "Matte 14 Pro Max", 5500)
+    barcode_item["barcode"] = "0000000000501"
+    barcode_item["identifiers"]["barcode"] = "0000000000501"
+    barcode_match = match_customs_annex_items(
+        annex_items=[barcode_item],
+        goods_items=[_goods("1", "Canonical aggregate", 1)],
+        shipment_lines=[lines[0]],
+        nomenclature_items=[nomenclature[0]],
+        parser_quantity_conserved=True,
+        shipment={"product_qty_total": 5500},
+    )
+    if not barcode_match.get("package_ready") or barcode_match["rows"][0].get("nm_id") != 501 or barcode_match["rows"][0].get("source_barcode") != "0000000000501":
+        raise AssertionError(f"exact DT barcode priority changed: {barcode_match}")
+
+    workbook_bytes, _, receipt = build_customs_breakdown_xlsx(
+        customs_document={
+            "document_id": "dt-safe",
+            "file_original_name": "safe.pdf",
+            "normalized_parse": {
+                "declaration_number": "SAFE-DT",
+                "goods_items": [_goods("1", "Canonical aggregate", 1)],
+                "annex_items": annex,
+                "annex_quantity_total": 10500,
+                "annex_quantity_conserved": True,
+            },
+        },
+        shipment=shipment,
+        shipment_lines=lines,
+        nomenclature_items=nomenclature,
+    )
+    if receipt.get("requires_review") or not receipt.get("workbook_valid") or not receipt.get("workbook_control_valid"):
+        raise AssertionError(f"strict workbook validation changed: {receipt}")
+    workbook = load_workbook(BytesIO(workbook_bytes), read_only=True, data_only=True)
+    sheet = workbook["Расшифровка ДТ"]
+    header_row = next(row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 1).value == "№ позиции ДТ")
+    if tuple(sheet.cell(header_row, column).value for column in range(1, len(WORKBOOK_HEADERS) + 1)) != WORKBOOK_HEADERS:
+        raise AssertionError("strict workbook headers changed")
+    for row in range(header_row + 1, sheet.max_row + 1):
+        if not isinstance(sheet.cell(row, 7).value, (int, float)):
+            raise AssertionError("strict workbook quantity is not numeric")
+        if any(sheet.cell(row, column).value in (None, "") for column in (9, 10, 11)):
+            raise AssertionError("strict workbook lost nmID, nomenclature or canonical barcode")
+        if sheet.cell(row, 11).data_type != "s":
+            raise AssertionError("canonical barcode is not stored losslessly as text")
+    control = workbook["Контроль"]
+    values = {control.cell(row, 1).value: control.cell(row, 2).value for row in range(1, control.max_row + 1)}
+    expected = {
+        "Готовность бухгалтерского пакета": "Да",
+        "Product rows Invoice": 3,
+        "DT annex rows": 3,
+        "Product quantity Invoice": 10500,
+        "DT quantity": 10500,
+        "Сопоставлено": 3,
+        "Неоднозначно": 0,
+        "Не сопоставлено": 0,
+        "Покрытие product lines Invoice": "3/3",
+        "Per-owner quantity reconciliation": "Да",
+        "Version parser projection": DT_ANNEX_ITEMS_PARSER_VERSION,
+        "Version matching policy": DT_ANNEX_MATCHING_POLICY_VERSION,
+        "Version reconciliation": STRICT_ACCOUNTING_RECONCILIATION_VERSION,
+    }
+    if any(values.get(key) != value for key, value in expected.items()):
+        raise AssertionError(f"strict workbook control sheet changed: {values}")
+
+
+def _assert_strict_reconciliation_blockers() -> None:
+    first = _strict_line("one", 601, "clean", ["iphone_13"], "0000000000601", "Safe one", 5, 1)
+    second = _strict_line("two", 602, "clean", ["iphone_13"], "0000000000602", "Safe two", 5, 2)
+    ambiguous = match_customs_annex_items(
+        annex_items=[_annex("1", "1", "13", "13", 5), _annex("1", "2", "13", "13", 5)],
+        goods_items=[_goods("1", "Safe", 1)],
+        shipment_lines=[first, second],
+        nomenclature_items=[_dt_nomenclature(first), _dt_nomenclature(second)],
+        parser_quantity_conserved=True,
+        shipment={"product_qty_total": 10},
+    )
+    _require_blocker(ambiguous, "bounded_reconciliation_has_multiple_full_solutions")
+
+    line13 = _strict_line("thirteen", 611, "clean", ["iphone_13"], "0000000000611", "Safe 13", 5, 1)
+    line14 = _strict_line("fourteen", 612, "clean", ["iphone_14"], "0000000000612", "Safe 14", 5, 2)
+    wrong_owner = match_customs_annex_items(
+        annex_items=[_annex("1", "1", "13", "13", 4), _annex("1", "2", "14", "14", 6)],
+        goods_items=[_goods("1", "Safe", 1)],
+        shipment_lines=[line13, line14],
+        nomenclature_items=[_dt_nomenclature(line13), _dt_nomenclature(line14)],
+        parser_quantity_conserved=True,
+        shipment={"product_qty_total": 10},
+    )
+    if wrong_owner.get("invoice_product_quantity_total") != wrong_owner.get("dt_quantity_total"):
+        raise AssertionError("wrong-owner fixture must keep the same grand total")
+    _require_blocker(wrong_owner, "per_owner_quantity_not_reconciled")
+
+    lines, nomenclature, annex, shipment = _strict_fixture()
+    row_mismatch = match_customs_annex_items(
+        annex_items=annex[:-1],
+        goods_items=[_goods("1", "Safe", 1)],
+        shipment_lines=lines,
+        nomenclature_items=nomenclature,
+        parser_quantity_conserved=True,
+        shipment=shipment,
+    )
+    _require_blocker(row_mismatch, "invoice_dt_product_row_count_mismatch")
+    missing_quantity = [dict(item) for item in annex]
+    missing_quantity[0]["quantity"] = None
+    missing_quantity[0]["unit"] = ""
+    incomplete = match_customs_annex_items(
+        annex_items=missing_quantity,
+        goods_items=[_goods("1", "Safe", 1)],
+        shipment_lines=lines,
+        nomenclature_items=nomenclature,
+        parser_quantity_conserved=False,
+        shipment=shipment,
+    )
+    _require_blocker(incomplete, "dt_annex_row_incomplete")
+    absent = match_customs_annex_items(
+        annex_items=[_annex("1", "1", "19", "19", 10500)],
+        goods_items=[_goods("1", "Safe", 1)],
+        shipment_lines=lines,
+        nomenclature_items=nomenclature,
+        parser_quantity_conserved=True,
+        shipment=shipment,
+    )
+    _require_blocker(absent, "dt_rows_not_fully_matched")
+
+    for missing_field in ("internal_nm_id", "internal_name", "canonical_barcode"):
+        broken_lines, broken_nomenclature, broken_annex, broken_shipment = _strict_fixture()
+        if missing_field == "internal_nm_id":
+            broken_lines[0]["internal_nm_id"] = None
+        elif missing_field == "internal_name":
+            broken_lines[0]["internal_name"] = ""
+            broken_nomenclature[0]["nomenclature_name"] = ""
+        else:
+            broken_lines[0]["barcode"] = ""
+            broken_nomenclature[0]["barcode"] = ""
+            broken_nomenclature[0]["barcodes"] = []
+        broken = match_customs_annex_items(
+            annex_items=broken_annex,
+            goods_items=[_goods("1", "Safe", 1)],
+            shipment_lines=broken_lines,
+            nomenclature_items=broken_nomenclature,
+            parser_quantity_conserved=True,
+            shipment=broken_shipment,
+        )
+        _require_blocker(broken, "invoice_product_line_incomplete")
+
+
+def _require_blocker(result: dict[str, object], code: str) -> None:
+    codes = {str(item.get("code") or "") for item in result.get("blocker_reasons") or []}
+    if result.get("package_ready") or code not in codes:
+        raise AssertionError(f"strict blocker {code} was not enforced: {result}")
+
+
+def _strict_package_payload() -> tuple[dict[str, object], list[dict[str, object]]]:
+    lines, nomenclature, annex, shipment = _strict_fixture()
+    invoice = _document("invoice-1", "invoice", "invoice.xlsx")
+    invoice["document_number"] = "SAFE-1"
+    invoice["file_sha256"] = hashlib.sha256(b"sanitized:invoice-1").hexdigest()
+    shipment.update({
+        "invoice_document_id": "invoice-1",
+        "source_file_sha256": invoice["file_sha256"],
+    })
+    customs = _document("dt-safe", "customs_declaration", "dt.pdf")
+    customs["normalized_parse"] = {
+        "declaration_number": "SAFE-DT",
+        "goods_items": [_goods("1", "Canonical aggregate", 1)],
+        "annex_items": annex,
+        "annex_item_count": 3,
+        "annex_quantity_total": 10500,
+        "annex_quantity_conserved": True,
+        "annex_parent_position_count": 1,
+        "annex_parent_positions_complete": True,
+        "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
+    }
+    payload = {
+        "supplier_order_id": "order-safe",
+        "shipment": shipment,
+        "required_documents": [invoice, _document("contract-1", "contract", "contract.pdf"), customs],
+    }
+    return payload, nomenclature
+
+
+def _assert_strict_accounting_package() -> None:
+    payload, nomenclature = _strict_package_payload()
+    archive_bytes, receipt = _build_supplier_order_documents_archive(
+        payload,
+        package_type="accounting",
+        file_loader=_fixture_loader,
+        nomenclature_items=nomenclature,
+    )
+    manifest, names = _manifest_and_names(archive_bytes)
+    if (
+        receipt.get("status") != "complete"
+        or receipt.get("requires_review")
+        or receipt.get("counts", {}).get("included") != 4
+        or receipt.get("accounting_reconciliation", {}).get("matched_count") != 3
+        or receipt.get("accounting_reconciliation", {}).get("package_ready") is not True
+        or sorted(names) != sorted(item["archive_name"] for item in manifest.get("included") or [])
+    ):
+        raise AssertionError(f"strict accounting package changed: {receipt} {manifest}")
+    with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+        for item in manifest.get("included") or []:
+            body = archive.read(item["archive_name"])
+            if len(body) != item.get("size_bytes") or "sha256:" + hashlib.sha256(body).hexdigest() != item.get("sha256"):
+                raise AssertionError("strict ZIP member differs from manifest size/hash")
+        generated = (manifest.get("generated_files") or [])[0]
+        workbook = load_workbook(BytesIO(archive.read(generated["archive_name"])), read_only=True, data_only=True)
+        if set(workbook.sheetnames) != {"Расшифровка ДТ", "Контроль"}:
+            raise AssertionError("strict accounting workbook readback changed")
+
+    blocked_payload = json.loads(json.dumps(payload))
+    blocked_payload["required_documents"][2]["normalized_parse"]["annex_items"][0]["quantity"] = 5499
+    blocked_payload["required_documents"][2]["normalized_parse"]["annex_quantity_total"] = 10499
+    try:
+        _build_supplier_order_documents_archive(
+            blocked_payload,
+            package_type="accounting",
+            file_loader=_fixture_loader,
+            nomenclature_items=nomenclature,
+        )
+    except SupplierAccountingPackageBlockedError as exc:
+        diagnostics = exc.diagnostics
+        if (
+            diagnostics.get("status") != "blocked"
+            or diagnostics.get("matched") == diagnostics.get("dt_row_count")
+            or not diagnostics.get("blocker_reasons")
+            or diagnostics.get("requires_review") is not True
+        ):
+            raise AssertionError(f"controlled accounting blocker diagnostics changed: {diagnostics}")
+    else:
+        raise AssertionError("accounting package returned ZIP for an unreconciled quantity")
+
+    try:
+        _build_supplier_order_documents_archive(
+            payload,
+            package_type="accounting",
+            file_loader=lambda row: _raise_unreadable() if row.get("document_type") == "customs_declaration" else _fixture_loader(row),
+            nomenclature_items=nomenclature,
+        )
+    except SupplierAccountingPackageBlockedError as exc:
+        if "customs_declaration" not in exc.diagnostics.get("failed", []):
+            raise AssertionError(f"unreadable DT was not exposed as a controlled blocker: {exc.diagnostics}")
+    else:
+        raise AssertionError("accounting package returned ZIP when a source document was unreadable")
+
+    invalid_workbook_payload = json.loads(json.dumps(payload))
+    invalid_workbook_payload["required_documents"][2]["normalized_parse"]["annex_items"][0]["source_name"] = (
+        "sanitized\u0000invalid workbook cell"
+    )
+    try:
+        _build_supplier_order_documents_archive(
+            invalid_workbook_payload,
+            package_type="accounting",
+            file_loader=_fixture_loader,
+            nomenclature_items=nomenclature,
+        )
+    except SupplierAccountingPackageBlockedError as exc:
+        codes = {str(item.get("code") or "") for item in exc.diagnostics.get("blocker_reasons") or []}
+        if "accounting_workbook_readback_failed" not in codes:
+            raise AssertionError(f"workbook failure did not use controlled accounting blocker: {exc.diagnostics}")
+    else:
+        raise AssertionError("accounting package returned ZIP after workbook generation/readback failure")
+
+
+def _assert_strict_accounting_multiple_customs() -> None:
+    first = _strict_line("split-a", 701, "clean", ["iphone_13"], "0000000000701", "Safe split", 4, 1)
+    second = _strict_line("split-b", 701, "clean", ["iphone_13"], "0000000000701", "Safe split", 6, 2)
+    nomenclature = [_dt_nomenclature(first)]
+    invoice = _document("invoice-multi", "invoice", "invoice.xlsx")
+    invoice["document_number"] = "SAFE-MULTI"
+    invoice["file_sha256"] = hashlib.sha256(b"sanitized:invoice-multi").hexdigest()
+    documents = []
+    for index, quantity in enumerate((4, 6), start=1):
+        customs = _document(f"dt-{index}", "customs_declaration", f"dt-{index}.pdf")
+        customs["normalized_parse"] = {
+            "declaration_number": f"SAFE-DT-{index}",
+            "goods_items": [_goods("1", "Safe", 1)],
+            "annex_items": [_annex("1", "1", "13", "13", quantity)],
+            "annex_item_count": 1,
+            "annex_quantity_total": quantity,
+            "annex_quantity_conserved": True,
+            "annex_parent_position_count": 1,
+            "annex_parent_positions_complete": True,
+            "annex_items_parser_version": DT_ANNEX_ITEMS_PARSER_VERSION,
+        }
+        documents.append(customs)
+    payload = {
+        "supplier_order_id": "order-multi",
+        "shipment": {
+            "shipment_id": "order-multi",
+            "invoice_no": "SAFE-MULTI",
+            "invoice_document_id": "invoice-multi",
+            "source_file_sha256": invoice["file_sha256"],
+            "product_qty_total": 10,
+            "match_status": "all_matched",
+            "errors": [],
+            "lines": [first, second],
+        },
+        "required_documents": [invoice, _document("contract-multi", "contract", "contract.pdf"), *documents],
+    }
+    archive_bytes, receipt = _build_supplier_order_documents_archive(
+        payload,
+        package_type="accounting",
+        file_loader=_fixture_loader,
+        nomenclature_items=nomenclature,
+    )
+    manifest, _ = _manifest_and_names(archive_bytes)
+    if (
+        receipt.get("status") != "complete"
+        or receipt.get("counts", {}).get("generated_files") != 2
+        or receipt.get("accounting_reconciliation", {}).get("invoice_product_lines_covered") != 2
+        or not receipt.get("accounting_reconciliation", {}).get("per_owner_quantity_reconciled")
+        or len(manifest.get("generated_files") or []) != 2
+    ):
+        raise AssertionError(f"multi-DT package aggregation changed: {receipt}")
+
+
+def _assert_strict_accounting_reparse_is_read_only() -> None:
+    payload, nomenclature = _strict_package_payload()
+    stale_customs = payload["required_documents"][2]
+    fresh_normalized = json.loads(json.dumps(stale_customs["normalized_parse"]))
+    stale_customs["normalized_parse"] = {
+        "declaration_number": "SAFE-DT",
+        "goods_items": [_goods("1", "Canonical aggregate", 1)],
+    }
+    parser_calls: list[str] = []
+
+    def parser(_: bytes, filename: str) -> dict[str, object]:
+        parser_calls.append(filename)
+        return {"normalized_parse": fresh_normalized}
+
+    archive_bytes, receipt = _build_supplier_order_documents_archive(
+        payload,
+        package_type="accounting",
+        file_loader=_fixture_loader,
+        nomenclature_items=nomenclature,
+        customs_parser=parser,
+    )
+    if (
+        parser_calls != ["dt.pdf"]
+        or receipt.get("status") != "complete"
+        or "annex_items" in stale_customs["normalized_parse"]
+        or not archive_bytes
+    ):
+        raise AssertionError("stored DT was not reparsed read-only under the strict projection")
 
 
 def _document(document_id: str, document_type: str, filename: str) -> dict[str, object]:
