@@ -374,12 +374,13 @@ class AutoanswersRepository:
         runtime_dir: Path,
         now_factory: Any = utc_now,
         env: Mapping[str, str] | None = None,
+        schema_lock_held: bool = False,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.db_path = self.runtime_dir / "registry_upload_runtime.sqlite3"
         self.now_factory = now_factory
         self.env = env
-        self.ensure_schema()
+        self.ensure_schema(schema_lock_held=schema_lock_held)
 
     def _now(self) -> datetime:
         value = self.now_factory()
@@ -411,52 +412,58 @@ class AutoanswersRepository:
         finally:
             conn.close()
 
-    def ensure_schema(self) -> None:
+    def ensure_schema(self, *, schema_lock_held: bool = False) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        if schema_lock_held:
+            self._ensure_schema_locked()
+            return
         lock_path = self.runtime_dir / ".wb_autoanswers_schema.lock"
         with lock_path.open("a+b") as lock_handle:
             os.chmod(lock_path, 0o600)
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                if not self._schema_version_is_applied():
-                    self._backup_database_before_first_schema()
-                conn = self._connect()
-                try:
-                    # sqlite3.executescript otherwise commits an already-open
-                    # transaction. Start the migration inside the script so
-                    # all additive DDL plus marker/settings rows are atomic.
-                    conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-                    self._migrate_schema_v2(conn)
-                    conn.execute(
-                        "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
-                        (SCHEMA_VERSION, iso_utc(self._now())),
-                    )
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_settings(
-                            singleton, master_enabled, mode, enable_epoch, enabled_at,
-                            daily_cap_usd, monthly_cap_usd, warning_ratio,
-                            max_reservation_per_review_usd, policy_version, updated_at
-                        ) VALUES(1, 0, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            MODE_DRAFT_ONLY,
-                            str(DEFAULT_DAILY_CAP_USD),
-                            str(DEFAULT_MONTHLY_CAP_USD),
-                            str(DEFAULT_WARNING_RATIO),
-                            str(DEFAULT_JOB_RESERVATION_USD),
-                            DEFAULT_POLICY_VERSION,
-                            iso_utc(self._now()),
-                        ),
-                    )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
-                finally:
-                    conn.close()
+                self._ensure_schema_locked()
             finally:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    def _ensure_schema_locked(self) -> None:
+        if not self._schema_version_is_applied():
+            self._backup_database_before_first_schema()
+        conn = self._connect()
+        try:
+            # sqlite3.executescript otherwise commits an already-open
+            # transaction. Start the migration inside the script so
+            # all additive DDL plus marker/settings rows are atomic.
+            conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
+            self._migrate_schema_v2(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
+                (SCHEMA_VERSION, iso_utc(self._now())),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_settings(
+                    singleton, master_enabled, mode, enable_epoch, enabled_at,
+                    daily_cap_usd, monthly_cap_usd, warning_ratio,
+                    max_reservation_per_review_usd, policy_version, updated_at
+                ) VALUES(1, 0, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    MODE_DRAFT_ONLY,
+                    str(DEFAULT_DAILY_CAP_USD),
+                    str(DEFAULT_MONTHLY_CAP_USD),
+                    str(DEFAULT_WARNING_RATIO),
+                    str(DEFAULT_JOB_RESERVATION_USD),
+                    DEFAULT_POLICY_VERSION,
+                    iso_utc(self._now()),
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _schema_version_is_applied(self) -> bool:
         if not self.db_path.exists() or self.db_path.stat().st_size == 0:
