@@ -129,6 +129,8 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing production manual state and all owner-published data/audit remain unchanged.
 
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v3 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+
 Required local checks:
 
 ```bash

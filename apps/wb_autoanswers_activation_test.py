@@ -12,13 +12,16 @@ import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from apps.wb_autoanswers_activation import (
     _capacity_heartbeat,
     _compress_verified_backup,
+    _compress_verified_current_schema_backup,
     _create_current_compressed_schema_backup,
+    _integrity_check,
     _prepare_backup_capacity,
     _schema_preparation_lock,
     run,
@@ -177,6 +180,104 @@ class ActivationTest(unittest.TestCase):
         self.assertFalse(sidecar.exists())
         self.assertEqual(cleanup["compaction"]["redundant_autoanswers_raw_removed"], 1)
         self.assertGreaterEqual(cleanup["compaction"]["orphan_autoanswers_sidecars_removed"], 1)
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
+    def test_capacity_compacts_verified_current_schema_raw_backup_before_retry(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('live')")
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir.mkdir(parents=True)
+        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__interrupted.sqlite3"
+        shutil.copy2(database, raw)
+        raw.with_name(raw.name + "-shm").write_bytes(b"sidecar")
+
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            return_value=SimpleNamespace(free=300 * 1024 * 1024),
+        ):
+            result = _prepare_backup_capacity(self.runtime_dir)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(
+            result["compaction"]["status"],
+            "compressed_current_schema_backup",
+        )
+        self.assertFalse(raw.exists())
+        self.assertFalse(raw.with_name(raw.name + "-shm").exists())
+        self.assertTrue(raw.with_suffix(raw.suffix + ".zst").is_file())
+        self.assertTrue(raw.with_suffix(raw.suffix + ".zst.manifest.json").is_file())
+        self.assertEqual(result["compaction"]["integrity_check"], "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
+    def test_current_schema_raw_backup_survives_failed_canonical_readback(self) -> None:
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir.mkdir(parents=True)
+        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__recoverable.sqlite3"
+        with sqlite3.connect(raw) as conn:
+            conn.execute("CREATE TABLE backup_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO backup_marker VALUES('recoverable')")
+        sidecar = raw.with_name(raw.name + "-wal")
+        sidecar.write_bytes(b"recoverable-sidecar")
+
+        with patch(
+            "apps.wb_autoanswers_activation._verified_compressed_schema_backup_status",
+            return_value={
+                "count": 1,
+                "integrity_check": "ok",
+                "snapshot_sha256": "sha256:not-the-source",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "readback is missing"):
+                _compress_verified_current_schema_backup(raw)
+
+        self.assertTrue(raw.is_file())
+        self.assertTrue(sidecar.is_file())
+        self.assertEqual(_integrity_check(raw), "ok")
+
+    def test_status_does_not_migrate_a_database_below_target_schema(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "CREATE TABLE sheet_vitrina_v1_wb_autoanswers_schema_migrations(version INTEGER PRIMARY KEY)"
+            )
+            conn.executemany(
+                "INSERT INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations VALUES(?)",
+                [(1,), (2,)],
+            )
+            conn.execute(
+                "CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings("
+                "singleton INTEGER PRIMARY KEY, master_enabled INTEGER NOT NULL, mode TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO sheet_vitrina_v1_wb_autoanswers_settings VALUES(1, 1, 'manual')"
+            )
+
+        with patch("apps.wb_autoanswers_activation.AutoanswersRepository") as repository:
+            result = run(action="status", runtime_dir=self.runtime_dir)
+
+        repository.assert_not_called()
+        self.assertEqual(result["status"], "schema_preparation_required")
+        self.assertEqual(
+            [row["version"] for row in result["runtime"]["schema_migrations"]],
+            [1, 2],
+        )
+        self.assertTrue(result["runtime"]["settings"]["master_enabled"])
+        self.assertEqual(result["runtime"]["settings"]["mode"], "manual")
+        self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
+
+    def test_status_does_not_initialize_a_missing_database(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with patch("apps.wb_autoanswers_activation.AutoanswersRepository") as repository:
+            result = run(action="status", runtime_dir=self.runtime_dir)
+
+        repository.assert_not_called()
+        self.assertEqual(result["status"], "schema_preparation_required")
+        self.assertFalse(database.exists())
+        self.assertEqual(result["runtime"]["schema_migrations"], [])
+        self.assertFalse(result["runtime"]["settings"]["master_enabled"])
+        self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
 
     def test_repository_can_migrate_inside_activation_owned_schema_lock(self) -> None:
         with _schema_preparation_lock(self.runtime_dir):

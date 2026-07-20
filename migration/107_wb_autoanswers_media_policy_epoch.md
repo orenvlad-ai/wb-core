@@ -34,3 +34,9 @@ Existing feedback rows, the owner-published answer, publication attempt/readback
 3. Do not delete revisions, regeneration flags or policy epochs to simulate rollback.
 4. Restore the verified pre-v3 SQLite backup only for demonstrated database corruption. First reconcile any ambiguous publication via GET; never replay a POST blindly.
 5. Private media files may be removed by TTL. Cleanup resets DB fetch state before deletion so later processing refetches safely.
+
+## Interrupted-capacity recovery
+
+Lifecycle `status` must not initialize or migrate SQLite. When schema v3 is not yet proven it returns `schema_preparation_required`; additive DDL remains owned by force-off `prepare-deploy`.
+
+If an interrupted schema-v3 preparation has already left a complete raw pre-schema snapshot in the autoanswers-owned v3 backup directory, the next repo-owned preparation resumes without deleting production data. It integrity-checks and hashes that snapshot, creates a zstd archive, verifies the compressed stream and exact decompressed SHA-256, writes and canonically reads back the v3 manifest, and only then removes the raw copy and orphaned sidecars. Any compression or verification error retains the raw snapshot for recovery.

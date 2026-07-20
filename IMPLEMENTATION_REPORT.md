@@ -2,7 +2,7 @@
 
 Date: 2026-07-20
 
-Status: `RELEASE_CANDIDATE__PRODUCTION_GATE_PENDING`
+Status: `RELEASE_RECOVERY__DEPLOY_GATE_PENDING`
 
 Production baseline at start: `82a96591db7e0fdb6b8a229912bcad1d77fb243c` (PR #686)
 
@@ -120,6 +120,12 @@ After exact-SHA deployment, keep `master_enabled=true`, `mode=manual`, `force_of
 - Deploys: `0` (until release train)
 
 Production release is authorized separately by the current LOOP request. Its read-only media GET and UI evidence are reported in the terminal handoff.
+
+## Release recovery after capacity halt
+
+The first deployment of merged PR #694 halted before service restart because the root volume did not have space for another raw database-sized pre-schema snapshot. Read-only inspection proved the live database and both recovery sources remained structurally valid. A lifecycle `status` invocation on the old implementation also exposed that constructing the repository below target schema could apply additive DDL; the database reached schema v3, while persisted `master_enabled=true`, `mode=manual`, the existing owner-published answer and its audit remained unchanged.
+
+The recovery increment makes `status` non-mutating for an old or absent database. It also resumes from the complete current-schema raw snapshot left by the interrupted preparation: only the owned backup filename boundary is accepted; SQLite integrity, compressed integrity, archive SHA-256 and exact decompressed SHA-256 are verified; the canonical v3 manifest is read back; and only then is the raw source removed to recover capacity. Failure before that proof retains the raw snapshot. Targeted tests cover both status cases and low-capacity exact backup compaction. The recovery performs no ad-hoc deletion, SQL mutation, WB/OpenAI call or service action; release remains owned by the standard deploy path.
 
 ## Owner’s first media-aware test after release
 
