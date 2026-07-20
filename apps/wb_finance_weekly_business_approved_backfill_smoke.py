@@ -34,6 +34,23 @@ def main() -> None:
         _seed_sources(block.db_path)
         _seed_weeks(block)
 
+        observed_stream = {"called": False}
+        original_build_retro_cost_rows = block._build_retro_cost_rows
+
+        def observed_build_retro_cost_rows(conn, *, rows):
+            observed_stream["called"] = True
+            if isinstance(rows, (list, tuple)):
+                raise AssertionError("full-scope Finance cost movements were materialized in memory")
+            return original_build_retro_cost_rows(conn, rows=rows)
+
+        block._build_retro_cost_rows = observed_build_retro_cost_rows  # type: ignore[method-assign]
+        streamed_plan = block.plan_business_approved_backfill(
+            date_from=date(2026, 4, 27),
+            date_to=date(2026, 5, 3),
+        )
+        if not observed_stream["called"] or streamed_plan["runtime_mutation"]:
+            raise AssertionError("Finance preflight did not use the bounded movement stream")
+
         dry = _run_cli(runtime, "--date-from", "2026-04-27", "--date-to", "2026-05-03")
         if dry.returncode != 0:
             raise AssertionError(f"dry-run failed: {dry.stderr}\n{dry.stdout}")

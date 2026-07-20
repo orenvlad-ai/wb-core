@@ -2809,6 +2809,44 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_finance_ui_flow_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="finance-ui-flow")
+    auth_cookie = _build_probe_auth_cookie(
+        target,
+        timeout_seconds=float(args.timeout_seconds),
+    )
+    if not auth_cookie:
+        raise RuntimeError(
+            "Finance UI flow requires safely available production app-session auth"
+        )
+    evidence_dir = Path(str(args.evidence_dir)).resolve()
+    try:
+        evidence_dir.relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Finance UI evidence must be stored outside the repository")
+    from apps.finance_partner_production_ui_flow import run_finance_partner_ui_flow
+
+    result = run_finance_partner_ui_flow(
+        base_url=target.public_base_url,
+        auth_cookie=auth_cookie,
+        evidence_dir=evidence_dir,
+        headless=not bool(args.headed),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "public_base_url": target.public_base_url,
+            "auth": _probe_auth_summary(auth_cookie),
+            "result": result,
+        }
+    )
+    return 0
+
+
 def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -3177,6 +3215,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",
     )
     warehouse_ui_flow.set_defaults(handler=run_warehouse_ui_flow_command)
+
+    finance_ui_flow = subparsers.add_parser(
+        "finance-ui-flow",
+        help="Run authenticated read-only production Playwright acceptance for Finance and Partner reports.",
+    )
+    finance_ui_flow.add_argument("--evidence-dir", required=True)
+    finance_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
+    finance_ui_flow.add_argument("--headed", action="store_true")
+    finance_ui_flow.set_defaults(handler=run_finance_ui_flow_command)
 
     autoanswers_ui_flow = subparsers.add_parser(
         "autoanswers-ui-flow",
