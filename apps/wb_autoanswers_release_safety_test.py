@@ -180,6 +180,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         )
         self.assertIn("shutil.disk_usage(backup_root).free", activation_source)
         self.assertIn("_create_current_compressed_schema_backup", activation_source)
+        self.assertIn('not bool(locked_before.get("schema_v2_applied"))', activation_source)
 
     def test_manual_activation_uses_get_only_canary_before_enabling_worker_timer(self) -> None:
         original = hosted.load_hosted_runtime_target(TARGET)
