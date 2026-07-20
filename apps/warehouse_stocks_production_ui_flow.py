@@ -351,8 +351,13 @@ def _run_warehouse_ui_flow(
                     fatal_surface_matches.append({"warehouse_key": warehouse_key, "marker": marker})
 
             balance_count = page.locator("[data-warehouse-balance-row]").count()
-            _assert(balance_count == int(expected_sku_count), f"{warehouse_name}: balance row count")
-            _assert(balance_count == len(detail_balances), f"{warehouse_name}: UI/detail balance rows")
+            _assert_warehouse_balance_cardinality(
+                warehouse_key=warehouse_key,
+                expected_sku_count=int(expected_sku_count),
+                detail_balances=detail_balances,
+                visible_balance_count=balance_count,
+                warehouse_name=warehouse_name,
+            )
             _assert(
                 all(str(item.get("warning") or "").strip() for item in detail_balances),
                 f"{warehouse_name}: every cost row has a visible localized status",
@@ -1476,6 +1481,37 @@ def _allocated_amount_matches_eligible(
     except Exception:
         return False
     return abs(eligible - allocated) < Decimal("0.000001")
+
+
+def _assert_warehouse_balance_cardinality(
+    *,
+    warehouse_key: str,
+    expected_sku_count: int,
+    detail_balances: list[Mapping[str, Any]],
+    visible_balance_count: int,
+    warehouse_name: str,
+) -> None:
+    """Keep physical SKU totals distinct from visible FF reservation-only rows."""
+
+    if warehouse_key == "ff":
+        physical_balance_count = sum(
+            1
+            for item in detail_balances
+            if Decimal(str(item.get("quantity") or 0)) > 0
+        )
+        _assert(
+            physical_balance_count == expected_sku_count,
+            f"{warehouse_name}: physical SKU count",
+        )
+    else:
+        _assert(
+            visible_balance_count == expected_sku_count,
+            f"{warehouse_name}: balance row count",
+        )
+    _assert(
+        visible_balance_count == len(detail_balances),
+        f"{warehouse_name}: UI/detail balance rows",
+    )
 
 
 def _registry_cell_display(
