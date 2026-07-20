@@ -7635,10 +7635,7 @@ def _render_sheet_vitrina_instructions_ui(
         + "".join(
             _render_operator_instruction_block(
                 block,
-                is_new=(
-                    block.block_id in instruction_new_state.new_block_ids
-                    and section.anchor not in instruction_new_state.new_section_anchors
-                ),
+                is_new=block.block_id in instruction_new_state.new_block_ids,
             )
             for block in section.blocks
         )
