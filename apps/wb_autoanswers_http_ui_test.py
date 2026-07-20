@@ -137,6 +137,7 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("Перегенерировать с учётом медиа", html)
         self.assertIn("Опубликовать", html)
         self.assertIn("Техническая информация", html)
+        self.assertIn("Hard gates: не запускались", html)
         self.assertIn("autoGrowReplyEditors", html)
         self.assertIn('addEventListener("input", handleFeedbacksInputChange)', html)
         self.assertIn("autoanswers-answer-box", html)

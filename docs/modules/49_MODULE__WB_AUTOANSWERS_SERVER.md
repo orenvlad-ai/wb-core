@@ -115,7 +115,7 @@ Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Additive routes includ
 
 The first `Отзывы → Отзывы` screen reads SQLite immediately, defaults to 50 rows and uses server pagination/filters. Table system replies remain in a fixed-height internal scroller with a copy-only button. Missing replies have a compact neutral state. The explicit `Исторический backlog` control is rendered for admins and remains disabled in OFF/manual; it cannot bypass the preview-bound server action.
 
-Detail keeps only rating/date, review, non-empty pros/cons/tags, product identity, customer media, WB answer, AI reply, friendly status and actions visible. Routes, raw states, case code, attempts, cost, warnings, contracts, guards, media uncertainty, hashes, idempotency and audit are in closed-by-default `Техническая информация`. The full-width reply textarea auto-grows on render, generation, input and detail refresh. Desktop and 390px narrow behavior are browser-tested.
+Detail keeps only rating/date, review, non-empty pros/cons/tags, product identity, customer media, WB answer, AI reply, friendly status and actions visible. Routes, raw states, case code, attempts, cost, warnings, contracts, guards, media uncertainty, hashes, idempotency and audit are in closed-by-default `Техническая информация`. Before generation the same technical fields remain named explicitly with a `не запускался` state, rather than disappearing or implying a passed check. The full-width reply textarea auto-grows on render, generation, input and detail refresh. Desktop and 390px narrow behavior are browser-tested.
 
 Permissions remain server-enforced:
 

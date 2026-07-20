@@ -12651,7 +12651,12 @@
           "\nFallback: " + (latestJob.fallback_used ? "да" : "нет") +
           "\nMedia uncertainty: " + (latestJob.media_uncertain ? "да" : "нет") +
           "\nФинальная проверка ручного текста: " + (latestJob.manual_guard_passed ? "пройдена" : "не пройдена")
-        : "AI ещё не запускался";
+        : "AI ещё не запускался" +
+          "\nJSON contract: не запускался" +
+          "\nHard gates: не запускались" +
+          "\nFallback: не применялся" +
+          "\nMedia uncertainty: не проверялась" +
+          "\nФинальная проверка ручного текста: не запускалась";
       let actions = "";
       if (answerText) {
         actions = '<p class="autoanswers-warning">В Wildberries уже есть ответ. Новая публикация заблокирована.</p>';
