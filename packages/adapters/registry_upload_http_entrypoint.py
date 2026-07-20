@@ -22,6 +22,7 @@ import time
 from typing import Any, Mapping, Sequence
 from urllib import parse as urllib_parse
 from uuid import uuid4
+import zlib
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.operator_instructions import (
@@ -3812,7 +3813,7 @@ def _build_handler(
                     return
                 try:
                     shipment_id, package_kind = _resolve_supplier_order_documents_archive_ids(parsed.path)
-                    archive_bytes, filename = entrypoint.handle_supplier_order_documents_archive_request(
+                    archive_bytes, filename, receipt = entrypoint.handle_supplier_order_documents_archive_request(
                         shipment_id,
                         package_kind=package_kind,
                     )
@@ -3833,6 +3834,15 @@ def _build_handler(
                     content_type="application/zip",
                     filename=filename,
                     as_attachment=True,
+                    headers={
+                        "X-WB-Core-Package-Receipt": _base64url_encode(
+                            zlib.compress(
+                                json.dumps(receipt, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                                level=9,
+                            )
+                        ),
+                        "X-WB-Core-Package-Receipt-Encoding": "deflate-base64url",
+                    },
                 )
                 return
 
@@ -5351,7 +5361,7 @@ def _is_supplier_order_documents_archive_path(path: str) -> bool:
         len(parts) == 3
         and bool(parts[0])
         and parts[1] == DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT
-        and parts[2] in {"archive.zip", "logistics-package.zip"}
+        and parts[2] in {"archive.zip", "logistics-package.zip", "accounting-package.zip"}
     )
 
 
@@ -5757,6 +5767,7 @@ def _write_binary_response(
     content_type: str,
     filename: str | None = None,
     as_attachment: bool = False,
+    headers: Mapping[str, str] | None = None,
 ) -> None:
     handler.send_response(status.value)
     handler.send_header("Content-Type", content_type)
@@ -5765,6 +5776,8 @@ def _write_binary_response(
             "attachment" if as_attachment else "inline",
             filename,
         ))
+    for name, value in (headers or {}).items():
+        handler.send_header(str(name), str(value))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     _write_response_body(handler, body)

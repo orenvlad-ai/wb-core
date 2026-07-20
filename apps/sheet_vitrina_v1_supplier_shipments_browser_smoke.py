@@ -333,8 +333,40 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
                 expect(frame.locator("#shipmentRows")).to_contain_text("Заказов пока нет.")
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("No orders yet")
-                expect(frame.get_by_text("Матчинг").first).to_be_visible()
-                expect(frame.get_by_text("Поставщик")).to_be_visible()
+                expect(frame.locator("#registryColumnChooser > summary")).to_have_text("Столбцы")
+                expect(frame.locator("#supplierRegistryTable thead")).to_contain_text("Распределение расходов")
+                frame.locator("#registryColumnChooser > summary").click()
+                supplier_column_toggle = frame.locator("#registryColumnChooser input[value='supplier']")
+                expect(supplier_column_toggle).to_be_checked()
+                supplier_column_toggle.uncheck()
+                expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_hidden()
+                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "18")
+                frame.locator("body").evaluate("() => window.location.reload()")
+                expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
+                expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_hidden()
+                expect(frame.locator("#registryColumnChooser input[value='supplier']")).not_to_be_checked()
+                frame.locator("#registryColumnChooser > summary").click()
+                frame.locator("#registryColumnChooser [data-column-reset]").click()
+                expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_visible()
+                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "19")
+                column_storage_keys = frame.locator("body").evaluate(
+                    "() => Object.keys(window.localStorage).filter((key) => key.includes('operator:') && key.includes('columns'))"
+                )
+                if any("supplier-safe" in key for key in column_storage_keys):
+                    raise AssertionError(f"operator and supplier-safe column preferences must not intersect: {column_storage_keys}")
+                page.set_viewport_size({"width": 390, "height": 844})
+                narrow_layout = frame.locator("body").evaluate(
+                    """() => ({
+                        bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                        tableScrolls: document.querySelector('.registry-wrap').scrollWidth > document.querySelector('.registry-wrap').clientWidth,
+                        chooserVisible: !!document.querySelector('#registryColumnChooser > summary')?.getClientRects().length
+                    })"""
+                )
+                if narrow_layout["bodyOverflow"] > 2 or not narrow_layout["tableScrolls"] or not narrow_layout["chooserVisible"]:
+                    raise AssertionError(f"narrow registry layout must contain horizontal scrolling without fatal body overflow: {narrow_layout}")
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                expect(frame.get_by_role("columnheader", name="Матчинг")).to_be_visible()
+                expect(frame.get_by_role("columnheader", name="Поставщик")).to_be_visible()
                 expect(frame.get_by_text("匹配 / Matching / Матчинг")).to_have_count(0)
                 expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_have_count(0)
                 expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
@@ -473,10 +505,24 @@ def main() -> None:
                 expect(frame.locator("#uploadContractButton")).to_be_visible()
                 expect(frame.get_by_role("link", name="Скачать все документы")).to_be_visible(timeout=5000)
                 expect(frame.get_by_role("link", name="Скачать пакет для логистов")).to_be_visible()
+                expect(frame.get_by_role("link", name="Скачать пакет для бухгалтерии")).to_be_visible()
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Invoice", timeout=5000)
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Контракт")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("КП логистов")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Не загружен")
+                expect(frame.locator("#supplierOrderDocumentsTable thead")).to_contain_text("Распределение расходов")
+                frame.locator("#financialDocumentsColumnChooser > summary").click()
+                counterparty_toggle = frame.locator("#financialDocumentsColumnChooser input[value='counterparty']")
+                counterparty_toggle.uncheck()
+                expect(frame.locator("#supplierOrderDocumentsTable th[data-column-key='counterparty']")).to_be_hidden()
+                frame.locator("#financialDocumentsColumnChooser [data-column-reset]").click()
+                expect(frame.locator("#supplierOrderDocumentsTable th[data-column-key='counterparty']")).to_be_visible()
+                with page.expect_download(timeout=5000):
+                    frame.get_by_role("link", name="Скачать пакет для логистов").click()
+                expect(frame.locator("#package-receipt-logistics")).to_contain_text("Пакет скачан частично:", timeout=5000)
+                with page.expect_download(timeout=5000):
+                    frame.get_by_role("link", name="Скачать пакет для бухгалтерии").click()
+                expect(frame.locator("#package-receipt-accounting")).to_contain_text("Пакет скачан частично:", timeout=5000)
                 frame.get_by_role("tab", name="Состав поставки").click()
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 frame.get_by_role("button", name="Проверить цены").click()

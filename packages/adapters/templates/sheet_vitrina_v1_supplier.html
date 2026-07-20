@@ -29,13 +29,14 @@
       color: var(--text);
     }
     main { padding: 24px; }
-    .shell { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; }
+    .shell { max-width: 1440px; min-width: 0; margin: 0 auto; display: grid; gap: 18px; }
     .topbar, .block {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 18px;
       box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+      min-width: 0;
     }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
     h1, h2, h3 { margin: 0; letter-spacing: 0; }
@@ -148,7 +149,7 @@
     .finance-upload-progress .error { color: var(--danger); }
     .finance-upload-progress .success { color: var(--success); }
     .finance-upload-progress .warning { color: var(--warning); }
-    .registry-wrap, .line-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .registry-wrap, .line-wrap { width: 100%; max-width: 100%; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .registry-wrap, .line-wrap { background: rgba(16, 19, 27, 0.48); }
     table { width: 100%; border-collapse: collapse; min-width: 1180px; }
     th, td { padding: 10px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
@@ -194,6 +195,47 @@
     }
     .document-row-uploaded { cursor: pointer; }
     .document-row-uploaded:hover td { background: rgba(56, 189, 248, 0.08); }
+    .column-chooser { position: relative; margin-left: auto; }
+    .column-chooser > summary {
+      min-height: 32px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+      list-style: none;
+    }
+    .column-chooser > summary::-webkit-details-marker { display: none; }
+    .column-chooser > summary::after { content: " ▾"; color: var(--muted); }
+    .column-chooser[open] > summary::after { content: " ▴"; }
+    .column-chooser-panel {
+      position: absolute;
+      right: 0;
+      z-index: 10;
+      width: min(320px, calc(100vw - 40px));
+      max-height: min(460px, 70vh);
+      overflow: auto;
+      display: grid;
+      gap: 8px;
+      margin-top: 6px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #171923;
+      box-shadow: 0 18px 46px rgba(0, 0, 0, 0.44);
+    }
+    .column-chooser-options { display: grid; gap: 6px; }
+    .column-chooser-options label { display: flex; align-items: flex-start; gap: 8px; color: var(--text); font-weight: 700; }
+    .column-chooser-options input { width: auto; min-height: auto; margin: 2px 0 0; }
+    .column-chooser-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+    .package-receipts { display: grid; gap: 7px; width: 100%; }
+    .package-receipt { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; font-weight: 800; }
+    .package-receipt.success { color: var(--success); border-color: rgba(52, 211, 153, 0.36); background: rgba(52, 211, 153, 0.08); }
+    .package-receipt.warning { color: var(--warning); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); }
+    .package-receipt.error { color: var(--danger); border-color: rgba(251, 113, 133, 0.42); background: rgba(251, 113, 133, 0.08); }
     .loading-inline { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 800; }
     .loading-dots { display: inline-flex; gap: 4px; align-items: center; }
     .loading-dots span {
@@ -361,6 +403,9 @@
       .topbar { align-items: stretch; }
       .card-tabs { display: grid; width: 100%; }
       button, .button-link { width: 100%; }
+      .column-chooser { width: 100%; margin-left: 0; }
+      .column-chooser > summary { width: 100%; }
+      .column-chooser-panel { left: 0; right: auto; }
     }
   </style>
 </head>
@@ -388,9 +433,19 @@
             <label><input type="checkbox" value="in_transit" data-order-status-filter>В пути</label>
             <label><input type="checkbox" value="accepted_ff" data-order-status-filter>Принято на ФФ</label>
           </div>
+          <details id="registryColumnChooser" class="column-chooser">
+            <summary>Столбцы</summary>
+            <div class="column-chooser-panel">
+              <div class="column-chooser-options" data-column-options></div>
+              <div class="column-chooser-actions">
+                <button class="compact" type="button" data-column-show-all>Показать все</button>
+                <button class="compact" type="button" data-column-reset>Сбросить</button>
+              </div>
+            </div>
+          </details>
         </div>
         <div class="registry-wrap">
-          <table>
+          <table id="supplierRegistryTable">
             <thead>
               <tr>
                 <th>计划出货日期 / Planned shipment date / Плановая дата отгрузки</th>
@@ -404,7 +459,8 @@
                 <th>其他费用 / Extras amount / Прочие позиции</th>
                 <th>发票总额 / Invoice total / Итого invoice</th>
                 <th>预估成本 / Est. cost / Ориент. себестоимость, ₽/шт</th>
-                <th>Точная себестоимость, ₽/шт</th>
+                    <th>Точная себестоимость, ₽/шт</th>
+                    <th>Распределение расходов</th>
                     <th data-currency-column>币种 / Currency / Валюта</th>
                     <th>匹配 / Matching / Матчинг</th>
                     <th>上传时间 / Uploaded / Дата загрузки</th>
@@ -414,7 +470,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
-              <tr data-registry-state="loading"><td colspan="18"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
+              <tr data-registry-state="loading"><td colspan="19"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -568,9 +624,11 @@
             <button id="addFinancialDocumentButton" class="primary compact" type="button">Добавить документ</button>
             <a id="allDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать все документы</a>
             <a id="logisticsDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать пакет для логистов</a>
+            <a id="accountingDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать пакет для бухгалтерии</a>
             <input id="financialDocumentFileInput" type="file" accept=".pdf,.xls,.xlsx" multiple hidden>
             <p id="financialDocumentsMessage" class="message"></p>
             <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
+            <div id="documentPackageReceipts" class="package-receipts" aria-live="polite"></div>
           </div>
           <div id="bankFeeStatementPreview" class="finance-summary-stack" hidden>
             <div class="finance-summary-card">
@@ -586,20 +644,33 @@
           <div id="financialSummaryGroups" class="finance-summary-stack" aria-label="Финансовая сводка"></div>
           <ul id="financialWarnings" class="warning-list" hidden></ul>
 
-          <h3 style="margin-top: 18px;">Документы</h3>
+          <div class="card-head" style="margin-top: 18px;">
+            <h3>Документы</h3>
+            <details id="financialDocumentsColumnChooser" class="column-chooser">
+              <summary>Столбцы</summary>
+              <div class="column-chooser-panel">
+                <div class="column-chooser-options" data-column-options></div>
+                <div class="column-chooser-actions">
+                  <button class="compact" type="button" data-column-show-all>Показать все</button>
+                  <button class="compact" type="button" data-column-reset>Сбросить</button>
+                </div>
+              </div>
+            </details>
+          </div>
           <div class="line-wrap">
-            <table>
+            <table id="supplierOrderDocumentsTable">
               <thead>
                 <tr>
                   <th>Тип</th>
                   <th>Статус</th>
+                  <th>Распределение расходов</th>
                   <th>Номер</th>
                   <th>Дата</th>
                   <th>Контрагент</th>
                   <th>Сумма</th>
                   <th>Файл</th>
                   <th>Комментарий</th>
-                  <th></th>
+                  <th>Действия</th>
                 </tr>
               </thead>
               <tbody id="financialDocumentsRows"></tbody>
@@ -693,6 +764,12 @@
       const addFinancialDocumentButton = document.getElementById("addFinancialDocumentButton");
       const allDocumentsPackageLink = document.getElementById("allDocumentsPackageLink");
       const logisticsDocumentsPackageLink = document.getElementById("logisticsDocumentsPackageLink");
+      const accountingDocumentsPackageLink = document.getElementById("accountingDocumentsPackageLink");
+      const documentPackageReceipts = document.getElementById("documentPackageReceipts");
+      const supplierRegistryTable = document.getElementById("supplierRegistryTable");
+      const supplierOrderDocumentsTable = document.getElementById("supplierOrderDocumentsTable");
+      const registryColumnChooser = document.getElementById("registryColumnChooser");
+      const financialDocumentsColumnChooser = document.getElementById("financialDocumentsColumnChooser");
       const financialDocumentFileInput = document.getElementById("financialDocumentFileInput");
       const financialDocumentsMessage = document.getElementById("financialDocumentsMessage");
       const financialUploadProgress = document.getElementById("financialUploadProgress");
@@ -717,6 +794,43 @@
           const isEmbeddedOperator = config.embedded === "operator" || window.self !== window.top;
           const useRussianLabels = isEmbeddedOperator;
           const statusFilterStorageKey = "wb-core:sheet-vitrina-v1:supplier-order-status-filter:v1";
+          const registryColumnStorageKey = "wb-core:sheet-vitrina-v1:operator:registry-columns:v1";
+          const financialDocumentsColumnStorageKey = "wb-core:sheet-vitrina-v1:operator:financial-document-columns:v1";
+          const registryColumnDefinitions = [
+            ["planned_shipment_date", "Плановая дата отгрузки"],
+            ["actual_shipment_date", "Фактическая дата отгрузки"],
+            ["actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ"],
+            ["invoice_no", "Номер invoice", true],
+            ["invoice_date", "Дата invoice"],
+            ["supplier", "Поставщик"],
+            ["product_qty", "Кол-во товаров"],
+            ["product_amount", "Сумма товаров"],
+            ["extras_amount", "Прочие позиции"],
+            ["invoice_total", "Итого invoice"],
+            ["approx_cost", "Ориент. себестоимость, ₽/шт"],
+            ["exact_cost", "Точная себестоимость, ₽/шт"],
+            ["expense_allocation", "Распределение расходов"],
+            ["currency", "Валюта"],
+            ["matching", "Матчинг"],
+            ["uploaded_at", "Дата загрузки"],
+            ["documents", "Документы"],
+            ["order_status", "Статус заказа"],
+            ["actions", "Действия", true]
+          ];
+          const financialDocumentColumnDefinitions = [
+            ["document_type", "Тип", true],
+            ["status", "Статус"],
+            ["expense_allocation", "Распределение расходов"],
+            ["number", "Номер"],
+            ["date", "Дата"],
+            ["counterparty", "Контрагент"],
+            ["amount", "Сумма"],
+            ["file", "Файл"],
+            ["comment", "Комментарий"],
+            ["actions", "Действия", true]
+          ];
+          let registryColumnPreference = null;
+          let financialDocumentColumnPreference = null;
 
       let currentShipment = null;
       let allShipments = [];
@@ -737,6 +851,7 @@
       let pendingDeepLinkTab = String(queryParams.get("tab") || "").trim();
       let saveRequestInFlight = false;
       let factualCorrectionInFlight = false;
+      let packageDownloadInFlight = "";
 
       actualShipmentDateInput.max = String(config.business_today || "");
       actualFfAcceptanceDateInput.max = String(config.business_today || "");
@@ -932,6 +1047,112 @@
             Array.from(document.querySelectorAll("[data-order-status-column]")).forEach((node) => {
               node.hidden = false;
             });
+            registryColumnPreference = initializeColumnChooser({
+              chooser: registryColumnChooser,
+              table: supplierRegistryTable,
+              definitions: registryColumnDefinitions,
+              storageKey: registryColumnStorageKey
+            });
+            financialDocumentColumnPreference = initializeColumnChooser({
+              chooser: financialDocumentsColumnChooser,
+              table: supplierOrderDocumentsTable,
+              definitions: financialDocumentColumnDefinitions,
+              storageKey: financialDocumentsColumnStorageKey
+            });
+          }
+
+          function initializeColumnChooser({ chooser, table, definitions, storageKey }) {
+            const keys = definitions.map((item) => item[0]);
+            const required = new Set(definitions.filter((item) => item[2]).map((item) => item[0]));
+            let visible = readColumnPreference(storageKey, keys, required);
+            const options = chooser.querySelector("[data-column-options]");
+            options.innerHTML = definitions.map(([key, label, isRequired]) => (
+              '<label><input type="checkbox" aria-label="' + escapeHtml("Видимость " + key) + '" value="' + escapeHtml(key) + '"'
+              + (visible.has(key) ? " checked" : "")
+              + (isRequired ? " disabled" : "")
+              + '> <span>' + escapeHtml(label) + (isRequired ? " · всегда" : "") + '</span></label>'
+            )).join("");
+
+            function apply() {
+              required.forEach((key) => visible.add(key));
+              tagTableColumns(table, definitions);
+              Array.from(table.querySelectorAll("[data-column-key]")).forEach((cell) => {
+                cell.hidden = !visible.has(cell.dataset.columnKey || "");
+              });
+              const visibleCount = keys.filter((key) => visible.has(key)).length;
+              Array.from(table.querySelectorAll("tbody tr")).forEach((row) => {
+                const cells = Array.from(row.children);
+                if (cells.length === 1 && cells[0].hasAttribute("colspan")) {
+                  cells[0].colSpan = visibleCount;
+                }
+              });
+              Array.from(options.querySelectorAll("input[type='checkbox']")).forEach((input) => {
+                input.checked = visible.has(input.value);
+              });
+            }
+
+            options.addEventListener("change", (event) => {
+              const input = event.target.closest("input[type='checkbox']");
+              if (!input || required.has(input.value)) {
+                return;
+              }
+              if (input.checked) {
+                visible.add(input.value);
+              } else {
+                visible.delete(input.value);
+              }
+              writeColumnPreference(storageKey, visible);
+              apply();
+            });
+            chooser.querySelector("[data-column-show-all]").addEventListener("click", () => {
+              visible = new Set(keys);
+              writeColumnPreference(storageKey, visible);
+              apply();
+              chooser.open = false;
+            });
+            chooser.querySelector("[data-column-reset]").addEventListener("click", () => {
+              visible = new Set(keys);
+              try { window.localStorage.removeItem(storageKey); } catch (error) { /* UI preference only. */ }
+              apply();
+              chooser.open = false;
+            });
+            apply();
+            return { apply };
+          }
+
+          function tagTableColumns(table, definitions) {
+            Array.from(table.querySelectorAll("thead th")).forEach((cell, index) => {
+              if (definitions[index]) {
+                cell.dataset.columnKey = definitions[index][0];
+              }
+            });
+            Array.from(table.querySelectorAll("tbody tr")).forEach((row) => {
+              const cells = Array.from(row.children);
+              if (cells.length !== definitions.length) {
+                return;
+              }
+              cells.forEach((cell, index) => { cell.dataset.columnKey = definitions[index][0]; });
+            });
+          }
+
+          function readColumnPreference(storageKey, keys, required) {
+            try {
+              const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "null");
+              const saved = parsed && Array.isArray(parsed.visible) ? parsed.visible : keys;
+              const visible = new Set(saved.filter((key) => keys.includes(key)));
+              required.forEach((key) => visible.add(key));
+              return visible;
+            } catch (error) {
+              return new Set(keys);
+            }
+          }
+
+          function writeColumnPreference(storageKey, visible) {
+            try {
+              window.localStorage.setItem(storageKey, JSON.stringify({ visible: Array.from(visible) }));
+            } catch (error) {
+              // Browser-local UI preferences are optional and never business truth.
+            }
           }
 
           function configureLocalizedLabels() {
@@ -967,6 +1188,7 @@
               "Итого invoice",
               "Ориент. себестоимость, ₽/шт",
               "Точная себестоимость, ₽/шт",
+              "Распределение расходов",
               "Валюта",
               "Матчинг",
               "Дата загрузки",
@@ -1134,13 +1356,15 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="18"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="19"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        if (registryColumnPreference) registryColumnPreference.apply();
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="18">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="19">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
+        if (registryColumnPreference) registryColumnPreference.apply();
       }
 
       function renderRegistry(rows) {
@@ -1151,7 +1375,8 @@
           const emptyText = hasUnfilteredRows
             ? "Нет заказов в выбранных статусах."
             : uiText("暂无订单 / No orders yet / Заказов пока нет.", "Заказов пока нет.");
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="18">' + escapeHtml(emptyText) + '</td></tr>';
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="19">' + escapeHtml(emptyText) + '</td></tr>';
+          if (registryColumnPreference) registryColumnPreference.apply();
           return;
         }
             registryLoadState = "loaded_with_rows";
@@ -1173,6 +1398,7 @@
                 '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatRegistryMoney(row.approx_landed_cost_per_unit_rub)) + '</td>',
                 '<td title="' + escapeHtml(exactCostTooltip(row)) + '">' + renderExactCostValue(row) + '</td>',
+                '<td>' + renderExpenseAllocation(row.expense_allocation) + '</td>',
               ];
               cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
               cells.push(
@@ -1199,6 +1425,28 @@
             });
             bindDeleteButtons();
             syncActiveRegistryRow();
+            if (registryColumnPreference) registryColumnPreference.apply();
+          }
+
+          function renderExpenseAllocation(value) {
+            const projection = value && typeof value === "object" ? value : {};
+            const status = String(projection.status || "none");
+            const label = projection.label || {
+              all: "Все расходы распределены",
+              partial: "Расходы распределены частично",
+              none: "Расходы не распределены",
+              not_applicable: "Не требует распределения"
+            }[status] || "Расходы не распределены";
+            const diagnostics = projection.diagnostics && typeof projection.diagnostics === "object" ? projection.diagnostics : {};
+            const reasons = Array.isArray(projection.reasons) ? projection.reasons : [];
+            const tooltip = [
+              diagnostics.eligible_documents != null ? "Документов: " + diagnostics.eligible_documents : "",
+              diagnostics.eligible_components != null ? "Компонентов: " + diagnostics.eligible_components : "",
+              diagnostics.allocated_components != null ? "Распределено: " + diagnostics.allocated_components : "",
+              ...reasons
+            ].filter(Boolean).join(" · ");
+            const tone = status === "all" ? "success" : status === "partial" ? "warning" : status === "not_applicable" ? "neutral" : "error";
+            return '<span class="badge ' + tone + '"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : "") + '>' + escapeHtml(label) + '</span>';
           }
 
           function syncActiveRegistryRow() {
@@ -1626,6 +1874,7 @@
         financialSummary = null;
         pendingBankFeePreview = null;
         selectedFinancialDocumentId = "";
+        documentPackageReceipts.innerHTML = "";
         renderBankFeePreview();
         renderFinancialDocuments();
       }
@@ -1692,10 +1941,134 @@
       function renderDocumentPackageLinks() {
         const allPackage = orderDocumentPackageDownloads.all || {};
         const logisticsPackage = orderDocumentPackageDownloads.logistics || {};
+        const accountingPackage = orderDocumentPackageDownloads.accounting || {};
         allDocumentsPackageLink.hidden = !allPackage.download_path;
         allDocumentsPackageLink.href = allPackage.download_path || "#";
         logisticsDocumentsPackageLink.hidden = !logisticsPackage.download_path;
         logisticsDocumentsPackageLink.href = logisticsPackage.download_path || "#";
+        accountingDocumentsPackageLink.hidden = !accountingPackage.download_path;
+        accountingDocumentsPackageLink.href = accountingPackage.download_path || "#";
+      }
+
+      async function downloadDocumentPackage(packageType) {
+        const packageConfig = orderDocumentPackageDownloads[packageType] || {};
+        if (!packageConfig.download_path || packageDownloadInFlight) {
+          return;
+        }
+        packageDownloadInFlight = packageType;
+        renderPackageReceipt(packageType, null, "Собираем пакет…");
+        try {
+          const response = await fetch(packageConfig.download_path, {
+            method: "GET",
+            headers: { Accept: "application/zip" },
+            credentials: "same-origin"
+          });
+          if (!response.ok) {
+            let message = "HTTP " + response.status;
+            try {
+              const errorPayload = await response.json();
+              message = errorPayload.error || message;
+            } catch (error) { /* bounded download error */ }
+            throw new Error(message);
+          }
+          const receiptHeader = response.headers.get("X-WB-Core-Package-Receipt") || "";
+          if (!receiptHeader) {
+            throw new Error("Сервер не вернул receipt фактической сборки");
+          }
+          const receiptEncoding = response.headers.get("X-WB-Core-Package-Receipt-Encoding") || "";
+          const receipt = JSON.parse(await decodeBase64UrlUtf8(receiptHeader, receiptEncoding));
+          const blob = await response.blob();
+          saveDownloadedBlob(blob, response.headers.get("Content-Disposition") || "", packageType + "-documents.zip");
+          renderPackageReceipt(packageType, receipt, "");
+        } catch (error) {
+          renderPackageReceipt(packageType, null, error.message || "Ошибка скачивания");
+        } finally {
+          packageDownloadInFlight = "";
+        }
+      }
+
+      async function decodeBase64UrlUtf8(value, encoding) {
+        const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+        const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+        const binary = window.atob(padded);
+        const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+        if (encoding === "deflate-base64url") {
+          if (typeof DecompressionStream !== "function") {
+            throw new Error("Браузер не поддерживает проверку receipt сборки");
+          }
+          const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+          return await new Response(stream).text();
+        }
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      }
+
+      function saveDownloadedBlob(blob, contentDisposition, fallbackName) {
+        let filename = fallbackName;
+        const encoded = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+        const plain = /filename="?([^";]+)"?/i.exec(contentDisposition);
+        try {
+          filename = encoded ? decodeURIComponent(encoded[1]) : plain ? plain[1] : fallbackName;
+        } catch (error) { filename = fallbackName; }
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      }
+
+      function renderPackageReceipt(packageType, receipt, errorMessage) {
+        const receiptId = "package-receipt-" + packageType;
+        let node = document.getElementById(receiptId);
+        if (!node) {
+          node = document.createElement("div");
+          node.id = receiptId;
+          documentPackageReceipts.appendChild(node);
+        }
+        if (!receipt) {
+          const isLoading = errorMessage === "Собираем пакет…";
+          node.className = "package-receipt " + (isLoading ? "warning" : "error");
+          node.innerHTML = isLoading
+            ? escapeHtml(errorMessage)
+            : 'Ошибка сборки пакета: — из —. ' + escapeHtml(errorMessage || "Не включено: неизвестно")
+              + ' <button class="compact" type="button" data-package-retry="' + escapeHtml(packageType) + '">Повторить</button>';
+          bindPackageRetry(node);
+          return;
+        }
+        const counts = receipt.counts || {};
+        const included = Number(counts.included || 0);
+        const expected = Number(counts.expected || 0);
+        const omitted = []
+          .concat(Array.isArray(receipt.missing) ? receipt.missing : [])
+          .concat(Array.isArray(receipt.failed) ? receipt.failed : [])
+          .map((item) => item.document_name || item.document_type || item.expected_key)
+          .filter(Boolean);
+        const uniqueOmitted = Array.from(new Set(omitted));
+        const status = receipt.status || "error";
+        let message = "";
+        if (status === "complete") {
+          message = "Пакет скачан полностью: " + included + " из " + expected;
+        } else if (status === "partial") {
+          message = "Пакет скачан частично: " + included + " из " + expected + ". Не загружено: " + (uniqueOmitted.join(", ") || "—");
+        } else {
+          message = "Ошибка сборки пакета: " + included + " из " + expected + ". Не включено: " + (uniqueOmitted.join(", ") || "—");
+        }
+        if (receipt.requires_review) {
+          message += ". Расшифровка ДТ требует проверки";
+        }
+        node.className = "package-receipt " + (status === "complete" && !receipt.requires_review ? "success" : status === "error" ? "error" : "warning");
+        node.innerHTML = escapeHtml(message)
+          + (status === "error" ? ' <button class="compact" type="button" data-package-retry="' + escapeHtml(packageType) + '">Повторить</button>' : "");
+        bindPackageRetry(node);
+      }
+
+      function bindPackageRetry(node) {
+        const retry = node.querySelector("[data-package-retry]");
+        if (retry) {
+          retry.addEventListener("click", () => downloadDocumentPackage(retry.dataset.packageRetry || ""));
+        }
       }
 
       function renderFinancialSummary() {
@@ -1835,7 +2208,8 @@
       function renderFinancialDocumentRows() {
         const rows = orderRequiredDocuments.length ? orderRequiredDocuments : [];
         if (!rows.length) {
-          financialDocumentsRows.innerHTML = '<tr><td colspan="9">Документы заказа не загружены.</td></tr>';
+          financialDocumentsRows.innerHTML = '<tr><td colspan="10">Документы заказа не загружены.</td></tr>';
+          if (financialDocumentColumnPreference) financialDocumentColumnPreference.apply();
           return;
         }
         financialDocumentsRows.innerHTML = rows.map((document) => {
@@ -1859,6 +2233,7 @@
             '<tr data-financial-document-row="' + escapeHtml(canSelect ? (document.document_id || "") : "") + '"' + (rowClass ? ' class="' + escapeHtml(rowClass) + '"' : "") + '>',
             '<td>' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</td>',
             '<td><span class="badge ' + financialStatusTone(status) + '">' + escapeHtml(document.status_label || orderDocumentStatusLabels[status] || status || "-") + '</span></td>',
+            '<td>' + renderExpenseAllocation(document.expense_allocation) + '</td>',
             '<td>' + escapeHtml(document.document_number || "-") + '</td>',
             '<td>' + escapeHtml(document.document_date || "-") + '</td>',
             '<td>' + escapeHtml(document.counterparty || "-") + '</td>',
@@ -1889,6 +2264,7 @@
             deleteFinancialDocument(button.dataset.deleteFinancialDocument || "");
           });
         });
+        if (financialDocumentColumnPreference) financialDocumentColumnPreference.apply();
       }
 
       function financialStatusTone(status) {
@@ -2907,6 +3283,14 @@
       uploadContractButton.addEventListener("click", () => contractFileInput.click());
       contractFileInput.addEventListener("change", () => uploadContractFile(contractFileInput.files && contractFileInput.files[0]));
       addFinancialDocumentButton.addEventListener("click", () => financialDocumentFileInput.click());
+      logisticsDocumentsPackageLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        downloadDocumentPackage("logistics");
+      });
+      accountingDocumentsPackageLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        downloadDocumentPackage("accounting");
+      });
       financialDocumentFileInput.addEventListener("change", () => uploadFinancialDocuments(financialDocumentFileInput.files));
       confirmBankFeeImportButton.addEventListener("click", confirmBankFeeImport);
       cancelBankFeeImportButton.addEventListener("click", cancelBankFeePreview);

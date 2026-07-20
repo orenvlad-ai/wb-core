@@ -75,6 +75,14 @@ LOGISTICS_DOCUMENT_TYPE = "logistics_invoice"
 CUSTOMS_DOCUMENT_TYPE = "customs_declaration"
 CUSTOMS_BY_QUANTITY = {"customs_fee_1010"}
 CUSTOMS_BY_VALUE = {"import_duty_2010", "import_vat_5010"}
+SUPPLIER_COST_AFFECTING_DOCUMENT_TYPES = (
+    "supplier_cny_payment",
+    "bank_transfer_application",
+    "bank_fee",
+    "bank_fee_statement",
+    LOGISTICS_DOCUMENT_TYPE,
+    CUSTOMS_DOCUMENT_TYPE,
+)
 
 WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
     "provisional": (
@@ -553,6 +561,9 @@ def load_supplier_cost_summary_fields(
     # runtime queries.  Exact fields below always come from the canonical proof
     # and deliberately overwrite any legacy exact-looking values.
     from packages.application.supplier_financial_documents import build_financial_summary
+    from packages.application.supplier_expense_allocation import (
+        project_supplier_order_expense_allocation,
+    )
 
     result: dict[str, dict[str, Any]] = {}
     for shipment_id in selected_ids:
@@ -568,7 +579,7 @@ def load_supplier_cost_summary_fields(
             else {}
         )
         allocation = allocations.get(shipment_id)
-        canonical_summary = supplier_cost_summary_fields(
+        canonical_allocation = (
             _supplier_allocation_with_certification(
                 allocation,
                 active_version_id=active_version_id,
@@ -577,12 +588,16 @@ def load_supplier_cost_summary_fields(
             if allocation is not None
             else {}
         )
+        canonical_summary = supplier_cost_summary_fields(canonical_allocation)
         result[shipment_id] = {
             "approx_invoice_cost_rub": per_unit.get("approx_invoice_cost_rub"),
             "approx_landed_cost_per_unit_rub": per_unit.get(
                 "approx_landed_cost_per_unit_rub"
             ),
             **canonical_summary,
+            "expense_allocation": project_supplier_order_expense_allocation(
+                canonical_allocation
+            ),
         }
     return result
 
@@ -956,6 +971,28 @@ def _decimal_conserves(left: Any, right: Any) -> bool:
     return abs(_decimal(left) - _decimal(right)) <= Decimal("0.000000000000000001")
 
 
+def _dedupe_supplier_control_reasons(
+    values: Iterable[Mapping[str, Any]],
+    *,
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    """Keep canonical document diagnostics stable, compact and non-duplicated."""
+
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for value in values:
+        code = str(value.get("code") or "incomplete_cost_allocation").strip()
+        reason_ru = str(value.get("reason_ru") or value.get("reason") or code).strip()
+        key = (code, reason_ru)
+        if not reason_ru or key in seen:
+            continue
+        seen.add(key)
+        result.append({"code": code, "reason_ru": reason_ru})
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Build the canonical per-line supplier cost proof used by warehouse replay and UI."""
 
@@ -1003,8 +1040,11 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
         for row in sources.get("cny_documents") or []
     }
     operations: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    cost_operation_candidates: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in sources.get("cny_operations") or []:
         source_document = cny_documents.get(str(raw.get("source_document_id") or ""))
+        if str(raw.get("operation_type") or "") in {"supplier_payment_out", "transfer_fee"}:
+            cost_operation_candidates[str(raw.get("source_order_id") or "")].append(dict(raw))
         if _counted_cny_operation(raw, document=source_document):
             operations[str(raw.get("source_order_id") or "")].append(dict(raw))
     financial_documents = {
@@ -1022,6 +1062,13 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             )
         )
     for rows in operations.values():
+        rows.sort(
+            key=lambda item: (
+                str(item.get("sequence_key") or ""),
+                str(item.get("operation_id") or ""),
+            )
+        )
+    for rows in cost_operation_candidates.values():
         rows.sort(
             key=lambda item: (
                 str(item.get("sequence_key") or ""),
@@ -1121,6 +1168,87 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
         line_components: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
         component_controls: list[dict[str, Any]] = []
         seen_source_components: set[str] = set()
+        document_evidence: dict[tuple[str, str], dict[str, Any]] = {}
+
+        def ensure_cost_document(
+            *,
+            document_id: str,
+            document_type: str,
+            source_document_id: str = "",
+        ) -> dict[str, Any]:
+            normalized_id = str(document_id or "").strip()
+            normalized_type = str(document_type or "").strip()
+            key = (normalized_id, normalized_type)
+            evidence = document_evidence.setdefault(
+                key,
+                {
+                    "document_id": normalized_id,
+                    "document_type": normalized_type,
+                    "source_document_ids": set(),
+                    "components": [],
+                    "incomplete_reasons": [],
+                },
+            )
+            for value in (normalized_id, str(source_document_id or "").strip()):
+                if value:
+                    evidence["source_document_ids"].add(value)
+            return evidence
+
+        def add_document_reason(
+            evidence: dict[str, Any],
+            *,
+            code: str,
+            reason_ru: str,
+        ) -> None:
+            evidence["incomplete_reasons"].append(
+                {"code": code, "reason_ru": reason_ru}
+            )
+
+        def add_document_component_candidate(
+            evidence: dict[str, Any],
+            *,
+            source_component_id: str,
+            amount_rub: Decimal | None,
+            incomplete_reasons: Iterable[Mapping[str, str]] = (),
+        ) -> None:
+            evidence["components"].append(
+                {
+                    "source_component_id": source_component_id,
+                    "amount_rub": amount_rub,
+                    "incomplete_reasons": [dict(item) for item in incomplete_reasons],
+                }
+            )
+
+        def cny_cost_document_evidence(
+            source_document: Mapping[str, Any],
+            operation: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            source_document_id = str(
+                source_document.get("document_id")
+                or (operation or {}).get("source_document_id")
+                or ""
+            ).strip()
+            linked_financial_id = str(
+                source_document.get("linked_financial_document_id") or ""
+            ).strip()
+            linked_financial = financial_documents.get(linked_financial_id, {})
+            operation_type = str((operation or {}).get("operation_type") or "")
+            inferred_type = (
+                "supplier_cny_payment"
+                if operation_type == "supplier_payment_out"
+                else "bank_fee"
+            )
+            if linked_financial_id and linked_financial:
+                return ensure_cost_document(
+                    document_id=linked_financial_id,
+                    document_type=str(linked_financial.get("document_type") or inferred_type),
+                    source_document_id=source_document_id,
+                )
+            return ensure_cost_document(
+                document_id=source_document_id,
+                document_type=str(source_document.get("document_type") or inferred_type),
+                source_document_id=source_document_id,
+            )
 
         def add_component(
             *,
@@ -1186,6 +1314,134 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                 }
             )
 
+        for document in financial_documents.values():
+            if str(document.get("supplier_order_id") or "") != shipment_id:
+                continue
+            document_type = str(document.get("document_type") or "")
+            if document_type not in SUPPLIER_COST_AFFECTING_DOCUMENT_TYPES:
+                continue
+            evidence = ensure_cost_document(
+                document_id=str(document.get("document_id") or ""),
+                document_type=document_type,
+                source_document_id=str(document.get("document_id") or ""),
+            )
+            if str(document.get("parse_status") or "") not in {"parsed", "confirmed"}:
+                add_document_reason(
+                    evidence,
+                    code="financial_document_status_not_eligible",
+                    reason_ru="Документ не имеет допустимого подтверждённого parse status.",
+                )
+        for document in cny_documents.values():
+            if str(document.get("source_order_id") or "") != shipment_id:
+                continue
+            if str(document.get("document_type") or "") not in {
+                "supplier_cny_payment",
+                "bank_fee",
+            }:
+                continue
+            evidence = cny_cost_document_evidence(document)
+            if str(document.get("status") or "").strip().lower() != "posted":
+                add_document_reason(
+                    evidence,
+                    code="cny_document_status_not_posted",
+                    reason_ru="CNY-документ ещё не имеет допустимого canonical status.",
+                )
+
+        for operation in cost_operation_candidates.get(shipment_id, []):
+            source_document = cny_documents.get(
+                str(operation.get("source_document_id") or ""),
+                {},
+            )
+            evidence = cny_cost_document_evidence(source_document, operation)
+            candidate_reasons: list[dict[str, str]] = []
+            raw_amount_rub = _optional_decimal(operation.get("rub_value_delta"))
+            amount_rub = abs(raw_amount_rub) if raw_amount_rub is not None else None
+            if not _counted_cny_operation(operation, document=source_document):
+                candidate_reasons.append(
+                    {
+                        "code": "cny_operation_status_not_eligible",
+                        "reason_ru": "Операция CNY ledger не имеет допустимого canonical status.",
+                    }
+                )
+            if amount_rub is None or amount_rub <= ZERO:
+                candidate_reasons.append(
+                    {
+                        "code": "cny_operation_rub_value_unavailable",
+                        "reason_ru": "Операция CNY ledger не имеет положительной фактической RUB-стоимости.",
+                    }
+                )
+            add_document_component_candidate(
+                evidence,
+                source_component_id="cny_operation:" + str(operation.get("operation_id") or ""),
+                amount_rub=amount_rub,
+                incomplete_reasons=candidate_reasons,
+            )
+
+        for expense in expenses.get(shipment_id, []):
+            document = financial_documents.get(
+                str(expense.get("financial_document_id") or ""),
+                {},
+            )
+            document_type = str(document.get("document_type") or "")
+            category = str(expense.get("category") or "")
+            is_cost_candidate = bool(
+                (
+                    document_type == "bank_fee_statement"
+                    and category in BANK_FEE_CATEGORIES
+                )
+                or document_type == LOGISTICS_DOCUMENT_TYPE
+                or (
+                    document_type == CUSTOMS_DOCUMENT_TYPE
+                    and category in CUSTOMS_BY_QUANTITY | CUSTOMS_BY_VALUE
+                )
+            )
+            if not is_cost_candidate:
+                continue
+            evidence = ensure_cost_document(
+                document_id=str(document.get("document_id") or expense.get("financial_document_id") or ""),
+                document_type=document_type,
+                source_document_id=str(expense.get("financial_document_id") or ""),
+            )
+            candidate_reasons = []
+            if not _validated_financial_expense(document=document, expense=expense):
+                candidate_reasons.append(
+                    {
+                        "code": "financial_component_status_not_eligible",
+                        "reason_ru": "Строка расхода или документ ещё не подтверждены для canonical allocation.",
+                    }
+                )
+            if (
+                document_type == "bank_fee_statement"
+                and str(expense.get("currency") or "").upper() != "RUB"
+            ):
+                candidate_reasons.append(
+                    {
+                        "code": "financial_component_currency_not_eligible",
+                        "reason_ru": "Комиссия банка не выражена в RUB.",
+                    }
+                )
+            if document_type in {LOGISTICS_DOCUMENT_TYPE, CUSTOMS_DOCUMENT_TYPE} and stage != STAGE_CHINA_TO_FF:
+                candidate_reasons.append(
+                    {
+                        "code": "supplier_stage_not_eligible",
+                        "reason_ru": "Расход станет распределяемым после подтверждения отгрузки из Китая.",
+                    }
+                )
+            amount_rub = _optional_decimal(expense.get("amount_rub"))
+            if amount_rub is None or amount_rub <= ZERO:
+                candidate_reasons.append(
+                    {
+                        "code": "financial_component_amount_not_positive",
+                        "reason_ru": "Строка расхода не имеет положительной суммы в RUB.",
+                    }
+                )
+            add_document_component_candidate(
+                evidence,
+                source_component_id="expense_line:" + str(expense.get("line_id") or ""),
+                amount_rub=amount_rub,
+                incomplete_reasons=candidate_reasons,
+            )
+
         for operation in payment_rows:
             rub = abs(_decimal(operation.get("rub_value_delta")))
             cny = abs(_decimal(operation.get("cny_delta")))
@@ -1244,6 +1500,91 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                 amount_rub=amount,
                 method=method,
                 document=document,
+            )
+
+        allocated_by_source_component = {
+            str(item.get("source_component_id") or ""): item
+            for item in component_controls
+        }
+        document_controls: list[dict[str, Any]] = []
+        for evidence in sorted(
+            document_evidence.values(),
+            key=lambda item: (
+                str(item.get("document_type") or ""),
+                str(item.get("document_id") or ""),
+            ),
+        ):
+            candidates = list(evidence.get("components") or [])
+            allocated = [
+                allocated_by_source_component[str(item.get("source_component_id") or "")]
+                for item in candidates
+                if str(item.get("source_component_id") or "") in allocated_by_source_component
+            ]
+            reasons = [dict(item) for item in evidence.get("incomplete_reasons") or []]
+            for candidate in candidates:
+                reasons.extend(
+                    dict(item) for item in candidate.get("incomplete_reasons") or []
+                )
+            if not candidates:
+                reasons.append(
+                    {
+                        "code": "cost_components_not_recognized",
+                        "reason_ru": "Документ не дал распознанных canonical cost-компонентов.",
+                    }
+                )
+            if len(allocated) < len(candidates):
+                reasons.append(
+                    {
+                        "code": "cost_components_not_fully_allocated",
+                        "reason_ru": "Не все eligible cost-компоненты документа вошли в canonical allocation.",
+                    }
+                )
+            if allocated and not all(bool(item.get("conserved")) for item in allocated):
+                reasons.append(
+                    {
+                        "code": "document_allocation_not_conserved",
+                        "reason_ru": "Контроль сохранения суммы документа не пройден.",
+                    }
+                )
+            if allocated and blockers:
+                reasons.append(
+                    {
+                        "code": "canonical_proof_has_blockers",
+                        "reason_ru": "Canonical proof заказа имеет блокеры и не публикует распределённую себестоимость.",
+                    }
+                )
+            reasons = _dedupe_supplier_control_reasons(reasons)
+            candidate_amounts = [item.get("amount_rub") for item in candidates]
+            eligible_amount = (
+                sum((amount for amount in candidate_amounts if amount is not None), ZERO)
+                if candidates and all(amount is not None for amount in candidate_amounts)
+                else None
+            )
+            allocated_amount = sum(
+                (_decimal(item.get("allocated_amount_rub")) for item in allocated),
+                ZERO,
+            )
+            conserved = bool(
+                candidates
+                and len(allocated) == len(candidates)
+                and all(bool(item.get("conserved")) for item in allocated)
+                and not reasons
+            )
+            document_controls.append(
+                {
+                    "document_id": str(evidence.get("document_id") or ""),
+                    "document_type": str(evidence.get("document_type") or ""),
+                    "source_document_ids": sorted(evidence.get("source_document_ids") or []),
+                    "cost_affecting": True,
+                    "eligible_component_count": len(candidates),
+                    "allocated_component_count": len(allocated),
+                    "eligible_amount_rub": (
+                        _text(eligible_amount) if eligible_amount is not None else None
+                    ),
+                    "allocated_amount_rub": _text(allocated_amount),
+                    "conserved": conserved,
+                    "incomplete_reasons": reasons,
+                }
             )
 
         public_lines: list[dict[str, Any]] = []
@@ -1367,6 +1708,10 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "lines": public_lines,
             "blockers": blockers,
             "component_controls": component_controls,
+            "cost_affecting_document_types": list(
+                SUPPLIER_COST_AFFECTING_DOCUMENT_TYPES
+            ),
+            "document_controls": document_controls,
             "controls": {
                 "document_allocation_conserved": all(item["conserved"] for item in component_controls),
                 "document_counted_once": len(seen_source_components) == len(component_controls),

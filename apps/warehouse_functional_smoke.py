@@ -462,6 +462,18 @@ def _test_blocked_cny_operation_cannot_activate_supplier_flow() -> None:
         and all(item["unit_cost_rub"] is None for item in allocation["lines"]),
         "recognized downstream expenses cannot activate full invoice quantity without a posted supplier payment",
     )
+    blocked_payment_control = next(
+        item
+        for item in allocation["document_controls"]
+        if item["document_type"] == "supplier_cny_payment"
+    )
+    _assert(
+        blocked_payment_control["eligible_component_count"] == 1
+        and blocked_payment_control["allocated_component_count"] == 0
+        and blocked_payment_control["conserved"] is False
+        and blocked_payment_control["incomplete_reasons"],
+        "a blocked CNY document remains a canonical none-status source with bounded reasons",
+    )
 
 
 def _test_zero_rub_supplier_payment_fails_closed() -> None:
@@ -533,6 +545,7 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
             financial_documents.append(
                 {
                     "document_id": document_id,
+                    "supplier_order_id": shipment_id,
                     "document_type": document_type,
                     "document_number": document_id,
                     "document_date": "2026-07-03",
@@ -550,6 +563,26 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                 "status": "confirmed",
             }
         )
+    financial_documents.extend(
+        [
+            {
+                "document_id": "payment-financial",
+                "supplier_order_id": shipment_id,
+                "document_type": "bank_transfer_application",
+                "document_number": "PAYMENT",
+                "document_date": "2026-05-21",
+                "parse_status": "confirmed",
+            },
+            {
+                "document_id": "packing-informational",
+                "supplier_order_id": shipment_id,
+                "document_type": "packing_list",
+                "document_number": "PACKING",
+                "document_date": "2026-05-14",
+                "parse_status": "confirmed",
+            },
+        ]
+    )
     allocation_sources = {
             "shipments": [
                 {
@@ -572,7 +605,22 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                 {"operation_id": "payment", "operation_type": "supplier_payment_out", "source_order_id": shipment_id, "source_document_id": "payment-doc", "operation_date": "2026-05-21", "sequence_key": "1", "cny_delta": "-541962.5", "rub_value_delta": "-5724403.57", "status": "posted"},
                 {"operation_id": "fee", "operation_type": "transfer_fee", "source_order_id": shipment_id, "source_document_id": "fee-doc", "operation_date": "2026-05-21", "sequence_key": "2", "cny_delta": "-11446.4", "rub_value_delta": "-120899.32", "status": "posted"},
             ],
-            "cny_documents": [],
+            "cny_documents": [
+                {
+                    "document_id": "payment-doc",
+                    "source_order_id": shipment_id,
+                    "linked_financial_document_id": "payment-financial",
+                    "document_type": "supplier_cny_payment",
+                    "status": "posted",
+                },
+                {
+                    "document_id": "fee-doc",
+                    "source_order_id": shipment_id,
+                    "linked_financial_document_id": "",
+                    "document_type": "bank_fee",
+                    "status": "posted",
+                },
+            ],
             "financial_documents": financial_documents,
             "financial_expense_lines": financial_expense_lines,
         }
@@ -630,6 +678,52 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
     _assert(abs(Decimal(by_nm[391660889]["capital_rub"]) - Decimal("586960.7448827740481998376819")) < Decimal("1e-20"), "26GN390 391660889 capital")
     _assert(abs(Decimal(by_nm[391661710]["capital_rub"]) - Decimal("684787.5356965697228998106288")) < Decimal("1e-20"), "26GN390 391661710 capital")
     _assert(all(all(item.values()) for item in [allocation["controls"]]), "26GN390 conservation controls")
+    document_controls = {
+        str(item["document_id"]): item for item in allocation["document_controls"]
+    }
+    _assert(
+        document_controls["payment-financial"]["document_type"]
+        == "bank_transfer_application"
+        and document_controls["payment-financial"]["eligible_component_count"] == 1
+        and document_controls["payment-financial"]["allocated_component_count"] == 1
+        and document_controls["payment-financial"]["conserved"] is True,
+        "linked CNY payment is projected onto its internal financial document",
+    )
+    _assert(
+        document_controls["customs"]["eligible_component_count"] == 3
+        and document_controls["customs"]["allocated_component_count"] == 3
+        and document_controls["customs"]["incomplete_reasons"] == []
+        and "packing-informational" not in document_controls
+        and "packing_list" not in allocation["cost_affecting_document_types"],
+        "canonical document controls conserve every customs component and exclude informational files",
+    )
+    partial_sources = copy.deepcopy(allocation_sources)
+    partial_sources["financial_expense_lines"].append(
+        {
+            "line_id": "customs:needs-review",
+            "financial_document_id": "customs",
+            "supplier_order_id": shipment_id,
+            "category": "import_duty_2010",
+            "amount_rub": "10",
+            "currency": "RUB",
+            "status": "needs_review",
+        }
+    )
+    partial_customs = next(
+        item
+        for item in _supplier_cost_allocations(partial_sources)[shipment_id]["document_controls"]
+        if item["document_id"] == "customs"
+    )
+    _assert(
+        partial_customs["eligible_component_count"] == 4
+        and partial_customs["allocated_component_count"] == 3
+        and partial_customs["conserved"] is False
+        and any(
+            reason["code"] == "financial_component_status_not_eligible"
+            for reason in partial_customs["incomplete_reasons"]
+        ),
+        "unconfirmed customs evidence stays visible as a partial canonical document allocation",
+    )
 
 
 def _test_official_wb_snapshot_integrity() -> None:
