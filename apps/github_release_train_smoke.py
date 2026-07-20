@@ -64,8 +64,19 @@ from apps.github_release_train import (  # noqa: E402
     upsert_status_comment,
 )
 from apps.github_release_train_wait import (  # noqa: E402
+    EXIT_AWAIT_PHASE_CAPABILITY,
     EXIT_AWAITING_UI,
+    EXIT_BLOCKED,
+    EXIT_CONTINUE_SAFE_PHASES,
+    EXIT_CONTINUE_WAITING,
+    EXIT_OWN_ACTION,
+    EXIT_RESUMED,
+    EXIT_TERMINAL_FAILURE,
+    build_parser,
     evaluate_release,
+    goal_disposition,
+    local_playwright_preflight,
+    shepherd_release,
     wait_for_release,
 )
 from apps.github_release_train_spec import (  # noqa: E402
@@ -75,18 +86,30 @@ from apps.github_release_train_spec import (  # noqa: E402
     CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
     EXPLICIT_TASK_PROMPTS,
+    GoalDisposition,
+    GoalCapability,
+    GoalPhase,
+    GoalPhaseContext,
     MONITORED_RELEASE_LABELS,
     PRIMARY_STATE_LABELS,
     TERMINAL_LABELS,
     TERMINAL_FORBIDDEN_INHERITANCE,
     TRANSITION_MATRIX,
+    PRODUCTION_MUTATION_RUNNER_REQUIREMENTS,
     TaskClass,
     TaskContinuity,
     TaskIntent,
+    UiRuntime,
     ContinuityIntent,
     classify_continuity,
     classify_task,
     explicit_task_class,
+    mcp_capability_sufficient,
+    order_goal_phases,
+    phase_goal_decision,
+    production_evidence_route,
+    production_mutation_runner_contract,
+    select_ui_runtime,
 )
 
 
@@ -956,6 +979,874 @@ def _assert_waiter_contract() -> None:
     assert _labels(classification_api.pulls[84]) == labels_before
     assert classification_api.comments == comments_before
     assert any("fail-closed classification" in line for line in classification_output)
+
+
+def _goal_gate_fixture(*, lost_owner: bool) -> tuple[FakeApi, dict[str, Any], dict[str, Any]]:
+    """Synthetic predecessor/successor fixture; never reads or mutates real regression PRs."""
+
+    api = FakeApi()
+    predecessor_number = 710
+    successor_number = 711
+    predecessor = _pull(
+        predecessor_number,
+        labels=[
+            AWAITING_UI_LABEL,
+            LOOP_TASK_LABEL,
+            LIVE_RUNTIME_LABEL,
+            loop_root_label(predecessor_number),
+        ],
+        created_at="2026-07-20T05:00:00Z",
+        sha=SHA_A,
+    )
+    predecessor["state"] = "closed"
+    predecessor["merged"] = True
+    predecessor["merge_commit_sha"] = SHA_A
+    successor = _pull(
+        successor_number,
+        labels=[
+            READY_LABEL,
+            LOOP_TASK_LABEL,
+            LIVE_RUNTIME_LABEL,
+            loop_root_label(successor_number),
+        ],
+        created_at="2026-07-20T05:01:00Z",
+        sha=SHA_B,
+    )
+    api.pulls = {predecessor_number: predecessor, successor_number: successor}
+    _add_new_root_proof(api, predecessor_number)
+    _add_new_root_proof(api, successor_number)
+    api.add_comment(
+        predecessor_number,
+        f"<!-- wb-core-loop-deploy-proof merge={SHA_A} "
+        f"pr={predecessor_number} root={predecessor_number} -->",
+    )
+    upsert_status_comment(
+        api,
+        successor_number,
+        owner="successor-agent",
+        reason="synthetic queued owner",
+        last_action="synthetic successor heartbeat",
+        intervention=False,
+    )
+    if lost_owner:
+        api.add_labels(predecessor_number, [NEEDS_RESUME_LABEL])
+        upsert_status_comment(
+            api,
+            predecessor_number,
+            owner="unowned",
+            reason="synthetic lost owner",
+            last_action="synthetic release:needs-resume proof",
+            intervention=True,
+        )
+    else:
+        upsert_status_comment(
+            api,
+            predecessor_number,
+            owner="active-agent",
+            reason="synthetic live owner",
+            last_action="synthetic heartbeat",
+            intervention=False,
+        )
+    return api, predecessor, successor
+
+
+def _assert_goal_shepherd_regressions() -> None:
+    completed: list[str] = []
+    assert {item.value for item in GoalDisposition} == {
+        "TERMINAL_SUCCESS",
+        "CONTINUE_WAITING",
+        "CONTINUE_SAFE_PHASES",
+        "AWAIT_PHASE_CAPABILITY",
+        "OWN_ACTION",
+        "TAKEOVER_PREDECESSOR",
+        "RECOVER_OWN_CHAIN",
+        "EXTERNAL_BLOCKER",
+        "TERMINAL_FAILURE",
+    }
+
+    lost_api, predecessor, successor = _goal_gate_fixture(lost_owner=True)
+    predecessor_number = int(predecessor["number"])
+    successor_number = int(successor["number"])
+    takeover = goal_disposition(lost_api, successor_number)
+    assert takeover.disposition == GoalDisposition.TAKEOVER_PREDECESSOR
+    assert takeover.own_pr == successor_number and takeover.action_pr == predecessor_number
+    assert takeover.allowed_next_action == (
+        f"python3 apps/github_release_train_wait.py {predecessor_number} "
+        "--resume-owner --no-ack-agent"
+    )
+    assert takeover.user_intervention_required is False
+    assert takeover.remediation_exhausted is False
+    assert set(takeover.as_dict()) == {
+        "disposition",
+        "own_pr",
+        "action_pr",
+        "canonical_github_state",
+        "reason_code",
+        "allowed_next_action",
+        "user_intervention_required",
+        "evidence",
+        "remediation_exhausted",
+        "current_phase",
+        "blocked_phase",
+        "safe_phases_remaining",
+        "required_capability",
+        "capability_evidence",
+        "next_executable_action",
+    }
+    identity = next(item for item in takeover.evidence if item.get("kind") == "loop-identity")
+    assert identity["exact_head_verified"] is True
+    assert identity["exact_deployed_sha"] == SHA_A
+    assert identity["exact_deployed_sha_verified"] is True
+    assert identity["own_root"] == successor_number
+    assert identity["action_root"] == predecessor_number
+    assert identity["root_isolation_preserved"] is True
+    live_overlay_api, live_overlay_predecessor, live_overlay_successor = _goal_gate_fixture(
+        lost_owner=True
+    )
+    upsert_status_comment(
+        live_overlay_api,
+        int(live_overlay_predecessor["number"]),
+        owner="returned-owner",
+        reason="newer synthetic owner heartbeat",
+        last_action="owner returned before takeover",
+        intervention=False,
+        now=datetime.now(timezone.utc).timestamp() + 1,
+    )
+    assert goal_disposition(
+        live_overlay_api, int(live_overlay_successor["number"])
+    ).disposition == GoalDisposition.OWN_ACTION
+    completed.append("01_lost_predecessor_takeover_not_blocked")
+
+    live_api, live_predecessor, live_successor = _goal_gate_fixture(lost_owner=False)
+    waiting = goal_disposition(live_api, int(live_successor["number"]))
+    assert waiting.disposition == GoalDisposition.CONTINUE_WAITING
+    assert waiting.action_pr == int(live_predecessor["number"])
+    completed.append("02_live_predecessor_normal_waiting")
+
+    for observations in (3, 30, 300):
+        decisions = {
+            goal_disposition(live_api, int(live_successor["number"])).disposition
+            for _ in range(observations)
+        }
+        assert decisions == {GoalDisposition.CONTINUE_WAITING}
+    fabricated_waiting_blocker = {
+        "own_pr": int(live_successor["number"]),
+        "action_pr": int(live_successor["number"]),
+        "canonical_reason_code": "fabricated-waiting-blocker",
+        "attempts": ["waited"],
+        "repo_owned_action_available": False,
+        "remediation_exhausted": True,
+        "terminal_failure": False,
+        "user_intervention_required": True,
+        "minimal_user_action": "intervene",
+    }
+    assert goal_disposition(
+        live_api,
+        int(live_successor["number"]),
+        blocker_evidence=fabricated_waiting_blocker,
+    ).disposition == GoalDisposition.CONTINUE_WAITING
+    assert shepherd_release(
+        live_api,
+        int(live_successor["number"]),
+        status_seconds=0,
+        poll_seconds=0,
+        once=True,
+        emit=lambda _: None,
+    ) == EXIT_CONTINUE_WAITING
+    completed.append("03_repetition_never_blocks")
+
+    assert resume_loop_owner(
+        lost_api,
+        predecessor_number,
+        SHA_A,
+        predecessor_number,
+        actor="takeover-agent",
+        association="OWNER",
+    ) == "resumed"
+    resumed = goal_disposition(lost_api, successor_number)
+    assert resumed.disposition == GoalDisposition.CONTINUE_WAITING
+    assert resumed.action_pr == predecessor_number
+    assert accept_loop_ui(
+        lost_api,
+        predecessor_number,
+        actor="takeover-agent",
+        association="OWNER",
+        deployed_sha=SHA_A,
+        evidence=EVIDENCE,
+    ) == "accepted"
+    after_predecessor = goal_disposition(lost_api, successor_number)
+    assert after_predecessor.disposition == GoalDisposition.CONTINUE_WAITING
+    assert after_predecessor.action_pr == successor_number
+    assert select_candidate(lost_api)["pr_number"] == successor_number
+    completed.append("04_takeover_accept_then_return_to_own_queue")
+
+    intermediate_api, _, intermediate_successor = _goal_gate_fixture(lost_owner=True)
+    before_comments = list(intermediate_api.comments)
+    exit_code = shepherd_release(
+        intermediate_api,
+        int(intermediate_successor["number"]),
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        emit=lambda _: None,
+    )
+    assert exit_code == EXIT_RESUMED and exit_code != 2
+    assert intermediate_api.comments == before_comments
+    completed.append("05_takeover_exit_is_intermediate")
+
+    defect_api, defect_gate, defect_successor = _goal_gate_fixture(lost_owner=False)
+    gate_number = int(defect_gate["number"])
+    successor_snapshot = (_labels(defect_successor), list(defect_api.list_comments(int(defect_successor["number"]))))
+    recovery_number = 712
+    defect_api.pulls[recovery_number] = _pull(
+        recovery_number,
+        labels=[LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T05:02:00Z",
+        sha=SHA_C,
+    )
+    defect_api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    enqueue_loop_recovery(
+        defect_api,
+        recovery_number,
+        SHA_C,
+        gate_pr=gate_number,
+        expected_root=gate_number,
+        actor="ui-agent",
+        association="OWNER",
+    )
+    assert select_candidate(defect_api)["pr_number"] == recovery_number
+    assert AWAITING_UI_LABEL in _labels(defect_gate)
+    assert goal_disposition(
+        defect_api, int(defect_successor["number"])
+    ).disposition == GoalDisposition.CONTINUE_WAITING
+    assert successor_snapshot == (
+        _labels(defect_successor),
+        list(defect_api.list_comments(int(defect_successor["number"]))),
+    )
+    completed.append("06_ui_defect_recovery_keeps_successor_healthy")
+
+    runtime = select_ui_runtime(
+        execution_surface="codex-cli",
+        playwright_available=True,
+        chromium_launchable=True,
+        repo_owned_recovery_available=False,
+    )
+    assert runtime.runtime == UiRuntime.LOCAL_PLAYWRIGHT
+    assert runtime.continue_ui_flow and not runtime.external_blocker_eligible
+    report = local_playwright_preflight(own_pr=successor_number, launch_probe=lambda: None)
+    assert report["runtime"] == UiRuntime.LOCAL_PLAYWRIGHT.value
+    assert report["embedded_browser_required"] is False
+    assert report["continue_ui_flow"] is True
+    completed.append("07_embedded_browser_absence_is_irrelevant")
+
+    recoverable_runtime = select_ui_runtime(
+        execution_surface="codex-cli",
+        playwright_available=True,
+        chromium_launchable=False,
+        repo_owned_recovery_available=True,
+    )
+    assert not recoverable_runtime.continue_ui_flow
+    assert not recoverable_runtime.external_blocker_eligible
+    ui_api, ui_gate, _ = _goal_gate_fixture(lost_owner=False)
+    ui_number = int(ui_gate["number"])
+    assert goal_disposition(ui_api, ui_number).disposition == GoalDisposition.RECOVER_OWN_CHAIN
+    assert shepherd_release(
+        ui_api,
+        ui_number,
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        emit=lambda _: None,
+    ) == EXIT_AWAITING_UI
+    chromium_blocker = {
+        "own_pr": ui_number,
+        "action_pr": ui_number,
+        "head_sha": SHA_A,
+        "release_state": AWAITING_UI_LABEL,
+        "loop_root": ui_number,
+        "merge_sha": SHA_A,
+        "canonical_reason_code": "local-chromium-unavailable-after-recovery",
+        "attempts": [
+            "Playwright import preflight",
+            "isolated Chromium launch",
+            "repo-owned browser restore",
+        ],
+        "repo_owned_action_available": False,
+        "remediation_exhausted": True,
+        "terminal_failure": False,
+        "user_intervention_required": True,
+        "minimal_user_action": "grant the missing local browser installation permission",
+    }
+    blocked_ui = goal_disposition(ui_api, ui_number, blocker_evidence=chromium_blocker)
+    assert blocked_ui.disposition == GoalDisposition.EXTERNAL_BLOCKER
+    assert blocked_ui.remediation_exhausted and blocked_ui.user_intervention_required
+    completed.append("08_chromium_blocker_requires_exhausted_preflight")
+
+    blocked_api = FakeApi()
+    blocked_number = 720
+    blocked_api.pulls[blocked_number] = _pull(
+        blocked_number,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-20T05:10:00Z",
+    )
+    own_blocked = goal_disposition(blocked_api, blocked_number)
+    assert own_blocked.disposition == GoalDisposition.OWN_ACTION
+    assert own_blocked.remediation_exhausted is False
+    assert shepherd_release(
+        blocked_api,
+        blocked_number,
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        emit=lambda _: None,
+    ) == EXIT_OWN_ACTION
+    blocked_external_evidence = {
+        "own_pr": blocked_number,
+        "action_pr": blocked_number,
+        "head_sha": SHA_A,
+        "release_state": BLOCKED_LABEL,
+        "loop_root": 0,
+        "merge_sha": "",
+        "canonical_reason_code": "bounded-fix-needs-external-approval",
+        "attempts": ["bounded diagnosis", "exact-head repair", "trusted retry"],
+        "repo_owned_action_available": False,
+        "remediation_exhausted": True,
+        "terminal_failure": False,
+        "user_intervention_required": True,
+        "minimal_user_action": "grant the missing repository approval",
+    }
+    assert goal_disposition(
+        blocked_api,
+        blocked_number,
+        blocker_evidence=blocked_external_evidence,
+    ).disposition == GoalDisposition.EXTERNAL_BLOCKER
+    assert shepherd_release(
+        blocked_api,
+        blocked_number,
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        blocker_evidence=blocked_external_evidence,
+        emit=lambda _: None,
+    ) == EXIT_BLOCKED
+    terminal_failure_evidence = dict(
+        blocked_external_evidence,
+        terminal_failure=True,
+        user_intervention_required=False,
+        minimal_user_action="",
+        canonical_reason_code="proven-protocol-irrecoverable",
+    )
+    assert shepherd_release(
+        blocked_api,
+        blocked_number,
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        blocker_evidence=terminal_failure_evidence,
+        emit=lambda _: None,
+    ) == EXIT_TERMINAL_FAILURE
+    invalid_available_evidence = dict(
+        blocked_external_evidence,
+        repo_owned_action_available=True,
+    )
+    try:
+        goal_disposition(
+            blocked_api,
+            blocked_number,
+            blocker_evidence=invalid_available_evidence,
+        )
+    except ValueError as exc:
+        assert "no repo-owned action" in str(exc)
+    else:
+        raise AssertionError("repo-owned remediation must forbid EXTERNAL_BLOCKER")
+    stale_root_api = FakeApi()
+    _terminal_loop_fixture(stale_root_api, 730)
+    stale_root_api.pulls[731] = _pull(
+        731,
+        labels=[BLOCKED_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(730)],
+        created_at="2026-07-20T05:10:30Z",
+        sha=SHA_B,
+    )
+    assert goal_disposition(stale_root_api, 731).disposition == GoalDisposition.OWN_ACTION
+    completed.append("09_own_blocked_requires_remediation_exhaustion")
+
+    halted_api = FakeApi()
+    halted_number = 721
+    halted = _pull(
+        halted_number,
+        labels=[HALTED_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T05:11:00Z",
+        sha=SHA_B,
+    )
+    halted["state"] = "closed"
+    halted["merged"] = True
+    halted["merge_commit_sha"] = SHA_A
+    halted_api.pulls[halted_number] = halted
+    assert goal_disposition(halted_api, halted_number).disposition == GoalDisposition.OWN_ACTION
+    reconciliation = {
+        "status": "reconciled",
+        "healthy": True,
+        "pr": halted_number,
+        "head": SHA_B,
+        "merge": SHA_A,
+        "expected_sha": SHA_A,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+    }
+    assert resume_halted_release(halted_api, halted_number, reconciliation) == "production"
+    assert goal_disposition(halted_api, halted_number).disposition == GoalDisposition.TERMINAL_SUCCESS
+    assert shepherd_release(
+        halted_api,
+        halted_number,
+        status_seconds=0,
+        poll_seconds=0,
+        once=False,
+        emit=lambda _: None,
+    ) == 0
+
+    failed_halted_api = FakeApi()
+    failed_halted = _pull(
+        halted_number + 1,
+        labels=[HALTED_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-20T05:12:00Z",
+        sha=SHA_B,
+    )
+    failed_halted["state"] = "closed"
+    failed_halted["merged"] = True
+    failed_halted["merge_commit_sha"] = SHA_A
+    failed_halted_api.pulls[halted_number + 1] = failed_halted
+    failed_evidence = {
+        "own_pr": halted_number + 1,
+        "action_pr": halted_number + 1,
+        "head_sha": SHA_B,
+        "release_state": HALTED_LABEL,
+        "loop_root": 0,
+        "merge_sha": SHA_A,
+        "canonical_reason_code": "exact-sha-reconciliation-external-permission",
+        "attempts": ["bounded exact-SHA reconciliation", "idempotent retry"],
+        "repo_owned_action_available": False,
+        "remediation_exhausted": True,
+        "terminal_failure": False,
+        "user_intervention_required": True,
+        "minimal_user_action": "restore the missing GitHub Environment approval",
+    }
+    assert goal_disposition(
+        failed_halted_api,
+        halted_number + 1,
+        blocker_evidence=failed_evidence,
+    ).disposition == GoalDisposition.EXTERNAL_BLOCKER
+    completed.append("10_halted_reconcile_or_evidence_blocker")
+
+    serial_api, serial_gate, serial_successor = _goal_gate_fixture(lost_owner=False)
+    queue = select_candidate(serial_api)
+    assert queue["status"] == "awaiting-ui" and not queue["found"]
+    assert goal_disposition(
+        serial_api, int(serial_successor["number"])
+    ).action_pr == int(serial_gate["number"])
+    completed.append("11_independent_roots_stay_serialized")
+
+    no_auto_api, no_auto_predecessor, no_auto_successor = _goal_gate_fixture(lost_owner=True)
+    comments_before = list(no_auto_api.comments)
+    takeover_decision = goal_disposition(no_auto_api, int(no_auto_successor["number"]))
+    assert takeover_decision.disposition == GoalDisposition.TAKEOVER_PREDECESSOR
+    assert no_auto_api.comments == comments_before
+    assert not any(
+        "/wb-core loop ack-agent" in body or "/wb-core loop accept-ui" in body
+        for _, body in no_auto_api.comments
+    )
+    assert NEEDS_RESUME_LABEL in _labels(no_auto_predecessor)
+    completed.append("12_takeover_never_acknowledges_or_accepts")
+
+    protocol_sources = [
+        (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+        (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "apps" / "github_release_train_wait.py").read_text(encoding="utf-8"),
+    ]
+    for source in protocol_sources:
+        lowered = source.casefold()
+        assert "открой встроенный browser" not in lowered
+        assert "open the embedded browser" not in lowered
+    for source in protocol_sources[:3]:
+        for required in (
+            "TERMINAL_SUCCESS",
+            "CONTINUE_WAITING",
+            "CONTINUE_SAFE_PHASES",
+            "AWAIT_PHASE_CAPABILITY",
+            "OWN_ACTION",
+            "TAKEOVER_PREDECESSOR",
+            "RECOVER_OWN_CHAIN",
+            "EXTERNAL_BLOCKER",
+            "TERMINAL_FAILURE",
+            "remediation_exhausted",
+            "current_phase",
+            "blocked_phase",
+            "safe_phases_remaining",
+            "required_capability",
+            "capability_evidence",
+            "next_executable_action",
+            "--shepherd",
+            "--playwright-preflight",
+        ):
+            assert required in source
+    assert all(
+        ("local" in source.casefold() or "локаль" in source.casefold())
+        and "playwright" in source.casefold()
+        for source in protocol_sources
+    )
+    help_text = build_parser().format_help()
+    for required in (
+        "--shepherd",
+        "--once",
+        "--blocker-evidence",
+        "--phase-state",
+        "--playwright-preflight",
+        "2 proven EXTERNAL_BLOCKER",
+        "6 --once normal waiting",
+        "7 proven TERMINAL_FAILURE",
+        "CONTINUE_SAFE_PHASES",
+        "AWAIT_PHASE_CAPABILITY",
+        "Elapsed time is",
+        "never terminal",
+    ):
+        assert required in help_text
+    completed.append("13_cli_protocol_never_requires_embedded_browser")
+
+    this_source = Path(__file__).read_text(encoding="utf-8")
+    for real_pr_number in (600 + 84, 700 - 10):
+        assert f"#{real_pr_number}" not in this_source
+    completed.append("14_regression_prs_are_synthetic_only")
+
+    assert len(completed) == 14, completed
+    print(f"goal_shepherd_regressions: {len(completed)}/14 ok")
+
+
+def _assert_phase_local_goal_regressions() -> None:
+    completed: list[str] = []
+    canonical = {
+        "own": {"pr": 810, "release_state": "release:none", "head_sha": SHA_A},
+        "queue": {"status": "idle", "gate_pr": 0},
+    }
+
+    def classify(context: GoalPhaseContext):
+        decision = phase_goal_decision(
+            context,
+            own_pr=810,
+            action_pr=810,
+            canonical_github_state=canonical,
+        )
+        assert decision is not None
+        return decision
+
+    repository_work = (
+        GoalPhase.REPOSITORY_PREFLIGHT,
+        GoalPhase.REPOSITORY_IMPLEMENTATION,
+        GoalPhase.REPOSITORY_VALIDATION,
+        GoalPhase.REPOSITORY_RUNNER_PREPARATION,
+        GoalPhase.PULL_REQUEST,
+    )
+    missing_credentials = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_PREFLIGHT,
+            safe_phases_remaining=repository_work,
+            required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+            capability_available=False,
+            next_executable_action="inspect repository and implement the fixture-backed runner",
+        )
+    )
+    assert missing_credentials.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert missing_credentials.blocked_phase is None
+    assert GoalPhase.PULL_REQUEST in missing_credentials.safe_phases_remaining
+    completed.append("01_future_backfill_credentials_do_not_block_repository")
+
+    missing_mcp = classify(
+        GoalPhaseContext.from_mapping(
+            {
+                "current_phase": GoalPhase.REPOSITORY_IMPLEMENTATION.value,
+                "safe_phases_remaining": [GoalPhase.REPOSITORY_IMPLEMENTATION.value],
+                "required_capability": GoalCapability.WEBCORE_DATA_MCP_READ.value,
+                "capability_available": False,
+            }
+        )
+    )
+    assert missing_mcp.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    completed.append("02_missing_mcp_is_irrelevant_to_repository_phase")
+
+    mcp_allowlist = {GoalCapability.PRODUCTION_READ.value}
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_MANIFEST,
+        mcp_allowlist,
+    )
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_DIGEST,
+        mcp_allowlist,
+    )
+    assert production_evidence_route(
+        GoalCapability.PRODUCTION_MANIFEST,
+        mcp_allowlist=mcp_allowlist,
+    ) == "repo-owned-runner"
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_MUTATION,
+        {GoalCapability.PRODUCTION_MUTATION.value},
+    )
+    completed.append("03_mcp_allowlist_is_checked_per_capability")
+
+    no_browser_session = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_IMPLEMENTATION,
+            safe_phases_remaining=(
+                GoalPhase.REPOSITORY_IMPLEMENTATION,
+                GoalPhase.REPOSITORY_VALIDATION,
+                GoalPhase.PULL_REQUEST,
+            ),
+            required_capability=GoalCapability.PRODUCTION_UI_AUTH.value,
+            capability_available=False,
+        )
+    )
+    assert no_browser_session.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert GoalPhase.PULL_REQUEST in no_browser_session.safe_phases_remaining
+    completed.append("04_future_browser_auth_does_not_block_development")
+
+    apply_count = 0
+    missing_backup = GoalPhaseContext(
+        current_phase=GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+        safe_phases_remaining=(),
+        required_capability="production-backup-and-pre-change-digest",
+        capability_available=False,
+        capability_evidence=(
+            {
+                "kind": "production-mutation-preflight",
+                "backup_available": False,
+                "pre_change_digest_available": False,
+                "attempts": ["canonical runner dry-run", "backup evidence lookup"],
+                "repo_owned_action_available": False,
+            },
+        ),
+        remediation_exhausted=True,
+        user_intervention_required=True,
+        minimal_user_action="restore read access to the canonical backup evidence",
+    )
+    pre_apply_wait = classify(missing_backup)
+    assert pre_apply_wait.disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY
+    assert pre_apply_wait.blocked_phase == GoalPhase.PRODUCTION_MUTATION_PREFLIGHT
+    incomplete_runner = {
+        requirement: True
+        for requirement in PRODUCTION_MUTATION_RUNNER_REQUIREMENTS
+        if requirement not in {"pre_change_digest", "backup_evidence_contract"}
+    }
+    incomplete_contract = production_mutation_runner_contract(incomplete_runner)
+    assert incomplete_contract["apply_allowed"] is False
+    assert incomplete_contract["missing_requirements"] == [
+        "backup_evidence_contract",
+        "pre_change_digest",
+    ]
+    assert apply_count == 0
+    completed.append("05_missing_backup_fails_closed_only_before_apply")
+
+    restored = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+            required_capability="production-backup-and-pre-change-digest",
+            capability_available=True,
+            capability_evidence=(
+                {
+                    "kind": "production-mutation-preflight",
+                    "backup_available": True,
+                    "pre_change_digest_available": True,
+                    "repo_owned_action_available": True,
+                },
+            ),
+            next_executable_action="run the canonical runner once with explicit --apply",
+        )
+    )
+    assert restored.disposition == GoalDisposition.OWN_ACTION
+    manifest = {requirement: True for requirement in PRODUCTION_MUTATION_RUNNER_REQUIREMENTS}
+    manifest["operation_id"] = "synthetic-fixture-operation"
+    runner_contract = production_mutation_runner_contract(manifest)
+    assert runner_contract == {
+        "valid": True,
+        "missing_requirements": [],
+        "apply_allowed": True,
+    }
+    applied_operations: set[str] = set()
+    for _ in range(2):
+        if manifest["operation_id"] not in applied_operations:
+            apply_count += 1
+            applied_operations.add(str(manifest["operation_id"]))
+    reconciliation = {
+        "operation_id": manifest["operation_id"],
+        "affected_records": 2,
+        "expected_affected_records": 2,
+        "non_target_invariants_preserved": True,
+    }
+    assert apply_count == 1
+    assert reconciliation["affected_records"] == reconciliation["expected_affected_records"]
+    assert reconciliation["non_target_invariants_preserved"] is True
+    assert set(PRODUCTION_MUTATION_RUNNER_REQUIREMENTS) <= set(manifest)
+    completed.append("06_restored_capability_applies_once_and_reconciles")
+
+    prompt_order = order_goal_phases(
+        (
+            GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+            GoalPhase.PRODUCTION_UI_PREFLIGHT,
+            GoalPhase.REPOSITORY_PREFLIGHT,
+            GoalPhase.PULL_REQUEST,
+            GoalPhase.REPOSITORY_IMPLEMENTATION,
+        )
+    )
+    assert prompt_order[:3] == (
+        GoalPhase.REPOSITORY_PREFLIGHT,
+        GoalPhase.REPOSITORY_IMPLEMENTATION,
+        GoalPhase.PULL_REQUEST,
+    )
+    assert prompt_order.index(GoalPhase.PRODUCTION_MUTATION_PREFLIGHT) > prompt_order.index(
+        GoalPhase.PULL_REQUEST
+    )
+    completed.append("07_prompt_order_is_rebuilt_from_dependencies")
+
+    future_database = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_VALIDATION,
+            safe_phases_remaining=(
+                GoalPhase.REPOSITORY_VALIDATION,
+                GoalPhase.REPOSITORY_RUNNER_PREPARATION,
+            ),
+            required_capability=GoalCapability.PRODUCTION_DATABASE.value,
+            capability_available=False,
+            capability_evidence=(
+                {
+                    "kind": "future-capability",
+                    "repo_owned_action_available": False,
+                },
+            ),
+            remediation_exhausted=True,
+            user_intervention_required=True,
+            minimal_user_action="provide future production database authorization",
+        )
+    )
+    assert future_database.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert not future_database.user_intervention_required
+    completed.append("08_future_missing_capability_keeps_safe_work_running")
+
+    phase_api = FakeApi()
+    phase_api.pulls[810] = _pull(
+        810,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-20T06:00:00Z",
+        sha=SHA_A,
+    )
+    immediate_auth = GoalPhaseContext(
+        current_phase=GoalPhase.PRODUCTION_READ_PREFLIGHT,
+        required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+        capability_available=False,
+        capability_evidence=(
+            {
+                "kind": "production-read-preflight",
+                "authentication_result": "permission-denied",
+                "attempts": ["canonical read-only runner preflight"],
+                "repo_owned_action_available": False,
+            },
+        ),
+        remediation_exhausted=True,
+        user_intervention_required=True,
+        minimal_user_action="grant read-only access for the named production evidence source",
+    )
+    awaited = goal_disposition(phase_api, 810, phase_context=immediate_auth)
+    assert awaited.disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY
+    assert awaited.user_intervention_required and awaited.remediation_exhausted
+    assert awaited.safe_phases_remaining == ()
+    assert shepherd_release(
+        phase_api,
+        810,
+        status_seconds=0,
+        poll_seconds=0,
+        once=True,
+        phase_context=immediate_auth,
+        emit=lambda _: None,
+    ) == EXIT_AWAIT_PHASE_CAPABILITY
+    completed.append("09_immediate_external_auth_awaits_exact_capability")
+
+    for keyword, capability in (
+        ("MCP", GoalCapability.WEBCORE_DATA_MCP_READ),
+        ("browser", GoalCapability.LOCAL_PLAYWRIGHT),
+        ("credentials", GoalCapability.PRODUCTION_CREDENTIALS),
+        ("production database", GoalCapability.PRODUCTION_DATABASE),
+    ):
+        keyword_decision = classify(
+            GoalPhaseContext(
+                current_phase=GoalPhase.REPOSITORY_PREFLIGHT,
+                safe_phases_remaining=(GoalPhase.REPOSITORY_PREFLIGHT,),
+                required_capability=capability.value,
+                capability_available=False,
+                capability_evidence=(
+                    {
+                        "kind": "keyword-only",
+                        "keyword": keyword,
+                        "repo_owned_action_available": False,
+                    },
+                ),
+            )
+        )
+        assert keyword_decision.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+        assert keyword_decision.disposition != GoalDisposition.EXTERNAL_BLOCKER
+    assumption_only = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.PRODUCTION_READ_PREFLIGHT,
+            required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+            capability_available=False,
+            capability_evidence=(
+                {
+                    "kind": "keyword-only",
+                    "keyword": "credentials",
+                    "repo_owned_action_available": False,
+                },
+            ),
+            remediation_exhausted=True,
+            user_intervention_required=True,
+            minimal_user_action="provide credentials",
+        )
+    )
+    assert assumption_only.disposition == GoalDisposition.OWN_ACTION
+    assert assumption_only.reason_code == "phase-capability-preflight-required"
+    phase_protocol_sources = [
+        (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+        (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
+            encoding="utf-8"
+        ),
+    ]
+    for source in phase_protocol_sources:
+        for required in (
+            "REPOSITORY_PREFLIGHT",
+            "PRODUCTION_READ_PREFLIGHT",
+            "PRODUCTION_MUTATION_PREFLIGHT",
+            "PRODUCTION_UI_PREFLIGHT",
+            "CONTINUE_SAFE_PHASES",
+            "AWAIT_PHASE_CAPABILITY",
+            "current_phase",
+            "blocked_phase",
+            "safe_phases_remaining",
+            "required_capability",
+            "capability_evidence",
+            "next_executable_action",
+            "allowlist",
+            "repo-owned runner",
+            "dry-run",
+            "fixtures/mocks",
+        ):
+            assert required in source
+    assert EXIT_CONTINUE_SAFE_PHASES == 8
+    completed.append("10_capability_words_never_create_global_blocker")
+
+    assert len(completed) == 10, completed
+    print(f"phase_local_goal_regressions: {len(completed)}/10 ok")
 
 
 def _assert_workflow_contract() -> None:
@@ -1958,9 +2849,14 @@ def _assert_continuity_classification_matrix() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--continuity-only", action="store_true")
+    parser.add_argument("--goal-only", action="store_true")
     args = parser.parse_args()
     if args.continuity_only:
         _assert_continuity_classification_matrix()
+        return 0
+    if args.goal_only:
+        _assert_goal_shepherd_regressions()
+        _assert_phase_local_goal_regressions()
         return 0
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
@@ -1972,6 +2868,8 @@ def main() -> int:
     _assert_blocked_halted_and_production_mutation()
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
+    _assert_goal_shepherd_regressions()
+    _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
     _assert_codex_task_class_and_monitor_contract()
     _assert_machine_classification_and_state_spec()
