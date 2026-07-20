@@ -235,6 +235,18 @@ class FfmpegVideoFrameExtractor:
     def extract(self, video_path: Path, output_dir: Path, *, max_frames: int = MAX_VIDEO_FRAMES) -> list[Path]:
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         frame_pattern = output_dir / "frame-%02d.jpg"
+        frame_limit = min(MAX_VIDEO_FRAMES, max(1, int(max_frames)))
+        # HLS media segments are commonly only 4-5 seconds long and retain
+        # their absolute stream timestamps.  Sampling those one at a time
+        # with a 15-second fps cadence can legitimately exit 0 while writing
+        # no frame.  For the bounded single-frame HLS path, select the first
+        # decodable frame instead; the segment selection itself already
+        # provides deterministic spacing across the video.
+        video_filter = (
+            "select='eq(n,0)',scale='min(1280,iw)':-2"
+            if frame_limit == 1
+            else "fps=1/15,scale='min(1280,iw)':-2"
+        )
         try:
             completed = subprocess.run(
                 [
@@ -245,9 +257,9 @@ class FfmpegVideoFrameExtractor:
                     "-i",
                     str(video_path),
                     "-vf",
-                    "fps=1/15,scale='min(1280,iw)':-2",
+                    video_filter,
                     "-frames:v",
-                    str(min(MAX_VIDEO_FRAMES, max(1, int(max_frames)))),
+                    str(frame_limit),
                     "-y",
                     str(frame_pattern),
                 ],

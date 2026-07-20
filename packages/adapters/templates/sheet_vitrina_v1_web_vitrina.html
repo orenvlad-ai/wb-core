@@ -5464,7 +5464,7 @@
 	                <label class="research-field"><span class="filter-label">Режим ответов</span><select class="select" data-autoanswers-mode><option value="off">Выключено</option><option value="manual">Ручной</option><option value="draft_only">Черновики</option><option value="auto_safe">Безопасный</option><option value="auto_all">Полный</option></select></label>
 	                <div class="research-field"><span class="filter-label">Расход сегодня</span><strong data-autoanswers-budget-day>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Расход за месяц</span><strong data-autoanswers-budget-month>—</strong></div>
-	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-backlog>Исторический backlog</button></div>
 	              </div>
 	              <p class="feedbacks-source-helper" data-autoanswers-settings-note>Загружаем настройки…</p>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
@@ -12651,7 +12651,12 @@
           "\nFallback: " + (latestJob.fallback_used ? "да" : "нет") +
           "\nMedia uncertainty: " + (latestJob.media_uncertain ? "да" : "нет") +
           "\nФинальная проверка ручного текста: " + (latestJob.manual_guard_passed ? "пройдена" : "не пройдена")
-        : "AI ещё не запускался";
+        : "AI ещё не запускался" +
+          "\nJSON contract: не запускался" +
+          "\nHard gates: не запускались" +
+          "\nFallback: не применялся" +
+          "\nMedia uncertainty: не проверялась" +
+          "\nФинальная проверка ручного текста: не запускалась";
       let actions = "";
       if (answerText) {
         actions = '<p class="autoanswers-warning">В Wildberries уже есть ответ. Новая публикация заблокирована.</p>';
@@ -12672,8 +12677,8 @@
         (row.cons ? '<p class="autoanswers-optional-line"><strong>Минусы:</strong> ' + escapeHtml(row.cons) + '</p>' : '') +
         ((row.tags || []).length ? '<p class="autoanswers-optional-line"><strong>Теги:</strong> ' + escapeHtml(row.tags.join(", ")) + '</p>' : '');
       const mediaItems = media.filter(function(item) { return item.kind !== "video_frame"; }).map(function(item) {
-        if (item.kind === "photo" && item.primary_available) return '<img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "primary")) + '" alt="Фото покупателя" loading="lazy">';
-        if (item.kind === "video" && item.preview_available) return '<figure><img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "preview")) + '" alt="Превью видео покупателя" loading="lazy"><figcaption>Видео · до 4 кадров подготовлено</figcaption></figure>';
+        if (item.kind === "photo" && item.primary_available) return '<img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "primary")) + '" alt="Фото покупателя">';
+        if (item.kind === "video" && item.preview_available) return '<figure><img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "preview")) + '" alt="Превью видео покупателя"><figcaption>Видео · до 4 кадров подготовлено</figcaption></figure>';
         return '<span class="autoanswers-answer-empty">' + escapeHtml(item.kind === "video" ? "Видео недоступно" : "Фото недоступно") + '</span>';
       }).join("");
       const mainStatus = answerText ? "В Wildberries уже есть ответ" : (regenerationRequired ? "Нужно перегенерировать с учётом медиа" : friendlyAutoanswersStatus(row.processing_status || "synced"));
