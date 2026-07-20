@@ -61,12 +61,12 @@ class ActivationTest(unittest.TestCase):
             result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["schema_backup"]["integrity_check"], "ok")
-        self.assertIn(2, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
+        self.assertIn(3, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
         with sqlite3.connect(db_path) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
-    def test_prepare_deploy_preserves_active_manual_mode_after_schema_v2(self, _dependency: object) -> None:
+    def test_prepare_deploy_preserves_active_manual_mode_after_additive_schema(self, _dependency: object) -> None:
         repository = AutoanswersRepository(runtime_dir=self.runtime_dir, now_factory=MutableClock(), env={})
         repository.update_settings(master_enabled=True, mode="manual", actor_id="release-train")
 
@@ -140,7 +140,7 @@ class ActivationTest(unittest.TestCase):
         self.assertTrue(result["raw_source_removed_after_verification"])
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for backup replacement acceptance")
-    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_schema_v2(self) -> None:
+    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_schema_v3(self) -> None:
         database = self.runtime_dir / "registry_upload_runtime.sqlite3"
         with sqlite3.connect(database) as conn:
             conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
@@ -167,8 +167,8 @@ class ActivationTest(unittest.TestCase):
         with sqlite3.connect(database) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "current")
 
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v2"
-        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__redundant.sqlite3"
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__redundant.sqlite3"
         shutil.copy2(database, redundant)
         sidecar = redundant.with_name(redundant.name + "-journal")
         sidecar.write_bytes(b"orphan")

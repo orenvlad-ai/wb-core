@@ -2,7 +2,7 @@
 """Fail-closed lifecycle control for the production manual autoanswers contour.
 
 This command never imports a WB writer and never performs external I/O.  It is
-the only repo-owned path used to migrate schema v2, activate manual mode, or
+the only repo-owned path used to migrate the current additive schema, activate manual mode, or
 return the persisted master switch to OFF.
 """
 
@@ -272,12 +272,14 @@ def _create_current_compressed_schema_backup(
     staging_dir = runtime_dir / ".wb_autoanswers_capacity_recovery"
     staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(staging_dir, 0o700)
-    staging = staging_dir / "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     staging_manifest = staging.with_suffix(staging.suffix + ".manifest.json")
     backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(backup_dir, 0o700)
-    archive = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__capacity_recovery.sqlite3.zst"
+    archive = backup_dir / (
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__capacity_recovery.sqlite3.zst"
+    )
     manifest = archive.with_suffix(archive.suffix + ".manifest.json")
 
     existing = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
@@ -401,7 +403,9 @@ def _create_current_compressed_schema_backup(
         manifest_temporary.unlink(missing_ok=True)
 
     orphan_journals_removed = 0
-    for journal in backup_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3-journal"):
+    for journal in backup_dir.glob(
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__*.sqlite3-journal"
+    ):
         database_candidate = Path(str(journal).removesuffix("-journal"))
         if not database_candidate.exists():
             journal.unlink()
@@ -427,14 +431,16 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     free_before = shutil.disk_usage(backup_root).free
     compressed = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
     if int(compressed.get("count") or 0) > 0:
-        schema_v2_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        current_schema_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         redundant_raw_removed = 0
-        for raw in schema_v2_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3"):
+        for raw in current_schema_dir.glob(
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__*.sqlite3"
+        ):
             raw.unlink()
             redundant_raw_removed += 1
         orphan_sidecars_removed = 0
         for suffix in ("*.sqlite3-journal", "*.sqlite3-shm", "*.sqlite3-wal"):
-            for sidecar in schema_v2_dir.glob(suffix):
+            for sidecar in current_schema_dir.glob(suffix):
                 database_candidate = Path(
                     str(sidecar).removesuffix("-journal").removesuffix("-shm").removesuffix("-wal")
                 )
@@ -461,12 +467,14 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
             "compaction": None,
         }
     candidates = sorted(
-        (runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob(
-            "registry_upload_runtime__pre_autoanswers_v1__*.sqlite3"
+        path
+        for path in (runtime_dir / "backups").glob(
+            "wb_autoanswers_schema_v*/registry_upload_runtime__pre_autoanswers_v*__*.sqlite3"
         )
+        if path.parent.name != f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
     )
     staging = runtime_dir / ".wb_autoanswers_capacity_recovery" / (
-        "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     )
     if not candidates and not staging.is_file():
         raise RuntimeError("insufficient backup capacity and no recoverable autoanswers backup exists")
@@ -491,7 +499,11 @@ def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
     """Inspect only the two fields needed before constructor-triggered DDL."""
 
     db_path = runtime_dir / "registry_upload_runtime.sqlite3"
-    evidence: dict[str, Any] = {"database_exists": db_path.is_file(), "schema_v2_applied": False}
+    evidence: dict[str, Any] = {
+        "database_exists": db_path.is_file(),
+        "autoanswers_initialized": False,
+        "target_schema_applied": False,
+    }
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return evidence
     with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=30) as conn:
@@ -499,7 +511,10 @@ def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_autoanswers_schema_migrations'"
         ).fetchone()
         if migrations:
-            evidence["schema_v2_applied"] = conn.execute(
+            evidence["autoanswers_initialized"] = conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations LIMIT 1"
+            ).fetchone() is not None
+            evidence["target_schema_applied"] = conn.execute(
                 "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=?",
                 (SCHEMA_VERSION,),
             ).fetchone() is not None
@@ -555,14 +570,14 @@ def _dependency_status(*, verify_boundary: bool) -> dict[str, Any]:
 def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
     before = _pre_migration_safety(runtime_dir)
     force_off = _truthy(os.environ.get("WB_AUTOANSWERS_FORCE_OFF"))
-    requires_off_preparation = action == "prepare-capacity" or (
-        action == "prepare-deploy" and not before.get("schema_v2_applied")
+    requires_persisted_off = action in {"prepare-capacity", "prepare-deploy"} and not before.get(
+        "autoanswers_initialized"
     )
-    if requires_off_preparation:
+    if action in {"prepare-capacity", "prepare-deploy"}:
         if not force_off:
-            raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
-        if bool(before.get("master_enabled")):
-            raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
+            raise RuntimeError("schema preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
+        if requires_persisted_off and bool(before.get("master_enabled")):
+            raise RuntimeError("initial schema preparation requires persisted master-switch OFF")
 
     if action == "prepare-capacity":
         with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
@@ -576,12 +591,12 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
         with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
             locked_before = _pre_migration_safety(runtime_dir)
             if not force_off:
-                raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
+                raise RuntimeError("schema preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
             if (
-                not bool(locked_before.get("schema_v2_applied"))
+                not bool(locked_before.get("autoanswers_initialized"))
                 and bool(locked_before.get("master_enabled"))
             ):
-                raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
+                raise RuntimeError("initial schema preparation requires persisted master-switch OFF")
             capacity = _prepare_backup_capacity(runtime_dir)
             repository = AutoanswersRepository(runtime_dir=runtime_dir, schema_lock_held=True)
             dependencies = _dependency_status(verify_boundary=True)
@@ -589,11 +604,11 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             if SCHEMA_VERSION not in {
                 int(row.get("version") or 0) for row in status_after["schema_migrations"]
             }:
-                raise RuntimeError("schema v2 migration marker is missing")
+                raise RuntimeError("current schema migration marker is missing")
             backup = repository.verified_schema_backup_status()
-            if before.get("database_exists") and not before.get("schema_v2_applied"):
+            if before.get("database_exists") and not before.get("target_schema_applied"):
                 if int(backup.get("count") or 0) < 1 or backup.get("integrity_check") != "ok":
-                    raise RuntimeError("verified pre-schema-v2 backup is missing")
+                    raise RuntimeError("verified pre-schema backup is missing")
         return {
             "status": "ready",
             "action": action,

@@ -105,8 +105,11 @@ class HttpUiTest(unittest.TestCase):
         )
         self.assertEqual(off["selector_state"], "off")
         self.assertFalse(off["settings"]["master_enabled"])
-        draft = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+        preview = self.app.handle_sheet_feedbacks_autoanswers_transition_preview_request(
             {"selector_state": "draft_only"}, actor_id="admin"
+        )
+        draft = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "draft_only", "preview_id": preview["preview_id"]}, actor_id="admin"
         )
         self.assertEqual(draft["selector_state"], "draft_only")
         self.assertEqual(draft["settings"]["mode"], "draft_only")
@@ -129,7 +132,19 @@ class HttpUiTest(unittest.TestCase):
         for label in ("Выключено", "Ручной", "Черновики", "Безопасный", "Полный"):
             self.assertIn(label, html)
         self.assertIn("Сгенерировать ответ", html)
+        self.assertIn("Перегенерировать с учётом медиа", html)
         self.assertIn("Опубликовать", html)
+        self.assertIn("Техническая информация", html)
+        self.assertIn("autoGrowReplyEditors", html)
+        self.assertIn('addEventListener("input", handleFeedbacksInputChange)', html)
+        self.assertIn("autoanswers-answer-box", html)
+        self.assertIn("data-autoanswers-copy", html)
+        self.assertIn("Скопировано", html)
+        self.assertIn("overflow: auto", html)
+        self.assertIn("https://platform.openai.com/settings/organization/billing/overview", html)
+        self.assertIn('rel="noopener noreferrer"', html)
+        self.assertIn("row.pros ?", html)
+        self.assertIn("row.cons ?", html)
         self.assertIn("X-WB-Autoanswers-CSRF", html)
         scripts = re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
         self.assertTrue(scripts)
@@ -144,6 +159,48 @@ class HttpUiTest(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_public_detail_hides_signed_urls_and_exposes_private_media_state(self) -> None:
+        row = feedback("media-public", photo_query="secret-signature=do-not-expose")
+        self.app.autoanswers_repository.upsert_feedback(
+            row, source_stream="backfill", run_kind="backfill"
+        )
+        detail = self.app.handle_sheet_feedbacks_detail_request("media-public")["feedback"]
+        serialized = __import__("json").dumps(detail, ensure_ascii=False)
+        self.assertNotIn("secret-signature", serialized)
+        self.assertNotIn("source_full_url", serialized)
+        self.assertIn("primary_available", detail["media"][0])
+
+        with self.app.autoanswers_repository.transaction() as conn:
+            self.app.autoanswers_repository._audit(
+                conn,
+                aggregate_type="feedback",
+                aggregate_id="media-public",
+                event_type="redaction_probe",
+                actor_type="test",
+                actor_id="test",
+                details={
+                    "source_url": "https://cdn.geobasket.ru/photo.webp?secret-signature=hidden",
+                    "message": "fetched https://cdn.geobasket.ru/photo.webp?secret-signature=hidden",
+                    "local_path": "/private/runtime/photo.webp",
+                },
+                at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+            )
+        redacted = __import__("json").dumps(
+            self.app.handle_sheet_feedbacks_detail_request("media-public")["feedback"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("secret-signature", redacted)
+        self.assertNotIn("/private/runtime", redacted)
+
+    def test_automated_mode_requires_bound_transition_preview(self) -> None:
+        self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "manual"}, actor_id="admin"
+        )
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "preview"):
+            self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+                {"selector_state": "auto_safe"}, actor_id="admin"
+            )
 
     def test_autoanswers_mutations_require_csrf_marker_and_same_origin(self) -> None:
         valid = FakeHandler(

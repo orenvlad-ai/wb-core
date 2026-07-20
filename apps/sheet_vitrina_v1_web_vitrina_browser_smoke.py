@@ -181,6 +181,8 @@ class LocalWebVitrinaFixtureServer:
             now_factory=lambda: self.now,
             sheet_load_runner=_stub_sheet_load_runner,
         )
+        self.entrypoint = entrypoint
+        self.runtime_dir = runtime_dir
         entrypoint.handle_sheet_refresh_request = lambda as_of_date=None, auto_load=False: _stub_sheet_refresh_request(
             entrypoint,
             runtime,

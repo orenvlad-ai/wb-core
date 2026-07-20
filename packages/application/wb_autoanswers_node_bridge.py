@@ -28,7 +28,7 @@ class NodeBoundaryError(RuntimeError):
         self.retryable = retryable
 
 
-def _data_url(path_value: str | None) -> str | None:
+def _data_url(path_value: str | None, mime_type: str | None = None) -> str | None:
     if not path_value:
         return None
     path = Path(path_value)
@@ -37,7 +37,9 @@ def _data_url(path_value: str | None) -> str | None:
     size = path.stat().st_size
     if size <= 0 or size > MAX_EMBEDDED_IMAGE_BYTES:
         return None
-    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    mime = str(mime_type or "").strip().lower() or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        return None
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
 
@@ -46,20 +48,23 @@ def build_frozen_raw_input(feedback: Mapping[str, Any], *, processing_key: str) 
     media_rows = feedback.get("media") if isinstance(feedback.get("media"), list) else []
     photos: list[dict[str, Any]] = []
     videos: list[Mapping[str, Any]] = []
-    frames: list[str] = []
+    frames: list[tuple[str, str]] = []
     media_uncertain = False
     for row in media_rows:
         if not isinstance(row, Mapping):
             continue
         kind = str(row.get("kind") or "")
         status = str(row.get("fetch_status") or "pending")
-        local_ref = _data_url(str(row.get("local_path") or "") or None)
+        local_ref = _data_url(
+            str(row.get("local_path") or "") or None,
+            str(row.get("mime_type") or "") or None,
+        )
         if kind == "photo":
             fetch_status = "downloaded" if local_ref else "fetch_failed" if status == "fetch_failed" else "not_requested"
             photos.append(
                 {
-                    "full_size_url": row.get("source_full_url") or None,
-                    "mini_size_url": row.get("source_preview_url") or None,
+                    "full_size_url": row.get("stable_full_url") or None,
+                    "mini_size_url": row.get("stable_preview_url") or None,
                     "fetch_status": fetch_status,
                     "local_ref": local_ref,
                 }
@@ -69,7 +74,7 @@ def build_frozen_raw_input(feedback: Mapping[str, Any], *, processing_key: str) 
             videos.append(row)
             media_uncertain = media_uncertain or status != "frames_extracted"
         elif kind == "video_frame" and local_ref:
-            frames.append(local_ref)
+            frames.append((local_ref, str(row.get("sha256") or "")))
     video = videos[0] if videos else None
     video_status = "none"
     if video:
@@ -79,7 +84,22 @@ def build_frozen_raw_input(feedback: Mapping[str, Any], *, processing_key: str) 
             video_status = "fetch_failed"
         else:
             video_status = "not_processed"
+    preview_ref = (
+        _data_url(
+            str(video.get("preview_local_path") or "") or None,
+            str(video.get("preview_mime_type") or "") or None,
+        )
+        if video else None
+    )
     answer = feedback.get("answer") if isinstance(feedback.get("answer"), Mapping) else {}
+    video_frame_refs: list[str] = [preview_ref] if preview_ref else []
+    preview_sha = str(video.get("preview_sha256") or "") if video else ""
+    skipped_derived_preview = False
+    for ref, frame_sha in frames[:4]:
+        if preview_ref and preview_sha and frame_sha == preview_sha and not skipped_derived_preview:
+            skipped_derived_preview = True
+            continue
+        video_frame_refs.append(ref)
     raw = {
         "ingestion_id": processing_key,
         "review_id": str(feedback.get("id") or ""),
@@ -98,9 +118,13 @@ def build_frozen_raw_input(feedback: Mapping[str, Any], *, processing_key: str) 
             "photos": photos,
             "video": {
                 "present": bool(video),
-                "source_url": video.get("source_full_url") if video else None,
+                "source_url": video.get("stable_full_url") if video else None,
                 "processing_status": video_status,
-                "frame_refs": frames[:20],
+                # The frozen media contract has one image list for sampled
+                # video.  Keep the WB preview first, followed by at most four
+                # deterministic frames; the frozen payload builder appends
+                # them after the classifier cache breakpoint.
+                "frame_refs": video_frame_refs[:5],
             },
         },
         "history": {"previous_public_reply": answer.get("text") or None},

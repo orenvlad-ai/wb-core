@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV
 from packages.adapters.wb_autoanswers import HttpBackedWbAutoanswersReadAdapter, WbFeedbackReadPort
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+from packages.application.wb_autoanswers_media import AutoanswersMediaProcessor
 from packages.application.wb_autoanswers_sync import FeedbackSyncError, WbFeedbackSyncService
 from packages.contracts.wb_autoanswers import MODE_MANUAL
 
@@ -115,6 +116,7 @@ def run_operation(
     max_pages: int,
     min_request_interval_seconds: float,
     sleep: Callable[[float], None] = time.sleep,
+    media_processor: AutoanswersMediaProcessor | None = None,
 ) -> dict[str, Any]:
     if operation == "status":
         runtime = _safe_status(repository)
@@ -124,13 +126,81 @@ def run_operation(
         raise ValueError("external read source is required")
     if not _truthy(os.environ.get(EXTERNAL_GATE_ENV)):
         raise RuntimeError("external IO gate is OFF")
-    if operation == "manual-canary":
+    if operation in {"manual-canary", "manual-media-canary"}:
         _assert_manual_on(repository)
     else:
         _assert_force_off(repository)
     before = repository.operational_status()
     before_ai = _sum_counts(before["ai_jobs"])
     before_publication = _sum_counts(before["publication_jobs"])
+
+    if operation == "manual-media-canary":
+        processor = media_processor
+        if processor is None:
+            def refresh_urls(feedback_id: str) -> bool:
+                detail = source.fetch_detail(feedback_id)
+                if not detail:
+                    return False
+                repository.upsert_feedback(
+                    detail,
+                    source_stream="detail",
+                    run_kind="reconciliation",
+                )
+                return True
+
+            processor = AutoanswersMediaProcessor(
+                repository=repository,
+                runtime_dir=repository.runtime_dir,
+                refresh_urls=refresh_urls,
+            )
+        evidence: dict[str, Any] = {}
+        for index, kind in enumerate(("photo", "video")):
+            candidate = repository.media_canary_candidate(kind)
+            if candidate is None:
+                raise RuntimeError(f"no unpublished {kind} candidate exists for the bounded media canary")
+            if index and min_request_interval_seconds > 0:
+                sleep(min_request_interval_seconds)
+            feedback_id = str(candidate["feedback_id"])
+            detail = source.fetch_detail(feedback_id)
+            if not detail:
+                raise RuntimeError(f"WB detail GET returned no {kind} feedback")
+            outcome = repository.upsert_feedback(
+                detail,
+                source_stream="detail",
+                run_kind="reconciliation",
+            )
+            result = processor.process(
+                feedback_id=feedback_id,
+                content_version=int(outcome["content_version"]),
+                asset_kinds=frozenset({kind}),
+            )
+            if result.get("media_uncertain"):
+                raise RuntimeError(f"bounded {kind} canary remained media-uncertain")
+            if kind == "photo" and int(result.get("photos_downloaded") or 0) < 1:
+                raise RuntimeError("bounded photo canary downloaded no validated image")
+            if kind == "video" and (
+                int(result.get("video_previews") or 0) < 1
+                or not 1 <= int(result.get("video_frames") or 0) <= 4
+            ):
+                raise RuntimeError("bounded video canary produced no preview or bounded frames")
+            evidence[kind] = {
+                "feedback_id_sha256": hashlib.sha256(feedback_id.encode("utf-8")).hexdigest(),
+                "content_version": int(outcome["content_version"]),
+                "photos_downloaded": int(result.get("photos_downloaded") or 0),
+                "video_previews": int(result.get("video_previews") or 0),
+                "video_frames": int(result.get("video_frames") or 0),
+            }
+        after = repository.operational_status()
+        if _sum_counts(after["ai_jobs"]) != before_ai or _sum_counts(after["publication_jobs"]) != before_publication:
+            raise RuntimeError("GET-only media canary created AI or publication jobs")
+        return {
+            "status": "passed",
+            "operation": operation,
+            "media": evidence,
+            "ttl_seconds": processor.ttl_seconds,
+            "runtime": _safe_status(repository),
+        }
+
     service = WbFeedbackSyncService(
         repository=repository,
         source=source,
@@ -292,7 +362,9 @@ def run_operation(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Force-off, GET-only WB feedback sync/backfill.")
     parser.add_argument(
-        "--operation", choices=("status", "canary", "manual-canary", "steady", "backfill"), required=True
+        "--operation",
+        choices=("status", "canary", "manual-canary", "manual-media-canary", "steady", "backfill"),
+        required=True,
     )
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--env-file", type=Path)
@@ -311,7 +383,9 @@ def main() -> int:
             _load_safe_env_file(args.env_file.resolve())
             # Reassert after the dotenv load so its contents cannot choose the
             # canary safety posture.
-            os.environ[FORCE_OFF_ENV] = "false" if args.operation == "manual-canary" else "true"
+            os.environ[FORCE_OFF_ENV] = (
+                "false" if args.operation in {"manual-canary", "manual-media-canary"} else "true"
+            )
         repository = AutoanswersRepository(runtime_dir=args.runtime_dir.resolve())
         source = HttpBackedWbAutoanswersReadAdapter() if args.operation != "status" else None
         result = run_operation(

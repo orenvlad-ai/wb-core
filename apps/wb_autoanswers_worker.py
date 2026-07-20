@@ -37,10 +37,26 @@ def build_coordinator(runtime_dir: Path) -> AutoanswersCoordinator:
     writer = HttpBackedWbAnswerWriter()
     worker_id = f"wb-autoanswers-{socket.gethostname()}-{os.getpid()}"
     sync_service = WbFeedbackSyncService(repository=repository, source=reader, now_factory=now)
+
+    def refresh_media_urls(feedback_id: str) -> bool:
+        detail = reader.fetch_detail(feedback_id)
+        if detail is None:
+            return False
+        repository.upsert_feedback(
+            detail,
+            source_stream="detail",
+            run_kind="detail_readback",
+        )
+        return True
+
     processing_worker = AutoanswersProcessingWorker(
         repository=repository,
         bridge=NodeAutoanswersBridge(),
-        media_processor=AutoanswersMediaProcessor(repository=repository, runtime_dir=runtime_dir),
+        media_processor=AutoanswersMediaProcessor(
+            repository=repository,
+            runtime_dir=runtime_dir,
+            refresh_urls=refresh_media_urls,
+        ),
         worker_id=worker_id,
     )
     publication_worker = AutoanswersPublicationWorker(
