@@ -40,6 +40,8 @@
     .knowledge-sidebar p { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .instruction-list, .topic-nav { display: grid; gap: 4px; }
     .instruction-link, .topic-link { display: block; border-radius: 7px; padding: 8px 10px; color: var(--muted); font-size: 14px; line-height: 1.35; text-decoration: none; overflow-wrap: anywhere; }
+    .label-with-badge { display: inline-flex; max-width: 100%; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+    .new-badge { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 17px; border: 1px solid rgba(167, 139, 250, .72); border-radius: 999px; padding: 1px 6px; background: var(--accent-soft); color: #ddd6fe; font-size: 10px; font-weight: 800; line-height: 1.2; letter-spacing: .055em; }
     .instruction-link:hover, .topic-link:hover { background: var(--accent-soft); color: var(--text); }
     .instruction-link[aria-current="page"], .topic-link[aria-current="true"] { background: var(--accent-soft); color: var(--text); font-weight: 700; }
     .instruction-link[aria-current="page"] { border-left: 3px solid var(--accent); padding-left: 7px; }
@@ -47,6 +49,15 @@
     .topics-mobile { display: none; }
 
     article { min-width: 0; }
+    .instruction-updates { margin: 0 0 24px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); overflow: hidden; }
+    .instruction-updates summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; padding: 12px 14px; font-size: 14px; font-weight: 750; }
+    .instruction-update-count { display: inline-flex; min-width: 23px; height: 23px; align-items: center; justify-content: center; border-radius: 999px; background: var(--panel-subtle); color: var(--muted); font-size: 12px; }
+    .instruction-update-list { margin: 0; padding: 0 14px 4px; list-style: none; }
+    .instruction-update-item { padding: 13px 0 14px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+    .instruction-update-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 12px; color: var(--muted); font-size: 12px; }
+    .instruction-update-link { color: var(--text); font-size: 14px; font-weight: 700; text-underline-offset: 3px; }
+    .instruction-update-item p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .instruction-update-item .instruction-update-revisit { font-size: 12px; }
     .article-header { padding: 4px 0 28px; border-bottom: 1px solid var(--border); }
     .article-header h1 { margin: 0; font-size: clamp(27px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025em; }
     .article-header p { max-width: 660px; margin: 12px 0 0; color: var(--muted); font-size: 16px; line-height: 1.55; }
@@ -55,6 +66,7 @@
     .instruction-section > h2 { margin: 0; font-size: 22px; line-height: 1.28; }
     .section-lead { max-width: 700px; margin: 10px 0 0; color: var(--muted); font-size: 15px; line-height: 1.6; }
     .block { margin-top: 18px; }
+    .block-new-marker { margin: 0 0 8px; }
     .subheading h3, .block h3 { margin: 0 0 7px; font-size: 16px; line-height: 1.4; }
     .block p { max-width: 720px; margin: 0; color: var(--text); font-size: 15px; line-height: 1.62; }
     .subheading p { color: var(--muted); }
@@ -82,6 +94,7 @@
       .topics-mobile summary { cursor: pointer; padding: 11px 12px; font-size: 14px; font-weight: 700; }
       .topics-mobile .topic-nav { padding: 0 7px 8px; }
       .article-header { padding-top: 0; }
+      .instruction-updates { margin-bottom: 20px; }
       .instruction-section { padding: 26px 0; }
     }
 
@@ -91,7 +104,7 @@
       .knowledge-base { max-width: none; padding: 0; }
       .knowledge-layout { display: block; }
       .knowledge-sidebar { position: static; }
-      .instruction-list, .topic-nav, .topics-mobile { display: none; }
+      .instruction-list, .topic-nav, .topics-mobile, .instruction-updates { display: none; }
       .instruction-section { break-inside: avoid; border-color: #ddd; }
       .callout { background: #fafafa; border-color: #aaa; }
       th { background: #f0f0f0; color: #333; }
@@ -115,6 +128,7 @@
         </details>
       </aside>
       <article aria-labelledby="instruction-title">
+        __INSTRUCTION_UPDATES__
         <header class="article-header">
           <h1 id="instruction-title">__INSTRUCTION_TITLE__</h1>
           <p>__INSTRUCTION_SUMMARY__</p>
@@ -127,15 +141,26 @@
     (() => {
       const topicLinks = Array.from(document.querySelectorAll(".topic-link"));
       const sections = topicLinks.map((link) => document.getElementById(link.getAttribute("href").slice(1))).filter(Boolean);
+      let navigationLockId = "";
       const setCurrent = (id) => topicLinks.forEach((link) => link.setAttribute("aria-current", link.getAttribute("href") === "#" + id ? "true" : "false"));
       const fromHash = () => {
         const id = decodeURIComponent(String(window.location.hash || "").replace(/^#/, ""));
         if (sections.some((section) => section.id === id)) setCurrent(id);
       };
       window.addEventListener("hashchange", fromHash);
-      topicLinks.forEach((link) => link.addEventListener("click", () => setCurrent(link.getAttribute("href").slice(1))));
+      topicLinks.forEach((link) => link.addEventListener("click", () => {
+        const id = link.getAttribute("href").slice(1);
+        navigationLockId = id;
+        setCurrent(id);
+        window.setTimeout(() => {
+          if (navigationLockId !== id) return;
+          setCurrent(id);
+          navigationLockId = "";
+        }, 350);
+      }));
       if ("IntersectionObserver" in window && sections.length) {
         const observer = new IntersectionObserver((entries) => {
+          if (navigationLockId) return;
           const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
           if (visible) setCurrent(visible.target.id);
         }, {rootMargin: "-18% 0px -68% 0px", threshold: 0});

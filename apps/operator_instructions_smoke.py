@@ -13,6 +13,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from unittest.mock import patch
 from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 
 
@@ -63,6 +64,9 @@ def main() -> None:
                 "WB_CORE_SUPPLIER_AUTH_USERNAME": "supplier-user",
                 "WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH": _password_hash(supplier_password),
             }
+        ), patch(
+            "packages.adapters.registry_upload_http_entrypoint.current_business_date_iso",
+            return_value="2026-07-20",
         ):
             server = build_registry_upload_http_server(
                 config,
@@ -94,10 +98,15 @@ def main() -> None:
                     'id="find-shipment"',
                     'id="shipment-dates"',
                     'id="documents"',
+                    'id="wb-warehouse-selection"',
+                    'href="#wb-warehouse-selection"',
                     'id="fulfillment-services"',
                     'href="#fulfillment-services"',
                     "Счёт ФФ передаётся на оплату только после успешной загрузки расчёта",
                     "STORAGE",
+                    "Обновления инструкций",
+                    "Подбор складов WB по направлениям",
+                    "Рекомендуемый склад",
                 ):
                     _assert(marker in embedded_body, f"instruction content marker missing: {marker}")
                 _assert("Инструкция_менеджера_по_поставкам" not in embedded_body, "source DOCX must not be published")
@@ -106,6 +115,11 @@ def main() -> None:
                     f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}?instruction=missing",
                 )
                 _assert(unknown_code == 404 and "Инструкция не найдена" in unknown_body, "unknown instruction id must be controlled 404")
+                repeated_code, repeated_body = _opener_text(
+                    admin,
+                    f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}?instruction=supply-management&instruction=missing",
+                )
+                _assert(repeated_code == 400 and "Некорректный идентификатор инструкции" in repeated_body, "repeated instruction id must be controlled 400")
                 docx_code, _ = _opener_text(
                     admin,
                     f"{base_url}/%D0%98%D0%BD%D1%81%D1%82%D1%80%D1%83%D0%BA%D1%86%D0%B8%D1%8F_%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80%D0%B0.docx",
@@ -159,7 +173,9 @@ def main() -> None:
                 _assert(denied_code == 200 and '"instructions"' not in _allowed_tabs_json(denied_body), "denied user shell must omit instructions capability")
                 denied_route_code, denied_route_body = _opener_text(denied_user, f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}")
                 _assert(
-                    denied_route_code == 403 and "Ведение поставок" not in denied_route_body,
+                    denied_route_code == 403
+                    and "Ведение поставок" not in denied_route_body
+                    and "Подбор складов WB по направлениям" not in denied_route_body,
                     "denied user direct route must be controlled forbidden without content leakage",
                 )
 
@@ -168,7 +184,9 @@ def main() -> None:
                 _assert(supplier_code == 200, "supplier login must complete through its allowed fallback")
                 supplier_route_code, supplier_route_body = _opener_text(supplier, f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}")
                 _assert(
-                    supplier_route_code == 403 and "Ведение поставок" not in supplier_route_body,
+                    supplier_route_code == 403
+                    and "Ведение поставок" not in supplier_route_body
+                    and "Подбор складов WB по направлениям" not in supplier_route_body,
                     "supplier-only user must not receive internal instructions",
                 )
 
@@ -185,7 +203,12 @@ def main() -> None:
                 reread = next((row for row in reread_payload.get("users", []) if row.get("user_id") == allowed_id), {})
                 _assert(reread_code == 200 and reread.get("allowed_sections") == ["vitrina"], "users reread must return saved capability state")
                 revoked_code, revoked_body = _opener_text(allowed_user, f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}")
-                _assert(revoked_code == 403 and "Ведение поставок" not in revoked_body, "session recheck must revoke route after normal update")
+                _assert(
+                    revoked_code == 403
+                    and "Ведение поставок" not in revoked_body
+                    and "Подбор складов WB по направлениям" not in revoked_body,
+                    "session recheck must revoke route after normal update",
+                )
 
                 _assert_browser_ui(base_url, admin_username, admin_password)
                 _assert_safe_renderer()
@@ -213,16 +236,44 @@ def _assert_browser_ui(base_url: str, username: str, password: str) -> None:
             page.wait_for_selector('[data-unified-tab-button="instructions"]:not([hidden])')
             page.locator('[data-unified-tab-button="instructions"]').click()
             frame = page.frame_locator('[data-instructions-embed-frame]')
-            frame.locator("#fulfillment-services").wait_for()
+            frame.locator("#wb-warehouse-selection").wait_for()
             if "Ведение поставок" not in frame.locator("article").inner_text():
                 raise AssertionError("instructions iframe must show web-native article content")
             if page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"):
                 raise AssertionError("desktop shell must not overflow horizontally")
+            if frame.locator("html").evaluate("element => element.scrollWidth > element.clientWidth"):
+                raise AssertionError("desktop instructions content must not overflow horizontally")
+            if frame.locator(".instruction-updates").get_attribute("open") is None:
+                raise AssertionError("active instruction updates must open automatically")
+            if frame.locator('.instruction-link[aria-current="page"] .new-badge').count() != 1:
+                raise AssertionError("active article navigation must show one NEW badge")
+            if frame.locator(".article-header .new-badge").count() != 1:
+                raise AssertionError("active article heading must show one NEW badge")
+            if frame.locator('.knowledge-sidebar > .topic-nav a[href="#wb-warehouse-selection"] .new-badge').count() != 1:
+                raise AssertionError("desktop topic navigation must show NEW")
+            if frame.locator("#wb-warehouse-selection > h2 .new-badge").count() != 1:
+                raise AssertionError("new section heading must show NEW")
+            if frame.locator("#wb-warehouse-selection .block .new-badge").count() != 0:
+                raise AssertionError("whole-section NEW must not be duplicated on child blocks")
+            update_link = frame.locator('.instruction-update-link[href$="#wb-warehouse-selection"]')
+            if update_link.count() != 1:
+                raise AssertionError("update registry must link to the exact new section")
+            update_link.click()
+            frame.locator("#wb-warehouse-selection").wait_for()
+            frame.locator("body").wait_for()
+            if not frame.locator("body").evaluate("() => window.location.hash === '#wb-warehouse-selection'"):
+                raise AssertionError("update registry navigation must land on the exact section DOM id")
             desktop_link = frame.locator('.knowledge-sidebar > .topic-nav a[href="#documents"]')
             desktop_link.focus()
             desktop_link.press("Enter")
+            page.wait_for_timeout(150)
             if desktop_link.get_attribute("aria-current") != "true":
-                raise AssertionError("instruction topic links must be keyboard-operable and mark the current section")
+                current_hash = frame.locator("body").evaluate("() => window.location.hash")
+                current_value = desktop_link.get_attribute("aria-current")
+                raise AssertionError(
+                    "instruction topic links must be keyboard-operable and mark the current section: "
+                    f"hash={current_hash!r}, aria-current={current_value!r}"
+                )
             if ":focus-visible" not in frame.locator("style").inner_text():
                 raise AssertionError("instruction topic links must define a visible keyboard focus state")
             page.set_viewport_size({"width": 390, "height": 844})
@@ -232,13 +283,20 @@ def _assert_browser_ui(base_url: str, username: str, password: str) -> None:
                 raise AssertionError("desktop topic navigation must not stay expanded on mobile")
             if page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"):
                 raise AssertionError("mobile shell must not overflow horizontally")
+            if frame.locator("html").evaluate("element => element.scrollWidth > element.clientWidth"):
+                raise AssertionError("mobile instructions content must not overflow horizontally")
+            frame.locator(".topics-mobile summary").click()
+            if not frame.locator('.topics-mobile a[href="#wb-warehouse-selection"] .new-badge').is_visible():
+                raise AssertionError("mobile topic disclosure must show NEW for the new section")
+            if not frame.locator(".instruction-update-item").first.is_visible():
+                raise AssertionError("instruction updates must remain readable on narrow viewport")
         finally:
             browser.close()
 
 
 def _assert_safe_renderer() -> None:
     rendered = _render_operator_instruction_block(
-        InstructionBlock(kind="important", title="<img src=x>", text="<script>alert(1)</script>")
+        InstructionBlock(block_id="safe-renderer-test", kind="important", title="<img src=x>", text="<script>alert(1)</script>")
     )
     _assert("<script>" not in rendered and "&lt;script&gt;" in rendered, "instruction renderer must escape dangerous HTML")
     _assert("<img" not in rendered and "&lt;img" in rendered, "instruction renderer must not inject title HTML")
