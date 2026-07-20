@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -68,6 +69,19 @@ def _capacity_heartbeat() -> Any:
     finally:
         stopped.set()
         thread.join(timeout=1)
+
+
+@contextmanager
+def _schema_preparation_lock(runtime_dir: Path) -> Any:
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_dir / ".wb_autoanswers_schema.lock"
+    with lock_path.open("a+b") as lock_handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def _sha256_file(path: Path) -> str:
@@ -413,11 +427,31 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     free_before = shutil.disk_usage(backup_root).free
     compressed = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
     if int(compressed.get("count") or 0) > 0:
+        schema_v2_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        redundant_raw_removed = 0
+        for raw in schema_v2_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3"):
+            raw.unlink()
+            redundant_raw_removed += 1
+        orphan_sidecars_removed = 0
+        for suffix in ("*.sqlite3-journal", "*.sqlite3-shm", "*.sqlite3-wal"):
+            for sidecar in schema_v2_dir.glob(suffix):
+                database_candidate = Path(
+                    str(sidecar).removesuffix("-journal").removesuffix("-shm").removesuffix("-wal")
+                )
+                if not database_candidate.exists():
+                    sidecar.unlink()
+                    orphan_sidecars_removed += 1
+        free_after_cleanup = shutil.disk_usage(backup_root).free
         return {
             "status": "ready",
             "free_before": free_before,
+            "free_after": free_after_cleanup,
             "required_free": required_free,
-            "compaction": compressed,
+            "compaction": {
+                **compressed,
+                "redundant_autoanswers_raw_removed": redundant_raw_removed,
+                "orphan_autoanswers_sidecars_removed": orphan_sidecars_removed,
+            },
         }
     if free_before >= required_free:
         return {
@@ -531,15 +565,22 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
 
     if action == "prepare-capacity":
-        return {
-            "status": "ready",
-            "action": action,
-            "capacity": _prepare_backup_capacity(runtime_dir),
-        }
+        with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
+            return {
+                "status": "ready",
+                "action": action,
+                "capacity": _prepare_backup_capacity(runtime_dir),
+            }
 
     if action == "prepare-deploy":
-        with _capacity_heartbeat():
-            repository = AutoanswersRepository(runtime_dir=runtime_dir)
+        with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
+            locked_before = _pre_migration_safety(runtime_dir)
+            if not force_off:
+                raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
+            if bool(locked_before.get("master_enabled")):
+                raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
+            capacity = _prepare_backup_capacity(runtime_dir)
+            repository = AutoanswersRepository(runtime_dir=runtime_dir, schema_lock_held=True)
             dependencies = _dependency_status(verify_boundary=True)
             status_after = repository.operational_status()
             if SCHEMA_VERSION not in {
@@ -555,6 +596,7 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             "action": action,
             "runtime": status_after,
             "schema_backup": backup,
+            "capacity": capacity,
             "dependencies": dependencies,
         }
 
