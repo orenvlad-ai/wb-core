@@ -20,7 +20,7 @@ Task class и task continuity независимы. `TaskContinuity` в `apps/gi
 - `.github/workflows/baseline-ci.yml` — обязательный check `baseline`;
 - `.github/workflows/release-train.yml` — один repository-wide queue worker и GitHub-native LOOP command handler;
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
-- `apps/github_release_train_wait.py` — bounded CLI waiter для Codex;
+- `apps/github_release_train_wait.py` — bounded CLI waiter и канонический Goal queue shepherd для Codex;
 - `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
 - `.github/pull_request_template.md` — PR closure checklist.
 
@@ -52,7 +52,19 @@ LOOP дополнительно требует exact-head repo-owned registratio
 
 Active states: `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
 
-Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query и marker names. Runtime, waiter и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/gate/merge/root/evidence.
+Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query, marker names и Goal disposition contract. Runtime, waiter/shepherd и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/gate/merge/root/evidence.
+
+Goal disposition является отдельной интерпретацией durable state, а не новым transition graph:
+
+- `TERMINAL_SUCCESS` — применимый terminal state подтверждён repo-owned exact-SHA proof;
+- `CONTINUE_WAITING` — штатное ожидание own/foreign queue state;
+- `OWN_ACTION` — доступно действие над собственным PR или canonical reconciliation;
+- `TAKEOVER_PREDECESSOR` — чужой predecessor имеет доказанный lost-owner overlay и безопасный resume path;
+- `RECOVER_OWN_CHAIN` — нужно завершить UI/recovery собственной LOOP-chain;
+- `EXTERNAL_BLOCKER` — требуется human/external authority, repo-owned actions отсутствуют и remediation исчерпана;
+- `TERMINAL_FAILURE` — evidence доказывает невосстановимую ошибку протокола после исчерпания remediation.
+
+Каждый результат содержит `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`. `EXTERNAL_BLOCKER` конструктивно запрещён, если evidence содержит доступную repo-owned команду.
 
 ## LOOP Registration И Root Invariants
 
@@ -113,9 +125,11 @@ Workflow принимает command только от `OWNER`, `MEMBER` или `
 
 Waiter ведёт на каждом активном PR ровно один marker-based status comment: task title, class, stage, queue reason/position, loop root, last action, intervention и exact resume command. Heartbeat обновляет этот comment, а дубли удаляются. `--no-ack-agent` запрещает ack; status heartbeat остаётся единственной idempotent ownership mutation.
 
-Чужой exclusive gate означает только waiting. Ни количество одинаковых polls/goal-turns, ни длительность не переводят его в `release:blocked` и не разрешают снимать, обходить или перехватывать gate. Task owner продолжает waiter до своей очереди; при исчерпании текущего goal-turn создаётся следующий goal на продолжение ожидания, а не terminal handoff открытого PR.
+Чужой exclusive gate означает только waiting. Ни количество одинаковых polls/goal-turns, ни длительность, ни отсутствие GitHub changes не переводят его в `release:blocked` и не разрешают снимать, обходить или перехватывать gate. Task owner продолжает waiter/heartbeat до своей очереди; при исчерпании текущего goal-turn создаётся следующий bounded turn на продолжение того же Goal, а не terminal handoff открытого PR.
 
-Workflow запускает queue observation каждые пять минут. Если LOOP status heartbeat на `ready/running/awaiting-agent/awaiting-ui` старше `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES` (default `30`), worker идемпотентно добавляет overlay `release:needs-resume` и обновляет status comment командой `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`. Resume comment-command привязан к PR, exact head и root; он снимает overlay и обновляет owner heartbeat, но не выполняет acknowledgement или acceptance. Повторный resume безопасен.
+Workflow запускает queue observation каждые пять минут. Если LOOP status heartbeat на `ready/running/awaiting-agent/awaiting-ui` старше `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES` (default `30`), worker идемпотентно добавляет overlay `release:needs-resume` и обновляет status comment командой `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`. Это доступный takeover-path, не blocker. Resume comment-command привязан к PR, exact head и root; он снимает overlay и обновляет owner heartbeat, но не выполняет acknowledgement или acceptance. Повторный resume безопасен и возвращает промежуточный код `4`.
+
+Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновременных machine evidence: `release:needs-resume`, exact status `owner=unowned`, отсутствие подтверждённого живого owner, проверенный exact head/root, для UI gate — exact deployed SHA, repo-owned resume command и сохранение root isolation. Takeover без overlay запрещён. После resume агент восстанавливает predecessor context из PR/status/diff/docs, завершает его точный stage, выполняет UI Flow при `awaiting-ui`, принимает только exact deployed SHA, ждёт terminal predecessor и повторно продолжает shepherd собственного PR. UI defect создаёт same-root recovery либо сохраняет gate fail-closed. Resume/takeover никогда автоматически не выполняет ack-agent или accept-ui.
 
 ## Exclusive Production UI Gate
 
@@ -123,7 +137,9 @@ Workflow запускает queue observation каждые пять минут. 
 
 Если production UI Flow не принят, исчезновение Codex не открывает очередь: `release:awaiting-ui` остаётся durable fail-closed state.
 
-UI Flow следует production UI contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). HTTP `200`, `curl`, наличие HTML или только canonical public probe недостаточны: требуется фактический browser render с DOM/final URL, отсутствием `5xx`/`pageerror`/fatal surface, классификацией существенных console errors и визуально проверенным screenshot. В Codex CLI сразу используется Playwright с новым изолированным Chrome/Chromium context; встроенный Browser в CLI недоступен. В ChatGPT web/desktop встроенный Browser допустим, если доступен. Пользовательский profile/cookies/credentials и любые clicks/input/business mutations запрещены по умолчанию. Если Playwright/Chromium или необходимая авторизация недоступны, gate остаётся fail-closed.
+UI Flow следует production UI contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). HTTP `200`, `curl`, наличие HTML или только canonical public probe недостаточны: требуется фактический browser render с DOM/final URL, отсутствием `5xx`/`pageerror`/fatal surface, классификацией существенных console errors и визуально проверенным screenshot. В Codex CLI сразу используется Playwright с новым изолированным Chrome/Chromium context; встроенный Browser в CLI недоступен и не требуется. В ChatGPT web/desktop встроенный Browser допустим, если доступен. Пользовательский profile/cookies/credentials и любые clicks/input/business mutations запрещены по умолчанию. Если UI Flow не проходит, gate остаётся fail-closed.
+
+CLI preflight: `python3 apps/github_release_train_wait.py <ACTION_PR> --playwright-preflight`. Helper фактически импортирует local Playwright и запускает fresh isolated non-persistent Chromium context. Успех продолжает UI Flow независимо от embedded Browser. Ошибка сначала означает repo-owned repair action; browser `EXTERNAL_BLOCKER` допустим только после зафиксированных import/launch errors, исчерпанного восстановления, `repo_owned_action_available=false`, `remediation_exhausted=true` и нового human permission/authority. Auth blocker также требует фактической navigation/auth evidence.
 
 При успешном UI Flow активная Codex-сессия оставляет точную GitHub-native command на текущей итерации:
 
@@ -153,9 +169,19 @@ Terminal cleanup механический, root-bounded и idempotent. До пе
 - до heartbeat/resume/ack LOOP waiter проверяет new/recovery registration proof и terminal boundary;
 - LOOP возвращает код `3` на `release:awaiting-ui`, чтобы Codex выполнил UI Flow;
 - повторный запуск после acceptance ждёт `release:production`;
-- собственные `release:blocked`/`release:halted` и conflicting durable gates возвращают код `2`; чужой halted gate — normal waiting;
+- legacy waiter возвращает код `2` на собственные `release:blocked`/`release:halted` и conflicting durable gates; Goal не использует этот код без последующего canonical shepherd, который сначала ищет retry/reconciliation/takeover;
 - `Ctrl-C` возвращает `130`;
 - `--poll-seconds` задаёт bounded polling interval, `--status-seconds` и backward-compatible `--timeout-seconds` — только heartbeat; elapsed time не является terminal condition, polling не содержит AI-цикла.
+
+Goal/shepherd command:
+
+```bash
+python3 apps/github_release_train_wait.py <OWN_PR> --shepherd
+```
+
+Shepherd читает own PR и global gate, выводит machine-readable Goal disposition и не принимает UI без evidence. `--once` нужен для bounded pre-handoff проверки. Exit codes: `0` = `TERMINAL_SUCCESS`; `2` = доказанный `EXTERNAL_BLOCKER`; `3` = `RECOVER_OWN_CHAIN`; `4` = `TAKEOVER_PREDECESSOR`/ownership resumed next action; `5` = `OWN_ACTION`; `6` = одно наблюдение `CONTINUE_WAITING`; `7` = доказанный `TERMINAL_FAILURE`; `130` = interrupt. Timeout, unchanged state и коды `3/4/5/6` не terminal. После кода `4` выполняется exact resume/action predecessor, затем та же команда с `OWN_PR` возвращает наблюдение к исходной очереди.
+
+Перед blocked handoff обязателен `--shepherd --once`. Handoff разрешён только для `EXTERNAL_BLOCKER` или `TERMINAL_FAILURE` вместе с canonical reason, evidence, выполненными recovery attempts и `remediation_exhausted=true`. При `CONTINUE_WAITING`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN` handoff запрещён. `EXTERNAL_BLOCKER` запрещён, если доступна repo-owned команда.
 
 ## Failures И Idempotency
 

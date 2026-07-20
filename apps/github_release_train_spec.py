@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote_plus
 
 
@@ -21,6 +21,122 @@ class TaskContinuity(str, Enum):
     ACTIVE_ADDITION = "ACTIVE_ADDITION"
     ACTIVE_LOOP_RECOVERY = "ACTIVE_LOOP_RECOVERY"
     TERMINAL_STALE_REFERENCE = "TERMINAL_STALE_REFERENCE"
+
+
+class GoalDisposition(str, Enum):
+    """Canonical Goal Mode interpretation of a Release Train observation."""
+
+    TERMINAL_SUCCESS = "TERMINAL_SUCCESS"
+    CONTINUE_WAITING = "CONTINUE_WAITING"
+    OWN_ACTION = "OWN_ACTION"
+    TAKEOVER_PREDECESSOR = "TAKEOVER_PREDECESSOR"
+    RECOVER_OWN_CHAIN = "RECOVER_OWN_CHAIN"
+    EXTERNAL_BLOCKER = "EXTERNAL_BLOCKER"
+    TERMINAL_FAILURE = "TERMINAL_FAILURE"
+
+
+class GoalReasonCode(str, Enum):
+    """Stable machine reason codes; prose is never used as a state transition."""
+
+    TERMINAL_PROOF_VERIFIED = "terminal-proof-verified"
+    TERMINAL_PROOF_MISSING = "terminal-proof-missing"
+    NORMAL_QUEUE_WAITING = "normal-queue-waiting"
+    FOREIGN_OWNER_ACTIVE = "foreign-owner-active"
+    FOREIGN_GATE_NEEDS_TAKEOVER = "foreign-gate-needs-takeover"
+    LOST_OWNER_EVIDENCE_INCOMPLETE = "lost-owner-evidence-incomplete"
+    OWN_RELEASE_RESUME_REQUIRED = "own-release-resume-required"
+    OWN_AGENT_ACK_REQUIRED = "own-agent-ack-required"
+    OWN_UI_FLOW_REQUIRED = "own-ui-flow-required"
+    OWN_RELEASE_REMEDIATION_AVAILABLE = "own-release-remediation-available"
+    OWN_RELEASE_ENQUEUE_REQUIRED = "own-release-enqueue-required"
+    QUEUE_RECONCILIATION_AVAILABLE = "queue-reconciliation-available"
+    HALTED_RECONCILIATION_AVAILABLE = "halted-reconciliation-available"
+    EXTERNAL_AUTHORITY_REQUIRED = "external-authority-required"
+    PROTOCOL_IRRECOVERABLE = "protocol-irrecoverable"
+
+
+class UiRuntime(str, Enum):
+    """UI runtime selected by the execution surface."""
+
+    LOCAL_PLAYWRIGHT = "LOCAL_PLAYWRIGHT"
+    CHATGPT_EMBEDDED_BROWSER = "CHATGPT_EMBEDDED_BROWSER"
+
+
+@dataclass(frozen=True)
+class GoalDecision:
+    """Machine-readable Goal handoff contract shared by CLI and regressions."""
+
+    disposition: GoalDisposition
+    own_pr: int
+    action_pr: int
+    canonical_github_state: Mapping[str, Any]
+    reason_code: str
+    allowed_next_action: str
+    user_intervention_required: bool
+    evidence: tuple[Mapping[str, Any], ...]
+    remediation_exhausted: bool
+
+    def __post_init__(self) -> None:
+        if self.own_pr <= 0 or self.action_pr <= 0:
+            raise ValueError("Goal decision requires positive own_pr and action_pr")
+        if not self.reason_code:
+            raise ValueError("Goal decision requires a canonical reason code")
+        if not self.canonical_github_state:
+            raise ValueError("Goal decision requires canonical GitHub state")
+        if self.disposition == GoalDisposition.EXTERNAL_BLOCKER:
+            if not (
+                self.user_intervention_required
+                and self.remediation_exhausted
+                and self.evidence
+                and self.allowed_next_action
+            ):
+                raise ValueError(
+                    "EXTERNAL_BLOCKER requires evidence, exhausted remediation and a human-only action"
+                )
+            if any(bool(item.get("repo_owned_action_available")) for item in self.evidence):
+                raise ValueError(
+                    "EXTERNAL_BLOCKER is forbidden while repo-owned remediation is available"
+                )
+        elif self.disposition == GoalDisposition.TERMINAL_FAILURE:
+            if self.user_intervention_required or not self.remediation_exhausted or not self.evidence:
+                raise ValueError(
+                    "TERMINAL_FAILURE requires evidence and exhausted remediation without handoff"
+                )
+        elif self.user_intervention_required or self.remediation_exhausted:
+            raise ValueError(
+                "non-blocking Goal dispositions cannot require user intervention or exhausted remediation"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "disposition": self.disposition.value,
+            "own_pr": self.own_pr,
+            "action_pr": self.action_pr,
+            "canonical_github_state": dict(self.canonical_github_state),
+            "reason_code": self.reason_code,
+            "allowed_next_action": self.allowed_next_action,
+            "user_intervention_required": self.user_intervention_required,
+            "evidence": [dict(item) for item in self.evidence],
+            "remediation_exhausted": self.remediation_exhausted,
+        }
+
+
+@dataclass(frozen=True)
+class UiRuntimeDecision:
+    runtime: UiRuntime
+    continue_ui_flow: bool
+    external_blocker_eligible: bool
+    reason_code: str
+    evidence: tuple[Mapping[str, Any], ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "runtime": self.runtime.value,
+            "continue_ui_flow": self.continue_ui_flow,
+            "external_blocker_eligible": self.external_blocker_eligible,
+            "reason_code": self.reason_code,
+            "evidence": [dict(item) for item in self.evidence],
+        }
 
 
 EXPLICIT_TASK_PROMPTS = {
@@ -170,6 +286,65 @@ class ContinuityIntent:
     defect_found_during_active_ui: bool = False
     same_chat: bool = False
     same_functional_area: bool = False
+
+
+def select_ui_runtime(
+    *,
+    execution_surface: str,
+    playwright_available: bool,
+    chromium_launchable: bool,
+    repo_owned_recovery_available: bool,
+    remediation_exhausted: bool = False,
+    user_authority_required: bool = False,
+) -> UiRuntimeDecision:
+    """Select the UI runtime without treating an absent embedded Browser as evidence."""
+
+    normalized_surface = execution_surface.strip().casefold()
+    local_evidence: tuple[Mapping[str, Any], ...] = (
+        {
+            "kind": "ui-runtime-preflight",
+            "execution_surface": normalized_surface,
+            "playwright_available": playwright_available,
+            "chromium_launchable": chromium_launchable,
+            "repo_owned_recovery_available": repo_owned_recovery_available,
+            "remediation_exhausted": remediation_exhausted,
+            "user_authority_required": user_authority_required,
+        },
+    )
+    if normalized_surface in {"codex-cli", "cli"}:
+        if playwright_available and chromium_launchable:
+            return UiRuntimeDecision(
+                runtime=UiRuntime.LOCAL_PLAYWRIGHT,
+                continue_ui_flow=True,
+                external_blocker_eligible=False,
+                reason_code="local-playwright-ready",
+                evidence=local_evidence,
+            )
+        external_eligible = (
+            not repo_owned_recovery_available
+            and remediation_exhausted
+            and user_authority_required
+        )
+        return UiRuntimeDecision(
+            runtime=UiRuntime.LOCAL_PLAYWRIGHT,
+            continue_ui_flow=False,
+            external_blocker_eligible=external_eligible,
+            reason_code=(
+                "local-playwright-external-authority-required"
+                if external_eligible
+                else "local-playwright-recovery-required"
+            ),
+            evidence=local_evidence,
+        )
+    if normalized_surface in {"chatgpt-web", "chatgpt-desktop"}:
+        return UiRuntimeDecision(
+            runtime=UiRuntime.CHATGPT_EMBEDDED_BROWSER,
+            continue_ui_flow=True,
+            external_blocker_eligible=False,
+            reason_code="chatgpt-embedded-browser-selected",
+            evidence=local_evidence,
+        )
+    raise ValueError(f"unsupported execution surface: {execution_surface}")
 
 
 def explicitly_requests_new_task(prompt: str) -> bool:
