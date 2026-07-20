@@ -91,7 +91,7 @@ Update registry содержит только нормализованные з�
 
 Revision растёт при опубликованном изменении статьи. Старые update records могут сохранять прежнюю revision, но не могут ссылаться на будущую; latest registered revision должна совпадать с current instruction revision. Неизвестные instructions/sections/blocks, некорректная дата или stale/future latest revision блокируют registry validation.
 
-`NEW` рассчитывается server-side по canonical business date `Asia/Yekaterinburg`: publication date и следующие 29 календарных дней активны, на `published_on + 30 days` badge исчезает. Cookies, localStorage и персонального acknowledgement нет. Новый section получает badge в article/topic navigation и section heading; дочерние blocks его не дублируют. Новый block старого section получает badge у block и parent topic. `NEW` — текстовая screen-reader-доступная метка, а не только цвет.
+`NEW` рассчитывается server-side по canonical business date `Asia/Yekaterinburg`: publication date и следующие 29 календарных дней активны, на `published_on + 30 days` badge исчезает. Cookies, localStorage и персонального acknowledgement нет. Новый section получает badge в article/topic navigation и section heading; blocks, добавленные той же update-записью вместе с новым section, не получают дублирующие дочерние badges. Если более поздняя update-запись добавляет block внутрь section, чей прежний section-level `NEW` ещё активен, новый block получает собственный badge, а parent topic и вся instruction продолжают отражать новый материал. `NEW` — текстовая screen-reader-доступная метка, а не только цвет.
 
 Компактный disclosure `Обновления инструкций` открыт автоматически, пока есть активные новые элементы, и остаётся доступным в collapsed state после их истечения. Он показывает дату, статью, summary и exact anchor link на desktop/narrow viewport.
 
@@ -107,7 +107,7 @@ The first record is a practical reference for:
 - `Поставки → ФФ → Услуги ФФ`, including exact WB supply ids, `STORAGE`, validation and the system payment visa;
 - final verification and escalation cases.
 
-Current revision: `2`. First update registry entry: `2026-07-20`, section `wb-warehouse-selection`, source type `owner_audio_instruction`.
+Current revision: `3`. Update registry содержит две последовательные записи с business date `2026-07-20` и source type `owner_audio_instruction`: revision `2` добавляет section `wb-warehouse-selection`, а revision `3` добавляет в него exact block `wb-warehouse-selection-exact-composition` с правилом сразу указывать полный фактический список SKU, точное количество каждого SKU и правильное общее количество поставки WB. Временная подстановка всего количества в одну условную SKU запрещена. Формулировка явно фиксирует, что система использует этот состав далее при синхронизации и обработке движения товара — для учёта перемещения, списания остатков ФФ и расчёта себестоимости, а не утверждает немедленное списание в момент создания поставки.
 
 Warehouse-selection wording follows current operator UI labels and warehouse-planning behavior, but intentionally never lists named primary/reserve warehouses. Состав, доступность, priority и dates принадлежат актуальному WebCore result и кабинету WB; Git-tracked operational instruction cannot duplicate the mutable warehouse registry or replace current selection with a memorized list. System quantities пока не заменяют Excel allocation, полученное от руководителя.
 
@@ -127,8 +127,8 @@ This module does not implement:
 
 # 7. Verification
 
-`apps/operator_instruction_registry_smoke.py` covers unique/stable ids, section/block references, revisions/dates, active/future/expired 30-day semantics with an injected date, whole-section inheritance, block-only badges, exact UI-label drift guards, current warehouse-registry name exclusion and escaped update/badge content.
+`apps/operator_instruction_registry_smoke.py` covers unique/stable ids, section/block references, sequential revisions/dates, exact-composition wording, active/future/expired 30-day semantics with an injected date, whole-section inheritance without child duplication, a later block badge inside a still-new section, exact update targets, exact UI-label drift guards, current warehouse-registry name exclusion and escaped update/badge content.
 
-`apps/operator_instructions_smoke.py` covers admin/capability/denied/supplier access, direct-route forbidden behavior, user capability persistence and revocation, controlled `400/404`, lack of DOCX route, escaped renderer output, shell placement, exact update navigation, article/topic/section badges without child duplicates, keyboard-operable navigation and desktop/narrow overflow checks. Its browser NEW assertions patch a fixed business date and therefore do not expire with wall-clock time.
+`apps/operator_instructions_smoke.py` covers admin/capability/denied/supplier access, direct-route forbidden behavior, user capability persistence and revocation, controlled `400/404`, lack of DOCX route, escaped renderer output, shell placement, exact update-to-block navigation, article/topic/section badges plus the later block's own badge, keyboard-operable navigation and desktop/narrow overflow checks. Its browser NEW assertions patch a fixed business date and therefore do not expire with wall-clock time.
 
 Existing auth/users/public-route smokes cover the shared session, runtime user update and managed nginx allowlist regression contours.
