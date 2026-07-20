@@ -61,8 +61,8 @@ def run_autoanswers_ui_flow(
         raise ValueError("autoanswers UI flow requires a valid app-session cookie")
     evidence_dir = evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    if expected_state not in {"off-force", "manual"}:
-        raise ValueError("expected_state must be off-force or manual")
+    if expected_state not in {"off-force", "off-unforced", "manual"}:
+        raise ValueError("expected_state must be off-force, off-unforced or manual")
 
     requested_url = normalized_base_url + UI_PATH
     page_errors: list[str] = []
@@ -114,7 +114,7 @@ def run_autoanswers_ui_flow(
         _assert(response is not None and response.status == 200, "autoanswers document must return HTTP 200")
         page.locator('[data-unified-tab-panel="feedbacks"]:not([hidden])').wait_for(timeout=60_000)
         page.locator('[data-feedbacks-subpanel="server-reviews"]:not([hidden])').wait_for(timeout=60_000)
-        expected_title = "Автоответы выключены" if expected_state == "off-force" else "Ручной режим"
+        expected_title = "Ручной режим" if expected_state == "manual" else "Автоответы выключены"
         page.wait_for_function(
             "title => document.querySelector('[data-autoanswers-master-status]').textContent.trim() === title",
             arg=expected_title,
@@ -125,9 +125,14 @@ def run_autoanswers_ui_flow(
                 "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('WB_AUTOANSWERS_FORCE_OFF=true')",
                 timeout=60_000,
             )
-        else:
+        elif expected_state == "manual":
             page.wait_for_function(
                 "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('только кнопкой')",
+                timeout=60_000,
+            )
+        else:
+            page.wait_for_function(
+                "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('Синхронизация и просмотр продолжаются')",
                 timeout=60_000,
             )
         page.wait_for_function(
@@ -147,14 +152,20 @@ def run_autoanswers_ui_flow(
             _assert(setting_values.get("effective_enabled") is False, "effective mode must be OFF")
             _assert(page.locator("[data-autoanswers-mode]").is_disabled(), "mode selector must be disabled by force-off")
             _assert(page.locator("[data-autoanswers-save-mode]").is_disabled(), "mode save must be disabled by force-off")
-        else:
+        elif expected_state == "manual":
             _assert(setting_values.get("master_enabled") is True, "manual acceptance requires persisted master ON")
             _assert(setting_values.get("force_off") is False, "manual acceptance requires force-off removed")
             _assert(setting_values.get("effective_enabled") is True, "manual acceptance requires effective ON")
             _assert(str(setting_values.get("mode") or "") == "manual", "effective production mode must be manual")
             _assert(page.locator("[data-autoanswers-mode]").input_value() == "manual", "selector must show manual")
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin mode selector must be enabled")
-        _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled by force-off")
+        else:
+            _assert(setting_values.get("master_enabled") is False, "unforced OFF requires persisted master-switch OFF")
+            _assert(setting_values.get("force_off") is False, "unforced OFF requires force-off removed")
+            _assert(setting_values.get("effective_enabled") is False, "unforced OFF must remain ineffective")
+            _assert(page.locator("[data-autoanswers-mode]").input_value() == "off", "selector must show OFF")
+            _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
+        _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
         runtime_before = dict(settings.get("runtime") or {})
         _assert(not (runtime_before.get("ai_jobs") or {}), "production acceptance requires zero AI jobs")
         _assert(not (runtime_before.get("publication_jobs") or {}), "production acceptance requires zero publication jobs")
@@ -312,7 +323,7 @@ def run_autoanswers_ui_flow(
                     page.locator("[data-autoanswers-publish]").count() == 0,
                     "publication must not be offered before a guarded generated result",
                 )
-            if expected_state == "off-force":
+            if expected_state != "manual":
                 _assert(page.locator("[data-autoanswers-generate]").count() == 0, "OFF must hide manual generation")
             detail_evidence = {
                 "feedback_id_sha256": hashlib.sha256(str(first_item["id"]).encode("utf-8")).hexdigest(),
