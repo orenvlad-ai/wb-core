@@ -60,6 +60,24 @@ Task class и task continuity определяются независимо. Mac
 
 Рабочая ветка остаётся proposed change и не подменяет актуальный `origin/main`. Старые чаты, вложения, прежние ChatGPT Project instructions и legacy artifacts могут использоваться только как migration evidence или do-not-lose constraints. Если репозиторий или обязательный источник недоступен, нельзя уверенно утверждать current state: результатом должен быть точный blocker.
 
+## Phase-Local Preflight И Dependency Planning
+
+Preflight не является единым глобальным барьером. Канонические фазы из `apps/github_release_train_spec.py` упорядочиваются по зависимостям, даже если prompt перечисляет production preflight первым:
+
+1. `REPOSITORY_PREFLIGHT` проверяет repository/worktree, `AGENTS.md`, architecture/runners, локальные зависимости, test infrastructure и при необходимости GitHub baseline. Production credentials/database, WebCore Data MCP, browser session, manifests и backup здесь не нужны.
+2. Repository implementation/validation/runner preparation, branch/PR, CI и review выполняются до максимально возможного безопасного состояния.
+3. `PRODUCTION_READ_PREFLIGHT` выполняется только непосредственно перед чтением конкретного production evidence и проверяет только фактически нужный read-only source/capability.
+4. `PRODUCTION_MUTATION_PREFLIGHT` выполняется только непосредственно перед apply и проверяет exact scope, dry-run/coverage, manifest/digests, backup/restore readiness, expected affected entities, non-target invariants, authorization, exact deployed runner/version и reconciliation path.
+5. `PRODUCTION_UI_PREFLIGHT` выполняется только перед production UI acceptance и фактически проверяет local Playwright/Chromium и необходимую именно этой операции authorization.
+
+Для задачи с mutation правильная dependency chain: `repository development → PR/review → deploy runner → production dry-run/read preflight → backup/manifests/digests/evidence → explicit apply → readback/reconciliation → UI acceptance`, если UI требуется. Невозможность выполнить поздние production steps не отменяет и не блокирует независимые ранние steps.
+
+Phase context входит в тот же Goal disposition contract через `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`, `user_intervention_required`. Недоступная будущая capability при оставшейся безопасной работе даёт `CONTINUE_SAFE_PHASES`; `AWAIT_PHASE_CAPABILITY` допустим только у непосредственной phase boundary, когда safe phases завершены, фактический preflight приложен, repo-owned remediation отсутствует/исчерпана и требуется точное human-only действие. Общий `EXTERNAL_BLOCKER` при `safe_phases_remaining` конструктивно запрещён.
+
+WebCore Data MCP — только read-only allowlist, а не универсальный production-доступ. Перед его требованием агент сопоставляет конкретную capability с allowlist: наличие MCP не доказывает arbitrary SQL, production filesystem, raw exports, manifests/digests, backup или backfill; отсутствие MCP не мешает фазам, которым он не нужен. Evidence извлекается соответствующим типу данных canonical repo-owned способом; mutation через MCP запрещена. Нельзя просить подключить MCP, если требуемая capability всё равно не входит в allowlist.
+
+Будущий production-data runner создаётся в репозитории и до production gate тестируется на fixtures/mocks. Его обязательный contract: dry-run по умолчанию, отдельный explicit apply flag, bounded scope, machine-readable manifest, pre-change digest, backup/evidence, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и server-only drift production mutation не выполняют.
+
 ## GOAL Mode И Scope
 
 Задача задаётся через проверяемый конечный результат, а не избыточный микроменеджмент. Каждая change-задача фиксирует:
@@ -176,11 +194,23 @@ Codex CLI наблюдает очередь без AI polling loop:
 
 Waiter ведёт один обновляемый status/heartbeat comment на активном PR и не создаёт повторяющиеся comments. Для LOOP он при own `release:awaiting-agent` заново читает actual head и публикует `/wb-core loop ack-agent <PR> head <HEAD_SHA>`; handler создаёт repo-owned proof, поэтому manually added `loop:ack-*` label не открывает merge. Чужие `ready/running/awaiting-agent/awaiting-ui/halted` — normal waiting без terminal timeout. Код `3` означает own UI Flow, `4` — owner resume без ack, `2` — own blocker или conflicting invariant, `130` — interrupt.
 
+Goal Mode обязан использовать канонический queue shepherd перед любым blocked handoff:
+
+`python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`
+
+Shepherd не создаёт второй state machine: он интерпретирует machine specification из `apps/github_release_train_spec.py` и возвращает структурированные `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`, `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`. Допустимые disposition: `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE`. Опциональный `--phase-state <JSON>` передаёт текущий dependency/capability context в этот же classifier.
+
+Неизменившееся состояние не доказывает impasse. Elapsed time, число polling-итераций или одинаковых goal-turns, отсутствие GitHub changes, чужой gate, `release:awaiting-ui`, `release:needs-resume`, слова MCP/browser/credentials/database и отсутствие embedded Browser в Codex CLI по отдельности никогда не дают `EXTERNAL_BLOCKER`/`TERMINAL_FAILURE`. При `CONTINUE_WAITING` shepherd продолжает polling/heartbeat; `--once` возвращает код `6` как bounded snapshot, после которого следующий goal-turn продолжает общий Goal. `CONTINUE_SAFE_PHASES` выполняет repository-safe dependency steps. `AWAIT_PHASE_CAPABILITY` приостанавливает только непосредственную production/UI phase и не объявляет всю цель сломанной. При `OWN_ACTION`, `TAKEOVER_PREDECESSOR` и `RECOVER_OWN_CHAIN` агент выполняет разрешённое действие сам.
+
+Exit-code contract shepherd: `0` — proven terminal success; `2` — proven external blocker; `3` — own LOOP UI/recovery; `4` — predecessor ownership resumed/takeover next action; `5` — другое repo-owned own action; `6` — normal waiting snapshot; `7` — proven irrecoverable terminal failure; `8` — `CONTINUE_SAFE_PHASES`; `9` — `AWAIT_PHASE_CAPABILITY`; `130` — interrupt. Только `0`, `2`, `7` terminal для Goal; `8` продолжает работу, `9` — phase-local capability wait. Перед blocked handoff обязателен `--shepherd --once` с актуальным `--phase-state`; он допустим только при disposition `EXTERNAL_BLOCKER`/`TERMINAL_FAILURE`, canonical reason, конкретном evidence, перечне recovery attempts и `remediation_exhausted=true`. `EXTERNAL_BLOCKER` запрещён, пока доступна repo-owned команда или незавершённая независимая safe phase.
+
 Новый LOOP всегда имеет `root == PR`; recovery — `root < PR` и exact proof текущего `awaiting-ui` gate; `root > PR` запрещён. Новый root может нормально ждать за чужим UI gate. Recovery-link немедленно становится stale при исчезновении gate или terminal closure root. Waiter проверяет enrollment proof до heartbeat/ack и завершает fail-closed при classification error.
 
 Trusted comment `/wb-core loop retry-blocked <PR> head <HEAD_SHA>` сохраняет task class, scope и root и применим только к техническому pre-merge blocker; enqueue-команды такой blocker не снимают. После successful baseline на новом fix-head retry может обновить exact-head marker уже доказанной new/recovery identity, но не создать и не переклассифицировать её. Comment обрабатывает trusted-main GitHub Actions, поэтому exact-head proof не зависит от identity локального `gh` token. Локальный waiter при classification mismatch только останавливается fail-closed и не выставляет label/comment от имени пользователя. Classification error сохраняет provenance через последующие смены head и обычным retry не исправляется; его разрешает только более поздний repo-owned new/recovery/correction proof. Отдельная `/wb-core loop correct-to-new <PR> head <HEAD_SHA> old-root <ROOT>` требует open/unmerged exact PR/head, successful baseline, `OWNER`/`MEMBER` authorization, classification-blocker proof, доказанный terminal old root и отсутствие его active gate; она одним label replacement создаёт independent root и идемпотентный audit proof. Повторная доставка уже доказанной enqueue/correction команы после перехода в `running`, `awaiting-agent` или `blocked` безопасно ничего не меняет и не возвращает PR в `ready`.
 
-Нормальное ожидание очереди не превращается в blocker после N polls или goal-turns. Если LOOP heartbeat исчез на `ready/running/awaiting-agent/awaiting-ui`, worker добавляет overlay `release:needs-resume` и точную команду `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`. Resume проверяет exact head/root, снимает только overlay и не выполняет ack или acceptance.
+Нормальное ожидание очереди не превращается в blocker после N polls или goal-turns. Если LOOP heartbeat исчез на `ready/running/awaiting-agent/awaiting-ui`, worker добавляет overlay `release:needs-resume` и точную команду `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`. Shepherd классифицирует чужого lost owner как `TAKEOVER_PREDECESSOR`, только если одновременно доказаны overlay, machine status `owner=unowned`, exact head, для UI gate exact deployed SHA, LOOP root и неизменность root isolation. Без этих evidence takeover запрещён. Resume идемпотентно снимает только overlay и не выполняет ack или acceptance; его код `4` означает continuation, не blocker.
+
+После takeover агент восстанавливает predecessor context из PR, status comment, semantic diff и authoritative docs; определяет точный незавершённый этап; на `release:awaiting-ui` выполняет production UI Flow; оставляет exact-SHA acceptance только после достаточного UI evidence; ждёт terminal predecessor; затем без пользовательского напоминания снова запускает shepherd исходного `OWN_PR`. Если UI выявил дефект, создаётся exact same-root recovery либо сохраняется fail-closed gate; независимый successor остаётся исправным и ожидающим. Takeover никогда сам не выполняет `ack-agent` или `accept-ui`.
 
 Явное ограничение пользователя имеет приоритет: «только ветка», «до commit», «до draft PR», «без merge», «без deploy», «без production mutations» или другая точная граница. Тогда Codex останавливается ровно на ней, подтверждает достигнутое состояние и не считает отсутствие дальнейшего closure ошибкой. Ограничение closure не расширяет authority для иных mutations.
 
@@ -205,11 +235,16 @@ Production UI-проверка доказывает фактический brows
 
 Surface policy:
 
+- browser session и UI authorization не нужны для repository analysis/development/tests/PR и проверяются только в `PRODUCTION_UI_PREFLIGHT`; будущая UI acceptance не останавливает ранние фазы;
 - в Codex CLI по умолчанию сразу использовать локальный Python/Node Playwright с установленным Chrome/Chromium в новом изолированном непостоянном browser context; встроенный Browser в CLI недоступен и не является preflight-попыткой;
 - в ChatGPT web/desktop встроенный Browser можно использовать, если он доступен; независимо от поверхности применяется один evidence contract;
 - по умолчанию не подключать пользовательский Chrome profile, `user_data_dir`, cookies, storage state или сохранённые credentials; авторизованный context допустим только при explicit scope и безопасно доступной авторизации;
 - не выполнять click, form fill, keyboard input, refresh/save/submit/delete/run-now или другие business mutations, если они прямо не входят в bounded UI Flow;
-- browser package/binary можно установить только когда это необходимо и разрешено текущим permission contour; отсутствие Playwright/Chrome/Chromium или требуемой авторизации является точным blocker, а не основанием подменить UI Flow HTTP-probe.
+- browser package/binary можно установить только когда это необходимо и разрешено текущим permission contour; отсутствие Playwright/Chrome/Chromium или требуемой авторизации не предполагается и не разрешает подменить UI Flow HTTP-probe.
+
+Публичную/неавторизованную UI-проверку выполняют, когда она достаточна для текущего этапа. Отсутствие авторизованной session блокирует только точную navigation/operation, которой она фактически нужна, и только после evidence, а не весь development/PR flow.
+
+В CLI фактический runtime preflight выполняется `python3 apps/github_release_train_wait.py <ACTION_PR> --playwright-preflight`: helper импортирует локальный Playwright и действительно запускает Chrome/Chromium с новым isolated non-persistent context. Успех означает немедленное продолжение UI Flow; доступность embedded Browser не проверяется и не требуется. Ошибка preflight сначала даёт repo-owned recovery action, а не blocker. `EXTERNAL_BLOCKER` возможен только после зафиксированных import/launch errors, выполненных repo-owned repair attempts, `repo_owned_action_available=false`, `remediation_exhausted=true` и доказательства, что следующий шаг требует новых пользовательских полномочий. Недоступность авторизации также подтверждается фактической navigation/auth evidence, а не предположением.
 
 Минимальное production UI evidence включает:
 
