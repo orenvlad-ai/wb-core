@@ -63,7 +63,7 @@ def main() -> None:
     _assert(get_operator_instruction() is instruction, "empty id resolves the first instruction")
     _assert(get_operator_instruction("supply-management") is instruction, "published id resolves")
     _assert(get_operator_instruction("missing") is None, "unknown id stays controlled")
-    _assert(instruction.revision == 2, "supply-management revision must be incremented")
+    _assert(instruction.revision == 3, "supply-management revision must be incremented")
     _assert(tuple(section.anchor for section in instruction.sections) == EXPECTED_SECTION_ORDER, "existing sections stay ordered and the new section precedes fulfillment services")
 
     _assert_registry_uniqueness(instructions)
@@ -179,10 +179,24 @@ def _assert_validation_failures(instruction) -> None:
 def _assert_update_and_new_semantics(instruction) -> None:
     updates = list_operator_instruction_updates()
     _assert(updates == tuple(sorted(updates, key=lambda item: (item.published_on, item.update_id), reverse=True)), "updates render newest first")
+    _assert(
+        tuple(update.update_id for update in PUBLISHED_OPERATOR_INSTRUCTION_UPDATES)
+        == (
+            "supply-management-r2-wb-warehouse-selection",
+            "supply-management-r3-exact-wb-supply-composition",
+        ),
+        "update registry must retain both append-only sequential entries",
+    )
     update = updates[0]
-    _assert(update.instruction_revision == instruction.revision, "latest update revision matches instruction revision")
+    previous_update = updates[1]
+    _assert(update.update_id == "supply-management-r3-exact-wb-supply-composition", "revision 3 update must be latest")
+    _assert(update.instruction_revision == instruction.revision == 3, "latest update revision matches instruction revision")
     _assert(update.source_type == "owner_audio_instruction", "normalized update source type is retained")
-    _assert(update.target_id == "wb-warehouse-selection", "update target is the exact section DOM id")
+    _assert(update.section_anchors == ("wb-warehouse-selection",), "revision 3 update references the existing section")
+    _assert(update.block_ids == ("wb-warehouse-selection-exact-composition",), "revision 3 update references the exact block")
+    _assert(update.new_section_anchors == (), "revision 3 does not recreate the existing section")
+    _assert(update.new_block_ids == ("wb-warehouse-selection-exact-composition",), "revision 3 marks the exact block as new")
+    _assert(update.target_id == "wb-warehouse-selection-exact-composition", "update target is the exact block DOM id")
     before = update.published_on - timedelta(days=1)
     last_active = update.published_on + timedelta(days=INSTRUCTION_NEW_WINDOW_DAYS - 1)
     expired = update.published_on + timedelta(days=INSTRUCTION_NEW_WINDOW_DAYS)
@@ -191,17 +205,39 @@ def _assert_update_and_new_semantics(instruction) -> None:
     _assert(is_instruction_update_new(update, last_active), "NEW must remain active through day 29")
     _assert(not is_instruction_update_new(update, expired), "NEW must expire on day 30")
 
+    whole_section_state = build_instruction_new_state(
+        instruction,
+        previous_update.published_on,
+        (previous_update,),
+    )
+    _assert(whole_section_state.instruction_is_new, "a new section makes the instruction new")
+    _assert(whole_section_state.new_section_anchors == frozenset({"wb-warehouse-selection"}), "new section badge is active")
+    _assert(whole_section_state.topic_section_anchors == frozenset({"wb-warehouse-selection"}), "new section marks its topic")
+    _assert(not whole_section_state.new_block_ids, "one update creating a whole section suppresses child block badges")
+    warehouse_section = next(section for section in instruction.sections if section.anchor == "wb-warehouse-selection")
+    whole_section_blocks_html = "".join(
+        _render_operator_instruction_block(
+            block,
+            is_new=block.block_id in whole_section_state.new_block_ids,
+        )
+        for block in warehouse_section.blocks
+    )
+    _assert('class="new-badge"' not in whole_section_blocks_html, "whole-section update renders no duplicate child NEW")
+
     active_state = build_instruction_new_state(instruction, update.published_on)
-    _assert(active_state.instruction_is_new, "active section makes the instruction new")
-    _assert(active_state.new_section_anchors == frozenset({"wb-warehouse-selection"}), "new section badge is active")
-    _assert(active_state.topic_section_anchors == frozenset({"wb-warehouse-selection"}), "new topic badge is active")
-    _assert(not active_state.new_block_ids, "a new whole section suppresses child block badges")
+    _assert(active_state.instruction_is_new, "active section and later block make the instruction new")
+    _assert(active_state.new_section_anchors == frozenset({"wb-warehouse-selection"}), "older section badge remains active")
+    _assert(
+        active_state.new_block_ids == frozenset({"wb-warehouse-selection-exact-composition"}),
+        "a later block keeps its own badge while the parent section is still new",
+    )
+    _assert(active_state.topic_section_anchors == frozenset({"wb-warehouse-selection"}), "later block keeps the parent topic new")
     _assert(not build_instruction_new_state(instruction, before).instruction_is_new, "future state is inactive")
     _assert(not build_instruction_new_state(instruction, expired).instruction_is_new, "expired state is inactive")
 
     block_update = replace(
         update,
-        update_id="supply-management-r2-documents-block-example",
+        update_id="supply-management-r3-documents-block-example",
         section_anchors=("documents",),
         block_ids=("documents-conflict",),
         target_id="documents-conflict",
@@ -221,15 +257,25 @@ def _assert_update_and_new_semantics(instruction) -> None:
     expired_html = _render_sheet_vitrina_instructions_ui(instruction, business_date=expired)
     _assert('<details class="instruction-updates" open>' in active_html, "updates disclose automatically while NEW is active")
     _assert('<details class="instruction-updates">' in expired_html, "update history remains after NEW expires")
-    _assert('href="/sheet-vitrina-v1/instructions?embedded=1&amp;instruction=supply-management#wb-warehouse-selection"' in active_html, "update links to exact section DOM id")
+    _assert('href="/sheet-vitrina-v1/instructions?embedded=1&amp;instruction=supply-management#wb-warehouse-selection-exact-composition"' in active_html, "latest update links to exact block DOM id")
+    _assert('href="/sheet-vitrina-v1/instructions?embedded=1&amp;instruction=supply-management#wb-warehouse-selection"' in active_html, "previous update keeps its exact section link")
     new_section_html = active_html.split('<section class="instruction-section" id="wb-warehouse-selection">', 1)[1].split('</section>', 1)[0]
-    _assert(new_section_html.count('class="new-badge"') == 1, "new section has one heading badge and no child badge duplication")
+    _assert(new_section_html.count('class="new-badge"') == 2, "still-new section has its heading badge plus the later block badge")
+    new_block_html = new_section_html.split('id="wb-warehouse-selection-exact-composition"', 1)[1].split('</aside>', 1)[0]
+    _assert(new_block_html.count('class="new-badge"') == 1, "revision 3 block renders one direct NEW badge")
     expired_section_html = expired_html.split('<section class="instruction-section" id="wb-warehouse-selection">', 1)[1].split('</section>', 1)[0]
     _assert('class="new-badge"' not in expired_section_html, "expired section badge disappears deterministically")
 
 
 def _assert_warehouse_instruction_contract(instruction) -> None:
     section = next(section for section in instruction.sections if section.anchor == "wb-warehouse-selection")
+    exact_composition_blocks = [
+        block
+        for block in section.blocks
+        if block.block_id == "wb-warehouse-selection-exact-composition"
+    ]
+    _assert(len(exact_composition_blocks) == 1, "exact composition block must be unique in the warehouse section")
+    _assert(exact_composition_blocks[0].kind == "important", "exact composition rule must use a visible callout")
     text = _section_text(section)
     for required in (
         WB_WAREHOUSE_SELECTION_ROUTE,
@@ -243,6 +289,15 @@ def _assert_warehouse_instruction_contract(instruction) -> None:
         "ЦФО Юг",
         "Excel-распределение",
         "фактическое состояние кабинета WB",
+        "полный фактический список SKU",
+        "точное количество каждого SKU",
+        "правильное общее количество",
+        "всё количество на одну SKU",
+        "синхронизации и обработке движения товара",
+        "учёта перемещения",
+        "списания остатков ФФ",
+        "расчёта себестоимости",
+        "условную SKU",
     ):
         _assert(required in text, f"warehouse instruction contract missing: {required}")
     for jargon in ("API", "registry", "payload", "acceptance/options"):

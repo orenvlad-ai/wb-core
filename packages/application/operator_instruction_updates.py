@@ -41,6 +41,21 @@ PUBLISHED_OPERATOR_INSTRUCTION_UPDATES = (
             "расчёт количества и формирование Excel-распределений в WebCore."
         ),
     ),
+    InstructionUpdate(
+        update_id="supply-management-r3-exact-wb-supply-composition",
+        published_on=date(2026, 7, 20),
+        instruction_id="supply-management",
+        instruction_revision=3,
+        summary=(
+            "Добавлено правило о необходимости сразу указывать полный фактический состав "
+            "поставки и точное количество каждого SKU."
+        ),
+        section_anchors=("wb-warehouse-selection",),
+        block_ids=("wb-warehouse-selection-exact-composition",),
+        source_type="owner_audio_instruction",
+        target_id="wb-warehouse-selection-exact-composition",
+        new_block_ids=("wb-warehouse-selection-exact-composition",),
+    ),
 )
 
 
@@ -85,7 +100,7 @@ def build_instruction_new_state(
     business_date: date,
     updates: tuple[InstructionUpdate, ...] = PUBLISHED_OPERATOR_INSTRUCTION_UPDATES,
 ) -> InstructionNewState:
-    """Build article/topic/section/block badges with section-level inheritance."""
+    """Build badges while suppressing child NEW only within the same section update."""
 
     active_updates = tuple(
         update
@@ -104,7 +119,7 @@ def build_instruction_new_state(
         block_id
         for update in active_updates
         for block_id in update.new_block_ids
-        if block_to_section.get(block_id) not in new_sections
+        if block_to_section.get(block_id) not in update.new_section_anchors
     }
     topic_sections = set(new_sections)
     topic_sections.update(

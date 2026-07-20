@@ -107,6 +107,10 @@ def main() -> None:
                     "Обновления инструкций",
                     "Подбор складов WB по направлениям",
                     "Рекомендуемый склад",
+                    'id="wb-warehouse-selection-exact-composition"',
+                    "Точный состав поставки",
+                    "полный фактический список SKU",
+                    "точное количество каждого SKU",
                 ):
                     _assert(marker in embedded_body, f"instruction content marker missing: {marker}")
                 _assert("Инструкция_менеджера_по_поставкам" not in embedded_body, "source DOCX must not be published")
@@ -253,16 +257,23 @@ def _assert_browser_ui(base_url: str, username: str, password: str) -> None:
                 raise AssertionError("desktop topic navigation must show NEW")
             if frame.locator("#wb-warehouse-selection > h2 .new-badge").count() != 1:
                 raise AssertionError("new section heading must show NEW")
-            if frame.locator("#wb-warehouse-selection .block .new-badge").count() != 0:
-                raise AssertionError("whole-section NEW must not be duplicated on child blocks")
-            update_link = frame.locator('.instruction-update-link[href$="#wb-warehouse-selection"]')
+            exact_block = frame.locator("#wb-warehouse-selection > #wb-warehouse-selection-exact-composition")
+            if exact_block.count() != 1:
+                raise AssertionError("exact composition block must render inside the warehouse-selection section")
+            if exact_block.locator(":scope > h3 .new-badge").count() != 1:
+                raise AssertionError("later exact-composition block must show its own NEW badge")
+            if frame.locator("#wb-warehouse-selection .block .new-badge").count() != 1:
+                raise AssertionError("only the later block may duplicate the still-active parent section NEW")
+            if frame.locator('[data-update-id="supply-management-r3-exact-wb-supply-composition"]').count() != 1:
+                raise AssertionError("revision 3 update must appear once in the update registry")
+            update_link = frame.locator('.instruction-update-link[href$="#wb-warehouse-selection-exact-composition"]')
             if update_link.count() != 1:
-                raise AssertionError("update registry must link to the exact new section")
+                raise AssertionError("revision 3 update registry item must link to the exact new block")
             update_link.click()
-            frame.locator("#wb-warehouse-selection").wait_for()
+            exact_block.wait_for()
             frame.locator("body").wait_for()
-            if not frame.locator("body").evaluate("() => window.location.hash === '#wb-warehouse-selection'"):
-                raise AssertionError("update registry navigation must land on the exact section DOM id")
+            if not frame.locator("body").evaluate("() => window.location.hash === '#wb-warehouse-selection-exact-composition'"):
+                raise AssertionError("update registry navigation must land on the exact block DOM id")
             desktop_link = frame.locator('.knowledge-sidebar > .topic-nav a[href="#documents"]')
             desktop_link.focus()
             desktop_link.press("Enter")
@@ -288,6 +299,9 @@ def _assert_browser_ui(base_url: str, username: str, password: str) -> None:
             frame.locator(".topics-mobile summary").click()
             if not frame.locator('.topics-mobile a[href="#wb-warehouse-selection"] .new-badge').is_visible():
                 raise AssertionError("mobile topic disclosure must show NEW for the new section")
+            exact_block.scroll_into_view_if_needed()
+            if not exact_block.is_visible() or not exact_block.locator(":scope > h3 .new-badge").is_visible():
+                raise AssertionError("exact composition block and its own NEW must remain visible on mobile")
             if not frame.locator(".instruction-update-item").first.is_visible():
                 raise AssertionError("instruction updates must remain readable on narrow viewport")
         finally:
