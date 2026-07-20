@@ -2597,6 +2597,11 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_order_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         shipment = self.supplier_shipments_block.get_shipment(shipment_id)
+        for prefix in ("invoice", "contract"):
+            document_id = str(shipment.get(f"{prefix}_document_id") or "")
+            document = self.runtime.load_trade_document(document_id) if document_id else None
+            if document is not None:
+                shipment[f"{prefix}_file_sha256"] = str(document.get("file_sha256") or "")
         financial_payload = self.supplier_financial_documents_block.list_documents(shipment_id)
         financial_documents = [
             apply_supplier_order_document_match(dict(item), shipment)
@@ -2794,6 +2799,7 @@ class RegistryUploadHttpEntrypoint:
             "file_original_name": str(
                 document.get("file_original_name") or document.get("original_filename") or ""
             ),
+            "file_sha256": str(document.get("file_sha256") or ""),
             "parse_status": str(document.get("parse_status") or document.get("status") or ""),
             "warnings": list(document.get("warnings") or []),
             "errors": list(document.get("errors") or []),
@@ -6065,6 +6071,9 @@ def _supplier_order_invoice_document_row(shipment: Mapping[str, Any]) -> dict[st
         "amount": shipment.get("invoice_amount_total") if shipment.get("invoice_amount_total") is not None else metadata.get("declared_invoice_total"),
         "currency": str(shipment.get("currency") or metadata.get("currency") or ""),
         "download_path": str(shipment.get("invoice_download_path") or ""),
+        "file_sha256": str(
+            shipment.get("invoice_file_sha256") or shipment.get("source_file_sha256") or ""
+        ),
     }
 
 
@@ -6081,6 +6090,7 @@ def _supplier_order_contract_document_row(shipment: Mapping[str, Any]) -> dict[s
         "amount": None,
         "currency": "",
         "download_path": str(shipment.get("contract_download_path") or ""),
+        "file_sha256": str(shipment.get("contract_file_sha256") or ""),
     }
 
 
@@ -6111,6 +6121,10 @@ def _supplier_order_financial_document_row(
             "amount": amount,
             "currency": "RUB" if document.get("total_amount_rub") is not None else str(document.get("currency") or ""),
             "download_path": str(document.get("download_path") or ""),
+            "file_original_name": str(
+                document.get("file_original_name") or document.get("original_filename") or ""
+            ),
+            "file_sha256": str(document.get("file_sha256") or ""),
             "parse_status": parse_status,
             "warnings": warnings,
             "errors": list(document.get("errors") or []),
@@ -6291,6 +6305,10 @@ def _build_supplier_order_documents_archive(
             file_bytes, filename, content_type = file_loader(row)
             if not file_bytes:
                 raise ValueError("loaded file is empty")
+            expected_sha256 = str(row.get("file_sha256") or "").removeprefix("sha256:").strip().lower()
+            actual_sha256 = hashlib.sha256(file_bytes).hexdigest()
+            if expected_sha256 and actual_sha256 != expected_sha256:
+                raise ValueError("loaded file checksum does not match stored upload evidence")
         except Exception as exc:
             failure = {**expected_item, "reason": str(exc)}
             failed.append(failure)

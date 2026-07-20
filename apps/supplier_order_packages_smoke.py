@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -185,6 +186,20 @@ def _assert_logistics_assemblies() -> None:
         or len(failed_names) != 3
     ):
         raise AssertionError(f"unreadable package member must be a red exact-assembly receipt: {failed_receipt}")
+
+    damaged_rows = [dict(row) for row in rows]
+    damaged_rows[1]["file_sha256"] = hashlib.sha256(b"different stored upload bytes").hexdigest()
+    _, damaged_receipt = _build_supplier_order_documents_archive(
+        {**payload, "required_documents": damaged_rows},
+        package_type="logistics",
+        file_loader=_fixture_loader,
+    )
+    if (
+        damaged_receipt.get("status") != "error"
+        or damaged_receipt.get("counts", {}).get("failed") != 1
+        or "checksum" not in str(damaged_receipt.get("failed", [{}])[0].get("reason") or "")
+    ):
+        raise AssertionError(f"damaged package member must fail stored-upload integrity: {damaged_receipt}")
 
     partial_payload = {
         **payload,
