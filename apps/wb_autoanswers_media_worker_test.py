@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from packages.application.wb_autoanswers_media import (
     AutoanswersMediaProcessor,
+    FfmpegVideoFrameExtractor,
     HttpMediaFetcher,
     MediaProcessingError,
     _allowed_url,
@@ -241,6 +242,35 @@ process.stdout.write(JSON.stringify({images: content.filter((item) => item.type 
         self.assertEqual(evidence["images"], 6)
         self.assertTrue(evidence["after"])
         self.assertTrue(evidence["cached"])
+
+    def test_single_hls_segment_selects_first_decodable_frame(self) -> None:
+        extractor = FfmpegVideoFrameExtractor()
+        video = Path(self.temp.name) / "segment.ts"
+        video.write_bytes(b"fixture")
+        output = Path(self.temp.name) / "frames"
+        with patch(
+            "packages.application.wb_autoanswers_media.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ) as run:
+            frames = extractor.extract(video, output, max_frames=1)
+        command = run.call_args.args[0]
+        self.assertIn("select='eq(n,0)',scale='min(1280,iw)':-2", command)
+        self.assertNotIn("fps=1/15,scale='min(1280,iw)':-2", command)
+        self.assertEqual(frames, [])
+
+    def test_multi_frame_video_keeps_bounded_cadence(self) -> None:
+        extractor = FfmpegVideoFrameExtractor()
+        video = Path(self.temp.name) / "video.mp4"
+        video.write_bytes(b"fixture")
+        output = Path(self.temp.name) / "frames"
+        with patch(
+            "packages.application.wb_autoanswers_media.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ) as run:
+            extractor.extract(video, output, max_frames=4)
+        command = run.call_args.args[0]
+        self.assertIn("fps=1/15,scale='min(1280,iw)':-2", command)
+        self.assertEqual(command[command.index("-frames:v") + 1], "4")
 
     def test_expired_signed_url_is_refreshed_by_detail_read(self) -> None:
         row = feedback("refresh")

@@ -104,6 +104,9 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 page.wait_for_function(
                     "document.querySelectorAll('[data-autoanswers-open]').length === 1"
                 )
+                backlog = page.locator("[data-autoanswers-backlog]")
+                self.assertEqual(backlog.count(), 1)
+                self.assertTrue(backlog.is_disabled())
 
                 answer_box = page.locator(".autoanswers-answer-box")
                 before_text = answer_box.inner_text()
