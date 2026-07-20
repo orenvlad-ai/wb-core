@@ -16,6 +16,10 @@
 
 Первоначальный server-native контур был выпущен из baseline `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`. Текущий manual increment построен от актуального `origin/main` `e9f90c306763e252790eeb3c921875198d2aca64`. Локальная реализация, fake-transport публикация, release hardening, тесты и документация готовы. Первый production deploy сохраняет emergency force-off и устанавливает full worker disabled. Снятие force-off выполняется только последующим tracked config release после OFF acceptance.
 
+### Release recovery note
+
+PR #678 был смёржен как `05bdbc9bd918e6bc2440debbaf52bb57202740aa`, но первый deploy fail-closed остановился до schema migration, systemd install и restart: общий seller-recovery package precheck не включал новые `node`, `npm` и `ffmpeg`, поэтому package-install branch не запускался. Recovery выносит эти зависимости в отдельный idempotent deploy gate: базовые пакеты и ffmpeg устанавливаются через apt, официальный Node `22.21.1` — из `nodejs.org` с exact SHA-256 для amd64/arm64, после чего прежний lockfile `npm ci` и проверка frozen identity остаются обязательными. Force-off posture не меняется.
+
 ## Manual mode increment
 
 - В стабильный enum добавлен `manual`; UI теперь имеет один selector: `Выключено`, `Ручной`, `Черновики`, `Безопасный`, `Полный`.

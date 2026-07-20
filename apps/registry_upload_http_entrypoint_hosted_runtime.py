@@ -181,15 +181,20 @@ RUNTIME_PIP_PACKAGES = [
 SELLER_PORTAL_RECOVERY_OS_PACKAGES = [
     "python3-pip",
     "python3-venv",
-    "ffmpeg",
-    "nodejs",
-    "npm",
     "xvfb",
     "x11vnc",
     "novnc",
     "websockify",
     "openbox",
 ]
+AUTOANSWERS_NODE_MAJOR = 20
+AUTOANSWERS_NODE_VERSION = "22.21.1"
+AUTOANSWERS_NODE_DIST_BASE = f"https://nodejs.org/dist/v{AUTOANSWERS_NODE_VERSION}"
+AUTOANSWERS_NODE_SHA256 = {
+    "amd64": "680d3f30b24a7ff24b98db5e96f294c0070f8f9078df658da1bce1b9c9873c88",
+    "arm64": "e660365729b434af422bcd2e8e14228637ecf24a1de2cd7c916ad48f2a0521e1",
+}
+AUTOANSWERS_BASE_OS_PACKAGES = ["ca-certificates", "curl", "xz-utils", "ffmpeg"]
 SELLER_PORTAL_RECOVERY_REQUIRED_COMMANDS = [
     "python3",
     "xvfb-run",
@@ -868,6 +873,7 @@ def deploy_current_checkout(
     seller_owner_venv_command = _build_seller_portal_owner_runtime_venv_command(target)
     seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
+    autoanswers_os_dependencies_command = _build_autoanswers_os_dependencies_command(target)
     autoanswers_node_dependencies_command = _build_autoanswers_node_dependencies_command(target)
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
@@ -897,6 +903,7 @@ def deploy_current_checkout(
             "seller_portal_owner_runtime_venv": seller_owner_venv_command,
             "seller_portal_owner_runtime_contract": seller_owner_contract_command,
             "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
+            "autoanswers_os_dependencies": autoanswers_os_dependencies_command,
             "autoanswers_node_dependencies": autoanswers_node_dependencies_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "systemd_install": systemd_commands["install"],
@@ -956,6 +963,7 @@ def deploy_current_checkout(
     run_stage("dependencies", seller_owner_venv_command)
     run_stage("dependencies", seller_owner_contract_command)
     run_stage("dependencies", seller_recovery_playwright_browser_command)
+    run_stage("dependencies", autoanswers_os_dependencies_command)
     run_stage("dependencies", autoanswers_node_dependencies_command)
     run_stage("readback", autoanswers_prepare_deploy_command)
     if systemd_commands["install"]:
@@ -990,6 +998,52 @@ def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
     return _remote_shell_command(target, script)
 
 
+def _build_autoanswers_os_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
+    """Install checksum-pinned official Node binaries plus ffmpeg idempotently."""
+
+    major_check = (
+        "command -v node >/dev/null 2>&1 && "
+        f"node -e \"if(Number(process.versions.node.split('.')[0])<{AUTOANSWERS_NODE_MAJOR}) process.exit(1)\""
+    )
+    complete_check = (
+        f"{major_check} && command -v npm >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1"
+    )
+    package_names = " ".join(shlex.quote(item) for item in AUTOANSWERS_BASE_OS_PACKAGES)
+    x64_sha = shlex.quote(AUTOANSWERS_NODE_SHA256["amd64"])
+    arm64_sha = shlex.quote(AUTOANSWERS_NODE_SHA256["arm64"])
+    version = shlex.quote(AUTOANSWERS_NODE_VERSION)
+    dist_base = shlex.quote(AUTOANSWERS_NODE_DIST_BASE)
+    install = (
+        f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {package_names}; "
+        f"if ! ({major_check}); then "
+        "machine_arch=$(dpkg --print-architecture); "
+        f"case \"$machine_arch\" in amd64) node_arch=x64; node_sha={x64_sha} ;; "
+        f"arm64) node_arch=arm64; node_sha={arm64_sha} ;; *) exit 78 ;; esac; "
+        f"node_version={version}; node_dist_base={dist_base}; "
+        "node_archive=/tmp/wb-core-node-${node_version}-linux-${node_arch}.tar.xz; "
+        "curl --fail --silent --show-error --location "
+        "\"${node_dist_base}/node-v${node_version}-linux-${node_arch}.tar.xz\" "
+        "--output \"$node_archive\"; "
+        "printf '%s  %s\\n' \"$node_sha\" \"$node_archive\" | sha256sum --check --status; "
+        "install -d -m 0755 /opt/wb-core-runtime/node-runtimes; "
+        "node_target=/opt/wb-core-runtime/node-runtimes/node-v${node_version}-linux-${node_arch}; "
+        "if [ ! -x \"$node_target/bin/node\" ]; then "
+        "node_temp=$(mktemp -d /opt/wb-core-runtime/node-runtimes/.install.XXXXXX); "
+        "tar -xJf \"$node_archive\" -C \"$node_temp\"; "
+        "mv \"$node_temp/node-v${node_version}-linux-${node_arch}\" \"$node_target\"; "
+        "rmdir \"$node_temp\"; "
+        "fi; "
+        "rm -f \"$node_archive\"; "
+        "ln -sfn \"$node_target/bin/node\" /usr/local/bin/node; "
+        "ln -sfn \"$node_target/bin/npm\" /usr/local/bin/npm; "
+        "ln -sfn \"$node_target/bin/npx\" /usr/local/bin/npx; "
+        "ln -sfn \"$node_target/bin/corepack\" /usr/local/bin/corepack; "
+        "fi; "
+        f"{complete_check}"
+    )
+    return _remote_shell_command(target, f"({complete_check}) || ({install})")
+
+
 def _build_autoanswers_node_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
     package_dir = (
         f"{target.target_dir.rstrip('/')}/packages/node/"
@@ -997,7 +1051,7 @@ def _build_autoanswers_node_dependencies_command(target: HostedRuntimeTarget) ->
     )
     script = (
         "set -eu; command -v node >/dev/null; command -v npm >/dev/null; command -v ffmpeg >/dev/null; "
-        "node -e \"if(Number(process.versions.node.split('.')[0])<20) process.exit(78)\"; "
+        f"node -e \"if(Number(process.versions.node.split('.')[0])<{AUTOANSWERS_NODE_MAJOR}) process.exit(78)\"; "
         f"cd {shlex.quote(package_dir)}; npm ci --omit=dev --ignore-scripts --no-audit --no-fund"
     )
     return _remote_shell_command(target, script)
