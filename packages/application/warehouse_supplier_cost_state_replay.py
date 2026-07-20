@@ -19,13 +19,9 @@ from typing import Any, Iterable, Mapping
 from packages.business_time import current_business_date_iso
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.warehouse_functional import (
-    _functional_local_source_view,
-    _frozen_pre_cutover_wb_cost_projection,
-    _guarded_local_sources,
-    _missing_pre_cutover_historical_dates,
-    _source_rows,
     _supplier_cost_allocations,
     _supplier_cost_version_states,
+    _watermark,
     ensure_warehouse_functional_schema,
 )
 
@@ -63,7 +59,7 @@ def build_supplier_cost_state_replay_plan(
             ensure_warehouse_functional_schema(conn)
         active = conn.execute(
             """SELECT active.version_id,version.plan_fingerprint,version.local_source_digest,
-                      version.effective_at,version.version_kind
+                      version.source_watermarks_json,version.effective_at,version.version_kind
                FROM sheet_vitrina_v1_warehouse_functional_active active
                JOIN sheet_vitrina_v1_warehouse_functional_versions version
                  ON version.version_id=active.version_id
@@ -91,21 +87,16 @@ def build_supplier_cost_state_replay_plan(
             str(state.get("proof_kind") or "") == "legacy_balance_conservation"
             for state in frozen_states.values()
         )
-        functional_local_source_digests = (
-            _functional_local_source_digest_candidates(conn)
-            if legacy_proof_required
-            else {"current": str(active["local_source_digest"])}
+        frozen_supplier_source_watermarks = _json_object(
+            active["source_watermarks_json"]
         )
-        matching_local_source_digest_shape = next(
-            (
-                shape
-                for shape, digest in functional_local_source_digests.items()
-                if digest == str(active["local_source_digest"])
-            ),
-            "",
-        )
-        immutable_local_source_digest_matches = bool(
-            matching_local_source_digest_shape
+        current_supplier_source_watermarks = _legacy_supplier_source_watermarks(sources)
+        immutable_supplier_source_watermarks_match = bool(
+            legacy_proof_required
+            and _supplier_source_watermarks_match(
+                frozen_supplier_source_watermarks,
+                current_supplier_source_watermarks,
+            )
         )
         if selected:
             missing = sorted(set(selected) - set(eligible))
@@ -195,11 +186,11 @@ def build_supplier_cost_state_replay_plan(
             if proof_kind == "explicit_fingerprints":
                 proof_matches = _state_fingerprint(frozen) == desired_fingerprint
             elif proof_kind == "legacy_balance_conservation":
-                if not immutable_local_source_digest_matches:
-                    mismatch_code = "immutable_local_source_digest_changed"
+                if not immutable_supplier_source_watermarks_match:
+                    mismatch_code = "immutable_supplier_source_watermarks_changed"
                     mismatch_reason = (
-                        "the complete canonical local-source digest no longer matches the "
-                        "digest captured by the immutable warehouse version"
+                        "the canonical supplier, CNY or financial source watermark no longer "
+                        "matches the watermark captured by the immutable warehouse version"
                     )
                 else:
                     proof_matches = _legacy_balance_proof_matches_allocation(
@@ -258,9 +249,11 @@ def build_supplier_cost_state_replay_plan(
             "active_version_effective_at": str(active["effective_at"]),
             "supersedes_version_plan_fingerprint": str(active["plan_fingerprint"]),
             "active_version_local_source_digest": str(active["local_source_digest"]),
-            "functional_local_source_digest_candidates": functional_local_source_digests,
-            "matching_local_source_digest_shape": matching_local_source_digest_shape,
-            "immutable_local_source_digest_matches": immutable_local_source_digest_matches,
+            "frozen_supplier_source_watermarks": frozen_supplier_source_watermarks,
+            "current_supplier_source_watermarks": current_supplier_source_watermarks,
+            "immutable_supplier_source_watermarks_match": (
+                immutable_supplier_source_watermarks_match
+            ),
             "source_manifest_digest": source_manifest_digest,
             "primary_source_digest": source_manifest_digest,
             "replay_history_digest": replay_history_digest,
@@ -291,8 +284,8 @@ def build_supplier_cost_state_replay_plan(
                 "reason": "missing supplier certification projection in an immutable active version",
                 "source": "canonical supplier/CNY/financial Decimal allocation",
                 "version_proof": (
-                    "immutable supplier fingerprints or legacy local-source digest plus "
-                    "per-SKU balance/document conservation"
+                    "immutable supplier fingerprints or legacy supplier/CNY/financial "
+                    "watermarks plus per-SKU balance/document conservation"
                 ),
                 "frozen_version_proofs": {
                     item["shipment_id"]: item["frozen_version_proof"]
@@ -939,47 +932,88 @@ def _frozen_supplier_states_from_version(
     return result
 
 
-def _functional_local_source_digest_candidates(
-    conn: sqlite3.Connection,
-) -> dict[str, str]:
-    """Hash current and exact pre-#684 local-source manifest shapes."""
+def _legacy_supplier_source_watermarks(
+    sources: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """Rebuild only source groups durably fingerprinted by legacy versions.
 
-    current_sources = _source_rows(conn)
-    legacy_sources = dict(current_sources)
-    # Legacy functional versions had no cny_documents member at all; hashing
-    # an empty modern member is not byte-semantically equivalent.
-    legacy_sources.pop("cny_documents", None)
-    legacy_sources["financial_expense_lines"] = _rows(
-        conn,
-        """SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines
-           ORDER BY supplier_order_id,financial_document_id,sort_order""",
+    The version-wide local digest also includes WB, FF and historical derived
+    projections.  Those can legitimately advance after the immutable supplier
+    balance was calculated, so they are not evidence that a supplier cost
+    changed.  Legacy versions did persist exact watermarks for the three
+    primary source groups used here; detailed line/document conservation below
+    covers their child rows and allocation result.
+    """
+
+    shipments = sorted(
+        (dict(row) for row in sources.get("shipments") or []),
+        key=lambda row: str(row.get("shipment_id") or ""),
     )
-    cutover = conn.execute(
-        """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
-           ORDER BY created_at DESC,cutover_id LIMIT 1"""
-    ).fetchone()
-    if cutover is not None:
-        legacy_cutover_date = str(cutover["cutover_at"] or "")[:10]
-        legacy_frozen = _frozen_pre_cutover_wb_cost_projection(
-            conn,
-            cutover_date=legacy_cutover_date,
-        )
-        legacy_sources["frozen_pre_cutover_wb_cost_projection"] = legacy_frozen
-        legacy_sources["historical_correction_missing_dates"] = (
-            _missing_pre_cutover_historical_dates(
-                legacy_frozen,
-                cutover_date=legacy_cutover_date,
-            )
-        )
-        legacy_sources["historical_correction_ready_snapshots"] = []
-    result: dict[str, str] = {}
-    for shape, sources in (
-        ("current", current_sources),
-        ("pre_684_without_cny_documents", legacy_sources),
-    ):
-        normalized = _functional_local_source_view(sources)
-        result[shape] = "sha256:" + _hash(_guarded_local_sources(normalized))
-    return result
+    cny_operations = sorted(
+        (dict(row) for row in sources.get("cny_operations") or []),
+        key=lambda row: (
+            str(row.get("sequence_key") or ""),
+            str(row.get("operation_id") or ""),
+        ),
+    )
+    financial_documents = sorted(
+        (dict(row) for row in sources.get("financial_documents") or []),
+        key=lambda row: (
+            str(row.get("document_date") or ""),
+            str(row.get("document_id") or ""),
+        ),
+    )
+    return {
+        "supplier_shipments": _watermark(shipments, "updated_at"),
+        "cny_ledger": _watermark(cny_operations, "updated_at"),
+        "financial_documents": _watermark(financial_documents, "updated_at"),
+    }
+
+
+def _supplier_source_watermarks_match(
+    frozen: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> bool:
+    """Require every persisted primary watermark field to match exactly."""
+
+    for key in ("supplier_shipments", "cny_ledger", "financial_documents"):
+        frozen_value = frozen.get(key)
+        current_value = current.get(key)
+        if not isinstance(frozen_value, Mapping) or not isinstance(
+            current_value, Mapping
+        ):
+            return False
+        try:
+            frozen_identity = {
+                "row_count": int(frozen_value.get("row_count")),
+                "max": str(frozen_value.get("max") or ""),
+                "digest": str(frozen_value.get("digest") or ""),
+            }
+            current_identity = {
+                "row_count": int(current_value.get("row_count")),
+                "max": str(current_value.get("max") or ""),
+                "digest": str(current_value.get("digest") or ""),
+            }
+        except (TypeError, ValueError):
+            return False
+        digest = frozen_identity["digest"]
+        if (
+            not digest.startswith("sha256:")
+            or len(digest) != 71
+            or frozen_identity != current_identity
+        ):
+            return False
+    return True
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or ""))
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
 def _legacy_balance_proof_matches_allocation(
@@ -1009,11 +1043,14 @@ def _legacy_balance_proof_matches_allocation(
                 components.setdefault(component_id, dict(component))
     if set(current_lines) != set(frozen_lines):
         return False
-    stage = str(allocation.get("stage") or "")
     for nm_id, current in current_lines.items():
         frozen_line = frozen_lines[nm_id]
-        if str(frozen_line.get("warehouse_key") or "") != stage:
-            return False
+        # ``warehouse_key`` is where the immutable balance happened to retain
+        # the nested supplier-flow provenance.  Once a lot reaches FF/WB that
+        # outer bucket is intentionally later than the original supplier flow
+        # stage, while ``flow_quantity`` and ``flow_capital_rub`` remain the
+        # exact immutable receipt proof.  Treat the location as audit evidence,
+        # not as an equality constraint on the supplier allocation stage.
         if not _decimal_equal(current["quantity"], frozen_line.get("quantity")):
             return False
         if not _decimal_equal(current["capital_rub"], frozen_line.get("capital_rub")):
