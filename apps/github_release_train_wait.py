@@ -35,11 +35,17 @@ from apps.github_release_train import (  # noqa: E402
     LOOP_TASK_LABEL,
     NEEDS_RESUME_LABEL,
     PRODUCTION_LABEL,
+    READY_LABEL,
     REPO_ONLY_LABEL,
+    RUNNING_LABEL,
     STANDARD_TASK_LABEL,
+    SUPERSEDED_LABEL,
+    ReleaseClassificationBlocked,
     label_names,
     loop_ack_label,
     loop_root_from_labels,
+    loop_registration_kind,
+    mark_classification_blocked,
     queue_gate_state,
     release_state_from_labels,
     scope_from_labels,
@@ -76,6 +82,14 @@ def evaluate_release(
     )
     if task_class == LOOP_TASK_LABEL and scope != LIVE_RUNTIME_LABEL:
         raise ValueError("LOOP waiter requires scope:live-runtime")
+    if state == SUPERSEDED_LABEL:
+        return {
+            "action": "terminal-superseded",
+            "task_class": task_class,
+            "scope": scope,
+            "state": state,
+            "reason": f"PR #{pr_number} is terminal release:superseded",
+        }
     if state in {BLOCKED_LABEL, HALTED_LABEL}:
         return {
             "action": "blocked",
@@ -141,6 +155,23 @@ def wait_for_release(
         queue = queue_gate_state(api)
         pull = api.get_pull(pr_number)
         labels = label_names(pull)
+        task_class = task_class_from_labels(labels)
+        state = release_state_from_labels(labels)
+        if task_class == LOOP_TASK_LABEL and state in {
+            READY_LABEL,
+            RUNNING_LABEL,
+            AWAITING_AGENT_LABEL,
+            AWAITING_UI_LABEL,
+        }:
+            try:
+                loop_registration_kind(api, pull)
+            except ReleaseClassificationBlocked as exc:
+                if state != AWAITING_UI_LABEL:
+                    mark_classification_blocked(api, pr_number, exc)
+                emit(
+                    f"PR #{pr_number} fail-closed classification `{exc.code}`: {exc}"
+                )
+                return EXIT_BLOCKED
         decision = evaluate_release(labels, pr_number=pr_number, queue=queue)
         head_sha = str((pull.get("head") or {}).get("sha") or "")
         snapshot = (
@@ -182,6 +213,9 @@ def wait_for_release(
             if decision.get("reason"):
                 emit(f"PR #{pr_number} fail-closed: {decision['reason']}")
             return EXIT_BLOCKED
+        if action == "terminal-superseded":
+            emit(f"PR #{pr_number} terminal: release:superseded")
+            return EXIT_BLOCKED
         if action == "awaiting-ui":
             return EXIT_AWAITING_UI
         if action == "needs-resume":
@@ -190,7 +224,10 @@ def wait_for_release(
                     f"PR #{pr_number} requires explicit owner resume; no acknowledgement was submitted"
                 )
                 return EXIT_RESUMED
-            root = loop_root_from_labels(labels) or pr_number
+            root = loop_root_from_labels(labels)
+            if root is None:
+                emit(f"PR #{pr_number} fail-closed: registered LOOP root is missing")
+                return EXIT_BLOCKED
             command = (
                 f"/wb-core loop resume-owner {pr_number} head {head_sha} root {root}"
             )

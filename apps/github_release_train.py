@@ -32,20 +32,25 @@ from apps.github_release_train_spec import (
     BLOCKED_LABEL,
     CHAIN_AUDIT_MARKER,
     CANONICAL_PRODUCTION_TARGET_ID,
+    CLASSIFICATION_BLOCKER_MARKER,
     COMPLETION_PROOF_MARKER,
     DEPLOY_PROOF_MARKER,
     DONE_LABEL,
     HALTED_LABEL,
     HALT_PROOF_MARKER,
+    IDENTITY_CORRECTION_PROOF_MARKER,
     NEEDS_RESUME_LABEL,
+    NEW_ROOT_PROOF_MARKER,
     PRIMARY_STATE_LABELS,
     PRODUCTION_LABEL,
     READY_LABEL,
     RECONCILE_PROOF_MARKER,
+    RECOVERY_PROOF_MARKER,
     RETRY_PROOF_MARKER,
     RUNNING_LABEL,
     STATUS_COMMENT_MARKER,
     SUPERSEDED_LABEL,
+    TERMINAL_LABELS,
     assert_state_invariants,
     transition_allowed,
 )
@@ -125,6 +130,14 @@ class ReleaseTrainError(RuntimeError):
 
 class ReleaseBlocked(ReleaseTrainError):
     """A bounded PR-specific blocker that must not halt unrelated queued PRs."""
+
+
+class ReleaseClassificationBlocked(ReleaseBlocked):
+    """LOOP identity is absent, stale, ambiguous, or unsupported by repo-owned proof."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class GitHubApiError(ReleaseTrainError):
@@ -547,6 +560,737 @@ def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: obje
     return False
 
 
+def _repo_owned_marker_fields(
+    api: ReleaseApi,
+    number: int,
+    marker: str,
+) -> list[dict[str, str]]:
+    prefix = f"<!-- {marker} "
+    matches: list[dict[str, str]] = []
+    for item in api.list_comments(number):
+        author = item.get("user")
+        if isinstance(author, Mapping) and str(author.get("login") or "") not in {
+            "github-actions",
+            "github-actions[bot]",
+        }:
+            continue
+        for line in str(item.get("body") or "").splitlines():
+            if not line.startswith(prefix) or not line.endswith(" -->"):
+                continue
+            fields: dict[str, str] = {}
+            for token in line[len(prefix) : -4].split():
+                key, separator, value = token.partition("=")
+                if separator:
+                    fields[key] = value
+            matches.append(fields)
+    return matches
+
+
+def _classification_blocker_unresolved(api: ReleaseApi, number: int) -> bool:
+    """Track classification provenance until a later trusted identity proof resolves it."""
+
+    unresolved = False
+    resolution_markers = {
+        NEW_ROOT_PROOF_MARKER,
+        RECOVERY_PROOF_MARKER,
+        IDENTITY_CORRECTION_PROOF_MARKER,
+    }
+    for item in api.list_comments(number):
+        author = item.get("user")
+        if isinstance(author, Mapping) and str(author.get("login") or "") not in {
+            "github-actions",
+            "github-actions[bot]",
+        }:
+            continue
+        for line in str(item.get("body") or "").splitlines():
+            if not line.startswith("<!-- ") or not line.endswith(" -->"):
+                continue
+            marker, _, payload = line[5:-4].partition(" ")
+            fields = {
+                key: value
+                for token in payload.split()
+                for key, separator, value in (token.partition("="),)
+                if separator
+            }
+            if fields.get("pr") != str(number):
+                continue
+            if marker == CLASSIFICATION_BLOCKER_MARKER:
+                unresolved = True
+            elif marker in resolution_markers:
+                unresolved = False
+    return unresolved
+
+
+def _loop_root_labels(labels: Iterable[str]) -> set[str]:
+    return {label for label in labels if label.startswith(LOOP_ROOT_PREFIX)}
+
+
+def _exact_head(pull: Mapping[str, Any], expected_head_sha: str) -> str:
+    actual = str((pull.get("head") or {}).get("sha") or "").lower()
+    expected = expected_head_sha.strip().lower()
+    if actual != expected:
+        raise ReleaseClassificationBlocked("loop-head-stale", "LOOP enrollment head SHA is stale")
+    try:
+        loop_ack_label(actual)
+    except ValueError as exc:
+        raise ReleaseClassificationBlocked(
+            "loop-head-invalid", "LOOP enrollment requires an exact 40-character head SHA"
+        ) from exc
+    return actual
+
+
+def _has_successful_check(
+    api: ReleaseApi,
+    head_sha: str,
+    check_name: str,
+) -> bool:
+    return any(
+        str(item.get("name") or "") == check_name
+        and str(item.get("status") or "") == "completed"
+        and str(item.get("conclusion") or "") == "success"
+        for item in api.list_check_runs(head_sha)
+    )
+
+
+def _require_loop_operator(association: str) -> None:
+    if association.upper() not in LOOP_ACCEPT_ASSOCIATIONS:
+        raise ReleaseBlocked("LOOP enrollment requires repository write association")
+
+
+def _require_enrollable_loop(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    *,
+    association: str,
+    check_name: str,
+) -> tuple[dict[str, Any], set[str], str]:
+    _require_loop_operator(association)
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    if str(pull.get("state") or "") != "open" or bool(pull.get("draft")) or bool(pull.get("merged")):
+        raise ReleaseClassificationBlocked(
+            "loop-pr-not-open", "LOOP enrollment requires an open, unmerged, non-draft PR"
+        )
+    if str((pull.get("base") or {}).get("ref") or "") != "main":
+        raise ReleaseClassificationBlocked("loop-base-invalid", "LOOP enrollment requires base main")
+    if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseClassificationBlocked(
+            "loop-class-scope-invalid", "LOOP enrollment requires task:loop + scope:live-runtime"
+        )
+    if labels & TERMINAL_LABELS:
+        raise ReleaseClassificationBlocked(
+            "loop-terminal-pr", "terminal release state cannot be enrolled or inherited"
+        )
+    state = release_state_from_labels(labels)
+    if state not in {"release:none", READY_LABEL, BLOCKED_LABEL}:
+        raise ReleaseClassificationBlocked(
+            "loop-state-not-enrollable", f"LOOP enrollment is not allowed from {state}"
+        )
+    if state == BLOCKED_LABEL and not _classification_blocker_unresolved(api, number):
+        raise ReleaseBlocked(
+            "technical release:blocked must be repaired through retry-blocked, not LOOP enrollment"
+        )
+    head_sha = _exact_head(pull, expected_head_sha)
+    if not _has_successful_check(api, head_sha, check_name):
+        raise ReleaseBlocked(
+            f"LOOP enrollment requires successful {check_name!r} on exact head {head_sha}"
+        )
+    return pull, labels, head_sha
+
+
+def _terminal_loop_member(api: ReleaseApi, root: int) -> dict[str, Any] | None:
+    for item in api.list_issues_by_label(loop_root_label(root), state="all"):
+        if "pull_request" not in item:
+            continue
+        pull = api.get_pull(int(item.get("number") or 0))
+        labels = label_names(pull)
+        if labels & TERMINAL_LABELS and terminal_state_proven(api, pull):
+            return pull
+    return None
+
+
+def _recovery_proof_gate(
+    api: ReleaseApi,
+    number: int,
+    *,
+    head_sha: str,
+    root: int,
+) -> int | None:
+    for fields in _repo_owned_marker_fields(api, number, RECOVERY_PROOF_MARKER):
+        try:
+            gate = int(fields.get("gate", "0"))
+            proof_pr = int(fields.get("pr", "0"))
+            proof_root = int(fields.get("root", "0"))
+        except ValueError:
+            continue
+        if proof_pr == number and proof_root == root and fields.get("head") == head_sha:
+            return gate
+    return None
+
+
+def _has_prior_new_root_proof(api: ReleaseApi, number: int) -> bool:
+    for fields in _repo_owned_marker_fields(api, number, NEW_ROOT_PROOF_MARKER):
+        try:
+            proof_pr = int(fields.get("pr", "0"))
+            proof_root = int(fields.get("root", "0"))
+        except ValueError:
+            continue
+        if proof_pr == number and proof_root == number:
+            return True
+    return False
+
+
+def _has_prior_recovery_proof(
+    api: ReleaseApi,
+    number: int,
+    *,
+    gate: int,
+    root: int,
+) -> bool:
+    for fields in _repo_owned_marker_fields(api, number, RECOVERY_PROOF_MARKER):
+        try:
+            proof_gate = int(fields.get("gate", "0"))
+            proof_pr = int(fields.get("pr", "0"))
+            proof_root = int(fields.get("root", "0"))
+        except ValueError:
+            continue
+        if proof_gate == gate and proof_pr == number and proof_root == root:
+            return True
+    return False
+
+
+def _refresh_loop_registration_for_retry(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+) -> str:
+    """Rebind a proven identity to a fixed exact head without changing classification."""
+
+    number = int(pull.get("number") or 0)
+    labels = label_names(pull)
+    head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
+    root = loop_root_from_labels(labels)
+    if root is None:
+        raise ReleaseClassificationBlocked(
+            "loop-root-missing", "LOOP retry cannot infer a missing registration identity"
+        )
+    if root > number:
+        raise ReleaseClassificationBlocked(
+            "loop-root-future", "LOOP root greater than the PR number is invalid"
+        )
+    if root == number:
+        if not _has_prior_new_root_proof(api, number):
+            raise ReleaseClassificationBlocked(
+                "loop-new-proof-missing",
+                "LOOP retry cannot create an independent identity without prior repo-owned proof",
+            )
+        values = {"head": head_sha, "pr": number, "root": root}
+        if not _has_comment_proof(api, number, NEW_ROOT_PROOF_MARKER, **values):
+            api.add_comment(
+                number,
+                f"Release Train rebound the existing independent LOOP identity to fixed exact "
+                f"head `{head_sha}`; class, scope, and root are unchanged.\n\n"
+                + _proof_marker(NEW_ROOT_PROOF_MARKER, **values),
+            )
+        return "new"
+
+    if _terminal_loop_member(api, root) is not None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-root-terminal", "terminal LOOP root cannot be retried or reactivated"
+        )
+    gate, gate_root = _validated_ui_gate(api, expected_root=root)
+    gate_number = int(gate.get("number") or 0)
+    if gate_root != root or not _has_prior_recovery_proof(
+        api,
+        number,
+        gate=gate_number,
+        root=root,
+    ):
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-proof-missing",
+            "LOOP retry cannot create recovery identity without prior exact gate/root proof",
+        )
+    values = {"gate": gate_number, "head": head_sha, "pr": number, "root": root}
+    if not _has_comment_proof(api, number, RECOVERY_PROOF_MARKER, **values):
+        api.add_comment(
+            number,
+            f"Release Train rebound the existing LOOP recovery identity to fixed exact head "
+            f"`{head_sha}`; gate #{gate_number}, class, scope, and root are unchanged.\n\n"
+            + _proof_marker(RECOVERY_PROOF_MARKER, **values),
+        )
+    return "recovery"
+
+
+def _validate_gate_identity(api: ReleaseApi, gate_number: int, root: int) -> dict[str, Any]:
+    gate = api.get_pull(gate_number)
+    gate_labels = label_names(gate)
+    merge_sha = str(gate.get("merge_commit_sha") or "").lower()
+    if (
+        not bool(gate.get("merged"))
+        or task_class_from_labels(gate_labels) != LOOP_TASK_LABEL
+        or scope_from_labels(gate_labels) != LIVE_RUNTIME_LABEL
+        or loop_root_from_labels(gate_labels) != root
+        or not _has_comment_proof(
+            api,
+            gate_number,
+            DEPLOY_PROOF_MARKER,
+            merge=merge_sha,
+            pr=gate_number,
+            root=root,
+        )
+    ):
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-gate-unproven",
+            "LOOP recovery gate lacks repo-owned exact deploy/root proof",
+        )
+    return gate
+
+
+def _validated_ui_gate(
+    api: ReleaseApi,
+    *,
+    expected_gate: int | None = None,
+    expected_root: int | None = None,
+) -> tuple[dict[str, Any], int]:
+    gate_item = _active_gate(api, AWAITING_UI_LABEL)
+    if gate_item is None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-gate-missing",
+            "LOOP recovery requires an active release:awaiting-ui gate",
+        )
+    gate_number = int(gate_item.get("number") or 0)
+    if expected_gate is not None and gate_number != expected_gate:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-gate-stale", "LOOP recovery gate PR is stale"
+        )
+    gate = api.get_pull(gate_number)
+    gate_labels = label_names(gate)
+    gate_root = loop_root_from_labels(gate_labels)
+    if gate_root is None or (expected_root is not None and gate_root != expected_root):
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-root-mismatch", "LOOP recovery root does not match the active UI gate"
+        )
+    return _validate_gate_identity(api, gate_number, gate_root), gate_root
+
+
+def _validate_active_ui_gate_registration(
+    api: ReleaseApi,
+    gate_item: Mapping[str, Any],
+) -> tuple[dict[str, Any], int]:
+    gate_number = int(gate_item.get("number") or 0)
+    gate, root = _validated_ui_gate(api, expected_gate=gate_number)
+    loop_registration_kind(api, gate)
+    if _terminal_loop_member(api, root) is not None:
+        raise ReleaseClassificationBlocked(
+            "loop-gate-root-terminal", "active UI gate references a terminal LOOP root"
+        )
+    return gate, root
+
+
+def _loop_registration_proof_kind(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    require_active_recovery: bool,
+    allow_terminal: bool = False,
+) -> str:
+    """Validate immutable enrollment proof, optionally requiring the live recovery gate."""
+
+    number = int(pull.get("number") or 0)
+    labels = label_names(pull)
+    if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseClassificationBlocked(
+            "loop-class-scope-invalid", "LOOP identity requires task:loop + scope:live-runtime"
+        )
+    if labels & TERMINAL_LABELS and not allow_terminal:
+        raise ReleaseClassificationBlocked(
+            "loop-terminal-pr", "terminal LOOP identity cannot be resumed or inherited"
+        )
+    try:
+        root = loop_root_from_labels(labels)
+    except ReleaseBlocked as exc:
+        raise ReleaseClassificationBlocked("loop-root-ambiguous", str(exc)) from exc
+    if root is None:
+        raise ReleaseClassificationBlocked(
+            "loop-root-missing", "LOOP PR lacks repo-owned new/recovery registration"
+        )
+    if root > number:
+        raise ReleaseClassificationBlocked(
+            "loop-root-future", "LOOP root greater than the PR number is invalid"
+        )
+    head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
+    if root == number:
+        if not _has_comment_proof(
+            api,
+            number,
+            NEW_ROOT_PROOF_MARKER,
+            head=head_sha,
+            pr=number,
+            root=root,
+        ):
+            raise ReleaseClassificationBlocked(
+                "loop-new-proof-missing",
+                "independent LOOP root lacks repo-owned exact-head new-root proof",
+            )
+        return "new"
+    proof_gate = _recovery_proof_gate(api, number, head_sha=head_sha, root=root)
+    if proof_gate is None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-proof-missing",
+            "LOOP recovery lacks repo-owned exact head/gate/root proof",
+        )
+    _validate_gate_identity(api, proof_gate, root)
+    if not require_active_recovery:
+        return "recovery"
+    if _terminal_loop_member(api, root) is not None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-root-terminal", "terminal LOOP root cannot be reactivated"
+        )
+    active_item = _active_gate(api, AWAITING_UI_LABEL)
+    if active_item is None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-gate-missing",
+            "LOOP recovery requires an active release:awaiting-ui gate",
+        )
+    gate_number = int(active_item.get("number") or 0)
+    if gate_number == number and AWAITING_UI_LABEL in labels:
+        gate_root = loop_root_from_labels(labels)
+    else:
+        gate, gate_root = _validated_ui_gate(api, expected_root=root)
+        gate_number = int(gate.get("number") or 0)
+    if gate_root != root or (
+        gate_number != proof_gate
+        and not (gate_number == number and AWAITING_UI_LABEL in labels)
+    ):
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-gate-stale", "LOOP recovery proof no longer matches the active gate"
+        )
+    return "recovery"
+
+
+def loop_registration_kind(api: ReleaseApi, pull: Mapping[str, Any]) -> str:
+    """Return new/recovery only for an exact, currently valid repo-owned identity proof."""
+
+    return _loop_registration_proof_kind(
+        api,
+        pull,
+        require_active_recovery=True,
+    )
+
+
+def _registered_ready_labels(labels: Iterable[str], root: int) -> set[str]:
+    result = set(labels)
+    result -= STATE_LABELS | {NEEDS_RESUME_LABEL}
+    result -= _loop_root_labels(result) | loop_ack_labels(result)
+    result.update({READY_LABEL, loop_root_label(root)})
+    assert_state_invariants(result)
+    return result
+
+
+def _ensure_loop_root_label(api: ReleaseApi, root: int) -> None:
+    api.ensure_label(
+        loop_root_label(root),
+        "C2A5F8",
+        f"Deterministic recovery chain for LOOP PR #{root}",
+    )
+
+
+def _exact_open_loop_identity(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    *,
+    association: str,
+) -> tuple[dict[str, Any], set[str], str]:
+    """Read exact identity for a delayed idempotent command without changing its state."""
+
+    _require_loop_operator(association)
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    if str(pull.get("state") or "") != "open" or bool(pull.get("draft")) or bool(pull.get("merged")):
+        raise ReleaseClassificationBlocked(
+            "loop-pr-not-open", "LOOP enrollment requires an open, unmerged, non-draft PR"
+        )
+    if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
+        raise ReleaseClassificationBlocked(
+            "loop-class-scope-invalid", "LOOP enrollment requires task:loop + scope:live-runtime"
+        )
+    if labels & TERMINAL_LABELS:
+        raise ReleaseClassificationBlocked(
+            "loop-terminal-pr", "terminal release state cannot be enrolled or inherited"
+        )
+    return pull, labels, _exact_head(pull, expected_head_sha)
+
+
+def enqueue_loop_new(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    *,
+    actor: str,
+    association: str,
+    check_name: str = "baseline",
+) -> str:
+    """Register one independent LOOP root and enqueue it in one label replacement."""
+
+    _, existing_labels, existing_head = _exact_open_loop_identity(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+    )
+    existing_root = loop_root_from_labels(existing_labels)
+    if existing_root == number and _has_comment_proof(
+        api,
+        number,
+        NEW_ROOT_PROOF_MARKER,
+        head=existing_head,
+        pr=number,
+        root=number,
+    ):
+        existing_state = release_state_from_labels(existing_labels)
+        if existing_state in {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, BLOCKED_LABEL}:
+            if not (
+                existing_state == BLOCKED_LABEL
+                and _classification_blocker_unresolved(api, number)
+            ):
+                return "already-enqueued-new"
+    _, labels, head_sha = _require_enrollable_loop(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+        check_name=check_name,
+    )
+    current_root = loop_root_from_labels(labels)
+    if current_root not in {None, number}:
+        raise ReleaseClassificationBlocked(
+            "loop-root-correction-required",
+            "existing LOOP root differs from this PR; use evidence-bound identity correction",
+        )
+    proof_values = {"head": head_sha, "pr": number, "root": number}
+    proven = _has_comment_proof(api, number, NEW_ROOT_PROOF_MARKER, **proof_values)
+    unresolved = _classification_blocker_unresolved(api, number)
+    desired = _registered_ready_labels(labels, number)
+    if proven and not unresolved and desired == labels:
+        return "already-enqueued-new"
+    if not proven or unresolved:
+        api.add_comment(
+            number,
+            f"Release Train registered independent LOOP root #{number} for exact head `{head_sha}` "
+            f"by @{actor}.\n\n{_proof_marker(NEW_ROOT_PROOF_MARKER, **proof_values)}",
+        )
+    _ensure_loop_root_label(api, number)
+    api.set_labels(number, sorted(desired))
+    api.dispatch_workflow("release-train.yml", "main")
+    return "enqueued-new"
+
+
+def enqueue_loop_recovery(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    *,
+    gate_pr: int,
+    expected_root: int,
+    actor: str,
+    association: str,
+    check_name: str = "baseline",
+) -> str:
+    """Register recovery only against the exact active awaiting-ui gate/root."""
+
+    if expected_root >= number:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-root-order", "recovery root must be lower than the recovery PR number"
+        )
+    existing_pull, existing_labels, existing_head = _exact_open_loop_identity(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+    )
+    if loop_root_from_labels(existing_labels) == expected_root and _has_comment_proof(
+        api,
+        number,
+        RECOVERY_PROOF_MARKER,
+        gate=gate_pr,
+        head=existing_head,
+        pr=number,
+        root=expected_root,
+    ):
+        existing_state = release_state_from_labels(existing_labels)
+        if existing_state in {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, BLOCKED_LABEL}:
+            if not (
+                existing_state == BLOCKED_LABEL
+                and _classification_blocker_unresolved(api, number)
+            ):
+                loop_registration_kind(api, existing_pull)
+                return "already-enqueued-recovery"
+    _, labels, head_sha = _require_enrollable_loop(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+        check_name=check_name,
+    )
+    current_root = loop_root_from_labels(labels)
+    if current_root not in {None, expected_root}:
+        raise ReleaseClassificationBlocked(
+            "loop-root-correction-required",
+            "existing LOOP root differs from expected recovery root",
+        )
+    if _terminal_loop_member(api, expected_root) is not None:
+        raise ReleaseClassificationBlocked(
+            "loop-recovery-root-terminal", "terminal LOOP root cannot be reactivated"
+        )
+    _validated_ui_gate(api, expected_gate=gate_pr, expected_root=expected_root)
+    proof_values = {
+        "gate": gate_pr,
+        "head": head_sha,
+        "pr": number,
+        "root": expected_root,
+    }
+    proven = _has_comment_proof(api, number, RECOVERY_PROOF_MARKER, **proof_values)
+    unresolved = _classification_blocker_unresolved(api, number)
+    desired = _registered_ready_labels(labels, expected_root)
+    if proven and not unresolved and desired == labels:
+        return "already-enqueued-recovery"
+    if not proven or unresolved:
+        api.add_comment(
+            number,
+            f"Release Train registered LOOP recovery #{number} for gate #{gate_pr}, root "
+            f"#{expected_root}, exact head `{head_sha}` by @{actor}.\n\n"
+            + _proof_marker(RECOVERY_PROOF_MARKER, **proof_values),
+        )
+    _ensure_loop_root_label(api, expected_root)
+    api.set_labels(number, sorted(desired))
+    api.dispatch_workflow("release-train.yml", "main")
+    return "enqueued-recovery"
+
+
+def correct_loop_identity_to_new(
+    api: ReleaseApi,
+    number: int,
+    expected_head_sha: str,
+    *,
+    expected_old_root: int,
+    actor: str,
+    association: str,
+    check_name: str = "baseline",
+) -> str:
+    """Replace one proven stale terminal recovery link with an independent identity."""
+
+    if association.upper() not in {"OWNER", "MEMBER"}:
+        raise ReleaseBlocked("LOOP identity correction requires repository OWNER or MEMBER")
+    _, existing_labels, existing_head = _exact_open_loop_identity(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+    )
+    correction_values = {
+        "from_root": expected_old_root,
+        "head": existing_head,
+        "pr": number,
+        "to_root": number,
+    }
+    if (
+        loop_root_from_labels(existing_labels) == number
+        and _has_comment_proof(
+            api,
+            number,
+            IDENTITY_CORRECTION_PROOF_MARKER,
+            **correction_values,
+        )
+        and _has_comment_proof(
+            api,
+            number,
+            NEW_ROOT_PROOF_MARKER,
+            head=existing_head,
+            pr=number,
+            root=number,
+        )
+    ):
+        existing_state = release_state_from_labels(existing_labels)
+        if existing_state in {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, BLOCKED_LABEL}:
+            if not (
+                existing_state == BLOCKED_LABEL
+                and _classification_blocker_unresolved(api, number)
+            ):
+                return "already-corrected-to-new"
+    _, labels, head_sha = _require_enrollable_loop(
+        api,
+        number,
+        expected_head_sha,
+        association=association,
+        check_name=check_name,
+    )
+    if expected_old_root >= number:
+        raise ReleaseClassificationBlocked(
+            "loop-correction-root-order", "old recovery root must be lower than the PR number"
+        )
+    if _terminal_loop_member(api, expected_old_root) is None:
+        raise ReleaseClassificationBlocked(
+            "loop-correction-terminal-proof-missing",
+            "identity correction requires repo-owned terminal proof for the old root",
+        )
+    gate = _active_gate(api, AWAITING_UI_LABEL)
+    if gate is not None and loop_root_from_labels(label_names(gate)) == expected_old_root:
+        raise ReleaseClassificationBlocked(
+            "loop-correction-gate-active", "identity correction is forbidden while the old root gate is active"
+        )
+    correction_values = {
+        "from_root": expected_old_root,
+        "head": head_sha,
+        "pr": number,
+        "to_root": number,
+    }
+    new_values = {"head": head_sha, "pr": number, "root": number}
+    corrected = _has_comment_proof(
+        api,
+        number,
+        IDENTITY_CORRECTION_PROOF_MARKER,
+        **correction_values,
+    )
+    unresolved = _classification_blocker_unresolved(api, number)
+    current_root = loop_root_from_labels(labels)
+    desired = _registered_ready_labels(labels, number)
+    if corrected and not unresolved and current_root == number and desired == labels:
+        return "already-corrected-to-new"
+    if (
+        BLOCKED_LABEL not in labels
+        or not _classification_blocker_unresolved(api, number)
+        or not _has_comment_proof(
+            api,
+            number,
+            CLASSIFICATION_BLOCKER_MARKER,
+            head=head_sha,
+            pr=number,
+        )
+    ):
+        raise ReleaseClassificationBlocked(
+            "loop-correction-blocker-proof-missing",
+            "identity correction requires the exact-head classification blocker proof",
+        )
+    if current_root != expected_old_root:
+        raise ReleaseClassificationBlocked(
+            "loop-correction-old-root-mismatch", "current LOOP root does not match expected old root"
+        )
+    if not corrected or unresolved:
+        api.add_comment(
+            number,
+            f"Release Train corrected stale terminal root #{expected_old_root} to independent root "
+            f"#{number} on exact head `{head_sha}` by @{actor}.\n\n"
+            + _proof_marker(IDENTITY_CORRECTION_PROOF_MARKER, **correction_values)
+            + "\n"
+            + _proof_marker(NEW_ROOT_PROOF_MARKER, **new_values),
+        )
+    _ensure_loop_root_label(api, number)
+    api.set_labels(number, sorted(desired))
+    api.dispatch_workflow("release-train.yml", "main")
+    return "corrected-to-new"
+
+
 def _status_metadata(body: str) -> dict[str, Any] | None:
     prefix = f"<!-- {STATUS_COMMENT_MARKER} "
     for line in body.splitlines():
@@ -568,6 +1312,8 @@ def upsert_status_comment(
     last_action: str,
     intervention: bool,
     now: float | None = None,
+    root_override: int | None = None,
+    resume_override: str | None = None,
 ) -> dict[str, Any]:
     """Maintain exactly one machine-owned status/heartbeat comment per active PR."""
 
@@ -576,12 +1322,12 @@ def upsert_status_comment(
     task_class = task_class_from_labels(labels)
     state = release_state_from_labels(labels)
     head_sha = str((pull.get("head") or {}).get("sha") or "")
-    root = loop_root_from_labels(labels)
-    root_identity = root or (number if task_class == LOOP_TASK_LABEL else 0)
+    root = root_override if root_override is not None else loop_root_from_labels(labels)
+    root_identity = root or 0
     heartbeat = time.time() if now is None else now
     resume = "не требуется"
     if intervention:
-        resume = (
+        resume = resume_override or (
             f"`python3 apps/github_release_train_wait.py {number} --resume-owner --no-ack-agent`"
         )
     metadata = {
@@ -620,6 +1366,67 @@ def upsert_status_comment(
     elif not matches:
         api.add_comment(number, body)
     return metadata
+
+
+def mark_classification_blocked(
+    api: ReleaseApi,
+    number: int,
+    error: ReleaseClassificationBlocked,
+) -> None:
+    """Persist one exact classification reason without mutating any other PR/root."""
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
+    values = {"head": head_sha, "pr": number}
+    classification_action = "identity must be registered again; `retry-blocked` is forbidden"
+    try:
+        root = loop_root_from_labels(labels)
+    except ReleaseBlocked:
+        root = None
+    if root == number:
+        classification_action = (
+            f"`/wb-core loop enqueue-new {number} head {head_sha}`"
+        )
+    elif root is not None and root < number:
+        if _terminal_loop_member(api, root) is not None:
+            classification_action = (
+                f"`/wb-core loop correct-to-new {number} head {head_sha} old-root {root}`"
+            )
+        else:
+            try:
+                gate = _active_gate(api, AWAITING_UI_LABEL)
+            except ReleaseTrainError:
+                gate = None
+            if gate is not None and loop_root_from_labels(label_names(gate)) == root:
+                classification_action = (
+                    f"`/wb-core loop enqueue-recovery {number} head {head_sha} "
+                    f"gate {int(gate.get('number') or 0)} root {root}`"
+                )
+    proven = _classification_blocker_unresolved(api, number)
+    set_release_state(
+        api,
+        number,
+        BLOCKED_LABEL,
+        current_labels=labels,
+        comment=(
+            f"Release Train classification error `{error.code}`: `{error}`. Generic retry is "
+            "not an identity repair.\n\n"
+            + _proof_marker(CLASSIFICATION_BLOCKER_MARKER, **values)
+            if not proven
+            else ""
+        ),
+    )
+    upsert_status_comment(
+        api,
+        number,
+        owner="classification-fail-closed",
+        reason=f"classification error `{error.code}`: {error}",
+        last_action="Release Train preserved labels on all other PRs and roots",
+        intervention=True,
+        root_override=root or 0,
+        resume_override=classification_action,
+    )
 
 
 def _latest_status_heartbeat(api: ReleaseApi, number: int, head_sha: str) -> float | None:
@@ -752,20 +1559,30 @@ def queue_gate_state(api: ReleaseApi) -> dict[str, Any]:
     except ReleaseTrainError as exc:
         return {"status": "gate-conflict", "reason": str(exc)}
     if agent_gate is not None:
+        try:
+            loop_registration_kind(
+                api,
+                api.get_pull(int(agent_gate.get("number") or 0)),
+            )
+        except ReleaseClassificationBlocked as exc:
+            return {
+                "status": "gate-conflict",
+                "reason": f"classification error {exc.code}: {exc}",
+            }
         return {
             "status": "awaiting-agent",
             "pr_number": int(agent_gate.get("number") or 0),
         }
     if ui_gate is not None:
         try:
-            root = loop_root_from_labels(label_names(ui_gate))
-        except ReleaseBlocked as exc:
-            return {"status": "gate-conflict", "reason": str(exc)}
-        if root is None:
+            _, root = _validate_active_ui_gate_registration(api, ui_gate)
+        except ReleaseClassificationBlocked as exc:
             return {
                 "status": "gate-conflict",
-                "reason": "active release:awaiting-ui PR has no deterministic root label",
+                "reason": f"classification error {exc.code}: {exc}",
             }
+        except (ReleaseBlocked, ReleaseTrainError) as exc:
+            return {"status": "gate-conflict", "reason": str(exc)}
         return {
             "status": "awaiting-ui",
             "pr_number": int(ui_gate.get("number") or 0),
@@ -798,28 +1615,23 @@ def _validate_task_context(
 ) -> tuple[str, int | None]:
     values = set(labels)
     task_class = task_class_from_labels(values)
-    root = loop_root_from_labels(values)
+    try:
+        root = loop_root_from_labels(values)
+    except ReleaseBlocked as exc:
+        raise ReleaseClassificationBlocked("loop-root-ambiguous", str(exc)) from exc
     ui_gate = _active_gate(api, AWAITING_UI_LABEL)
     if task_class == STANDARD_TASK_LABEL:
         if root is not None or loop_ack_labels(values):
             raise ReleaseBlocked("STANDARD PR cannot carry LOOP recovery or acknowledgement labels")
-        if ui_gate is not None:
-            raise ReleaseBlocked("an exclusive LOOP UI gate is active; unrelated PRs must wait")
         return task_class, None
     if scope != LIVE_RUNTIME_LABEL:
         raise ReleaseBlocked("LOOP PR must use scope:live-runtime")
-    if ui_gate is None:
-        if root is not None:
-            raise ReleaseBlocked("LOOP recovery link is stale because no release:awaiting-ui gate is active")
-        return task_class, None
-    gate_labels = label_names(ui_gate)
-    gate_root = loop_root_from_labels(gate_labels)
-    gate_number = int(ui_gate.get("number") or 0)
-    if gate_root is None:
-        raise ReleaseTrainError(f"active LOOP gate PR #{gate_number} has no deterministic root label")
-    if number == gate_number or root != gate_root:
+    pull = api.get_pull(number)
+    registration = loop_registration_kind(api, pull)
+    if registration == "new" and ui_gate is not None:
+        gate_number = int(ui_gate.get("number") or 0)
         raise ReleaseBlocked(
-            f"only a recovery PR linked by {loop_root_label(gate_root)} may run during the active LOOP gate"
+            f"independent LOOP root waits normally behind active UI gate PR #{gate_number}"
         )
     return task_class, root
 
@@ -899,6 +1711,16 @@ def select_candidate(
     except ReleaseTrainError as exc:
         return {"status": "gate-conflict", "found": False, "reason": str(exc)}
     if agent_gate is not None:
+        agent_number = int(agent_gate.get("number") or 0)
+        try:
+            loop_registration_kind(api, api.get_pull(agent_number))
+        except ReleaseClassificationBlocked as exc:
+            mark_classification_blocked(api, agent_number, exc)
+            return {
+                "status": "gate-conflict",
+                "found": False,
+                "reason": f"classification error {exc.code}: {exc}",
+            }
         try:
             needs_resume = mark_needs_resume_if_stale(
                 api,
@@ -924,15 +1746,26 @@ def select_candidate(
     ]
     if ui_gate is not None:
         try:
-            active_root = loop_root_from_labels(label_names(ui_gate))
-        except ReleaseBlocked as exc:
-            return {"status": "gate-conflict", "found": False, "reason": str(exc)}
-        if active_root is None:
+            _, active_root = _validate_active_ui_gate_registration(api, ui_gate)
+        except ReleaseClassificationBlocked as exc:
+            gate_number = int(ui_gate.get("number") or 0)
+            upsert_status_comment(
+                api,
+                gate_number,
+                owner="classification-fail-closed",
+                reason=f"classification error `{exc.code}`: {exc}",
+                last_action="Release Train preserved labels on all other PRs and roots",
+                intervention=True,
+                root_override=0,
+                resume_override="classification proof must be repaired; `retry-blocked` is forbidden",
+            )
             return {
                 "status": "gate-conflict",
                 "found": False,
-                "reason": "active release:awaiting-ui PR has no loop root label",
+                "reason": f"classification error {exc.code}: {exc}",
             }
+        except (ReleaseBlocked, ReleaseTrainError) as exc:
+            return {"status": "gate-conflict", "found": False, "reason": str(exc)}
         linked: list[dict[str, Any]] = []
         for item in ready:
             try:
@@ -1297,15 +2130,28 @@ def retry_blocked_release(
         character not in "0123456789abcdef" for character in actual_head
     ):
         raise ReleaseBlocked("blocked retry requires an exact 40-character head SHA")
+    classification_marker = _classification_blocker_unresolved(api, number)
     if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
         raise ReleaseBlocked("blocked retry requires an open non-draft PR")
-    successful = any(
-        str(item.get("name") or "") == check_name
-        and str(item.get("status") or "") == "completed"
-        and str(item.get("conclusion") or "") == "success"
-        for item in api.list_check_runs(actual_head)
-    )
-    if not successful:
+    task_class = task_class_from_labels(labels)
+    scope_from_labels(labels)
+    successful_check = _has_successful_check(api, actual_head, check_name)
+    if task_class == LOOP_TASK_LABEL:
+        try:
+            loop_registration_kind(api, pull)
+        except ReleaseClassificationBlocked as exc:
+            if classification_marker:
+                raise ReleaseClassificationBlocked(
+                    "generic-retry-classification-forbidden",
+                    "retry-blocked repairs only technical pre-merge blockers and cannot change LOOP identity",
+                ) from exc
+            if not successful_check:
+                raise ReleaseBlocked(
+                    f"blocked retry requires successful {check_name!r} on exact head {actual_head}"
+                ) from exc
+            _refresh_loop_registration_for_retry(api, pull)
+            loop_registration_kind(api, api.get_pull(number))
+    if not successful_check:
         raise ReleaseBlocked(
             f"blocked retry requires successful {check_name!r} on exact head {actual_head}"
         )
@@ -1523,10 +2369,11 @@ def resume_loop_owner(
     pull = api.get_pull(number)
     labels = label_names(pull)
     actual_head = str((pull.get("head") or {}).get("sha") or "")
-    actual_root = loop_root_from_labels(labels) or number
+    actual_root = loop_root_from_labels(labels)
+    loop_registration_kind(api, pull)
     if actual_head != expected_head_sha:
         raise ReleaseBlocked("LOOP resume head SHA is stale")
-    if actual_root != expected_root:
+    if actual_root is None or actual_root != expected_root:
         raise ReleaseBlocked("LOOP resume root is stale or ambiguous")
     if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope_from_labels(labels) != LIVE_RUNTIME_LABEL:
         raise ReleaseBlocked("LOOP resume requires task:loop + scope:live-runtime")
@@ -1559,6 +2406,10 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
     if task_class_from_labels(labels) != LOOP_TASK_LABEL or scope != LIVE_RUNTIME_LABEL:
         raise ReleaseBlocked("release:awaiting-ui requires task:loop + scope:live-runtime")
     current_root = loop_root_from_labels(labels)
+    if current_root is None:
+        raise ReleaseClassificationBlocked(
+            "loop-root-missing", "LOOP UI gate requires a registered root"
+        )
     if PRODUCTION_LABEL in labels:
         if current_root is None:
             raise ReleaseTrainError("accepted LOOP PR has no root label")
@@ -1572,8 +2423,33 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
     if None in gate_roots or len(gate_roots) > 1:
         raise ReleaseTrainError("active LOOP UI gates do not share one deterministic root")
     if any(int(item.get("number") or 0) == number for item in gates):
-        if current_root is None:
-            raise ReleaseTrainError("active LOOP UI gate has no root label")
+        head_sha = str((pull.get("head") or {}).get("sha") or "").lower()
+        if current_root == number:
+            if not _has_comment_proof(
+                api,
+                number,
+                NEW_ROOT_PROOF_MARKER,
+                head=head_sha,
+                pr=number,
+                root=number,
+            ):
+                raise ReleaseClassificationBlocked(
+                    "loop-new-proof-missing",
+                    "active independent LOOP gate lacks new-root proof",
+                )
+        else:
+            proof_gate = _recovery_proof_gate(
+                api,
+                number,
+                head_sha=head_sha,
+                root=current_root,
+            )
+            if proof_gate is None:
+                raise ReleaseClassificationBlocked(
+                    "loop-recovery-proof-missing",
+                    "active recovery LOOP gate lacks recovery proof",
+                )
+            _validate_gate_identity(api, proof_gate, current_root)
         if not _has_comment_proof(
             api,
             number,
@@ -1598,21 +2474,20 @@ def mark_loop_awaiting_ui(api: ReleaseApi, number: int, merge_sha: str) -> tuple
                 api.remove_label(previous, AWAITING_UI_LABEL)
                 api.add_comment(previous, f"Duplicate gate healed in favor of LOOP PR #{number}.")
         return current_root, "already-awaiting-ui"
-    if gates and current_root is not None and RUNNING_LABEL not in labels:
+    registration = loop_registration_kind(api, pull)
+    if gates and RUNNING_LABEL not in labels:
         root = next(iter(gate_roots))
         if current_root == root:
             return current_root, "superseded-iteration"
     if not gates:
-        if current_root is not None:
+        if registration != "new" or current_root != number:
             raise ReleaseBlocked("recovery LOOP lost its active parent gate before UI handoff")
         root = number
     else:
         root = next(iter(gate_roots))
-        if root <= 0 or current_root != root:
+        if registration != "recovery" or root <= 0 or current_root != root:
             raise ReleaseBlocked("recovery LOOP does not match the active deterministic loop root")
     root_label = loop_root_label(root)
-    api.ensure_label(root_label, "C2A5F8", f"Deterministic recovery chain for LOOP PR #{root}")
-    api.add_labels(number, [root_label])
     deploy_proof = _proof_marker(
         DEPLOY_PROOF_MARKER,
         merge=merge_sha.lower(),
@@ -1686,6 +2561,13 @@ def normalize_completed_loop_chain(
                 and scope_from_labels(chain_labels) == LIVE_RUNTIME_LABEL
                 and loop_root_from_labels(chain_labels) == root
             )
+            if valid_member:
+                _loop_registration_proof_kind(
+                    api,
+                    chain_pull,
+                    require_active_recovery=False,
+                    allow_terminal=True,
+                )
         except ReleaseBlocked:
             valid_member = False
         if not valid_member:
@@ -1807,17 +2689,23 @@ def accept_loop_ui(
         if PRODUCTION_LABEL not in labels:
             raise ReleaseBlocked("there is no active release:awaiting-ui gate")
         normalize_completed_loop_chain(api, number, actor=actor)
+        evidence_comment = f"UI evidence accepted for `{merge_sha}`: `{normalized_evidence}`."
+        if not any(
+            evidence_comment == str(item.get("body") or "").strip()
+            for item in api.list_comments(number)
+        ):
+            api.add_comment(number, evidence_comment)
         api.dispatch_workflow("release-train.yml", "main")
         return "already-accepted"
     if int(active_gate.get("number") or 0) != number:
         raise ReleaseBlocked("UI acceptance must target the current LOOP iteration")
+    normalize_completed_loop_chain(api, number, actor=actor)
     evidence_comment = f"UI evidence accepted for `{merge_sha}`: `{normalized_evidence}`."
     if not any(
         evidence_comment == str(item.get("body") or "").strip()
         for item in api.list_comments(number)
     ):
         api.add_comment(number, evidence_comment)
-    normalize_completed_loop_chain(api, number, actor=actor)
     api.dispatch_workflow("release-train.yml", "main")
     return "accepted"
 
@@ -1831,6 +2719,63 @@ def handle_loop_comment(
     association: str,
 ) -> str:
     parts = command.strip().split()
+    if len(parts) == 6 and parts[:3] == ["/wb-core", "loop", "enqueue-new"]:
+        try:
+            command_number = int(parts[3])
+        except ValueError as exc:
+            raise ReleaseBlocked("invalid new LOOP PR number") from exc
+        if command_number != number or parts[4] != "head":
+            raise ReleaseBlocked("new LOOP enrollment must bind the current PR and exact head")
+        return enqueue_loop_new(
+            api,
+            number,
+            parts[5],
+            actor=actor,
+            association=association,
+        )
+    if len(parts) == 10 and parts[:3] == ["/wb-core", "loop", "enqueue-recovery"]:
+        try:
+            command_number = int(parts[3])
+            gate_pr = int(parts[7])
+            expected_root = int(parts[9])
+        except ValueError as exc:
+            raise ReleaseBlocked("invalid LOOP recovery identity") from exc
+        if (
+            command_number != number
+            or parts[4] != "head"
+            or parts[6] != "gate"
+            or parts[8] != "root"
+        ):
+            raise ReleaseBlocked(
+                "LOOP recovery enrollment must bind current PR, exact head, gate and root"
+            )
+        return enqueue_loop_recovery(
+            api,
+            number,
+            parts[5],
+            gate_pr=gate_pr,
+            expected_root=expected_root,
+            actor=actor,
+            association=association,
+        )
+    if len(parts) == 8 and parts[:3] == ["/wb-core", "loop", "correct-to-new"]:
+        try:
+            command_number = int(parts[3])
+            old_root = int(parts[7])
+        except ValueError as exc:
+            raise ReleaseBlocked("invalid LOOP correction identity") from exc
+        if command_number != number or parts[4] != "head" or parts[6] != "old-root":
+            raise ReleaseBlocked(
+                "LOOP identity correction must bind current PR, exact head and old root"
+            )
+        return correct_loop_identity_to_new(
+            api,
+            number,
+            parts[5],
+            expected_old_root=old_root,
+            actor=actor,
+            association=association,
+        )
     if len(parts) == 6 and parts[:3] == ["/wb-core", "loop", "ack-agent"]:
         try:
             command_number = int(parts[3])
@@ -1992,13 +2937,69 @@ def command_halt(args: argparse.Namespace) -> int:
 
 def command_retry_blocked(args: argparse.Namespace) -> int:
     api = _api_from_env()
-    status = retry_blocked_release(
+    try:
+        status = retry_blocked_release(
+            api,
+            args.pr,
+            expected_head_sha=args.expected_head_sha,
+            check_name=args.check_name,
+        )
+    except ReleaseClassificationBlocked as exc:
+        _json_print(
+            {
+                "status": "classification-rejected",
+                "pr_number": args.pr,
+                "code": exc.code,
+                "reason": str(exc),
+            }
+        )
+        return 2
+    _json_print({"status": status, "pr_number": args.pr, "head_sha": args.expected_head_sha})
+    return 0
+
+
+def command_enqueue_loop_new(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = enqueue_loop_new(
         api,
         args.pr,
-        expected_head_sha=args.expected_head_sha,
+        args.expected_head_sha,
+        actor=args.actor,
+        association=args.association,
         check_name=args.check_name,
     )
-    _json_print({"status": status, "pr_number": args.pr, "head_sha": args.expected_head_sha})
+    _json_print({"status": status, "pr_number": args.pr, "loop_root": args.pr})
+    return 0
+
+
+def command_enqueue_loop_recovery(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = enqueue_loop_recovery(
+        api,
+        args.pr,
+        args.expected_head_sha,
+        gate_pr=args.gate_pr,
+        expected_root=args.expected_root,
+        actor=args.actor,
+        association=args.association,
+        check_name=args.check_name,
+    )
+    _json_print({"status": status, "pr_number": args.pr, "loop_root": args.expected_root})
+    return 0
+
+
+def command_correct_loop_identity(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    status = correct_loop_identity_to_new(
+        api,
+        args.pr,
+        args.expected_head_sha,
+        expected_old_root=args.expected_old_root,
+        actor=args.actor,
+        association=args.association,
+        check_name=args.check_name,
+    )
+    _json_print({"status": status, "pr_number": args.pr, "loop_root": args.pr})
     return 0
 
 
@@ -2036,6 +3037,17 @@ def command_prepare(args: argparse.Namespace) -> int:
             timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
         )
+    except ReleaseClassificationBlocked as exc:
+        mark_classification_blocked(api, args.pr, exc)
+        _json_print(
+            {
+                "status": "classification-blocked",
+                "pr_number": args.pr,
+                "code": exc.code,
+                "reason": str(exc),
+            }
+        )
+        return 2
     except ReleaseBlocked as exc:
         set_release_state(
             api,
@@ -2101,6 +3113,17 @@ def command_merge(args: argparse.Namespace) -> int:
     )
     try:
         result = merge_candidate(api, candidate)
+    except ReleaseClassificationBlocked as exc:
+        mark_classification_blocked(api, args.pr, exc)
+        _json_print(
+            {
+                "status": "classification-blocked",
+                "pr_number": args.pr,
+                "code": exc.code,
+                "reason": str(exc),
+            }
+        )
+        return 2
     except ReleaseBlocked as exc:
         set_release_state(
             api,
@@ -2128,6 +3151,17 @@ def command_request_agent(args: argparse.Namespace) -> int:
     api = _api_from_env()
     try:
         request_loop_agent(api, args.pr, args.expected_head_sha)
+    except ReleaseClassificationBlocked as exc:
+        mark_classification_blocked(api, args.pr, exc)
+        _json_print(
+            {
+                "status": "classification-blocked",
+                "pr_number": args.pr,
+                "code": exc.code,
+                "reason": str(exc),
+            }
+        )
+        return 2
     except ReleaseBlocked as exc:
         set_release_state(
             api,
@@ -2211,6 +3245,33 @@ def build_parser() -> argparse.ArgumentParser:
     retry_blocked.add_argument("--expected-head-sha", required=True)
     retry_blocked.add_argument("--check-name", default="baseline")
     retry_blocked.set_defaults(handler=command_retry_blocked)
+
+    enqueue_new = subparsers.add_parser("enqueue-loop-new")
+    enqueue_new.add_argument("--pr", type=int, required=True)
+    enqueue_new.add_argument("--expected-head-sha", required=True)
+    enqueue_new.add_argument("--actor", required=True)
+    enqueue_new.add_argument("--association", required=True)
+    enqueue_new.add_argument("--check-name", default="baseline")
+    enqueue_new.set_defaults(handler=command_enqueue_loop_new)
+
+    enqueue_recovery = subparsers.add_parser("enqueue-loop-recovery")
+    enqueue_recovery.add_argument("--pr", type=int, required=True)
+    enqueue_recovery.add_argument("--expected-head-sha", required=True)
+    enqueue_recovery.add_argument("--gate-pr", type=int, required=True)
+    enqueue_recovery.add_argument("--expected-root", type=int, required=True)
+    enqueue_recovery.add_argument("--actor", required=True)
+    enqueue_recovery.add_argument("--association", required=True)
+    enqueue_recovery.add_argument("--check-name", default="baseline")
+    enqueue_recovery.set_defaults(handler=command_enqueue_loop_recovery)
+
+    correct_identity = subparsers.add_parser("correct-loop-identity")
+    correct_identity.add_argument("--pr", type=int, required=True)
+    correct_identity.add_argument("--expected-head-sha", required=True)
+    correct_identity.add_argument("--expected-old-root", type=int, required=True)
+    correct_identity.add_argument("--actor", required=True)
+    correct_identity.add_argument("--association", required=True)
+    correct_identity.add_argument("--check-name", default="baseline")
+    correct_identity.set_defaults(handler=command_correct_loop_identity)
 
     complete = subparsers.add_parser("complete-standard")
     complete.add_argument("--pr", type=int, required=True)
