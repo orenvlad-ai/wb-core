@@ -2553,6 +2553,8 @@ class RegistryUploadDbBackedRuntime:
         expected_activation: Mapping[str, Any] | None = None,
         expected_active_nomenclature: Mapping[int, Mapping[str, Any]] | None = None,
         expected_ledger_totals: Mapping[str, float] | None = None,
+        reservation_transition: Mapping[str, Any] | None = None,
+        expected_downstream_costs: Mapping[int, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Atomically recheck a targeted plan and append one ledger operation."""
         normalized_operation_id = str(operation_id or "").strip()
@@ -2759,6 +2761,60 @@ class RegistryUploadDbBackedRuntime:
                 if negative:
                     raise ValueError("targeted_ff_stock_would_make_negative_balance: " + _canonical_json(negative))
 
+                reservation_payload = dict(reservation_transition or {})
+                if reservation_payload:
+                    reservation_supply_id = str(reservation_payload.get("supply_id") or "")
+                    reservation_expected = {
+                        int(key): float(value)
+                        for key, value in dict(reservation_payload.get("expected_current") or {}).items()
+                    }
+                    actual_reservations = _ff_stock_reservation_quantities(
+                        conn,
+                        reservation_supply_id,
+                    )
+                    reservation_scope = set(reservation_expected) | set(actual_reservations)
+                    if any(
+                        abs(
+                            reservation_expected.get(nm_id, 0.0)
+                            - actual_reservations.get(nm_id, 0.0)
+                        )
+                        > 1e-9
+                        for nm_id in reservation_scope
+                    ):
+                        raise ValueError(
+                            "ff_stock_reservation_changed: "
+                            + _canonical_json(
+                                {
+                                    "expected": reservation_expected,
+                                    "actual": actual_reservations,
+                                }
+                            )
+                        )
+
+                for nm_id, expected_cost in dict(expected_downstream_costs or {}).items():
+                    expected_cost_payload = dict(expected_cost)
+                    cost_row = conn.execute(
+                        """
+                        SELECT wb_supply_id,nm_id,inputs_hash,source_status,
+                               transit_cost_status,sku_ff_unit_cost_rub,
+                               pre_acceptance_unit_cost_rub
+                        FROM sheet_vitrina_v1_wb_supply_cost_layers
+                        WHERE wb_supply_id=? AND nm_id=? AND is_current=1
+                        """,
+                        (
+                            str(expected_cost_payload.get("wb_supply_id") or ""),
+                            int(nm_id),
+                        ),
+                    ).fetchone()
+                    actual_cost = dict(cost_row) if cost_row is not None else {}
+                    if _canonical_json(actual_cost) != _canonical_json(expected_cost_payload):
+                        raise ValueError(
+                            "validated_downstream_cost_state_changed: "
+                            + _canonical_json(
+                                {"expected": expected_cost_payload, "actual": actual_cost}
+                            )
+                        )
+
                 conn.execute(
                     """
                     INSERT INTO sheet_vitrina_v1_ff_stock_operations(
@@ -2807,6 +2863,21 @@ class RegistryUploadDbBackedRuntime:
                         for index, item in enumerate(normalized_lines, start=1)
                     ],
                 )
+                if reservation_payload:
+                    reservation_lines = [
+                        dict(item) for item in reservation_payload.get("lines") or []
+                    ]
+                    _insert_ff_stock_reservation_operation(
+                        conn,
+                        operation_id=str(reservation_payload.get("operation_id") or ""),
+                        source_key=str(reservation_payload.get("source_key") or ""),
+                        supply_id=str(reservation_payload.get("supply_id") or ""),
+                        supply_revision=str(reservation_payload.get("supply_revision") or ""),
+                        operation_type=str(reservation_payload.get("operation_type") or "fulfill"),
+                        created_at=str(reservation_payload.get("created_at") or created_at),
+                        diagnostics=dict(reservation_payload.get("diagnostics") or {}),
+                        lines=reservation_lines,
+                    )
                 if expected_total_map:
                     post_total_row = conn.execute(
                         "SELECT COALESCE(SUM(quantity_delta), 0) AS total FROM sheet_vitrina_v1_ff_stock_operation_lines"
@@ -2958,6 +3029,146 @@ class RegistryUploadDbBackedRuntime:
                 }
                 for row in rows
             ]
+
+    def list_ff_stock_reservations(self, *, supply_id: str = "") -> list[dict[str, Any]]:
+        """Return current positive reservations reconstructed from append-only deltas."""
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            where = "WHERE operation.supply_id = ?" if str(supply_id or "").strip() else ""
+            params: tuple[Any, ...] = (str(supply_id).strip(),) if where else ()
+            rows = conn.execute(
+                f"""
+                SELECT operation.supply_id, line.nm_id,
+                       SUM(line.quantity_delta) AS quantity,
+                       MAX(operation.created_at) AS updated_at,
+                       (
+                         SELECT latest.operation_id
+                         FROM sheet_vitrina_v1_ff_stock_reservation_operations AS latest
+                         WHERE latest.supply_id = operation.supply_id
+                         ORDER BY latest.created_at DESC, latest.operation_id DESC
+                         LIMIT 1
+                       ) AS latest_operation_id
+                FROM sheet_vitrina_v1_ff_stock_reservation_operations AS operation
+                JOIN sheet_vitrina_v1_ff_stock_reservation_lines AS line
+                  ON line.operation_id = operation.operation_id
+                {where}
+                GROUP BY operation.supply_id, line.nm_id
+                HAVING SUM(line.quantity_delta) > 0.000000001
+                ORDER BY operation.supply_id, line.nm_id
+                """,
+                params,
+            ).fetchall()
+            return [
+                {
+                    "supply_id": str(row["supply_id"] or ""),
+                    "nm_id": int(row["nm_id"]),
+                    "quantity": float(row["quantity"] or 0.0),
+                    "updated_at": str(row["updated_at"] or ""),
+                    "latest_operation_id": str(row["latest_operation_id"] or ""),
+                }
+                for row in rows
+            ]
+
+    def list_current_wb_supply_cost_layers(
+        self,
+        *,
+        supply_ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        identifiers = sorted({str(item or "").strip() for item in supply_ids if str(item or "").strip()})
+        if not identifiers:
+            return []
+        placeholders = ",".join("?" for _ in identifiers)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_cost_layers
+                WHERE is_current=1
+                  AND (wb_supply_id IN ({placeholders}) OR cache_key IN ({placeholders}))
+                ORDER BY wb_supply_id,nm_id
+                """,
+                tuple(identifiers) + tuple(identifiers),
+            ).fetchall()
+            return [
+                {
+                    **dict(row),
+                    "component_status": _loads_json_object(row["component_status_json"]),
+                }
+                for row in rows
+            ]
+
+    def create_ff_stock_reservation_operation(
+        self,
+        *,
+        operation_id: str,
+        source_key: str,
+        supply_id: str,
+        supply_revision: str,
+        operation_type: str,
+        created_at: str,
+        diagnostics: Mapping[str, Any] | None,
+        lines: list[Mapping[str, Any]],
+        expected_current: Mapping[int, float],
+    ) -> dict[str, Any]:
+        """Atomically recheck and append one idempotent reservation delta."""
+        normalized_lines = [dict(item) for item in lines]
+        if not normalized_lines:
+            return {"idempotent": True, "operation_id": "", "no_op": True}
+        _validate_timestamp(created_at, field_name="created_at")
+        expected = {int(key): float(value) for key, value in expected_current.items()}
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_ff_stock_reservation_operations WHERE source_key=?",
+                    (str(source_key),),
+                ).fetchone()
+                if existing is not None:
+                    conn.rollback()
+                    return {**dict(existing), "idempotent": True}
+                actual = _ff_stock_reservation_quantities(conn, str(supply_id))
+                actual = {nm_id: actual.get(nm_id, 0.0) for nm_id in set(expected) | set(actual)}
+                expected_full = {nm_id: expected.get(nm_id, 0.0) for nm_id in set(expected) | set(actual)}
+                if any(abs(actual[nm_id] - expected_full[nm_id]) > 1e-9 for nm_id in actual):
+                    raise ValueError(
+                        "ff_stock_reservation_changed: "
+                        + _canonical_json({"expected": expected_full, "actual": actual})
+                    )
+                projected = dict(actual)
+                for item in normalized_lines:
+                    nm_id = int(item.get("nm_id") or 0)
+                    if nm_id <= 0:
+                        raise ValueError("reservation nm_id is required")
+                    projected[nm_id] = projected.get(nm_id, 0.0) + float(item.get("quantity_delta") or 0.0)
+                negative = {key: value for key, value in projected.items() if value < -1e-9}
+                if negative:
+                    raise ValueError("ff_stock_reservation_would_be_negative: " + _canonical_json(negative))
+                _insert_ff_stock_reservation_operation(
+                    conn,
+                    operation_id=str(operation_id),
+                    source_key=str(source_key),
+                    supply_id=str(supply_id),
+                    supply_revision=str(supply_revision),
+                    operation_type=str(operation_type),
+                    created_at=created_at,
+                    diagnostics=dict(diagnostics or {}),
+                    lines=normalized_lines,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return {
+                "operation_id": str(operation_id),
+                "source_key": str(source_key),
+                "supply_id": str(supply_id),
+                "supply_revision": str(supply_revision),
+                "operation_type": str(operation_type),
+                "idempotent": False,
+            }
 
     def upsert_wb_supplies(
         self,
@@ -7934,6 +8145,75 @@ def _targeted_wb_supply_guard_from_row(row: sqlite3.Row | None) -> dict[str, Any
     }
 
 
+def _ff_stock_reservation_quantities(conn: sqlite3.Connection, supply_id: str) -> dict[int, float]:
+    rows = conn.execute(
+        """
+        SELECT line.nm_id, SUM(line.quantity_delta) AS quantity
+        FROM sheet_vitrina_v1_ff_stock_reservation_operations AS operation
+        JOIN sheet_vitrina_v1_ff_stock_reservation_lines AS line
+          ON line.operation_id = operation.operation_id
+        WHERE operation.supply_id = ?
+        GROUP BY line.nm_id
+        """,
+        (str(supply_id),),
+    ).fetchall()
+    return {
+        int(row["nm_id"]): float(row["quantity"] or 0.0)
+        for row in rows
+        if abs(float(row["quantity"] or 0.0)) > 1e-9
+    }
+
+
+def _insert_ff_stock_reservation_operation(
+    conn: sqlite3.Connection,
+    *,
+    operation_id: str,
+    source_key: str,
+    supply_id: str,
+    supply_revision: str,
+    operation_type: str,
+    created_at: str,
+    diagnostics: Mapping[str, Any],
+    lines: list[Mapping[str, Any]],
+) -> None:
+    if not operation_id or not source_key or not supply_id or not lines:
+        raise ValueError("complete reservation operation and lines are required")
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_ff_stock_reservation_operations(
+            operation_id, source_key, supply_id, supply_revision,
+            operation_type, created_at, diagnostics_json
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            operation_id,
+            source_key,
+            supply_id,
+            supply_revision,
+            operation_type,
+            created_at,
+            json.dumps(dict(diagnostics), ensure_ascii=False),
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO sheet_vitrina_v1_ff_stock_reservation_lines(
+            operation_id, line_no, nm_id, quantity_delta, raw_json
+        ) VALUES(?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                operation_id,
+                index,
+                int(item.get("nm_id") or 0),
+                float(item.get("quantity_delta") or 0.0),
+                json.dumps(dict(item.get("raw") or item), ensure_ascii=False),
+            )
+            for index, item in enumerate(lines, start=1)
+        ],
+    )
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -8353,6 +8633,31 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_lines_by_nm
         ON sheet_vitrina_v1_ff_stock_operation_lines(nm_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_reservation_operations (
+            operation_id TEXT PRIMARY KEY,
+            source_key TEXT NOT NULL UNIQUE,
+            supply_id TEXT NOT NULL,
+            supply_revision TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            diagnostics_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_reservation_operations_by_supply
+        ON sheet_vitrina_v1_ff_stock_reservation_operations(supply_id, created_at, operation_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_reservation_lines (
+            operation_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_ff_stock_reservation_operations(operation_id) ON DELETE CASCADE,
+            line_no INTEGER NOT NULL,
+            nm_id INTEGER NOT NULL,
+            quantity_delta REAL NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(operation_id, line_no)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_reservation_lines_by_nm
+        ON sheet_vitrina_v1_ff_stock_reservation_lines(nm_id);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint (
             slot TEXT PRIMARY KEY,

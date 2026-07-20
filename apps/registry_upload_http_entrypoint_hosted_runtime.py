@@ -2433,6 +2433,7 @@ def _run_remote_warehouse_functional_action(
         "supplier-certification-apply",
         "supplier-certification-rollback",
         "rollback",
+        "backup",
         "hourly-sync",
         "manual-sync",
         "enable-hourly",
@@ -2544,6 +2545,20 @@ def _run_remote_warehouse_functional_action(
                 fingerprint,
                 "--backup-dir",
                 "/opt/wb-core-runtime/backups/warehouse-functional",
+            ]
+        )
+    elif action == "backup":
+        runner_args.extend(
+            [
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-functional-sync",
+            ]
+        )
+    elif action == "manual-sync":
+        runner_args.extend(
+            [
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-functional-sync",
             ]
         )
 
@@ -3094,6 +3109,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     functional_readback.set_defaults(
         handler=run_warehouse_functional_command,
         warehouse_functional_action="readback",
+    )
+
+    functional_backup = subparsers.add_parser(
+        "warehouse-functional-backup",
+        help="Create one coherent integrity-checked pre-sync production backup.",
+    )
+    functional_backup.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="backup",
     )
 
     functional_sync = subparsers.add_parser(

@@ -206,6 +206,7 @@ def main() -> None:
                 )
         for action, expected_timeout in (
             ("readback", 300.0),
+            ("backup", 1800.0),
             ("cutover-dry-run", 1800.0),
             ("emergency-dry-run", 1800.0),
             ("economics-backfill-dry-run", 1800.0),
@@ -250,6 +251,13 @@ def main() -> None:
                     f"warehouse functional {action} subprocess timeout must be "
                     f"{expected_timeout}, got {actual_timeout}"
                 )
+            if action == "backup":
+                remote_command = " ".join(run_mock.call_args.args[0])
+                if (
+                    "warehouse-functional-sync" not in remote_command
+                    or "--backup-dir" not in remote_command
+                ):
+                    raise AssertionError("functional backup must use the canonical pre-sync directory")
         failed_backup_source = (
             "/opt/wb-core-runtime/backups/warehouse-functional/"
             "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
@@ -380,6 +388,14 @@ def main() -> None:
     opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
     if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
         raise AssertionError("hosted runner must expose canonical warehouse opening commands")
+    functional_backup_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-functional-backup"]
+    )
+    if (
+        functional_backup_args.handler is not hosted_runtime.run_warehouse_functional_command
+        or functional_backup_args.warehouse_functional_action != "backup"
+    ):
+        raise AssertionError("hosted runner must expose coherent warehouse functional backup")
     with TemporaryDirectory(prefix="warehouse-functional-reviewed-plan-smoke-") as plan_temp_dir:
         reviewed_plan_path = Path(plan_temp_dir) / "functional-plan.json"
         functional_args = hosted_runtime.build_arg_parser().parse_args(

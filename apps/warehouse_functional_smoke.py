@@ -574,12 +574,42 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                 "parse_status": "confirmed",
             },
             {
+                "document_id": "fee-financial",
+                "supplier_order_id": shipment_id,
+                "document_type": "bank_fee_statement",
+                "document_number": "FEE",
+                "document_date": "2026-05-21",
+                "parse_status": "confirmed",
+            },
+            {
                 "document_id": "packing-informational",
                 "supplier_order_id": shipment_id,
                 "document_type": "packing_list",
                 "document_number": "PACKING",
                 "document_date": "2026-05-14",
                 "parse_status": "confirmed",
+            },
+        ]
+    )
+    financial_expense_lines.extend(
+        [
+            {
+                "line_id": "fee-info-cny",
+                "financial_document_id": "fee-financial",
+                "supplier_order_id": shipment_id,
+                "category": "bank_transfer_fee",
+                "amount_rub": "120899.32",
+                "currency": "CNY",
+                "status": "confirmed",
+            },
+            {
+                "line_id": "fee-info-zero",
+                "financial_document_id": "fee-financial",
+                "supplier_order_id": shipment_id,
+                "category": "bank_transfer_fee",
+                "amount_rub": "0",
+                "currency": "RUB",
+                "status": "confirmed",
             },
         ]
     )
@@ -616,7 +646,7 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                 {
                     "document_id": "fee-doc",
                     "source_order_id": shipment_id,
-                    "linked_financial_document_id": "",
+                    "linked_financial_document_id": "fee-financial",
                     "document_type": "bank_fee",
                     "status": "posted",
                 },
@@ -688,6 +718,13 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
         and document_controls["payment-financial"]["allocated_component_count"] == 1
         and document_controls["payment-financial"]["conserved"] is True,
         "linked CNY payment is projected onto its internal financial document",
+    )
+    _assert(
+        document_controls["fee-financial"]["eligible_component_count"] == 1
+        and document_controls["fee-financial"]["allocated_component_count"] == 1
+        and document_controls["fee-financial"]["conserved"] is True
+        and document_controls["fee-financial"]["incomplete_reasons"] == [],
+        "CNY/zero statement provenance rows do not duplicate canonical CNY-ledger fees",
     )
     _assert(
         document_controls["customs"]["eligible_component_count"] == 3
@@ -2694,6 +2731,37 @@ def _test_guarded_publication() -> None:
             confirm_fingerprint=sync_plan["plan_fingerprint"],
         )
         _assert(sync_applied["idempotent"] is False, "hourly daily WAC version publishes")
+        frozen_reservation_state = copy.deepcopy(block.readback()["ff_reservations"])
+        runtime.create_ff_stock_reservation_operation(
+            operation_id="ffsr-functional-live-probe-reserve",
+            source_key="functional-live-probe:reserve",
+            supply_id="functional-live-probe",
+            supply_revision="reserve-v1",
+            operation_type="reserve",
+            created_at="2026-07-19T12:06:00Z",
+            diagnostics={"reason": "snapshot consistency smoke"},
+            lines=[{"nm_id": 104, "quantity_delta": 1}],
+            expected_current={},
+        )
+        _assert(
+            runtime.list_ff_stock_reservations(supply_id="functional-live-probe"),
+            "live reservation probe exists outside the frozen functional version",
+        )
+        _assert(
+            block.readback()["ff_reservations"] == frozen_reservation_state,
+            "active functional readback never mixes a live reservation with frozen FF quantities",
+        )
+        runtime.create_ff_stock_reservation_operation(
+            operation_id="ffsr-functional-live-probe-release",
+            source_key="functional-live-probe:release",
+            supply_id="functional-live-probe",
+            supply_revision="release-v1",
+            operation_type="release",
+            created_at="2026-07-19T12:07:00Z",
+            diagnostics={"reason": "snapshot consistency smoke cleanup"},
+            lines=[{"nm_id": 104, "quantity_delta": -1}],
+            expected_current={104: 1},
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             retained_supplier_cost_state = conn.execute(
                 """SELECT source_fingerprint,calculation_fingerprint,expenses_complete

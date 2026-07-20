@@ -291,6 +291,10 @@
     .badge.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .badge.warning { background: rgba(251, 191, 36, 0.14); color: var(--warning); }
     .badge.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
+    .supplier-allocation { display: grid; gap: 4px; min-width: 220px; color: var(--text); font-size: 12px; line-height: 1.35; }
+    .supplier-allocation .badge { justify-self: start; }
+    .supplier-allocation-details summary { cursor: pointer; color: var(--muted); font-weight: 800; }
+    .supplier-allocation-details ul { margin: 6px 0 0; padding-left: 18px; color: var(--warning); }
     .price-conformity { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; font-size: 18px; font-weight: 900; }
     .price-conformity.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .price-conformity.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
@@ -1441,6 +1445,17 @@
             }[status] || "Расходы не распределены";
             const diagnostics = projection.diagnostics && typeof projection.diagnostics === "object" ? projection.diagnostics : {};
             const reasons = Array.isArray(projection.reasons) ? projection.reasons : [];
+            const rub = (raw) => {
+              const amount = Number(raw);
+              return Number.isFinite(amount)
+                ? amount.toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " ₽"
+                : "—";
+            };
+            const amountSummary = diagnostics.eligible_amount_rub != null
+              ? "Распределено " + rub(diagnostics.allocated_amount_rub) + " из " + rub(diagnostics.eligible_amount_rub)
+              : "Сумма распределения пока не определена";
+            const unallocatedSummary = "Не распределено " + rub(diagnostics.unallocated_amount_rub);
+            const componentSummary = "Компонентов: " + Number(diagnostics.allocated_components || 0) + " из " + Number(diagnostics.eligible_components || 0);
             const tooltip = [
               diagnostics.eligible_documents != null ? "Документов: " + diagnostics.eligible_documents : "",
               diagnostics.eligible_components != null ? "Компонентов: " + diagnostics.eligible_components : "",
@@ -1448,7 +1463,10 @@
               ...reasons
             ].filter(Boolean).join(" · ");
             const tone = status === "all" ? "success" : status === "partial" ? "warning" : status === "not_applicable" ? "neutral" : "error";
-            return '<span class="badge ' + tone + '"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : "") + '>' + escapeHtml(label) + '</span>';
+            const details = reasons.length
+              ? '<details class="supplier-allocation-details"><summary>Почему</summary><ul>' + reasons.map((reason) => '<li>' + escapeHtml(reason) + '</li>').join("") + '</ul></details>'
+              : "";
+            return '<div class="supplier-allocation"><span class="badge ' + tone + '"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : "") + '>' + escapeHtml(label) + '</span><span>' + escapeHtml(amountSummary) + '</span><span>' + escapeHtml(unallocatedSummary) + '</span><span>' + escapeHtml(componentSummary) + '</span>' + details + '</div>';
           }
 
           function syncActiveRegistryRow() {

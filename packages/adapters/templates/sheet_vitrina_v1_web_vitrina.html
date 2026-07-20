@@ -3548,11 +3548,13 @@
     }
 
     .vitrina-table td.cell-history-unavailable {
-      color: #64748b;
-      background: #f1f5f9;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--surface-2) 86%, transparent);
       font-size: 11px;
       font-weight: 650;
-      white-space: normal;
+      line-height: 1;
+      min-width: 48px;
+      white-space: nowrap;
     }
 
     .vitrina-table tbody tr:hover td.cell-session-highlight-updated {
@@ -5063,6 +5065,7 @@
     .warehouse-number { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .warehouse-balance-warning { display: block; margin-top: 4px; color: var(--warning-text); font-size: 11px; font-weight: 700; white-space: normal; }
     .warehouse-balance-warning[data-tone="success"] { color: var(--success-text); }
+    .warehouse-balance-reservation { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.35; white-space: normal; }
     .warehouse-source-details summary { color: var(--accent); cursor: pointer; font-weight: 650; }
     .warehouse-source-details pre { max-width: 680px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--muted); }
     .warehouse-evidence-list { display: grid; gap: 8px; margin-top: 10px; min-width: 420px; max-width: 760px; }
@@ -8226,7 +8229,8 @@
       if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Склады и себестоимость");
       if (warehouseMetaNode) {
         warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—") +
-          (warehouse.wb_contour && warehouse.wb_contour.formula_ru ? " · " + String(warehouse.wb_contour.formula_ru) : "");
+          (warehouse.wb_contour && warehouse.wb_contour.formula_ru ? " · " + String(warehouse.wb_contour.formula_ru) : "") +
+          (warehouse.ff_reservations && warehouse.ff_reservations.formula_ru ? " · " + String(warehouse.ff_reservations.formula_ru) : "");
       }
       const syncPresentation = (payload && payload.sync_presentation) || {};
       if (warehouseStatusNode) {
@@ -8239,7 +8243,9 @@
       if (warehouseSummaryNode) {
         const summaryItems = [
           ["Уникальных SKU", warehouseNumber(warehouse.sku_count)],
-          [warehouse.wb_contour ? "Всего в контуре WB" : "Всего единиц", warehouseNumber(warehouse.total_quantity)],
+          [warehouse.wb_contour
+            ? "Всего в контуре WB"
+            : (warehouse.ff_reservations ? "Физический остаток" : "Всего единиц"), warehouseNumber(warehouse.total_quantity)],
           ["Товарный капитал", warehouseMoney(warehouse.total_capital_rub)],
           ["Средневзвешенная себестоимость", warehouseMoney(warehouse.average_unit_cost_rub)]
         ];
@@ -8250,6 +8256,13 @@
             ["В пути возврата на WB", warehouseNumber(warehouse.wb_contour.in_way_from_client)]
           );
         }
+        if (warehouse.ff_reservations) {
+          summaryItems.push(
+            ["Зарезервировано", warehouseNumber(warehouse.ff_reservations.reserved_quantity)],
+            ["Доступно", warehouseNumber(warehouse.ff_reservations.available_quantity)],
+            ["Необеспеченный резерв", warehouseNumber(warehouse.ff_reservations.unsecured_reservation_quantity)]
+          );
+        }
         warehouseSummaryNode.innerHTML = summaryItems.map(function(item) {
           return '<div class="warehouse-summary-item"><span class="warehouse-summary-label">' + escapeHtml(item[0]) + '</span><span class="warehouse-summary-value">' + escapeHtml(item[1]) + '</span></div>';
         }).join("");
@@ -8257,11 +8270,21 @@
       if (warehouseBalancesNode) {
         warehouseBalancesNode.innerHTML = balances.length ? balances.map(function(line) {
           const identity = String(line.barcode || "") + (line.barcode ? " / " : "") + String(line.nm_id || "");
+          const reservationFacts = warehouse.ff_reservations
+            ? '<span class="warehouse-balance-reservation">Физически: ' + escapeHtml(warehouseNumber(line.physical_quantity)) +
+              ' · Зарезервировано: ' + escapeHtml(warehouseNumber(line.reserved_quantity)) +
+              ' · Доступно: ' + escapeHtml(warehouseNumber(line.available_quantity)) +
+              ' · Необеспечено: ' + escapeHtml(warehouseNumber(line.unsecured_reservation_quantity)) +
+              (Array.isArray(line.reservation_supply_ids) && line.reservation_supply_ids.length
+                ? ' · WB-поставка: ' + escapeHtml(line.reservation_supply_ids.join(", "))
+                : '') + '</span>'
+            : '';
           return '<tr data-warehouse-balance-row="' + escapeHtml(line.line_id || "") + '">' +
             '<td>' + escapeHtml(line.sku || "—") + '</td>' +
             '<td>' + escapeHtml(line.nomenclature_name || "—") + '</td>' +
             '<td>' + escapeHtml(identity || "—") + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseNumber(line.quantity)) +
+              reservationFacts +
               (line.warning ? '<span class="warehouse-balance-warning" data-tone="' + escapeHtml(line.quality_tone || "warning") + '">' + escapeHtml(line.warning) + '</span>' : '') + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td>' +
@@ -12037,7 +12060,7 @@
 
     function formatCellContent(column, row, cell) {
       if (String(cell.presentation_state || "") === "unavailable") {
-        return '<span>Исторические данные отсутствуют</span>';
+        return '<span aria-label="Исторические данные отсутствуют">—</span>';
       }
       if (column.id === "metric_label") {
         const content = '<span class="metric-label-text">' + escapeHtml(formatCellValue(cell)) + '</span>';

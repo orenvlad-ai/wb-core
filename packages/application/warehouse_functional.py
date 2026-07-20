@@ -1384,10 +1384,19 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             )
             document_type = str(document.get("document_type") or "")
             category = str(expense.get("category") or "")
+            # CNY statement rows are provenance for the canonical CNY-ledger
+            # fee operations already considered above.  Only independent,
+            # positive RUB rows are additional eligible components; zero and
+            # informational rows must not manufacture a false partial status.
+            bank_fee_is_canonical_rub_line = bool(
+                document_type == "bank_fee_statement"
+                and category in BANK_FEE_CATEGORIES
+                and str(expense.get("currency") or "").upper() == "RUB"
+                and (_optional_decimal(expense.get("amount_rub")) or ZERO) > ZERO
+            )
             is_cost_candidate = bool(
                 (
-                    document_type == "bank_fee_statement"
-                    and category in BANK_FEE_CATEGORIES
+                    bank_fee_is_canonical_rub_line
                 )
                 or document_type == LOGISTICS_DOCUMENT_TYPE
                 or (
@@ -1408,16 +1417,6 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                     {
                         "code": "financial_component_status_not_eligible",
                         "reason_ru": "Строка расхода или документ ещё не подтверждены для canonical allocation.",
-                    }
-                )
-            if (
-                document_type == "bank_fee_statement"
-                and str(expense.get("currency") or "").upper() != "RUB"
-            ):
-                candidate_reasons.append(
-                    {
-                        "code": "financial_component_currency_not_eligible",
-                        "reason_ru": "Комиссия банка не выражена в RUB.",
                     }
                 )
             if document_type in {LOGISTICS_DOCUMENT_TYPE, CUSTOMS_DOCUMENT_TYPE} and stage != STAGE_CHINA_TO_FF:
@@ -2960,6 +2959,7 @@ class WarehouseFunctionalBlock:
             "new_events": events,
             "movement_documents": movement_documents,
             "supplier_cost_states": supplier_cost_states,
+            "ff_reservations": _ff_reservation_snapshot_rows(capture),
             "diff": _balance_diff(previous, lines),
             "invariants": {
                 "warehouse_count": len(STAGES),
@@ -3329,6 +3329,18 @@ class WarehouseFunctionalBlock:
                             _json(item["provenance"]),
                         ),
                     )
+                for item in normalized.get("ff_reservations") or []:
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_warehouse_functional_ff_reservations(
+                               version_id,supply_id,nm_id,quantity
+                           ) VALUES(?,?,?,?)""",
+                        (
+                            version_id,
+                            str(item["supply_id"]),
+                            int(item["nm_id"]),
+                            str(item["quantity"]),
+                        ),
+                    )
                 for item in normalized.get("unmatched_doprinato") or []:
                     conn.execute(
                         """INSERT INTO sheet_vitrina_v1_warehouse_unmatched_doprinato(
@@ -3479,6 +3491,10 @@ class WarehouseFunctionalBlock:
                         (version_id,),
                     )
                     conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_functional_ff_reservations WHERE version_id=?",
+                        (version_id,),
+                    )
+                    conn.execute(
                         "DELETE FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id=?",
                         (version_id,),
                     )
@@ -3553,6 +3569,7 @@ class WarehouseFunctionalBlock:
             active_version_id=str((readback.get("active_version") or {}).get("version_id") or ""),
         )
         summaries = _summaries([_line_from_payload(item) for item in lines])
+        ff_reservations = dict(readback.get("ff_reservations") or {})
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -3567,6 +3584,7 @@ class WarehouseFunctionalBlock:
                     **summaries[key],
                     "updated_at": readback["active_version"]["effective_at"],
                     "status": _summary_status(lines, key, readback["sync"]),
+                    "ff_reservations": ff_reservations if key == STAGE_FF else None,
                 }
                 for key in STAGES
             ],
@@ -3589,9 +3607,17 @@ class WarehouseFunctionalBlock:
         summary = _summaries([_line_from_payload(item) for item in balances])[warehouse_key]
         names = self._nomenclature_names()
         documents = self._warehouse_documents(warehouse_key)
+        ff_reservations = (
+            dict(readback.get("ff_reservations") or {})
+            if warehouse_key == STAGE_FF
+            else {"by_nm": {}, "rows": []}
+        )
+        ff_reservations_by_nm = dict(ff_reservations.get("by_nm") or {})
         public_balances = []
+        balance_nm_ids: set[int] = set()
         for item in balances:
             nm_id = int(item["nm_id"])
+            balance_nm_ids.add(nm_id)
             identity = names.get(nm_id, {})
             quality_presentation = _warehouse_quality_presentation(item.get("quality"))
             cost_status_presentation = _warehouse_balance_status_presentation(
@@ -3617,6 +3643,27 @@ class WarehouseFunctionalBlock:
                     "barcode": identity.get("barcode") or "",
                     "identity_source": identity.get("source") or "nm_id",
                     "average_unit_cost_rub": item.get("wac_rub"),
+                    "physical_quantity": item.get("quantity"),
+                    "reserved_quantity": _text(
+                        _decimal((ff_reservations_by_nm.get(str(nm_id)) or {}).get("quantity"))
+                    ) if warehouse_key == STAGE_FF else "0",
+                    "available_quantity": _text(
+                        max(
+                            _decimal(item.get("quantity"))
+                            - _decimal((ff_reservations_by_nm.get(str(nm_id)) or {}).get("quantity")),
+                            ZERO,
+                        )
+                    ) if warehouse_key == STAGE_FF else item.get("quantity"),
+                    "unsecured_reservation_quantity": _text(
+                        max(
+                            _decimal((ff_reservations_by_nm.get(str(nm_id)) or {}).get("quantity"))
+                            - _decimal(item.get("quantity")),
+                            ZERO,
+                        )
+                    ) if warehouse_key == STAGE_FF else "0",
+                    "reservation_supply_ids": list(
+                        (ff_reservations_by_nm.get(str(nm_id)) or {}).get("supply_ids") or []
+                    ),
                     "quality_presentation": quality_presentation,
                     "cost_status_presentation": cost_status_presentation,
                     "identity_warning": identity_warning,
@@ -3632,6 +3679,53 @@ class WarehouseFunctionalBlock:
                     "warning": " · ".join(warning_parts),
                 }
             )
+        if warehouse_key == STAGE_FF:
+            for nm_key, reservation in sorted(
+                ff_reservations_by_nm.items(),
+                key=lambda item: int(item[0]),
+            ):
+                nm_id = int(nm_key)
+                if nm_id in balance_nm_ids:
+                    continue
+                identity = names.get(nm_id, {})
+                quantity = _text(_decimal(reservation.get("quantity")))
+                public_balances.append(
+                    {
+                        "line_id": f"reservation:{nm_id}",
+                        "version_id": str(readback["active_version"]["version_id"]),
+                        "warehouse_key": STAGE_FF,
+                        "nm_id": nm_id,
+                        "sku": identity.get("sku") or str(nm_id),
+                        "nomenclature_name": identity.get("name") or "",
+                        "barcode": identity.get("barcode") or "",
+                        "quantity": "0",
+                        "physical_quantity": "0",
+                        "reserved_quantity": quantity,
+                        "available_quantity": "0",
+                        "unsecured_reservation_quantity": quantity,
+                        "capital_rub": "0",
+                        "wac_rub": None,
+                        "average_unit_cost_rub": None,
+                        "certified": False,
+                        "quality": "reservation_waiting_for_receipt",
+                        "quality_tone": "warning",
+                        "quality_presentation": {
+                            "code": "reservation_waiting_for_receipt",
+                            "label_ru": "Ожидает поступления",
+                            "description_ru": "Товар зарезервирован для WB-поставки, но физически ещё не списан со склада FF.",
+                            "tone": "warning",
+                        },
+                        "cost_status_presentation": {
+                            "code": "reservation_waiting_for_receipt",
+                            "label_ru": "Ожидает поступления",
+                            "description_ru": "Резерв не входит в физический остаток и товарный капитал.",
+                            "tone": "warning",
+                        },
+                        "reservation_supply_ids": list(reservation.get("supply_ids") or []),
+                        "human_evidence": [],
+                        "warning": "Ожидает поступления",
+                    }
+                )
         public_documents = []
         for item in documents:
             document_lines = []
@@ -3735,6 +3829,7 @@ class WarehouseFunctionalBlock:
                         "+ В пути возврата на WB."
                     ),
                 } if warehouse_key == STAGE_WB else None,
+                "ff_reservations": ff_reservations if warehouse_key == STAGE_FF else None,
             },
             "balances": public_balances,
             "documents": public_documents,
@@ -3853,6 +3948,15 @@ class WarehouseFunctionalBlock:
                 "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id",
                 (active["version_id"],),
             ).fetchall()]
+            ff_reservation_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT supply_id,nm_id,quantity
+                       FROM sheet_vitrina_v1_warehouse_functional_ff_reservations
+                       WHERE version_id=? ORDER BY supply_id,nm_id""",
+                    (active["version_id"],),
+                ).fetchall()
+            ]
             documents = [dict(row) for row in conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_warehouse_functional_documents WHERE version_id=? ORDER BY occurred_at,document_id",
                 (active["version_id"],),
@@ -3995,6 +4099,12 @@ class WarehouseFunctionalBlock:
             "unmatched_doprinato": [_unmatched_public(item) for item in unmatched],
             "historical_wb_cost_projection": historical_public,
             "historical_wb_cost_corrections": historical_corrections,
+            "ff_reservations": _ff_reservation_public_state_from_snapshot(
+                reservations=ff_reservation_rows,
+                balances=[
+                    item for item in public_balances if item["warehouse_key"] == STAGE_FF
+                ],
+            ),
             "cutover_opening_discrepancy": {
                 "quantity": _text(sum((_decimal(row["quantity"]) for row in cutover_discrepancy_rows), ZERO)),
                 "capital_rub": _text(sum((_decimal(row["capital_rub"]) for row in cutover_discrepancy_rows), ZERO)),
@@ -4382,6 +4492,10 @@ class WarehouseFunctionalBlock:
                 )
 
         downstream_components = _supply_downstream_component_index(capture["downstream_cost_rows"])
+        active_reservations = _active_ff_reservation_index(
+            capture.get("ff_reservation_operations") or [],
+            capture.get("ff_reservation_lines") or [],
+        )
         cutover_revisions = dict((cutover or {}).get("absorbed_supply_revisions") or {})
         discrepancy_receipts: list[dict[str, Any]] = []
         doprinato_rows: list[dict[str, Any]] = []
@@ -4426,6 +4540,28 @@ class WarehouseFunctionalBlock:
                         )
                     )
                 )
+                reservation_quantity = active_reservations.get((supply_id, nm_id), ZERO)
+                if reservation_quantity == ZERO and wb_supply_id:
+                    reservation_quantity = active_reservations.get((wb_supply_id, nm_id), ZERO)
+                outbound_ff_wac = ff_outbound_wac_by_supply_nm.get((supply_id, nm_id))
+                if outbound_ff_wac is None:
+                    outbound_ff_wac = ff_outbound_wac_by_supply_nm.get((wb_supply_id, nm_id))
+                reservation_only = bool(
+                    needs_supply_cost
+                    and outbound_ff_wac is None
+                    and reservation_quantity >= packed
+                    and packed > ZERO
+                )
+                if reservation_only:
+                    provenance.update(
+                        {
+                            "reservation_only": True,
+                            "reservation_quantity": _text(reservation_quantity),
+                            "reservation_status": "waiting_for_goods_or_validated_costs",
+                            "physical_movement": False,
+                        }
+                    )
+                    needs_supply_cost = False
                 accepted_cost = ZERO
                 pre_acceptance_cost = ZERO
                 if needs_supply_cost:
@@ -4436,9 +4572,6 @@ class WarehouseFunctionalBlock:
                         raise WarehouseFunctionalError(
                             f"WB supply {supply_id}:{nm_id} has no validated downstream cost state"
                         )
-                    outbound_ff_wac = ff_outbound_wac_by_supply_nm.get((supply_id, nm_id))
-                    if outbound_ff_wac is None:
-                        outbound_ff_wac = ff_outbound_wac_by_supply_nm.get((wb_supply_id, nm_id))
                     if outbound_ff_wac is None and (cutover_mode or absorbed):
                         seed = cost_map.get(nm_id)
                         outbound_ff_wac = seed.ff_unit_cost if seed is not None else None
@@ -4492,6 +4625,8 @@ class WarehouseFunctionalBlock:
                                 },
                             }
                         )
+                    continue
+                if reservation_only:
                     continue
                 if status_id in WB_POST_SHIPMENT_GATE_STATUS_IDS and not is_doprinato:
                     open_qty = max(packed - accepted, ZERO)
@@ -5524,6 +5659,12 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS warehouse_functional_balance_stage
         ON sheet_vitrina_v1_warehouse_functional_balances(version_id,warehouse_key,nm_id);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_functional_ff_reservations(
+            version_id TEXT NOT NULL,supply_id TEXT NOT NULL,nm_id INTEGER NOT NULL,
+            quantity TEXT NOT NULL,PRIMARY KEY(version_id,supply_id,nm_id)
+        );
+        CREATE INDEX IF NOT EXISTS warehouse_functional_ff_reservation_stage
+        ON sheet_vitrina_v1_warehouse_functional_ff_reservations(version_id,nm_id,supply_id);
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_cost_states(
             version_id TEXT NOT NULL,shipment_id TEXT NOT NULL,
             source_fingerprint TEXT NOT NULL,calculation_fingerprint TEXT NOT NULL,
@@ -5620,6 +5761,8 @@ def _source_rows(
         "sheet_vitrina_v1_supplier_financial_expense_lines",
         "sheet_vitrina_v1_ff_stock_operations",
         "sheet_vitrina_v1_ff_stock_operation_lines",
+        "sheet_vitrina_v1_ff_stock_reservation_operations",
+        "sheet_vitrina_v1_ff_stock_reservation_lines",
         "sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint",
         "sheet_vitrina_v1_wb_supplies",
         "sheet_vitrina_v1_wb_supply_cost_layers",
@@ -5667,6 +5810,8 @@ def _source_rows(
         "financial_expense_lines": "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines ORDER BY supplier_order_id,financial_document_id,sort_order,line_id",
         "ff_operations": "SELECT * FROM sheet_vitrina_v1_ff_stock_operations ORDER BY created_at,operation_id",
         "ff_lines": "SELECT * FROM sheet_vitrina_v1_ff_stock_operation_lines ORDER BY operation_id,line_no",
+        "ff_reservation_operations": "SELECT * FROM sheet_vitrina_v1_ff_stock_reservation_operations ORDER BY created_at,operation_id",
+        "ff_reservation_lines": "SELECT * FROM sheet_vitrina_v1_ff_stock_reservation_lines ORDER BY operation_id,line_no",
         "ff_auto_writeoff_checkpoint": "SELECT * FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint ORDER BY slot",
         "wb_supplies": "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id",
         "fulfillment_service_uploads": "SELECT * FROM sheet_vitrina_v1_fulfillment_service_uploads ORDER BY upload_id",
@@ -6059,6 +6204,95 @@ def _guarded_local_sources(sources: Mapping[str, Any]) -> dict[str, Any]:
             "historical_correction_ready_snapshots",
         }
     }
+
+
+def _ff_reservation_snapshot_rows(capture: Mapping[str, Any]) -> list[dict[str, Any]]:
+    active = _active_ff_reservation_index(
+        capture.get("ff_reservation_operations") or [],
+        capture.get("ff_reservation_lines") or [],
+    )
+    return [
+        {"supply_id": supply_id, "nm_id": nm_id, "quantity": _text(quantity)}
+        for (supply_id, nm_id), quantity in sorted(active.items())
+    ]
+
+
+def _ff_reservation_public_state_from_snapshot(
+    *,
+    reservations: Iterable[Mapping[str, Any]],
+    balances: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    reservation_rows = [dict(item) for item in reservations]
+    balances_by_nm = {
+        int(item.get("nm_id") or 0): _decimal(item.get("quantity"))
+        for item in balances
+    }
+    by_nm: dict[str, dict[str, Any]] = {}
+    for item in reservation_rows:
+        nm_id = int(item.get("nm_id") or 0)
+        key = str(nm_id)
+        current = by_nm.setdefault(key, {"quantity": ZERO, "supply_ids": []})
+        current["quantity"] = _decimal(current["quantity"]) + _decimal(item.get("quantity"))
+        supply_id = str(item.get("supply_id") or "")
+        if supply_id and supply_id not in current["supply_ids"]:
+            current["supply_ids"].append(supply_id)
+    reserved = sum((_decimal(item["quantity"]) for item in by_nm.values()), ZERO)
+    physical = sum(balances_by_nm.values(), ZERO)
+    available = sum(
+        (max(quantity - _decimal((by_nm.get(str(nm_id)) or {}).get("quantity")), ZERO)
+         for nm_id, quantity in balances_by_nm.items()),
+        ZERO,
+    )
+    unsecured = sum(
+        (
+            max(
+                _decimal(item["quantity"])
+                - max(balances_by_nm.get(int(nm_id), ZERO), ZERO),
+                ZERO,
+            )
+            for nm_id, item in by_nm.items()
+        ),
+        ZERO,
+    )
+    public_by_nm = {
+        nm_id: {
+            "quantity": _text(_decimal(item["quantity"])),
+            "supply_ids": sorted(item["supply_ids"]),
+        }
+        for nm_id, item in by_nm.items()
+    }
+    return {
+        "physical_quantity": _text(physical),
+        "reserved_quantity": _text(reserved),
+        "available_quantity": _text(available),
+        "unsecured_reservation_quantity": _text(unsecured),
+        "reservation_supply_count": len(
+            {str(item.get("supply_id") or "") for item in reservation_rows}
+        ),
+        "reservation_sku_count": len(public_by_nm),
+        "by_nm": public_by_nm,
+        "rows": reservation_rows,
+        "formula_ru": "Доступно = max(физический остаток − резерв, 0); необеспеченный резерв не создаёт отрицательный остаток или капитал.",
+    }
+
+
+def _active_ff_reservation_index(
+    operations: Iterable[Mapping[str, Any]],
+    lines: Iterable[Mapping[str, Any]],
+) -> dict[tuple[str, int], Decimal]:
+    supply_by_operation = {
+        str(item.get("operation_id") or ""): str(item.get("supply_id") or "")
+        for item in operations
+    }
+    result: dict[tuple[str, int], Decimal] = {}
+    for line in lines:
+        supply_id = supply_by_operation.get(str(line.get("operation_id") or ""), "")
+        nm_id = int(line.get("nm_id") or 0)
+        if not supply_id or nm_id <= 0:
+            continue
+        key = (supply_id, nm_id)
+        result[key] = result.get(key, ZERO) + _decimal(line.get("quantity_delta"))
+    return {key: quantity for key, quantity in result.items() if quantity > ZERO}
 
 
 def _supply_downstream_component_index(
@@ -6953,6 +7187,24 @@ def _verify_version(conn: sqlite3.Connection, *, version_id: str, expected: Mapp
     ]
     if actual != wanted:
         raise WarehouseFunctionalError("functional apply readback mismatch")
+    stored_reservations = [
+        list(row)
+        for row in conn.execute(
+            """SELECT supply_id,nm_id,quantity
+               FROM sheet_vitrina_v1_warehouse_functional_ff_reservations
+               WHERE version_id=? ORDER BY supply_id,nm_id""",
+            (version_id,),
+        ).fetchall()
+    ]
+    wanted_reservations = [
+        [str(item["supply_id"]), int(item["nm_id"]), str(item["quantity"])]
+        for item in sorted(
+            expected.get("ff_reservations") or [],
+            key=lambda item: (str(item["supply_id"]), int(item["nm_id"])),
+        )
+    ]
+    if stored_reservations != wanted_reservations:
+        raise WarehouseFunctionalError("functional FF reservation readback mismatch")
     if len(expected["summaries"]) != 6:
         raise WarehouseFunctionalError("functional apply did not publish six warehouses")
 
@@ -7187,6 +7439,7 @@ def _calculation_digest(plan: Mapping[str, Any]) -> str:
         "new_events": events,
         "movement_documents": movement_documents,
         "supplier_cost_states": plan.get("supplier_cost_states") or [],
+        "ff_reservations": plan.get("ff_reservations") or [],
         "invariants": plan.get("invariants") or {},
     }
     return "sha256:" + _hash(payload)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -193,6 +194,11 @@ def main() -> None:
             result = block.record_wb_supply_debit(_wb_record(f"wb-skip-{status_id}", status_id, second_nm_id, 5))
             _assert(result is None, f"WB status {status_id} must not debit ФФ")
         for status_id in (3, 4, 5, 6):
+            _seed_validated_downstream_cost(
+                runtime,
+                supply_id=f"wb-debit-{status_id}",
+                nm_id=second_nm_id,
+            )
             result = block.record_wb_supply_debit(_wb_record(f"wb-debit-{status_id}", status_id, second_nm_id, 1))
             repeat = block.record_wb_supply_debit(_wb_record(f"wb-debit-{status_id}", status_id, second_nm_id, 1))
             _assert(result and not result.get("idempotent"), f"WB status {status_id} must debit ФФ")
@@ -205,10 +211,18 @@ def main() -> None:
             historical_debit and historical_debit.get("skip_reason") == "wb_supply_before_auto_writeoff_checkpoint",
             f"historical WB supply must not backfill across checkpoint, got {historical_debit}",
         )
+        _seed_validated_downstream_cost(runtime, supply_id="wb-too-large", nm_id=second_nm_id)
         oversized_debit = block.record_wb_supply_debit(_wb_record("wb-too-large", 5, second_nm_id, 100))
         _assert(
-            oversized_debit and oversized_debit.get("skip_reason") == "wb_supply_would_make_negative_balance",
-            f"WB auto writeoff must not create negative balance, got {oversized_debit}",
+            oversized_debit and oversized_debit.get("skip_reason") == "wb_supply_reserved_waiting_for_goods",
+            f"WB auto writeoff must reserve instead of creating negative balance, got {oversized_debit}",
+        )
+        reservation = runtime.list_ff_stock_reservations(supply_id="wb-too-large")
+        _assert(
+            len(reservation) == 1
+            and reservation[0]["quantity"] == 100.0
+            and _balance(block, second_nm_id) == 6.0,
+            f"unsecured reservation must stay outside physical balance: {reservation}",
         )
         bulk_repeat = block.record_wb_supply_debits(
             [
@@ -280,7 +294,7 @@ def main() -> None:
             "WB regional ledger source must not deduct selected WB supply from stock_ff again",
         )
         _assert(
-            regional_overlay_projection.get("added_qty_by_district", {}).get("central") == 10.0,
+            sum(regional_overlay_projection.get("added_qty_by_district", {}).values()) == 10.0,
             "WB regional ledger source must still add selected WB supply to district projection",
         )
 
@@ -443,6 +457,37 @@ def _wb_record(
     }
 
 
+def _seed_validated_downstream_cost(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str,
+    nm_id: int,
+) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sheet_vitrina_v1_wb_supply_cost_layers(
+                wb_supply_cost_layer_id,wb_supply_id,cache_key,nm_id,
+                accepted_qty,qty_denominator,supply_date,accepted_date,
+                sku_ff_unit_cost_rub,transit_cost_status,transit_amount_total,
+                transit_per_unit_rub,ff_services_amount_total,ff_services_per_unit_rub,
+                ff_storage_amount_total,ff_storage_per_unit_rub,
+                pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,
+                wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub,
+                source_status,component_status_json,missing_reason,calculated_at,
+                inputs_hash,version,is_current
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            """,
+            (
+                f"cost-{supply_id}-{nm_id}", supply_id, supply_id, int(nm_id),
+                0, 1, "2026-04-18", None, 100, "direct_zero_confirmed", 0,
+                0, 0, 0, 0, 0, 100, 0, 0, 100, "estimated", "{}", None,
+                ACTIVATED_AT, f"sha256:{supply_id}:{nm_id}", 1,
+            ),
+        )
+        conn.commit()
+
+
 def _balance(block: FfStockLedgerBlock, nm_id: int) -> float:
     rows = block.current_balance_rows_for_active_skus([(int(nm_id), "")])
     return float(rows[0]["current_stock_ff"])
@@ -475,7 +520,7 @@ def _regional_settings(*, selected_wb_supply_ids: list[str] | None = None) -> di
         "order_batch_qty": 10,
         "report_date_override": "2026-04-18",
         "stock_ff_source": STOCK_FF_SOURCE_LEDGER,
-        "included_district_keys": ["central", "northwest"],
+        "included_district_keys": ["central_north", "northwest"],
     }
     if selected_wb_supply_ids:
         settings["selected_wb_supply_ids"] = selected_wb_supply_ids

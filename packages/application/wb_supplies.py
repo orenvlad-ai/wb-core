@@ -602,12 +602,9 @@ class WbSuppliesBlock:
         }
         checkpoint: dict[str, Any] = {}
         if record_ff_movements:
-            checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
-                reason="warehouse_functional_bounded_sync"
-            )
-            ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
-                self.runtime.list_wb_supplies_cache_records()
-            )
+            movement = self.reconcile_functional_ff_state()
+            checkpoint = dict(movement.get("checkpoint") or {})
+            ff_stock_debits = dict(movement.get("ff_stock_debits") or {})
         sync.update(
             {
                 "record_ff_movements": record_ff_movements,
@@ -617,6 +614,25 @@ class WbSuppliesBlock:
         )
         response["sync"] = sync
         return response
+
+    def reconcile_functional_ff_state(self) -> dict[str, Any]:
+        """Reconcile reservations or atomic physical debits from cached official supplies.
+
+        The caller must materialize current downstream cost layers first.  A
+        reservation-only supply is safe and does not require a transit cost;
+        an actual physical debit remains fail-closed until every SKU has a
+        validated downstream state.
+        """
+        checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
+            reason="warehouse_functional_bounded_sync"
+        )
+        ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
+            self.runtime.list_wb_supplies_cache_records()
+        )
+        return {
+            "checkpoint": checkpoint,
+            "ff_stock_debits": ff_stock_debits,
+        }
 
     def start_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_backfill_request(payload or {})

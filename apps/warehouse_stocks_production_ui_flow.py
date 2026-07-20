@@ -280,7 +280,8 @@ def _run_warehouse_ui_flow(
                 )
 
             summary_values = page.locator("[data-warehouse-summary] .warehouse-summary-value").all_inner_texts()
-            _assert(len(summary_values) == (7 if warehouse_key == "wb" else 4), f"{warehouse_name}: summary values")
+            expected_summary_count = 7 if warehouse_key in {"ff", "wb"} else 4
+            _assert(len(summary_values) == expected_summary_count, f"{warehouse_name}: summary values")
             visible_sku_count = _visible_decimal(summary_values[0])
             visible_quantity = _visible_decimal(summary_values[1])
             visible_capital = _visible_money(summary_values[2])
@@ -303,6 +304,20 @@ def _run_warehouse_ui_flow(
                 labels = page.locator("[data-warehouse-summary] .warehouse-summary-label").all_inner_texts()
                 _assert(labels[1] == "Всего в контуре WB", "WB contour replaces ambiguous total tile")
                 _assert("На складах WB + В пути к покупателям + В пути возврата на WB" in page.locator("[data-warehouse-meta]").inner_text(), "WB contour formula is visible")
+            if warehouse_key == "ff":
+                labels = page.locator("[data-warehouse-summary] .warehouse-summary-label").all_inner_texts()
+                _assert(
+                    labels == [
+                        "Уникальных SKU",
+                        "Физический остаток",
+                        "Товарный капитал",
+                        "Средневзвешенная себестоимость",
+                        "Зарезервировано",
+                        "Доступно",
+                        "Необеспеченный резерв",
+                    ],
+                    "Склад FF: physical and reservation summary labels",
+                )
             visible_status = page.locator("[data-warehouse-status]").inner_text().strip()
             _assert(
                 visible_status == str(detail_summary.get("status_label") or "").strip(),
@@ -461,7 +476,7 @@ def _run_warehouse_ui_flow(
         legacy_summary_values = page.locator(
             "[data-warehouse-summary] .warehouse-summary-value"
         ).all_inner_texts()
-        _assert(len(legacy_summary_values) == 4, "legacy FF transition: four loaded summary values")
+        _assert(len(legacy_summary_values) == 7, "legacy FF transition: reservation-aware summary values")
         _assert(
             _visible_decimal(legacy_summary_values[0])
             == Decimal(str(legacy_ff_expected["sku_count"])),
@@ -977,11 +992,14 @@ def _run_warehouse_ui_flow(
             _assert(historical_unavailable_cells.count() > 0, "18 July warehouse history cells are rendered")
             _assert(
                 all(
-                    historical_unavailable_cells.nth(index).inner_text().strip()
-                    == "Исторические данные отсутствуют"
+                    historical_unavailable_cells.nth(index).inner_text().strip() == "—"
+                    and historical_unavailable_cells.nth(index)
+                    .locator('[aria-label="Исторические данные отсутствуют"]')
+                    .count()
+                    == 1
                     for index in range(historical_unavailable_cells.count())
                 ),
-                "18 July unproved warehouse history has an explicit reason instead of zero or dash",
+                "18 July unproved warehouse history uses one compact dash with an accessible reason",
             )
             functional_closed_cells = page.locator(
                 f'td[data-metric-key^="own_capital_"][data-cell-date="{period_date_to}"]'
@@ -989,8 +1007,10 @@ def _run_warehouse_ui_flow(
             _assert(functional_closed_cells.count() > 0, "last closed warehouse history cells are rendered")
             _assert(
                 all(
-                    functional_closed_cells.nth(index).inner_text().strip()
-                    != "Исторические данные отсутствуют"
+                    functional_closed_cells.nth(index)
+                    .locator('[aria-label="Исторические данные отсутствуют"]')
+                    .count()
+                    == 0
                     for index in range(functional_closed_cells.count())
                 ),
                 "last closed functional warehouse date is not presented as a historical gap",
@@ -1470,7 +1490,7 @@ def _assert_supplier_cost_transparency_profile(
     registry_payload: Mapping[str, Any],
     evidence_dir: Path,
 ) -> dict[str, Any]:
-    """Verify immutable controls for migration 106 only when explicitly selected."""
+    """Verify the current exact supplier-cost controls when explicitly selected."""
 
     control_column = next(
         (
@@ -1490,6 +1510,51 @@ def _assert_supplier_cost_transparency_profile(
         label="26GN390 supplier detail API",
     )
     control_breakdown = dict(control_detail.get("supplier_cost_breakdown") or {})
+    control_component_totals = _supplier_component_totals(control_breakdown)
+    _assert(
+        control_component_totals.get("supplier_payment") == Decimal("5724403.57"),
+        "26GN390 supplier payment enters capital once",
+    )
+    _assert(
+        control_component_totals.get("bank_fee") == Decimal("120899.32"),
+        "26GN390 bank fees enter capital once",
+    )
+    _assert(
+        sum(
+            (
+                amount
+                for key, amount in control_component_totals.items()
+                if key not in {"supplier_payment", "bank_fee"}
+            ),
+            Decimal("0"),
+        )
+        == Decimal("3256828.23"),
+        "26GN390 China to FF expenses enter capital once",
+    )
+    control_conservation = dict(control_breakdown.get("controls") or {})
+    _assert(
+        all(
+            bool(control_conservation.get(key))
+            for key in (
+                "document_allocation_conserved",
+                "document_counted_once",
+                "line_components_equal_capital",
+                "shipment_lines_equal_capital",
+            )
+        ),
+        "26GN390 allocation conservation controls",
+    )
+    control_document_controls = list(control_breakdown.get("document_controls") or [])
+    _assert(
+        bool(control_document_controls)
+        and all(
+            bool(item.get("conserved"))
+            and item.get("eligible_amount_rub") == item.get("allocated_amount_rub")
+            and not list(item.get("incomplete_reasons") or [])
+            for item in control_document_controls
+        ),
+        "26GN390 every cost-affecting document is fully allocated",
+    )
     control_lines = {
         int(item.get("nm_id") or 0): dict(item)
         for item in control_breakdown.get("lines") or []
@@ -1558,55 +1623,151 @@ def _assert_supplier_cost_transparency_profile(
     control_screenshot = evidence_dir / "supplier_26GN390_anti_spy_cost_proof.png"
     page.screenshot(path=str(control_screenshot), full_page=True)
 
-    partial_column = next(
+    payment_control_column = next(
         (
             dict(item)
             for item in registry_payload.get("columns") or []
-            if str((item or {}).get("invoice_no") or "") == "26GN462"
+            if str((item or {}).get("invoice_no") or "") == "26GN310"
         ),
         None,
     )
-    _assert(partial_column is not None, "26GN462 supplier registry column")
-    partial_shipment_id = str((partial_column or {}).get("shipment_id") or "")
-    partial_detail = _protected_json_get(
+    _assert(payment_control_column is not None, "26GN310 supplier registry column")
+    payment_control_shipment_id = str(
+        (payment_control_column or {}).get("shipment_id") or ""
+    )
+    payment_control_detail = _protected_json_get(
         context,
         base_url
         + "/v1/sheet-vitrina-v1/supply/supplier-shipments/"
-        + quote(partial_shipment_id, safe=""),
-        label="26GN462 supplier detail API",
+        + quote(payment_control_shipment_id, safe=""),
+        label="26GN310 supplier detail API",
     )
-    partial_breakdown = dict(partial_detail.get("supplier_cost_breakdown") or {})
+    payment_control_breakdown = dict(
+        payment_control_detail.get("supplier_cost_breakdown") or {}
+    )
+    payment_control_component_totals = _supplier_component_totals(
+        payment_control_breakdown
+    )
     _assert(
-        not bool((partial_breakdown.get("certification") or {}).get("certified")),
-        "26GN462 remains provisional",
+        payment_control_component_totals.get("supplier_payment")
+        == Decimal("8633999.78"),
+        "26GN310 supplier payment enters capital once",
     )
-    partial_response = page.goto(
-        _supplier_detail_url(base_url, partial_shipment_id, tab="supply"),
+    _assert(
+        payment_control_component_totals.get("bank_fee")
+        == Decimal("182350.10"),
+        "26GN310 bank fees enter capital once",
+    )
+    _assert(
+        sum(
+            (
+                amount
+                for key, amount in payment_control_component_totals.items()
+                if key not in {"supplier_payment", "bank_fee"}
+            ),
+            Decimal("0"),
+        )
+        == Decimal("4108486.60"),
+        "26GN310 China to FF expenses enter capital once",
+    )
+    _assert(
+        Decimal(str(payment_control_breakdown.get("quantity") or 0))
+        == Decimal("116250"),
+        "26GN310 canonical quantity",
+    )
+    _assert(
+        abs(
+            Decimal(str(payment_control_breakdown.get("capital_rub") or 0))
+            - Decimal("12924836.48")
+        )
+        < Decimal("0.01"),
+        "26GN310 canonical capital",
+    )
+    _assert(
+        abs(
+            Decimal(
+                str(payment_control_breakdown.get("average_unit_cost_rub") or 0)
+            )
+            - Decimal("111.1813890752688172043010753")
+        )
+        < Decimal("1e-20"),
+        "26GN310 canonical WAC",
+    )
+    payment_controls = dict(payment_control_breakdown.get("controls") or {})
+    _assert(
+        all(
+            bool(payment_controls.get(key))
+            for key in (
+                "document_allocation_conserved",
+                "document_counted_once",
+                "line_components_equal_capital",
+                "shipment_lines_equal_capital",
+            )
+        ),
+        "26GN310 conservation controls",
+    )
+    payment_document_controls = list(
+        payment_control_breakdown.get("document_controls") or []
+    )
+    _assert(
+        bool(payment_document_controls)
+        and all(
+            bool(item.get("conserved"))
+            and item.get("eligible_amount_rub") == item.get("allocated_amount_rub")
+            and not list(item.get("incomplete_reasons") or [])
+            for item in payment_document_controls
+        ),
+        "26GN310 every cost-affecting document is fully allocated",
+    )
+    _assert(
+        bool(
+            (payment_control_breakdown.get("certification") or {}).get(
+                "certified"
+            )
+        ),
+        "26GN310 source/calculation fingerprints are certified",
+    )
+    payment_control_response = page.goto(
+        _supplier_detail_url(base_url, payment_control_shipment_id, tab="supply"),
         wait_until="domcontentloaded",
         timeout=120_000,
     )
     _assert(
-        partial_response is not None and partial_response.status == 200,
-        "26GN462 supplier detail page status",
+        payment_control_response is not None
+        and payment_control_response.status == 200,
+        "26GN310 supplier detail page status",
     )
     page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
+    payment_statuses = page.locator("#productLines .line-cost-status")
     _assert(
-        page.locator("#productLines .line-cost-value.exact-cost-incomplete").count() > 0,
-        "26GN462 yellow cost values",
+        payment_statuses.count() > 0,
+        "26GN310 visible cost statuses",
     )
+    for index in range(payment_statuses.count()):
+        _assert(
+            payment_statuses.nth(index).inner_text().strip()
+            == "Все расходы учтены",
+            f"26GN310 green status row {index + 1}",
+        )
+    page.locator("#productLines details.line-cost-proof").first.click()
     _assert(
-        page.locator("#productLines .line-cost-status").first.inner_text().strip()
-        == "Предварительная себестоимость — не все расходы учтены",
-        "26GN462 visible provisional explanation",
+        page.locator("#productLines").get_by_text("Контроль:", exact=False).count()
+        >= 1,
+        "26GN310 human cost proof",
     )
-    partial_screenshot = evidence_dir / "supplier_26GN462_provisional_cost.png"
-    page.screenshot(path=str(partial_screenshot), full_page=True)
+    payment_control_screenshot = evidence_dir / "supplier_26GN310_payment_cost_proof.png"
+    page.screenshot(path=str(payment_control_screenshot), full_page=True)
     return {
         "control_26GN390": {
             "shipment_id": control_shipment_id,
             "source_fingerprint": control_breakdown.get("source_fingerprint"),
             "calculation_fingerprint": control_breakdown.get("calculation_fingerprint"),
             "certification": control_breakdown.get("certification"),
+            "component_totals_rub": {
+                key: str(value) for key, value in control_component_totals.items()
+            },
+            "controls": control_conservation,
+            "document_controls": control_document_controls,
             "lines": {
                 str(key): value
                 for key, value in control_lines.items()
@@ -1614,13 +1775,42 @@ def _assert_supplier_cost_transparency_profile(
             },
             "screenshot": str(control_screenshot),
         },
-        "control_26GN462": {
-            "shipment_id": partial_shipment_id,
-            "certification": partial_breakdown.get("certification"),
-            "screenshot": str(partial_screenshot),
+        "control_26GN310": {
+            "shipment_id": payment_control_shipment_id,
+            "quantity": payment_control_breakdown.get("quantity"),
+            "capital_rub": payment_control_breakdown.get("capital_rub"),
+            "average_unit_cost_rub": payment_control_breakdown.get(
+                "average_unit_cost_rub"
+            ),
+            "source_fingerprint": payment_control_breakdown.get(
+                "source_fingerprint"
+            ),
+            "calculation_fingerprint": payment_control_breakdown.get(
+                "calculation_fingerprint"
+            ),
+            "certification": payment_control_breakdown.get("certification"),
+            "controls": payment_controls,
+            "document_controls": payment_document_controls,
+            "component_totals_rub": {
+                key: str(value)
+                for key, value in payment_control_component_totals.items()
+            },
+            "screenshot": str(payment_control_screenshot),
         },
-        "screenshots": [str(control_screenshot), str(partial_screenshot)],
+        "screenshots": [str(control_screenshot), str(payment_control_screenshot)],
     }
+
+
+def _supplier_component_totals(breakdown: Mapping[str, Any]) -> dict[str, Decimal]:
+    result: dict[str, Decimal] = {}
+    for item in breakdown.get("component_controls") or []:
+        key = str((item or {}).get("component_key") or "").strip()
+        if not key:
+            continue
+        result[key] = result.get(key, Decimal("0")) + Decimal(
+            str((item or {}).get("source_amount_rub") or 0)
+        )
+    return result
 
 
 def _protected_json_get(
