@@ -6327,6 +6327,10 @@ def _customs_goods_items(normalized: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(item) for item in normalized.get("goods_items") or [] if isinstance(item, Mapping)]
 
 
+def _customs_annex_items(normalized: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in normalized.get("annex_items") or [] if isinstance(item, Mapping)]
+
+
 def _complete_customs_goods_item_count(items: Iterable[Mapping[str, Any]]) -> int:
     return sum(
         1
@@ -6346,12 +6350,13 @@ def _refresh_customs_goods_items_for_package(
     filename: str,
     customs_parser: Callable[[bytes, str], Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Read-only refresh incomplete item evidence without replacing stored aggregate truth."""
+    """Read-only refresh package evidence without persisting parser state."""
 
     normalized = dict(generation_row.get("normalized_parse") or {})
     existing_items = _customs_goods_items(normalized)
     existing_complete = _complete_customs_goods_item_count(existing_items)
-    if existing_items and existing_complete == len(existing_items):
+    existing_annex_items = _customs_annex_items(normalized)
+    if existing_items and existing_complete == len(existing_items) and existing_annex_items:
         return generation_row
     reparsed = (
         customs_parser(file_bytes, filename)
@@ -6360,17 +6365,29 @@ def _refresh_customs_goods_items_for_package(
     )
     reparsed_normalized = dict(reparsed.get("normalized_parse") or {})
     reparsed_items = _customs_goods_items(reparsed_normalized)
+    reparsed_annex_items = _customs_annex_items(reparsed_normalized)
     reparsed_complete = _complete_customs_goods_item_count(reparsed_items)
     same_item_boundary = (
         not existing_items
         or _customs_goods_item_boundary(reparsed_items) == _customs_goods_item_boundary(existing_items)
     )
-    if not reparsed_items or not same_item_boundary or reparsed_complete <= existing_complete:
+    if not reparsed_items or not same_item_boundary:
         return generation_row
-    normalized["goods_items"] = reparsed_items
-    normalized["goods_item_count"] = len(reparsed_items)
-    if reparsed_normalized.get("goods_items_parser_version"):
-        normalized["goods_items_parser_version"] = reparsed_normalized["goods_items_parser_version"]
+    if reparsed_complete > existing_complete:
+        normalized["goods_items"] = reparsed_items
+        normalized["goods_item_count"] = len(reparsed_items)
+        if reparsed_normalized.get("goods_items_parser_version"):
+            normalized["goods_items_parser_version"] = reparsed_normalized["goods_items_parser_version"]
+    if reparsed_annex_items:
+        normalized["annex_items"] = reparsed_annex_items
+        for key in (
+            "annex_item_count",
+            "annex_quantity_total",
+            "annex_quantity_conserved",
+            "annex_items_parser_version",
+        ):
+            if key in reparsed_normalized:
+                normalized[key] = reparsed_normalized[key]
     generation_row["normalized_parse"] = normalized
     return generation_row
 
