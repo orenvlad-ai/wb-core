@@ -20,6 +20,8 @@
 
 PR #678 был смёржен как `05bdbc9bd918e6bc2440debbaf52bb57202740aa`, но первый deploy fail-closed остановился до schema migration, systemd install и restart: общий seller-recovery package precheck не включал новые `node`, `npm` и `ffmpeg`, поэтому package-install branch не запускался. Recovery выносит эти зависимости в отдельный idempotent deploy gate: базовые пакеты и ffmpeg устанавливаются через apt, официальный Node `22.21.1` — из `nodejs.org` с exact SHA-256 для amd64/arm64, после чего прежний lockfile `npm ci` и проверка frozen identity остаются обязательными. Force-off posture не меняется.
 
+PR #679 подтвердил исправление dependency gate, но следующий fail-closed остановился до DDL из-за недостаточного headroom для второй raw-копии ~10.9 GB SQLite на текущем volume. Recovery не удаляет бизнес-данные и не затрагивает чужие backup-наборы: только autoanswers-owned verified pre-v1 raw backup преобразуется в `.sqlite3.zst`. До удаления raw выполняются SQLite `integrity_check`, SHA-256 source/compressed, `zstd --test` и byte-for-byte hash восстановленного stream; рядом атомарно сохраняется restore manifest. Capacity gate требует `database size + 2 GiB` свободного места перед новым coherent pre-v2 backup.
+
 ## Manual mode increment
 
 - В стабильный enum добавлен `manual`; UI теперь имеет один selector: `Выключено`, `Ручной`, `Черновики`, `Безопасный`, `Полный`.
@@ -118,10 +120,10 @@ SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` arou
 
 ## Проверки
 
-### Autoanswers tests — PASS (75 methods)
+### Autoanswers tests — PASS (76 methods)
 
 ```text
-apps/wb_autoanswers_activation_test.py         3 PASS
+apps/wb_autoanswers_activation_test.py         4 PASS
 apps/wb_autoanswers_runtime_test.py           21 PASS
 apps/wb_autoanswers_sync_test.py               7 PASS
 apps/wb_autoanswers_node_bridge_test.py        5 PASS

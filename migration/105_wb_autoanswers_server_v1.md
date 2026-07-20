@@ -7,9 +7,10 @@ Status: staged manual-mode release train.
 1. Review `IMPLEMENTATION_REPORT.md` and `docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md`.
 2. Keep persisted master-switch OFF and set `WB_AUTOANSWERS_FORCE_OFF=true` for the first database/schema and read-only checks.
 3. The schema-v2 initializer must create a coherent `runtime/backups/wb_autoanswers_schema_v2/` SQLite backup, verify `PRAGMA integrity_check=ok`, and abort before mutation on failure.
-4. Install the lockfile-pinned Node dependencies and ffmpeg in the target image; never commit `node_modules`.
-5. Bind only the named runtime secrets through the existing hosted secret boundary.
-6. The repo-owned GET-only runner may set its narrow external-I/O gate for approved sync/backfill; the full worker timer stays disabled through initial force-OFF acceptance.
+4. Before that raw backup, require free capacity of live DB size plus 2 GiB. The repo-owned capacity gate may replace only the autoanswers pre-v1 raw backup with a verified zstd representation and restore manifest; it must prove SQLite integrity and byte-exact decompression before deleting the raw representation.
+5. Install the lockfile-pinned Node dependencies and ffmpeg in the target image; never commit `node_modules`.
+6. Bind only the named runtime secrets through the existing hosted secret boundary.
+7. The repo-owned GET-only runner may set its narrow external-I/O gate for approved sync/backfill; the full worker timer stays disabled through initial force-OFF acceptance.
 
 ## Staged external gates
 

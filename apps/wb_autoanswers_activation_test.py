@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from apps.wb_autoanswers_activation import run
+from apps.wb_autoanswers_activation import _compress_verified_backup, run
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
 
@@ -73,6 +75,30 @@ class ActivationTest(unittest.TestCase):
         with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "false"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "empty AI/publication queue"):
                 run(action="activate-manual", runtime_dir=self.runtime_dir)
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for backup compaction acceptance")
+    def test_schema_v1_backup_is_removed_only_after_verified_byte_exact_compression(self) -> None:
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backup_dir.mkdir(parents=True)
+        source = backup_dir / "registry_upload_runtime__pre_autoanswers_v1__test.sqlite3"
+        with sqlite3.connect(source) as conn:
+            conn.execute("CREATE TABLE evidence(value BLOB NOT NULL)")
+            conn.execute("INSERT INTO evidence VALUES(?)", (os.urandom(1024 * 1024),))
+        original = source.read_bytes()
+        result = _compress_verified_backup(source)
+        compressed = backup_dir / result["compressed_filename"]
+        manifest = backup_dir / result["manifest_filename"]
+        self.assertFalse(source.exists())
+        self.assertTrue(compressed.is_file())
+        self.assertTrue(manifest.is_file())
+        restored = subprocess.run(
+            ["zstd", "--decompress", "--stdout", "--quiet", str(compressed)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        self.assertEqual(restored, original)
+        self.assertTrue(result["raw_source_removed_after_verification"])
 
 
 if __name__ == "__main__":
