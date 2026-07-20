@@ -1,15 +1,32 @@
 # WB Autoanswers Server v1 — implementation report
 
-Дата локальной приёмки: 2026-07-20  
-Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`  
-Рабочая копия: `/Users/ovlmacbook/Downloads/wb-core-autoanswers-loop_20260719T214600Z/repo`  
-Локальная ветка: `codex/wb-autoanswers-server-v1`
+Дата локальной приёмки manual increment: 2026-07-20
+
+Актуальный baseline: local `refs/remotes/origin/main` at `e9f90c306763e252790eeb3c921875198d2aca64`
+
+Исходный server-v1 baseline: `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`
+
+Рабочая копия: `/Users/ovlmacbook/Downloads/wb-core-autoanswers-manual_20260720T081019Z/repo`
+
+Локальная ветка: `agent/wb-autoanswers-manual`
 
 ## Local release-candidate status
 
-`LOCAL_RELEASE_CANDIDATE_READY__STANDARD_RELEASE_TRAIN_AUTHORIZED`
+`MANUAL_MODE_RELEASE_CANDIDATE_READY__FORCE_OFF_STAGE_FIRST`
 
-Локальная реализация, fake-transport публикация, release hardening, тесты и документация готовы. Production HTTP deployment pin-ит emergency force-off; AI/publication scheduler не добавлен. Фактические PR/deploy/production acceptance результаты фиксируются release-train evidence и финальным LOOP-отчётом, а не заранее в этом versioned code report.
+Первоначальный server-native контур был выпущен из baseline `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`. Текущий manual increment построен от актуального `origin/main` `e9f90c306763e252790eeb3c921875198d2aca64`. Локальная реализация, fake-transport публикация, release hardening, тесты и документация готовы. Первый production deploy сохраняет emergency force-off и устанавливает full worker disabled. Снятие force-off выполняется только последующим tracked config release после OFF acceptance.
+
+## Manual mode increment
+
+- В стабильный enum добавлен `manual`; UI теперь имеет один selector: `Выключено`, `Ручной`, `Черновики`, `Безопасный`, `Полный`.
+- В `manual` steady sync и backfill создают ноль AI jobs. Только явный POST `manual/generate` с permission `feedbacks.ai_review` ставит один idempotent durable job для точной текущей версии.
+- Generated reply, route, warnings, cost и checks доступны в detail. Редактирование вызывает новый `guard_final` operation узкого Python↔Node boundary: strict draft JSON Schema плюс неизменённый frozen final draft guard.
+- Публикация требует сохранённый guard pass, exact edit revision/hash и отдельный `confirmed=true`. HTTP лишь создаёт durable publication job.
+- Непосредственно перед write повторно проверяются effective ON, текущий `manual`, permission инициатора, version/hash, отсутствие WB answer, exact reply, hard gates, fallback/media uncertainty и seller_chat invariants.
+- Все autoanswers POST защищены capability checks и JSON/same-origin CSRF marker.
+- Schema v2 создаёт verified pre-migration backup, расширяет persisted mode constraint и хранит manual review/publication evidence. Duplicate publication для одной feedback version запрещён уникальным индексом.
+- Full worker service/timer устанавливается disabled и force-OFF. Repo-owned lifecycle проверяет зависимости/frozen hashes/empty queues, atomically activates manual, запускает только GET-only canary без Node/OpenAI/writer capability и умеет fail closed deactivate.
+- Production UI acceptance имеет два read-only профиля: `off-force` и `manual`; manual profile не нажимает generation/publication и доказывает нулевой job delta.
 
 ## Что реализовано
 
@@ -21,9 +38,9 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - Реализован узкий stdin/stdout JSON boundary Python → Node. Node перед каждым запуском проверяет все 28 manifest hashes и вызывает исходный frozen orchestrator.
 - В существующей runtime SQLite добавлены отдельные canonical feedback/version/media, sync, command, processing, publication, attempt, budget, backlog-preview and audit tables.
 - Master-switch default OFF; `WB_AUTOANSWERS_FORCE_OFF=true` имеет абсолютный приоритет.
-- OFF разрешает синхронизацию и локальный UI, но блокирует enqueue/claim AI, ручное approve, все publication claims (включая readback) и каждый WB write.
+- OFF разрешает синхронизацию, локальный UI и обязательный GET-only readback уже возможной отправки, но блокирует enqueue/claim AI, ручное approve, все новые write claims и каждый WB write.
 - OFF→ON увеличивает `enable_epoch`; старые jobs не продолжаются автоматически и переводятся в `needs_review`.
-- Реализованы `draft_only`, `auto_safe`, `auto_all`. Начальный auto_safe allowlist: `public_only`, `wb_return`, `wb_support`. `seller_chat` всегда review-only.
+- Реализованы `manual`, `draft_only`, `auto_safe`, `auto_all`. Начальный auto_safe allowlist: `public_only`, `wb_return`, `wb_support`. `seller_chat` всегда review-only.
 - Реализован двухшаговый historical backlog: expiring preview с count/max cost → explicit enqueue. История не проходит эту границу автоматически.
 - Бюджет: warning 70%, hard cap $5/day and $50/month. Atomic reservation учитывает параллельные claims; exact frozen usage settles per-review cost.
 
@@ -72,7 +89,7 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - `204` is not publication proof. HTTP success/error/timeout all go to `publish_pending_readback`.
 - Pending publication can execute only GET detail reconciliation; blind POST retry is structurally excluded.
 - Exact normalized readback reaches `published`. Missing/different/external reply reaches `needs_review` without a second write.
-- Readback 429/5xx/timeout сохраняет только readback retry. Пока master/force-off активен, такой job не claim-ится; после отдельного разрешённого ON он может выполнить только GET readback, никогда повторный POST.
+- Readback 429/5xx/timeout сохраняет только readback retry. Даже при master/force-off такой job может claim-иться исключительно для обязательного GET readback; повторный POST структурно невозможен.
 - PATCH existing WB answers is absent.
 
 ### 6. Documentation and explicit external boundary
@@ -80,12 +97,12 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - Added `docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md`.
 - Added `migration/105_wb_autoanswers_server_v1.md` with staged activation and rollback.
 - Updated module index and README.
-- `apps/wb_autoanswers_worker.py` is inert by default. `--run-once` is rejected unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`; AI/publication timer не добавлен.
+- `apps/wb_autoanswers_worker.py` is inert by default. `--run-once` is rejected unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`; full timer устанавливается disabled и включается lifecycle gate только после manual activation proof.
 - Active production target and HTTP systemd unit pin `WB_AUTOANSWERS_FORCE_OFF=true`; OFF→ON is rejected while the override is active.
 - `apps/wb_autoanswers_readonly.py` is a separate GET-only capability for bounded canary/backfill. It imports no writer/Node/OpenAI code, requires persisted master OFF, reasserts force-off after env load, rate-limits calls and proves zero AI/publication job delta.
 - A dedicated five-minute GET-only steady timer is deployed disabled, then can be enabled only by the repo-owned timer gate after production read acceptance. It also drains UI sync commands without importing AI/publication capabilities.
 - Authenticated production Playwright acceptance has a repo-owned flow that proves exact URL/render, OFF reason and disabled controls, local 50-row pagination, detail/media/status contracts, zero cross-page duplicates, no 5xx/page/console/fatal errors and screenshot evidence.
-- First additive schema execution takes a coherent SQLite backup under `backups/wb_autoanswers_schema_v1`, verifies `PRAGMA integrity_check=ok`, and applies DDL plus marker/settings atomically; failure aborts before activation.
+- Schema-v2 execution takes a coherent SQLite backup under `backups/wb_autoanswers_schema_v2`, verifies `PRAGMA integrity_check=ok`, and applies DDL plus marker/settings atomically; failure aborts before activation.
 
 ## State and idempotency summary
 
@@ -93,27 +110,28 @@ Implemented states cover:
 
 `discovered → synced → queued → processing → generated → needs_review/approved → publishing → publish_pending_readback → published`, with `skipped`, `retryable_error` and `terminal_error` branches.
 
-SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` around claims/reservations/transitions. Claims have owner/lease timestamps. An expired processing or publication lease is recoverable by exactly one claimant only while effective ON. Publication pending readback remains durable but unclaimed while OFF and can never become a second POST.
+SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` around claims/reservations/transitions. Claims have owner/lease timestamps. An expired processing or new-write publication lease is recoverable by exactly one claimant only while effective ON. Publication pending readback remains durable and may perform only GET reconciliation while OFF; it can never become a second POST.
 
 ## Проверки
 
-### New autoanswers tests — PASS (52 methods)
+### Autoanswers tests — PASS (75 methods)
 
 ```text
-apps/wb_autoanswers_runtime_test.py          16 PASS
-apps/wb_autoanswers_sync_test.py              6 PASS
-apps/wb_autoanswers_node_bridge_test.py       4 PASS
+apps/wb_autoanswers_activation_test.py         3 PASS
+apps/wb_autoanswers_runtime_test.py           21 PASS
+apps/wb_autoanswers_sync_test.py               7 PASS
+apps/wb_autoanswers_node_bridge_test.py        5 PASS
 apps/wb_autoanswers_media_worker_test.py      4 PASS
-apps/wb_autoanswers_publication_test.py       9 PASS
-apps/wb_autoanswers_http_ui_test.py           3 PASS
-apps/wb_autoanswers_readonly_test.py          6 PASS
-apps/wb_autoanswers_release_safety_test.py    4 PASS
+apps/wb_autoanswers_publication_test.py       15 PASS
+apps/wb_autoanswers_http_ui_test.py            7 PASS
+apps/wb_autoanswers_readonly_test.py           7 PASS
+apps/wb_autoanswers_release_safety_test.py     6 PASS
 ```
 
 Покрыты обязательные сценарии:
 
 - OFF at enqueue, processing, approval and pre-write;
-- all three modes and complete initial auto_safe allowlist;
+- all five selector states, four enabled modes and complete initial auto_safe allowlist;
 - emergency force-off;
 - OFF→ON without automatic historical/old-epoch backlog;
 - explicit backlog preview/enqueue;
@@ -178,14 +196,13 @@ python3 apps/wb_autoanswers_worker.py --run-once
 
 ## Что намеренно осталось
 
-These are activation tasks, not missing local implementation:
+These are release/owner actions, not missing local implementation:
 
-1. Complete the standard GitHub release train and exact-SHA hosted deployment.
-2. Run the authorized production GET-only page/detail and resumable history backfill with master/force-off both OFF.
-3. Install/verify lockfile Node dependencies and ffmpeg before, but not as authorization for, a future AI canary.
-4. Only after a new owner decision may force-off be removed for one `draft_only` AI canary under the budget gate.
-5. Add an AI/publication scheduler only in a separate owner-approved live-runtime change.
-6. Any production WB POST requires a later explicit bounded canary decision and mandatory readback.
+1. Complete the LOOP release train and exact-SHA hosted deployment while force-off remains true.
+2. Run authenticated production OFF acceptance.
+3. Complete the tracked configuration release that removes force-off while persisted master remains OFF.
+4. Activate `master_enabled=true, mode=manual` only through the repo-owned lifecycle and run read-only manual acceptance without clicking generation.
+5. The first real generation is intentionally left to the owner through the UI; any production WB publication still requires a later explicit confirmation after review and mandatory readback.
 
 No automatic PATCH/edit of an existing answer is planned for v1.
 
@@ -213,4 +230,4 @@ All WB and model behaviors were exercised through fakes or frozen local fixture 
 
 ## Exact post-release external gate
 
-The current owner authorization covers only the standard release train plus force-off production GET sync/backfill. After successful production acceptance, the single next gate is separate owner approval to remove `WB_AUTOANSWERS_FORCE_OFF` and run one bounded `draft_only` AI canary. OpenAI live calls and every WB write remain prohibited until that later gate.
+Текущий owner authorization включает release train, force-OFF acceptance, tracked снятие force-off и activation в `master_enabled=true, mode=manual` без генерации. После успешной manual acceptance единственный следующий gate — владелец открывает `Отзывы → Отзывы`, выбирает eligible отзыв и нажимает `Сгенерировать ответ`. Release train не нажимает эту кнопку, не вызывает OpenAI и не создаёт WB write. Публикация остаётся отдельным последующим подтверждением владельца после просмотра и повторных guards.

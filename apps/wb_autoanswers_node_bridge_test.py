@@ -102,6 +102,27 @@ class NodeBridgeTest(unittest.TestCase):
             self.assertNotIn("line", raw)
             self.assertEqual(EVALUATION_SIGNATURE[:7], "sha256:")
 
+    def test_manual_edit_runs_untouched_frozen_final_guard(self) -> None:
+        safe = self.bridge().guard_final(
+            review_id="manual-1",
+            review_version=1,
+            route="public_only",
+            case_code=None,
+            reply="Здравствуйте. Понимаем, что небольшие пузыри после установки портят впечатление.",
+            primary_issue=None,
+        )
+        self.assertTrue(safe["passed"], safe["errors"])
+        unsafe = self.bridge().guard_final(
+            review_id="manual-2",
+            review_version=1,
+            route="seller_chat",
+            case_code="WB-A123",
+            reply="Напишите в чат продавца по коду WB-A123 и приложите фото доказательств.",
+            primary_issue="SERVICE_GUARANTEE",
+        )
+        self.assertFalse(unsafe["passed"])
+        self.assertTrue(unsafe["errors"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

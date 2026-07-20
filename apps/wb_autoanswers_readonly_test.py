@@ -76,6 +76,18 @@ class ReadonlyRunnerTest(unittest.TestCase):
         self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
         self.assertFalse(result["detail"]["auto_enqueue"])
 
+    def test_manual_canary_syncs_without_ai_capability_or_jobs(self) -> None:
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "false"
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        result = self.run_case("manual-canary")
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(result["runtime"]["settings"]["effective_enabled"])
+        self.assertEqual(result["runtime"]["settings"]["mode"], "manual")
+        self.assertEqual(result["runtime"]["ai_jobs"], {})
+        self.assertEqual(result["runtime"]["publication_jobs"], {})
+        self.assertFalse(result["runtime"]["capabilities"]["openai"])
+        self.assertFalse(result["runtime"]["capabilities"]["wb_post_patch"])
+
     def test_backfill_completes_both_streams_without_jobs(self) -> None:
         result = self.run_case("backfill")
         self.assertEqual(result["status"], "complete")

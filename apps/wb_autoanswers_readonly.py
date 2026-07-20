@@ -27,6 +27,7 @@ from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV
 from packages.adapters.wb_autoanswers import HttpBackedWbAutoanswersReadAdapter, WbFeedbackReadPort
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
 from packages.application.wb_autoanswers_sync import FeedbackSyncError, WbFeedbackSyncService
+from packages.contracts.wb_autoanswers import MODE_MANUAL
 
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -81,6 +82,17 @@ def _assert_force_off(repository: AutoanswersRepository) -> None:
         raise RuntimeError("read-only production operation requires effective emergency force-off")
 
 
+def _assert_manual_on(repository: AutoanswersRepository) -> None:
+    settings = repository.settings()
+    if (
+        not settings.master_enabled
+        or settings.force_off
+        or not settings.effective_enabled
+        or settings.mode != MODE_MANUAL
+    ):
+        raise RuntimeError("manual GET-only canary requires effective manual mode")
+
+
 def _safe_status(repository: AutoanswersRepository) -> dict[str, Any]:
     status = repository.operational_status()
     status["capabilities"] = {
@@ -112,7 +124,10 @@ def run_operation(
         raise ValueError("external read source is required")
     if not _truthy(os.environ.get(EXTERNAL_GATE_ENV)):
         raise RuntimeError("external IO gate is OFF")
-    _assert_force_off(repository)
+    if operation == "manual-canary":
+        _assert_manual_on(repository)
+    else:
+        _assert_force_off(repository)
     before = repository.operational_status()
     before_ai = _sum_counts(before["ai_jobs"])
     before_publication = _sum_counts(before["publication_jobs"])
@@ -123,10 +138,10 @@ def run_operation(
         page_size=page_size,
     )
 
-    if operation == "canary":
+    if operation in {"canary", "manual-canary"}:
         page = service.steady_sync_tick(is_answered=False)
         if int(page.get("enqueued") or 0) != 0:
-            raise RuntimeError("force-off canary unexpectedly enqueued AI work")
+            raise RuntimeError("GET-only canary unexpectedly enqueued AI work")
         feedback_id = repository.latest_feedback_id(sync_run_id=str(page["run_id"]))
         if not feedback_id:
             raise RuntimeError("bounded unanswered page was empty; detail GET was not attempted")
@@ -276,7 +291,9 @@ def run_operation(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Force-off, GET-only WB feedback sync/backfill.")
-    parser.add_argument("--operation", choices=("status", "canary", "steady", "backfill"), required=True)
+    parser.add_argument(
+        "--operation", choices=("status", "canary", "manual-canary", "steady", "backfill"), required=True
+    )
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--page-size", type=int, default=100)
@@ -292,8 +309,9 @@ def main() -> int:
             if args.env_file is None:
                 raise ValueError("external read operations require --env-file")
             _load_safe_env_file(args.env_file.resolve())
-            # Reassert after the dotenv load so its contents cannot weaken this runner.
-            os.environ[FORCE_OFF_ENV] = "true"
+            # Reassert after the dotenv load so its contents cannot choose the
+            # canary safety posture.
+            os.environ[FORCE_OFF_ENV] = "false" if args.operation == "manual-canary" else "true"
         repository = AutoanswersRepository(runtime_dir=args.runtime_dir.resolve())
         source = HttpBackedWbAutoanswersReadAdapter() if args.operation != "status" else None
         result = run_operation(

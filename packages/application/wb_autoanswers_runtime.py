@@ -28,6 +28,7 @@ from packages.contracts.wb_autoanswers import (
     MODE_AUTO_ALL,
     MODE_AUTO_SAFE,
     MODE_DRAFT_ONLY,
+    MODE_MANUAL,
     NODE_BOUNDARY_VERSION,
     PROMPT_BUNDLE_VERSION,
     STATE_APPROVED,
@@ -50,7 +51,7 @@ from packages.contracts.wb_autoanswers import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_DAILY_CAP_USD = Decimal("5.00")
 DEFAULT_MONTHLY_CAP_USD = Decimal("50.00")
 DEFAULT_WARNING_RATIO = Decimal("0.70")
@@ -339,6 +340,7 @@ class AutoanswersRepository:
                     # transaction. Start the migration inside the script so
                     # all additive DDL plus marker/settings rows are atomic.
                     conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
+                    self._migrate_schema_v2(conn)
                     conn.execute(
                         "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
                         (SCHEMA_VERSION, iso_utc(self._now())),
@@ -398,7 +400,7 @@ class AutoanswersRepository:
 
         if not self.db_path.exists() or self.db_path.stat().st_size == 0:
             return None
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backup_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(backup_dir, 0o700)
         stamp = self._now().strftime("%Y%m%dT%H%M%SZ")
@@ -422,6 +424,78 @@ class AutoanswersRepository:
                 code="schema_backup_failed",
             ) from exc
         return backup_path
+
+    @staticmethod
+    def _migrate_schema_v2(conn: sqlite3.Connection) -> None:
+        """Widen the persisted mode enum and add manual-review evidence columns."""
+
+        settings_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_autoanswers_settings'"
+        ).fetchone()
+        settings_sql = str(settings_sql_row["sql"] or "") if settings_sql_row else ""
+        if "'manual'" not in settings_sql:
+            conn.execute(
+                "ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v1"
+            )
+            conn.execute(
+                """
+                CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    master_enabled INTEGER NOT NULL DEFAULT 0 CHECK(master_enabled IN (0,1)),
+                    mode TEXT NOT NULL DEFAULT 'draft_only' CHECK(mode IN ('manual','draft_only','auto_safe','auto_all')),
+                    enable_epoch INTEGER NOT NULL DEFAULT 0,
+                    enabled_at TEXT,
+                    daily_cap_usd TEXT NOT NULL,
+                    monthly_cap_usd TEXT NOT NULL,
+                    warning_ratio TEXT NOT NULL,
+                    max_reservation_per_review_usd TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswers_settings
+                SELECT singleton, master_enabled, mode, enable_epoch, enabled_at,
+                       daily_cap_usd, monthly_cap_usd, warning_ratio,
+                       max_reservation_per_review_usd, policy_version, updated_at
+                FROM sheet_vitrina_v1_wb_autoanswers_settings_v1
+                """
+            )
+            conn.execute("DROP TABLE sheet_vitrina_v1_wb_autoanswers_settings_v1")
+
+        def add_column(table: str, column: str, declaration: str) -> None:
+            columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+        job_table = "sheet_vitrina_v1_wb_autoanswer_jobs"
+        for name, declaration in (
+            ("manual_reply", "TEXT"),
+            ("manual_reply_sha256", "TEXT"),
+            ("manual_guard_passed", "INTEGER"),
+            ("manual_guard_errors_json", "TEXT"),
+            ("manual_reviewed_by", "TEXT"),
+            ("manual_reviewed_at", "TEXT"),
+            ("manual_edit_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            add_column(job_table, name, declaration)
+
+        publication_table = "sheet_vitrina_v1_wb_publication_jobs"
+        for name, declaration in (
+            ("request_source", "TEXT NOT NULL DEFAULT 'automatic'"),
+            ("requested_by", "TEXT"),
+            ("mode_at_enqueue", "TEXT"),
+            ("manual_edit_revision", "INTEGER"),
+        ):
+            add_column(publication_table, name, declaration)
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sv1_pub_jobs_one_create_per_version
+            ON sheet_vitrina_v1_wb_publication_jobs(feedback_id, content_version)
+            """
+        )
 
     def settings(self) -> AutoanswersSettings:
         with closing(self._connect()) as conn:
@@ -602,7 +676,8 @@ class AutoanswersRepository:
             content_version = 1 if is_new else int(current["content_version"]) + int(content_changed)
             effective_on = bool(settings["master_enabled"]) and not _force_off_from_env(self.env)
             eligible_epoch: int | None = None
-            if is_new and run_kind == "steady" and effective_on and not answer_text:
+            automatic_mode = str(settings["mode"]) != MODE_MANUAL
+            if is_new and run_kind == "steady" and effective_on and automatic_mode and not answer_text:
                 eligible_epoch = int(settings["enable_epoch"])
             elif current is not None and current["auto_eligible_epoch"] is not None:
                 eligible_epoch = int(current["auto_eligible_epoch"])
@@ -754,6 +829,7 @@ class AutoanswersRepository:
                 and content_changed
                 and eligible_epoch is not None
                 and effective_on
+                and automatic_mode
                 and eligible_epoch == int(settings["enable_epoch"])
                 and not answer_text
             ),
@@ -829,7 +905,7 @@ class AutoanswersRepository:
             schema_rows = conn.execute(
                 "SELECT version, applied_at FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations ORDER BY version"
             ).fetchall()
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
         settings = self.settings()
         return {
@@ -868,7 +944,7 @@ class AutoanswersRepository:
         }
 
     def verified_schema_backup_status(self) -> dict[str, Any]:
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
         if not backups:
             return {"count": 0, "latest_filename": None, "integrity_check": None, "sha256": None}
@@ -1121,6 +1197,29 @@ class AutoanswersRepository:
                 ).fetchone()
             return dict(existing)
 
+    def enqueue_manual_processing(
+        self,
+        feedback_id: str,
+        *,
+        content_version: int,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Idempotently queue one exact current review version after an explicit click."""
+
+        settings = self.assert_effective_on(operation="manual AI enqueue")
+        if settings.mode != MODE_MANUAL:
+            raise AutoanswersRuntimeError(
+                "manual generation is available only in manual mode",
+                code="manual_mode_required",
+            )
+        return self.enqueue_processing(
+            feedback_id,
+            content_version=content_version,
+            trigger_source="manual_generate",
+            actor_id=actor_id,
+            allow_history=True,
+        )
+
     @staticmethod
     def _period_bounds(now: datetime) -> tuple[str, str]:
         day = now.astimezone(timezone.utc).date().isoformat()
@@ -1202,10 +1301,20 @@ class AutoanswersRepository:
                     (j.state=? AND j.lease_until IS NOT NULL AND j.lease_until<=?) OR
                     (j.state=? AND j.retry_stage='processing' AND j.available_at<=?)
                 )
+                  AND (? <> ? OR j.trigger_source='manual_generate')
                 ORDER BY j.created_at, j.processing_key
                 LIMIT 1
                 """,
-                (STATE_QUEUED, iso_utc(now), STATE_PROCESSING, iso_utc(now), STATE_RETRYABLE_ERROR, iso_utc(now)),
+                (
+                    STATE_QUEUED,
+                    iso_utc(now),
+                    STATE_PROCESSING,
+                    iso_utc(now),
+                    STATE_RETRYABLE_ERROR,
+                    iso_utc(now),
+                    settings.mode,
+                    MODE_MANUAL,
+                ),
             ).fetchone()
             if row is None:
                 return None
@@ -1497,7 +1606,7 @@ class AutoanswersRepository:
             next_state = STATE_GENERATED
             if review_reasons:
                 next_state = STATE_NEEDS_REVIEW
-            elif settings.mode == MODE_DRAFT_ONLY:
+            elif settings.mode in {MODE_MANUAL, MODE_DRAFT_ONLY}:
                 next_state = STATE_GENERATED
             elif settings.mode == MODE_AUTO_SAFE:
                 next_state = STATE_APPROVED if route in AUTO_SAFE_ROUTES else STATE_NEEDS_REVIEW
@@ -1528,7 +1637,17 @@ class AutoanswersRepository:
                     next_state=next_state,
                 )
             if next_state == STATE_APPROVED:
-                self._create_publication_job(conn, job=job, reply=reply, reply_sha=reply_sha, at=now)
+                self._create_publication_job(
+                    conn,
+                    job=job,
+                    reply=reply,
+                    reply_sha=reply_sha,
+                    request_source="automatic",
+                    requested_by=None,
+                    mode_at_enqueue=settings.mode,
+                    manual_edit_revision=None,
+                    at=now,
+                )
             stored = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
                 (processing_key_value,),
@@ -1592,6 +1711,10 @@ class AutoanswersRepository:
         job: Mapping[str, Any],
         reply: str,
         reply_sha: str,
+        request_source: str,
+        requested_by: str | None,
+        mode_at_enqueue: str,
+        manual_edit_revision: int | None,
         at: datetime,
     ) -> str:
         pub_key = publication_key(str(job["feedback_id"]), int(job["content_version"]), reply_sha)
@@ -1600,8 +1723,9 @@ class AutoanswersRepository:
             INSERT OR IGNORE INTO sheet_vitrina_v1_wb_publication_jobs(
                 publication_key, processing_key, feedback_id, content_version,
                 content_version_hash, exact_reply, normalized_reply_sha256,
-                state, available_at, attempts, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,0,?,?)
+                state, available_at, attempts, request_source, requested_by,
+                mode_at_enqueue, manual_edit_revision, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)
             """,
             (
                 pub_key,
@@ -1613,14 +1737,153 @@ class AutoanswersRepository:
                 reply_sha,
                 STATE_APPROVED,
                 iso_utc(at),
+                _clean_text(request_source),
+                _clean_text(requested_by) or None,
+                mode_at_enqueue,
+                manual_edit_revision,
                 iso_utc(at),
                 iso_utc(at),
             ),
         )
+        stored = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE feedback_id=? AND content_version=?",
+            (job["feedback_id"], job["content_version"]),
+        ).fetchone()
+        if stored is None:
+            raise AutoanswersRuntimeError("publication job was not persisted", code="publication_persist_failed")
+        if str(stored["publication_key"]) != pub_key:
+            raise AutoanswersRuntimeError(
+                "a publication already exists for this feedback version",
+                code="publication_already_exists",
+            )
         return pub_key
 
-    def approve_for_publication(self, processing_key_value: str, *, actor_id: str) -> dict[str, Any]:
-        self.assert_effective_on(operation="manual publication approval")
+    def manual_guard_context(self, processing_key_value: str) -> dict[str, Any]:
+        settings = self.assert_effective_on(operation="manual reply validation")
+        if settings.mode != MODE_MANUAL:
+            raise AutoanswersRuntimeError("manual mode is required", code="manual_mode_required")
+        with closing(self._connect()) as conn:
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (_clean_text(processing_key_value),),
+            ).fetchone()
+            if job is None:
+                raise AutoanswersRuntimeError("processing job not found", code="job_not_found")
+            feedback = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                (job["feedback_id"],),
+            ).fetchone()
+        if str(job["state"]) not in {STATE_GENERATED, STATE_NEEDS_REVIEW}:
+            raise AutoanswersRuntimeError("job is not ready for review", code="invalid_approval_state")
+        if feedback is None or int(feedback["content_version"]) != int(job["content_version"]):
+            raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
+        if str(feedback["content_version_hash"]) != str(job["content_version_hash"]):
+            raise AutoanswersRuntimeError("stale feedback hash", code="stale_content_hash")
+        if feedback["answer_text"]:
+            raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+        if not bool(job["node_contract_valid"]) or not bool(job["hard_gates_passed"]):
+            raise AutoanswersRuntimeError("hard gates did not pass", code="hard_gate_failed")
+        if bool(job["fallback_used"]) or bool(job["media_uncertain"]):
+            raise AutoanswersRuntimeError("uncertain result cannot be published", code="uncertain_result")
+        result = json.loads(str(job["result_json"] or "{}"))
+        pipeline = result.get("pipeline_result") if isinstance(result.get("pipeline_result"), Mapping) else {}
+        return {
+            "processing_key": str(job["processing_key"]),
+            "feedback_id": str(job["feedback_id"]),
+            "content_version": int(job["content_version"]),
+            "route": str(job["final_route"] or ""),
+            "case_code": str(job["case_code"]) if job["case_code"] else None,
+            "primary_issue": str(pipeline.get("primary_issue")) if pipeline.get("primary_issue") else None,
+        }
+
+    def save_manual_reply_review(
+        self,
+        processing_key_value: str,
+        *,
+        reply: str,
+        guard_passed: bool,
+        guard_errors: Sequence[str],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        context = self.manual_guard_context(processing_key_value)
+        exact_reply = str(reply or "").strip()
+        if not exact_reply:
+            raise ValueError("reply is required")
+        now = self._now()
+        digest = final_reply_hash(exact_reply)
+        with self.transaction() as conn:
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (processing_key_value,),
+            ).fetchone()
+            if job is None:
+                raise AutoanswersRuntimeError("processing job not found", code="job_not_found")
+            if conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs WHERE feedback_id=? AND content_version=?",
+                (job["feedback_id"], job["content_version"]),
+            ).fetchone():
+                raise AutoanswersRuntimeError("publication is already queued", code="publication_already_exists")
+            previous = str(job["state"])
+            next_state = previous
+            if not guard_passed and previous == STATE_GENERATED:
+                next_state = STATE_NEEDS_REVIEW
+            revision = int(job["manual_edit_revision"] or 0) + 1
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state=?, manual_reply=?, manual_reply_sha256=?, manual_guard_passed=?,
+                    manual_guard_errors_json=?, manual_reviewed_by=?, manual_reviewed_at=?,
+                    manual_edit_revision=?, updated_at=?
+                WHERE processing_key=?
+                """,
+                (
+                    next_state,
+                    exact_reply,
+                    digest,
+                    int(bool(guard_passed)),
+                    canonical_json([_clean_text(item) for item in guard_errors]),
+                    _clean_text(actor_id),
+                    iso_utc(now),
+                    revision,
+                    iso_utc(now),
+                    processing_key_value,
+                ),
+            )
+            self._audit(
+                conn,
+                aggregate_type="processing_job",
+                aggregate_id=processing_key_value,
+                event_type="manual_reply_guarded",
+                actor_type="user",
+                actor_id=_clean_text(actor_id),
+                details={
+                    "reply_sha256": digest,
+                    "guard_passed": bool(guard_passed),
+                    "guard_errors": list(guard_errors),
+                    "manual_edit_revision": revision,
+                    "route": context["route"],
+                },
+                at=now,
+                previous_state=previous,
+                next_state=next_state,
+            )
+            stored = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (processing_key_value,),
+            ).fetchone()
+        return dict(stored)
+
+    def approve_for_publication(
+        self,
+        processing_key_value: str,
+        *,
+        actor_id: str,
+        confirmed: bool = False,
+        expected_reply_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        settings = self.assert_effective_on(operation="manual publication approval")
+        if not confirmed:
+            raise AutoanswersRuntimeError("explicit publication confirmation is required", code="confirmation_required")
         now = self._now()
         with self.transaction() as conn:
             job = conn.execute(
@@ -1643,6 +1906,16 @@ class AutoanswersRepository:
                 raise AutoanswersRuntimeError("hard gates did not pass", code="hard_gate_failed")
             if bool(job["fallback_used"]) or bool(job["media_uncertain"]):
                 raise AutoanswersRuntimeError("uncertain result cannot be published", code="uncertain_result")
+            is_manual_mode = settings.mode == MODE_MANUAL
+            reply = str((job["manual_reply"] if is_manual_mode else job["final_reply"]) or "")
+            reply_sha = str((job["manual_reply_sha256"] if is_manual_mode else job["final_reply_sha256"]) or "")
+            if is_manual_mode:
+                if not bool(job["manual_guard_passed"]) or not job["manual_reviewed_by"]:
+                    raise AutoanswersRuntimeError("manual reply has not passed final guards", code="manual_guard_required")
+                if not expected_reply_sha256 or str(expected_reply_sha256) != reply_sha:
+                    raise AutoanswersRuntimeError("reviewed reply hash changed", code="manual_reply_hash_mismatch")
+            if not reply or final_reply_hash(reply) != reply_sha:
+                raise AutoanswersRuntimeError("reviewed reply hash is invalid", code="publication_reply_hash_mismatch")
             previous = str(job["state"])
             assert_transition(previous, STATE_APPROVED)
             conn.execute(
@@ -1652,8 +1925,12 @@ class AutoanswersRepository:
             pub_key = self._create_publication_job(
                 conn,
                 job=job,
-                reply=str(job["final_reply"]),
-                reply_sha=str(job["final_reply_sha256"]),
+                reply=reply,
+                reply_sha=reply_sha,
+                request_source="manual" if is_manual_mode else "review_approval",
+                requested_by=_clean_text(actor_id),
+                mode_at_enqueue=settings.mode,
+                manual_edit_revision=int(job["manual_edit_revision"] or 0) if is_manual_mode else None,
                 at=now,
             )
             self._audit(
@@ -1676,16 +1953,11 @@ class AutoanswersRepository:
             )
 
     def claim_publication_job(self, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict[str, Any] | None:
-        """Claim no publication work while OFF, including pending readbacks."""
+        """Allow mandatory GET readback while OFF, but never claim a new write."""
 
         now = self._now()
         lease_until = now + timedelta(seconds=max(1, int(lease_seconds)))
         with self.transaction() as conn:
-            settings_row = conn.execute(
-                "SELECT master_enabled FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
-            ).fetchone()
-            if not settings_row or not bool(settings_row["master_enabled"]) or _force_off_from_env(self.env):
-                return None
             row = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_wb_publication_jobs
@@ -1707,6 +1979,11 @@ class AutoanswersRepository:
             ).fetchone()
             action = "readback"
             if row is None:
+                settings_row = conn.execute(
+                    "SELECT master_enabled FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+                ).fetchone()
+                if not settings_row or not bool(settings_row["master_enabled"]) or _force_off_from_env(self.env):
+                    return None
                 row = conn.execute(
                     """
                     SELECT * FROM sheet_vitrina_v1_wb_publication_jobs
@@ -1800,6 +2077,39 @@ class AutoanswersRepository:
             ).fetchone()
             return {**dict(claimed), "action": action}
 
+    def _actor_has_ai_review_permission(self, conn: sqlite3.Connection, actor_id: str) -> bool:
+        actor = _clean_text(actor_id)
+        if not actor:
+            return False
+        source = self.env if self.env is not None else os.environ
+        configured_admin = _clean_text(source.get("WB_CORE_WEB_AUTH_USERNAME"))
+        if configured_admin and actor.casefold() == configured_admin.casefold():
+            return True
+        auth_enabled = bool(_clean_text(source.get("WB_CORE_WEB_AUTH_SESSION_SECRET")))
+        if actor == "local_operator" and not auth_enabled:
+            return True
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_users'"
+        ).fetchone()
+        if table_exists is None:
+            return False
+        row = conn.execute(
+            """
+            SELECT is_active, allowed_sections_json
+            FROM sheet_vitrina_v1_users
+            WHERE lower(username)=lower(?)
+            LIMIT 1
+            """,
+            (actor,),
+        ).fetchone()
+        if row is None or not bool(row["is_active"]):
+            return False
+        try:
+            sections = json.loads(str(row["allowed_sections_json"] or "[]"))
+        except json.JSONDecodeError:
+            return False
+        return isinstance(sections, list) and "feedbacks.ai_review" in sections
+
     def _assert_publication_invariants(self, conn: sqlite3.Connection, publication: Mapping[str, Any]) -> None:
         processing = conn.execute(
             "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
@@ -1823,6 +2133,28 @@ class AutoanswersRepository:
             raise AutoanswersRuntimeError("publication hard gates failed", code="hard_gate_failed")
         if bool(processing["fallback_used"]) or bool(processing["media_uncertain"]):
             raise AutoanswersRuntimeError("uncertain result cannot be published", code="uncertain_result")
+        request_source = str(publication["request_source"] or "automatic")
+        if request_source in {"manual", "review_approval"}:
+            actor_id = str(publication["requested_by"] or "")
+            if not self._actor_has_ai_review_permission(conn, actor_id):
+                raise AutoanswersRuntimeError(
+                    "publication requester no longer has feedbacks.ai_review",
+                    code="review_permission_revoked",
+                )
+        if request_source == "manual":
+            settings = conn.execute(
+                "SELECT master_enabled, mode FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+            ).fetchone()
+            if settings is None or not bool(settings["master_enabled"]) or str(settings["mode"]) != MODE_MANUAL:
+                raise AutoanswersRuntimeError("manual publication requires current manual mode", code="manual_mode_required")
+            if str(publication["mode_at_enqueue"] or "") != MODE_MANUAL:
+                raise AutoanswersRuntimeError("manual publication mode evidence is invalid", code="manual_mode_evidence_invalid")
+            if not bool(processing["manual_guard_passed"]) or not processing["manual_reviewed_by"]:
+                raise AutoanswersRuntimeError("manual final guard evidence is missing", code="manual_guard_required")
+            if int(publication["manual_edit_revision"] or 0) != int(processing["manual_edit_revision"] or 0):
+                raise AutoanswersRuntimeError("manual reply revision is stale", code="manual_reply_revision_stale")
+            if str(processing["manual_reply_sha256"] or "") != str(publication["normalized_reply_sha256"]):
+                raise AutoanswersRuntimeError("manual reply hash is stale", code="manual_reply_hash_mismatch")
         if str(processing["final_route"] or "") == "seller_chat":
             reply = str(publication["exact_reply"] or "")
             case_code = str(processing["case_code"] or "")
@@ -2072,6 +2404,11 @@ class AutoanswersRepository:
 
     def preview_backlog(self, *, actor_id: str) -> dict[str, Any]:
         settings = self.assert_effective_on(operation="backlog preview")
+        if settings.mode == MODE_MANUAL:
+            raise AutoanswersRuntimeError(
+                "historical backlog is disabled in manual mode",
+                code="manual_mode_backlog_disabled",
+            )
         now = self._now()
         expires = now + timedelta(seconds=BACKLOG_PREVIEW_TTL_SECONDS)
         with self.transaction() as conn:
@@ -2117,6 +2454,11 @@ class AutoanswersRepository:
 
     def enqueue_backlog_from_preview(self, preview_id: str, *, actor_id: str) -> dict[str, Any]:
         settings = self.assert_effective_on(operation="historical backlog enqueue")
+        if settings.mode == MODE_MANUAL:
+            raise AutoanswersRuntimeError(
+                "historical backlog is disabled in manual mode",
+                code="manual_mode_backlog_disabled",
+            )
         now = self._now()
         with self.transaction() as conn:
             preview = conn.execute(
@@ -2448,7 +2790,7 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_schema_migrations(
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_settings(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     master_enabled INTEGER NOT NULL DEFAULT 0 CHECK(master_enabled IN (0,1)),
-    mode TEXT NOT NULL DEFAULT 'draft_only' CHECK(mode IN ('draft_only','auto_safe','auto_all')),
+    mode TEXT NOT NULL DEFAULT 'draft_only' CHECK(mode IN ('manual','draft_only','auto_safe','auto_all')),
     enable_epoch INTEGER NOT NULL DEFAULT 0,
     enabled_at TEXT,
     daily_cap_usd TEXT NOT NULL,
@@ -2589,6 +2931,13 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswer_jobs(
     last_error_code TEXT,
     approved_by TEXT,
     approved_at TEXT,
+    manual_reply TEXT,
+    manual_reply_sha256 TEXT,
+    manual_guard_passed INTEGER,
+    manual_guard_errors_json TEXT,
+    manual_reviewed_by TEXT,
+    manual_reviewed_at TEXT,
+    manual_edit_revision INTEGER NOT NULL DEFAULT 0,
     started_at TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL,
@@ -2618,10 +2967,15 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_publication_jobs(
     readback_hash TEXT,
     last_error_code TEXT,
     retry_stage TEXT,
+    request_source TEXT NOT NULL DEFAULT 'automatic',
+    requested_by TEXT,
+    mode_at_enqueue TEXT,
+    manual_edit_revision INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sv1_pub_jobs_claim ON sheet_vitrina_v1_wb_publication_jobs(state, available_at, lease_until);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sv1_pub_jobs_one_create_per_version ON sheet_vitrina_v1_wb_publication_jobs(feedback_id, content_version);
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_publication_attempts(
     attempt_id TEXT PRIMARY KEY,

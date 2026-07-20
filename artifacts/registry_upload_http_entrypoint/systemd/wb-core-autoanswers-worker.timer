@@ -1,0 +1,12 @@
+[Unit]
+Description=Run WB Core Autoanswers Bounded Worker Every Minute
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+RandomizedDelaySec=10
+Persistent=true
+Unit=wb-core-autoanswers-worker.service
+
+[Install]
+WantedBy=timers.target

@@ -110,7 +110,7 @@ class RuntimeTest(unittest.TestCase):
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
-            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob("*.sqlite3"))
+            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v2").glob("*.sqlite3"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
@@ -120,7 +120,7 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob("*.sqlite3"))),
+                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v2").glob("*.sqlite3"))),
                 1,
             )
             evidence = AutoanswersRepository(
@@ -136,6 +136,40 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(settings.effective_enabled)
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
             self.repo.assert_effective_on(operation="test")
+
+    def test_schema_v1_settings_constraint_migrates_to_manual_without_data_loss(self) -> None:
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            repo = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
+            repo.update_settings(mode="auto_safe", actor_id="admin")
+            with sqlite3.connect(repo.db_path) as conn:
+                conn.executescript(
+                    """
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=2;
+                    ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
+                    CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
+                        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                        master_enabled INTEGER NOT NULL DEFAULT 0 CHECK(master_enabled IN (0,1)),
+                        mode TEXT NOT NULL DEFAULT 'draft_only' CHECK(mode IN ('draft_only','auto_safe','auto_all')),
+                        enable_epoch INTEGER NOT NULL DEFAULT 0,
+                        enabled_at TEXT,
+                        daily_cap_usd TEXT NOT NULL,
+                        monthly_cap_usd TEXT NOT NULL,
+                        warning_ratio TEXT NOT NULL,
+                        max_reservation_per_review_usd TEXT NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO sheet_vitrina_v1_wb_autoanswers_settings
+                    SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings_v2;
+                    DROP TABLE sheet_vitrina_v1_wb_autoanswers_settings_v2;
+                    """
+                )
+            migrated = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
+            self.assertEqual(migrated.settings().mode, "auto_safe")
+            migrated.update_settings(mode="manual", actor_id="admin")
+            self.assertEqual(migrated.settings().mode, "manual")
+            self.assertEqual(migrated.verified_schema_backup_status()["integrity_check"], "ok")
 
     def test_emergency_force_off_prevents_persisting_master_on(self) -> None:
         self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
@@ -257,6 +291,64 @@ class RuntimeTest(unittest.TestCase):
                         job["processing_key"], result=successful_result(route), worker_id="worker"
                     )
                     self.assertEqual(stored["state"], expected)
+
+    def test_five_selector_states_and_force_off_precedence(self) -> None:
+        self.assertFalse(self.repo.settings().master_enabled)
+        for mode in ("manual", "draft_only", "auto_safe", "auto_all"):
+            with self.subTest(mode=mode):
+                settings = self.repo.update_settings(master_enabled=True, mode=mode, actor_id="admin")
+                self.assertTrue(settings.effective_enabled)
+                self.assertEqual(settings.mode, mode)
+                settings = self.repo.update_settings(master_enabled=False, actor_id="admin")
+                self.assertFalse(settings.effective_enabled)
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+        settings = self.repo.settings()
+        self.assertTrue(settings.master_enabled)
+        self.assertEqual(settings.mode, "manual")
+        self.assertFalse(settings.effective_enabled)
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
+            self.repo.enqueue_manual_processing("missing", content_version=1, actor_id="reviewer")
+
+    def test_manual_sync_never_enqueues_and_click_is_idempotent(self) -> None:
+        self.enable("manual")
+        outcome = self.insert_new("manual-review")
+        self.assertFalse(outcome["auto_enqueue"])
+        self.assertIsNone(outcome["auto_eligible_epoch"])
+        first = self.repo.enqueue_manual_processing(
+            "manual-review", content_version=1, actor_id="reviewer"
+        )
+        second = self.repo.enqueue_manual_processing(
+            "manual-review", content_version=1, actor_id="reviewer"
+        )
+        self.assertEqual(first["processing_key"], second["processing_key"])
+        self.assertEqual(len(self.repo.get_feedback("manual-review")["ai_jobs"]), 1)
+        claimed = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(claimed["trigger_source"], "manual_generate")
+
+    def test_manual_result_is_stale_after_content_change(self) -> None:
+        self.enable("manual")
+        self.insert_new("manual-stale")
+        job = self.repo.enqueue_manual_processing(
+            "manual-stale", content_version=1, actor_id="reviewer"
+        )
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.complete_generation(
+            job["processing_key"], result=successful_result(), worker_id="worker"
+        )
+        self.repo.upsert_feedback(
+            feedback("manual-stale", text="Смысл отзыва изменился"),
+            source_stream="detail",
+            run_kind="reconciliation",
+        )
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "stale"):
+            self.repo.manual_guard_context(job["processing_key"])
+
+    def test_manual_mode_disables_backlog_preview(self) -> None:
+        self.enable("manual")
+        self.repo.upsert_feedback(feedback("history"), source_stream="archive", run_kind="backfill")
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "manual"):
+            self.repo.preview_backlog(actor_id="admin")
 
     def test_fallback_media_uncertainty_and_invalid_contract_need_review(self) -> None:
         for field in ("fallback_used", "media_uncertain"):

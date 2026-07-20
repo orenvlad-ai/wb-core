@@ -1,15 +1,15 @@
 # WB autoanswers server v1 — activation and rollback runbook
 
-Status: production release train; feature deployed physically but activation deliberately blocked.
+Status: staged manual-mode release train.
 
 ## Preconditions
 
 1. Review `IMPLEMENTATION_REPORT.md` and `docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md`.
 2. Keep persisted master-switch OFF and set `WB_AUTOANSWERS_FORCE_OFF=true` for the first database/schema and read-only checks.
-3. The first schema initializer must create a coherent `runtime/backups/wb_autoanswers_schema_v1/` SQLite backup, verify `PRAGMA integrity_check=ok`, and abort before schema mutation on failure.
+3. The schema-v2 initializer must create a coherent `runtime/backups/wb_autoanswers_schema_v2/` SQLite backup, verify `PRAGMA integrity_check=ok`, and abort before mutation on failure.
 4. Install the lockfile-pinned Node dependencies and ffmpeg in the target image; never commit `node_modules`.
 5. Bind only the named runtime secrets through the existing hosted secret boundary.
-6. The repo-owned GET-only runner may set its narrow external-I/O gate for approved sync/backfill; the full worker gate stays disabled.
+6. The repo-owned GET-only runner may set its narrow external-I/O gate for approved sync/backfill; the full worker timer stays disabled through initial force-OFF acceptance.
 
 ## Staged external gates
 
@@ -29,36 +29,43 @@ Status: production release train; feature deployed physically but activation del
 - verify history created no AI jobs.
 - after successful reconciliation, enable only `wb-core-autoanswers-readonly-sync.timer`; the full AI/publication worker remains unscheduled.
 
-### Gate C — OpenAI draft-only canary
+### Gate C — remove force-off and activate manual without AI
 
-- explicit owner approval and daily/monthly budget dashboards required;
-- enable master in `draft_only` only;
-- one newly observed eligible review;
-- verify frozen identity, usage/cost, media status and no publication job.
+- merge/deploy the tracked configuration release that changes HTTP, target and full-worker force-off pins to false;
+- keep persisted master OFF through deploy and prove it in the UI;
+- run `autoanswers-lifecycle activate-manual`;
+- require Node >=20, ffmpeg, all 28 frozen hashes, an empty AI/publication queue and current schema backup evidence;
+- the command disables the force-OFF timer, persists master ON/manual, runs one bounded GET-only canary with no Node/OpenAI/writer import, proves zero AI/publication jobs and enables the full worker timer;
+- run authenticated UI acceptance with `--expected-state manual`;
+- do not click generation and do not publish.
 
-### Gate D — fake transport publication rehearsal
+### Gate D — first owner-operated manual generation
+
+- the owner explicitly clicks `Сгенерировать ответ` for one eligible review in `Отзывы → Отзывы`;
+- verify frozen identity, usage/cost, route, warnings, media status and guard evidence;
+- do not publish until the owner reviews/edits, reruns final guards and separately confirms `Опубликовать`.
+
+### Gate E — fake transport publication rehearsal
 
 - no WB write;
 - exercise approved, 204/no readback, different readback, timeout and 429 paths against the test transport.
 
-### Gate E — separately approved production write canary
+### Gate F — owner-confirmed production manual write
 
-- not authorized by this implementation;
-- exact review IDs and maximum count must be owner-approved;
-- start with `auto_safe`, not `auto_all`;
+- only one separately confirmed guarded manual reply;
 - mandatory readback is the only publication proof.
 
 ## Rollback
 
-1. Set `WB_AUTOANSWERS_FORCE_OFF=true`; this blocks AI, manual approval, every write and all publication claims, including pending readback.
-2. Stop only the future autoanswers scheduler unit after it exists; do not delete queued data.
-3. Keep `publish_pending_readback` jobs unclaimed while OFF. After a separately authorized re-enable, reconcile them by GET before considering any new write; never replay their POST blindly.
+1. Run `autoanswers-lifecycle deactivate`; it disables the full worker timer, persists master OFF, and enables the GET-only sync timer.
+2. Restore `WB_AUTOANSWERS_FORCE_OFF=true` in a tracked release for emergency fail-closed operation.
+3. A `publish_pending_readback` job may perform only detail GET reconciliation while OFF; never replay its POST blindly.
 4. Restore code independently. Additive SQLite tables may remain inert; destructive down migrations are not required.
 5. Restore the pre-activation SQLite backup only for database corruption, never to hide ambiguous publication attempts. Reconcile WB first.
 
 ## Acceptance
 
-- master OFF really blocks all new processing and writes;
+- master OFF really blocks all new processing and writes while still allowing mandatory GET-only readback;
 - expired leases recover with one claimant;
 - backfill creates zero automatic AI jobs;
 - daily/monthly reservations prevent concurrent overspend;

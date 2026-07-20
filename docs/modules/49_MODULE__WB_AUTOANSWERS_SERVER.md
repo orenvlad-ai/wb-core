@@ -2,12 +2,12 @@
 title: "WB Autoanswers Server v1"
 doc_id: "49_MODULE__WB_AUTOANSWERS_SERVER"
 doc_type: "module"
-status: "implemented_locally_external_io_gated"
+status: "manual_mode_release_candidate_force_off_staged"
 purpose: "Server-native synchronization, frozen AI drafting and readback-confirmed WB answer publication"
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "No production deployment, live WB/OpenAI call or WB write is included in this checkpoint."
+update_note: "Manual mode is implemented; release first deploys force-OFF, then a separate tracked activation release may remove force-off and select manual without running AI or WB writes."
 ---
 
 # WB Autoanswers Server v1
@@ -28,7 +28,9 @@ WB Feedbacks GET
   -> mandatory GET feedback detail readback
 ```
 
-The production HTTP unit and active hosted target pin `WB_AUTOANSWERS_FORCE_OFF=true`; no AI/publication timer is installed. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every WB write also require effective ON. `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
+The first deployment stage pins `WB_AUTOANSWERS_FORCE_OFF=true` in the production HTTP unit, target, and installed-but-disabled full worker. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every WB write also require effective ON. `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
+
+After force-OFF UI acceptance, the tracked activation release changes the same three pins to false. The repo-owned `autoanswers-lifecycle activate-manual` command then requires an empty AI/publication queue, verifies Node >=20, ffmpeg and all 28 frozen hashes, disables the force-OFF-only sync timer, atomically persists `master_enabled=true, mode=manual`, runs one bounded GET-only canary through an entrypoint that imports neither Node/OpenAI nor a WB writer, proves zero AI/publication jobs, and only then enables the full worker timer. It never generates a real answer or calls a WB write during activation.
 
 Production history and OFF-mode steady synchronization run only through `apps/wb_autoanswers_readonly.py`, invoked by the repo-owned hosted runner or its dedicated timer. That entrypoint imports only the GET adapter, reasserts force-off after loading its allowlisted env values, requires persisted master OFF, and proves that AI/publication job counts do not change. Deploy installs the timer disabled; it is enabled only after canary/detail/backfill acceptance.
 
@@ -55,7 +57,7 @@ The packaged `make_mvp/` bytes are preserved. The only new Node code is a siblin
 | Initial backfill, steady overlap and reconciliation | `packages/application/wb_autoanswers_sync.py` |
 | Bounded media download and frames | `packages/application/wb_autoanswers_media.py` |
 | Python/Node adapter | `packages/application/wb_autoanswers_node_bridge.py` |
-| Frozen Node boundary | `packages/node/wb_autoanswers_boundary_v1/runner.mjs` |
+| Frozen Node boundary and exact manual final-guard adapter | `packages/node/wb_autoanswers_boundary_v1/runner.mjs` |
 | Frozen package | `packages/node/wb_autoanswers_v1_4_2/make_mvp/` |
 | AI processing lease worker | `packages/application/wb_autoanswers_worker.py` |
 | Publication/readback lease worker | `packages/application/wb_autoanswers_publication.py` |
@@ -64,6 +66,8 @@ The packaged `make_mvp/` bytes are preserved. The only new Node code is a siblin
 | Force-off GET-only canary/backfill | `apps/wb_autoanswers_readonly.py`, hosted `autoanswers-readonly` command |
 | Authenticated production browser acceptance | `apps/wb_autoanswers_production_ui_flow.py`, hosted `autoanswers-ui-flow` command |
 | OFF-mode background GET sync | `wb-core-autoanswers-readonly-sync.service/.timer`, hosted timer gate |
+| Manual lifecycle and schema-v2 backup gate | `apps/wb_autoanswers_activation.py`, hosted `autoanswers-lifecycle` command |
+| Full bounded worker, installed disabled in force-OFF stage | `wb-core-autoanswers-worker.service/.timer` |
 | Backend/UI integration | `packages/application/registry_upload_http_entrypoint.py`, `packages/adapters/registry_upload_http_entrypoint.py`, `packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html` |
 
 ## Local data model
@@ -99,11 +103,12 @@ The persisted default is OFF.
 
 - OFF: sync, local list and detail continue; processing, review approval and new writes fail closed.
 - emergency OFF: `WB_AUTOANSWERS_FORCE_OFF=true`; OFF→ON is rejected and any pre-existing persisted ON remains ineffective.
+- `manual`: sync never creates AI jobs. One explicit per-review action creates one idempotent durable job for the exact current content version. Generation stops for user review; edited text crosses the same frozen schema/final guard again; a separate confirmed action creates a durable publication job.
 - `draft_only`: valid drafts stop at `generated`.
 - `auto_safe`: only `public_only`, `wb_return`, and `wb_support` can become `approved`; `seller_chat` is always `needs_review`.
 - `auto_all`: any route passing every hard gate can become `approved`, except `seller_chat`, fallback, media uncertainty, stale version, external answer, or technical/contract uncertainty.
 
-Changing OFF to ON increments `enable_epoch`. Old queued/retry work is quarantined into `needs_review`; it is not silently resumed. Backlog requires an expiring, actor-bound preview with count and conservative maximum estimated cost, followed by a second explicit request.
+The UI exposes one five-state Russian selector: `Выключено`, `Ручной`, `Черновики`, `Безопасный`, `Полный`. Changing OFF to ON increments `enable_epoch`. Old queued/retry work is quarantined into `needs_review`; it is not silently resumed. Manual mode does not expose backlog execution. Other enabled modes require an expiring, actor-bound backlog preview with count and conservative maximum estimated cost, followed by a second explicit request.
 
 ## Budgets
 
@@ -135,8 +140,9 @@ Before POST, the repository atomically rechecks:
 - schema/route/validator/final hard-gate flags;
 - no fallback and no media uncertainty;
 - seller_chat has exactly one frozen case code and no public request for photos, video, screenshots, labels, evidence or other materials.
+- for manual publication: current mode is still `manual`, the requester still has `feedbacks.ai_review`, the reviewed edit revision and exact reply hash match, and a frozen final-guard pass is persisted.
 
-An attempt row containing exact reply, normalized hash, feedback ID, versions and evaluation signature is committed before transport. Any HTTP response, HTTP error or timeout becomes `publish_pending_readback`. The worker cannot write again from that state. It performs detail GET, compares normalized answer text and reaches `published` only on an exact match. Missing/different/external answer becomes `needs_review`. While master/force-off is active, no publication job is claimed, including pending readback. After a later authorized re-enable, pending readback is reconciled before any new write and can never become a second POST.
+An attempt row containing exact reply, normalized hash, feedback ID, versions and evaluation signature is committed before transport. Any HTTP response, HTTP error or timeout becomes `publish_pending_readback`. The worker cannot write again from that state. It performs detail GET, compares normalized answer text and reaches `published` only on an exact match. Missing/different/external answer becomes `needs_review`. While master/force-off is active, no new-write publication job is claimed. A durable job for which a write may already have happened can still perform its mandatory GET-only readback while OFF; it can never become a second POST.
 
 ## UI and API
 
@@ -151,10 +157,12 @@ The existing `GET /v1/sheet-vitrina-v1/feedbacks` remains unchanged. New routes 
 | POST | `/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/preview` | Count/cost preview |
 | POST | `/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/enqueue` | Explicit preview-bound enqueue |
 | POST | `/v1/sheet-vitrina-v1/feedbacks/autoanswers/review/approve` | Manual durable publication enqueue only |
+| POST | `/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/generate` | Idempotent exact-version manual AI enqueue |
+| POST | `/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/edit` | Frozen final guard and persisted reviewed edit |
 
-Base local read/sync requires `feedbacks`. Approval additionally requires `feedbacks.ai_review`. Switch, mode, policy/budget and backlog actions additionally require `feedbacks.autoanswers_admin`.
+Base local read/sync requires `feedbacks`. Manual generation, edit review, and publication enqueue additionally require `feedbacks.ai_review`. Switch, mode, policy/budget and backlog actions require `feedbacks.autoanswers_admin`. Every autoanswers POST also requires JSON content, the same-origin CSRF marker, and a non-cross-site browser request.
 
-The first `Отзывы -> Отзывы` subtab reads immediately from SQLite, defaults to 50 rows, has server pagination/filters, AI and WB status badges, detail media/result/cost/attempt/error/audit blocks, and a nonblocking sync command. ON and `auto_all` require explicit confirmation; the latter cannot be enabled with one click.
+The first `Отзывы -> Отзывы` subtab reads immediately from SQLite, defaults to 50 rows, has server pagination/filters, AI and WB status badges, detail media/result/cost/attempt/error/audit blocks, and a nonblocking sync command. In manual mode an eligible review shows `Сгенерировать ответ`; the guarded result can be edited and rechecked, and `Опубликовать` appears only after a pass. Publication requires a normal confirmation and remains a background job until WB readback. Enabling any state from OFF requires confirmation; `Полный` additionally requires a typed confirmation.
 
 ## Required environment names
 
@@ -171,6 +179,7 @@ No values belong in source control:
 ## Local verification
 
 ```bash
+PYTHONPATH=. python3 apps/wb_autoanswers_activation_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_runtime_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_sync_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_node_bridge_test.py
@@ -186,15 +195,15 @@ The frozen package is tested separately with `npm test` from its directory. Fixt
 
 ## Production release posture
 
-- hosted deployment keeps both persisted master and effective mode OFF;
+- first hosted deployment keeps both persisted master and effective mode OFF;
 - the HTTP systemd unit and active target pin force-off true;
 - first additive schema takes and integrity-checks a coherent SQLite backup before mutation;
-- no AI/publication timer is installed;
+- the full worker timer is installed disabled and pinned force-OFF;
 - bounded GET-only canary/backfill is the only production WB capability authorized for this release;
 - the GET-only steady timer is installed disabled and may be enabled only after read acceptance;
 - no OpenAI call;
 - no WB POST;
-- no production mode change;
+- only after force-OFF acceptance may the tracked activation release remove force-off and atomically select manual;
 - no PATCH of existing WB answers.
 
-After production read-only acceptance, the only next gate is separate owner authorization to remove force-off and run a bounded `draft_only` AI canary. Any WB write remains a later, separate gate.
+After manual activation acceptance, the only next gate is the owner's first explicit click on `Сгенерировать ответ` for one real eligible review. That click is intentionally not part of release acceptance; every WB write remains blocked until the owner separately confirms `Опубликовать` for a guarded result.

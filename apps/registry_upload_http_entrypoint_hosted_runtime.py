@@ -32,6 +32,7 @@ PROBE_BODY_LIMIT_BYTES = 768 * 1024
 WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
+AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -180,6 +181,9 @@ RUNTIME_PIP_PACKAGES = [
 SELLER_PORTAL_RECOVERY_OS_PACKAGES = [
     "python3-pip",
     "python3-venv",
+    "ffmpeg",
+    "nodejs",
+    "npm",
     "xvfb",
     "x11vnc",
     "novnc",
@@ -426,6 +430,8 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "create or repair /opt/wb-ai/venv for seller-portal owner handoff API",
         "verify owner runtime code/import contract for /opt/wb-web-bot and /opt/wb-ai",
         "ensure Playwright Chromium can launch from both hosted runtime python contexts",
+        "install locked frozen Node boundary dependencies and verify Node.js >=20 plus ffmpeg",
+        "prepare additive autoanswers schema with a verified backup while effective OFF",
     ]
     if target.has_managed_systemd_units:
         deploy_sequence.extend(
@@ -862,6 +868,8 @@ def deploy_current_checkout(
     seller_owner_venv_command = _build_seller_portal_owner_runtime_venv_command(target)
     seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
+    autoanswers_node_dependencies_command = _build_autoanswers_node_dependencies_command(target)
+    autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
@@ -889,6 +897,8 @@ def deploy_current_checkout(
             "seller_portal_owner_runtime_venv": seller_owner_venv_command,
             "seller_portal_owner_runtime_contract": seller_owner_contract_command,
             "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
+            "autoanswers_node_dependencies": autoanswers_node_dependencies_command,
+            "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
             "restart": restart_command,
@@ -946,6 +956,8 @@ def deploy_current_checkout(
     run_stage("dependencies", seller_owner_venv_command)
     run_stage("dependencies", seller_owner_contract_command)
     run_stage("dependencies", seller_recovery_playwright_browser_command)
+    run_stage("dependencies", autoanswers_node_dependencies_command)
+    run_stage("readback", autoanswers_prepare_deploy_command)
     if systemd_commands["install"]:
         run_stage("systemd-install", systemd_commands["install"])
         run_stage("daemon-reload", systemd_commands["daemon_reload"])
@@ -976,6 +988,30 @@ def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
         "done"
     )
     return _remote_shell_command(target, script)
+
+
+def _build_autoanswers_node_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
+    package_dir = (
+        f"{target.target_dir.rstrip('/')}/packages/node/"
+        "wb_autoanswers_v1_4_2/make_mvp"
+    )
+    script = (
+        "set -eu; command -v node >/dev/null; command -v npm >/dev/null; command -v ffmpeg >/dev/null; "
+        "node -e \"if(Number(process.versions.node.split('.')[0])<20) process.exit(78)\"; "
+        f"cd {shlex.quote(package_dir)}; npm ci --omit=dev --ignore-scripts --no-audit --no-fund"
+    )
+    return _remote_shell_command(target, script)
+
+
+def _build_autoanswers_prepare_deploy_command(target: HostedRuntimeTarget) -> list[str]:
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true "
+        "python3 apps/wb_autoanswers_activation.py prepare-deploy "
+        f"--runtime-dir {shlex.quote(runtime_dir)}"
+    )
+    return _remote_shell_command(target, command)
 
 
 def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
@@ -1967,6 +2003,135 @@ def run_autoanswers_readonly_timer_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_remote_autoanswers_lifecycle(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    """Operate only the repo-owned manual-mode lifecycle and its two timers."""
+
+    _ensure_active_hosted_runtime_target(target, action=f"autoanswers-lifecycle-{action}")
+    if action not in {"status", "activate-manual", "deactivate"}:
+        raise ValueError(f"unsupported autoanswers lifecycle action: {action}")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    force_off = str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower()
+    if force_off not in {"true", "false"}:
+        raise ValueError("autoanswers lifecycle requires an explicit target force-off boolean")
+    readonly_timer = "wb-core-autoanswers-readonly-sync.timer"
+    worker_timer = "wb-core-autoanswers-worker.timer"
+    app_command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        f"/usr/bin/env WB_AUTOANSWERS_FORCE_OFF={shlex.quote(force_off)} "
+        f"python3 apps/wb_autoanswers_activation.py {shlex.quote(action)} "
+        f"--runtime-dir {shlex.quote(runtime_dir)}"
+    )
+    if action == "status":
+        shell = (
+            app_command
+            + f" && (systemctl is-enabled {shlex.quote(readonly_timer)} || true)"
+            + f" && (systemctl is-active {shlex.quote(readonly_timer)} || true)"
+            + f" && (systemctl is-enabled {shlex.quote(worker_timer)} || true)"
+            + f" && (systemctl is-active {shlex.quote(worker_timer)} || true)"
+        )
+    elif action == "activate-manual":
+        if force_off != "false":
+            raise RuntimeError("manual activation requires target WB_AUTOANSWERS_FORCE_OFF=false")
+        if not target.environment_file:
+            raise ValueError("manual activation requires the hosted environment file")
+        manual_canary = (
+            f"cd {shlex.quote(target.target_dir)} && "
+            "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=false WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
+            "python3 apps/wb_autoanswers_readonly.py --operation manual-canary "
+            f"--runtime-dir {shlex.quote(runtime_dir)} "
+            f"--env-file {shlex.quote(target.environment_file)} "
+            "--page-size 50 --max-pages 1 --min-request-interval-seconds 1.0"
+        )
+        # The timer is enabled only after a GET-only canary, which imports no
+        # Node/OpenAI/WB writer, proves that manual sync creates no work.
+        shell = (
+            f"systemctl disable --now {shlex.quote(readonly_timer)}"
+            f" && systemctl disable --now {shlex.quote(worker_timer)}"
+            f" && ! systemctl is-active --quiet {shlex.quote(worker_timer)}"
+            " && "
+            + app_command
+            + " && "
+            + manual_canary
+            + " && "
+            + app_command.replace("activate-manual", "status", 1)
+            + f" && systemctl enable --now {shlex.quote(worker_timer)}"
+            + f" && systemctl is-enabled {shlex.quote(worker_timer)}"
+            + f" && systemctl is-active {shlex.quote(worker_timer)}"
+        )
+    else:
+        shell = (
+            f"systemctl disable --now {shlex.quote(worker_timer)}"
+            f" && ! systemctl is-active --quiet {shlex.quote(worker_timer)}"
+            " && "
+            + app_command
+            + f" && systemctl enable --now {shlex.quote(readonly_timer)}"
+            + f" && systemctl is-enabled {shlex.quote(readonly_timer)}"
+            + f" && systemctl is-active {shlex.quote(readonly_timer)}"
+        )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"autoanswers lifecycle {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+    json_objects: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            json_objects.append(value)
+    if not json_objects:
+        raise RuntimeError("autoanswers lifecycle returned no JSON evidence")
+    runtime = (json_objects[-1].get("runtime") or {}) if json_objects else {}
+    settings = runtime.get("settings") or {}
+    if action == "activate-manual":
+        if (
+            not bool(settings.get("master_enabled"))
+            or not bool(settings.get("effective_enabled"))
+            or bool(settings.get("force_off"))
+            or str(settings.get("mode") or "") != "manual"
+        ):
+            raise RuntimeError("manual lifecycle readback did not prove effective manual mode")
+        if _sum_mapping_counts(runtime.get("ai_jobs")) or _sum_mapping_counts(runtime.get("publication_jobs")):
+            raise RuntimeError("manual activation created unexpected AI/publication work")
+    elif action == "deactivate" and (
+        bool(settings.get("master_enabled")) or bool(settings.get("effective_enabled"))
+    ):
+        raise RuntimeError("autoanswers deactivation readback did not prove OFF")
+    return {
+        "status": "ok",
+        "action": action,
+        "evidence": json_objects,
+        "systemctl": [line for line in lines if not line.startswith("{")],
+    }
+
+
+def _sum_mapping_counts(value: Any) -> int:
+    return sum(int(item or 0) for item in (value or {}).values()) if isinstance(value, dict) else 0
+
+
+def run_autoanswers_lifecycle_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_autoanswers_lifecycle(target, action=str(args.action))
+    _print_json({"target_id": target.target_id, "result": payload})
+    return 0
+
+
 def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2375,8 +2540,13 @@ def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
     _ensure_active_hosted_runtime_target(target, action="autoanswers-ui-flow")
-    if str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower() != "true":
-        raise RuntimeError("autoanswers UI flow requires the production target force-off pin")
+    expected_state = str(args.expected_state)
+    target_force_off = str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower()
+    expected_force_off = "true" if expected_state == "off-force" else "false"
+    if target_force_off != expected_force_off:
+        raise RuntimeError(
+            f"autoanswers UI flow expected target force-off={expected_force_off}, got {target_force_off or '<missing>'}"
+        )
     auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=float(args.timeout_seconds))
     if not auth_cookie:
         raise RuntimeError("autoanswers UI flow requires safely available production app-session auth")
@@ -2394,6 +2564,7 @@ def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
         auth_cookie=auth_cookie,
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
+        expected_state=expected_state,
     )
     _print_json(
         {
@@ -2466,6 +2637,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     autoanswers_readonly_timer.add_argument("action", choices=("status", "enable", "disable"))
     autoanswers_readonly_timer.set_defaults(handler=run_autoanswers_readonly_timer_command)
+
+    autoanswers_lifecycle = subparsers.add_parser(
+        "autoanswers-lifecycle",
+        help="Inspect, activate manual mode, or fail closed to OFF through the repo-owned lifecycle.",
+    )
+    autoanswers_lifecycle.add_argument("action", choices=("status", "activate-manual", "deactivate"))
+    autoanswers_lifecycle.set_defaults(handler=run_autoanswers_lifecycle_command)
 
     warehouse_dry_run = subparsers.add_parser(
         "warehouse-opening-dry-run",
@@ -2660,6 +2838,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_ui_flow.add_argument("--evidence-dir", required=True)
     autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     autoanswers_ui_flow.add_argument("--headed", action="store_true")
+    autoanswers_ui_flow.add_argument(
+        "--expected-state", choices=("off-force", "manual"), default="off-force"
+    )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 
     return parser

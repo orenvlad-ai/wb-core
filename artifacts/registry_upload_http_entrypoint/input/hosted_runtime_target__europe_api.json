@@ -120,6 +120,16 @@
       "name": "wb-core-autoanswers-readonly-sync.timer",
       "enable": false,
       "restart": false
+    },
+    {
+      "name": "wb-core-autoanswers-worker.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-autoanswers-worker.timer",
+      "enable": false,
+      "restart": false
     }
   ],
   "runtime_env": {

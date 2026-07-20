@@ -37,7 +37,9 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
+from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
+from packages.contracts.wb_autoanswers import AUTOANSWER_MODES
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -708,6 +710,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         autoanswers_repository: AutoanswersRepository | None = None,
+        autoanswers_node_bridge: NodeAutoanswersBridge | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
@@ -758,6 +761,7 @@ class RegistryUploadHttpEntrypoint:
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
         )
+        self.autoanswers_node_bridge = autoanswers_node_bridge or NodeAutoanswersBridge()
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
@@ -1288,20 +1292,36 @@ class RegistryUploadHttpEntrypoint:
             "contract_version": "v1",
             "settings": asdict(settings),
             "budget": self.autoanswers_repository.budget_status(),
+            "selector_state": settings.mode if settings.master_enabled else "off",
+            "runtime": self.autoanswers_repository.operational_status(),
         }
 
     def handle_sheet_feedbacks_autoanswers_settings_update_request(
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
+        selector_state = str(payload.get("selector_state") or "").strip()
+        if selector_state:
+            if selector_state != "off" and selector_state not in AUTOANSWER_MODES:
+                raise ValueError("unsupported autoanswers selector state")
+            master_enabled: bool | None = selector_state != "off"
+            mode: str | None = None if selector_state == "off" else selector_state
+        else:
+            master_enabled = payload.get("master_enabled") if "master_enabled" in payload else None
+            mode = str(payload["mode"]) if "mode" in payload else None
         settings = self.autoanswers_repository.update_settings(
-            master_enabled=payload.get("master_enabled") if "master_enabled" in payload else None,
-            mode=str(payload["mode"]) if "mode" in payload else None,
+            master_enabled=master_enabled,
+            mode=mode,
             daily_cap_usd=payload.get("daily_cap_usd"),
             monthly_cap_usd=payload.get("monthly_cap_usd"),
             warning_ratio=payload.get("warning_ratio"),
             actor_id=actor_id,
         )
-        return {"settings": asdict(settings), "budget": self.autoanswers_repository.budget_status()}
+        return {
+            "settings": asdict(settings),
+            "budget": self.autoanswers_repository.budget_status(),
+            "selector_state": settings.mode if settings.master_enabled else "off",
+            "runtime": self.autoanswers_repository.operational_status(),
+        }
 
     def handle_sheet_feedbacks_autoanswers_sync_request(
         self, payload: Mapping[str, Any], *, actor_id: str
@@ -1326,8 +1346,57 @@ class RegistryUploadHttpEntrypoint:
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
         return self.autoanswers_repository.approve_for_publication(
-            str(payload.get("processing_key") or ""), actor_id=actor_id
+            str(payload.get("processing_key") or ""),
+            actor_id=actor_id,
+            confirmed=payload.get("confirmed") is True,
+            expected_reply_sha256=str(payload.get("reply_sha256") or "") or None,
         )
+
+    def handle_sheet_feedbacks_autoanswers_generate_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        feedback_id = str(payload.get("feedback_id") or "").strip()
+        try:
+            content_version = int(payload.get("content_version"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("content_version is required") from exc
+        job = self.autoanswers_repository.enqueue_manual_processing(
+            feedback_id,
+            content_version=content_version,
+            actor_id=actor_id,
+        )
+        return {"accepted": True, "job": job}
+
+    def handle_sheet_feedbacks_autoanswers_manual_edit_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        processing_key = str(payload.get("processing_key") or "").strip()
+        reply = str(payload.get("reply") or "").strip()
+        if not processing_key or not reply:
+            raise ValueError("processing_key and reply are required")
+        context = self.autoanswers_repository.manual_guard_context(processing_key)
+        try:
+            guard = self.autoanswers_node_bridge.guard_final(
+                review_id=context["feedback_id"],
+                review_version=context["content_version"],
+                route=context["route"],
+                case_code=context["case_code"],
+                reply=reply,
+                primary_issue=context["primary_issue"],
+            )
+        except NodeBoundaryError as exc:
+            raise AutoanswersRuntimeError(
+                "frozen final guard could not validate the edited reply",
+                code=f"manual_final_guard_{exc.code}",
+            ) from exc
+        job = self.autoanswers_repository.save_manual_reply_review(
+            processing_key,
+            reply=str(guard["reply"]),
+            guard_passed=bool(guard["passed"]),
+            guard_errors=list(guard["errors"]),
+            actor_id=actor_id,
+        )
+        return {"accepted": True, "guard": guard, "job": job}
 
     def handle_sheet_feedbacks_export_request(self, payload: Mapping[str, Any]) -> tuple[bytes, str]:
         return self.feedbacks_block.build_export(payload)

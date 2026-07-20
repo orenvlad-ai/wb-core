@@ -4,14 +4,23 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from email.message import Message
+import io
 from pathlib import Path
 import re
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
-from packages.adapters.registry_upload_http_entrypoint import _render_sheet_vitrina_web_vitrina_ui
+from packages.adapters.registry_upload_http_entrypoint import (
+    _ensure_autoanswers_csrf,
+    _ensure_feedback_capability,
+    _render_sheet_vitrina_web_vitrina_ui,
+)
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.wb_autoanswers_node_bridge import NodeBoundaryError
+from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
 from apps.wb_autoanswers_runtime_test import feedback
 
 
@@ -27,6 +36,25 @@ class LegacyFeedbacksBlock:
 
     def build_export(self, payload: dict) -> tuple[bytes, str]:
         return b"", "feedbacks.xlsx"
+
+
+class FakeHandler:
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = Message()
+        for key, value in headers.items():
+            self.headers[key] = value
+        self.server = type("Server", (), {"server_address": ("127.0.0.1", 8765)})()
+        self.wfile = io.BytesIO()
+        self.status: int | None = None
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, _key: str, _value: str) -> None:
+        return None
+
+    def end_headers(self) -> None:
+        return None
 
 
 class HttpUiTest(unittest.TestCase):
@@ -66,6 +94,23 @@ class HttpUiTest(unittest.TestCase):
         self.assertFalse(settings["settings"]["effective_enabled"])
         self.assertEqual(first["command"]["command_id"], second["command"]["command_id"])
 
+    def test_five_state_selector_maps_atomically_to_master_and_mode(self) -> None:
+        manual = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "manual"}, actor_id="admin"
+        )
+        self.assertEqual(manual["selector_state"], "manual")
+        self.assertTrue(manual["settings"]["master_enabled"])
+        off = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "off"}, actor_id="admin"
+        )
+        self.assertEqual(off["selector_state"], "off")
+        self.assertFalse(off["settings"]["master_enabled"])
+        draft = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "draft_only"}, actor_id="admin"
+        )
+        self.assertEqual(draft["selector_state"], "draft_only")
+        self.assertEqual(draft["settings"]["mode"], "draft_only")
+
     def test_rendered_ui_contains_local_routes_protected_controls_and_valid_javascript(self) -> None:
         html = _render_sheet_vitrina_web_vitrina_ui(
             read_path="/read",
@@ -81,7 +126,11 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("Автоответы выключены", html)
         self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", html)
         self.assertIn("feedbacks_autoanswers_settings_path", html)
-        self.assertIn("AUTO_ALL", html)
+        for label in ("Выключено", "Ручной", "Черновики", "Безопасный", "Полный"):
+            self.assertIn(label, html)
+        self.assertIn("Сгенерировать ответ", html)
+        self.assertIn("Опубликовать", html)
+        self.assertIn("X-WB-Autoanswers-CSRF", html)
         scripts = re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
         self.assertTrue(scripts)
         with TemporaryDirectory() as directory:
@@ -95,6 +144,86 @@ class HttpUiTest(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_autoanswers_mutations_require_csrf_marker_and_same_origin(self) -> None:
+        valid = FakeHandler(
+            {
+                "Host": "selleros.test",
+                "X-Forwarded-Proto": "https",
+                "Content-Type": "application/json",
+                "X-WB-Autoanswers-CSRF": "1",
+                "Origin": "https://selleros.test",
+                "Sec-Fetch-Site": "same-origin",
+            }
+        )
+        self.assertTrue(_ensure_autoanswers_csrf(valid, "/manual/generate"))
+        for headers in (
+            {"Host": "selleros.test", "Content-Type": "application/json"},
+            {
+                "Host": "selleros.test",
+                "Content-Type": "application/json",
+                "X-WB-Autoanswers-CSRF": "1",
+                "Origin": "https://evil.test",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        ):
+            handler = FakeHandler(headers)
+            self.assertFalse(_ensure_autoanswers_csrf(handler, "/manual/generate"))
+            self.assertEqual(handler.status, 403)
+
+    def test_manual_actions_require_ai_review_and_mode_changes_require_admin(self) -> None:
+        base_config = {"enabled": True}
+        ai_reviewer = {
+            "allowed_sections": ["feedbacks", "feedbacks.ai_review"],
+            "role": "operator",
+        }
+        viewer = {"allowed_sections": ["feedbacks"], "role": "operator"}
+        handler = FakeHandler({"Host": "selleros.test"})
+        with patch(
+            "packages.adapters.registry_upload_http_entrypoint._web_auth_config",
+            return_value=base_config,
+        ), patch(
+            "packages.adapters.registry_upload_http_entrypoint._authenticated_web_user",
+            return_value=ai_reviewer,
+        ):
+            self.assertTrue(_ensure_feedback_capability(handler, "/manual/generate", "feedbacks.ai_review"))
+            self.assertFalse(
+                _ensure_feedback_capability(handler, "/settings", "feedbacks.autoanswers_admin")
+            )
+        viewer_handler = FakeHandler({"Host": "selleros.test"})
+        with patch(
+            "packages.adapters.registry_upload_http_entrypoint._web_auth_config",
+            return_value=base_config,
+        ), patch(
+            "packages.adapters.registry_upload_http_entrypoint._authenticated_web_user",
+            return_value=viewer,
+        ):
+            self.assertFalse(
+                _ensure_feedback_capability(viewer_handler, "/manual/generate", "feedbacks.ai_review")
+            )
+
+    def test_manual_edit_fails_closed_when_frozen_guard_is_unavailable(self) -> None:
+        repository = Mock()
+        repository.manual_guard_context.return_value = {
+            "feedback_id": "feedback-1",
+            "content_version": 1,
+            "route": "public_only",
+            "case_code": None,
+            "primary_issue": None,
+        }
+        bridge = Mock()
+        bridge.guard_final.side_effect = NodeBoundaryError(
+            "boundary unavailable", code="node_unavailable"
+        )
+        self.app.autoanswers_repository = repository
+        self.app.autoanswers_node_bridge = bridge
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "could not validate") as raised:
+            self.app.handle_sheet_feedbacks_autoanswers_manual_edit_request(
+                {"processing_key": "processing-1", "reply": "Безопасный ответ."},
+                actor_id="reviewer",
+            )
+        self.assertEqual(raised.exception.code, "manual_final_guard_node_unavailable")
+        repository.save_manual_reply_review.assert_not_called()
 
 
 if __name__ == "__main__":
