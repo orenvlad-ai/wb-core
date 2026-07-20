@@ -144,6 +144,16 @@ def _assert_plan(plan: dict) -> None:
         raise AssertionError(f"dry-run mutated state: {plan}")
     if plan["source_manifests"]["finance"]["sale_return_nm_ids"] != ["101"]:
         raise AssertionError(f"Finance manifest mismatch: {plan['source_manifests']['finance']}")
+    finance = plan["source_manifests"]["finance"]
+    if (
+        finance["sale_return_identity_issue_count"] != 0
+        or finance["sale_return_identity_issues"]
+        or finance["zero_unit_unresolved_identity_count"] != 1
+        or not str(finance["zero_unit_unresolved_identity_digest"]).startswith("sha256:")
+        or finance["rows_without_nm_id"] != 1
+        or "zero-unit-non-cogs" in json.dumps(plan, ensure_ascii=False)
+    ):
+        raise AssertionError(f"zero-unit Finance diagnostics mismatch: {finance}")
     if plan["source_manifests"]["cost"]["proposed_row_count"] != 1:
         raise AssertionError(f"cost manifest mismatch: {plan['source_manifests']['cost']}")
     coverage = plan["source_manifests"]["coverage"]
@@ -213,6 +223,8 @@ def _assert_apply(block: WbFinanceWeeklyBlock, result: dict) -> None:
             f"immutable map/audit mismatch: audits={audit_rows}, retro={retro}"
         )
 
+    _assert_nonzero_unresolved_identity_still_blocks()
+
 
 def _seed_sources(db_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
@@ -270,8 +282,59 @@ def _seed_weeks(block: WbFinanceWeeklyBlock) -> None:
         {**old, "dateFrom": "2026-04-27", "dateTo": "2026-05-03", "reportId": 3, "reportType": 2, "rrdId": 4, "rrDate": "2026-05-02", "docTypeName": "Возврат", "quantity": 1, "retailPriceWithDisc": "200", "forPay": "150"},
         {**old, "dateFrom": "2026-04-27", "dateTo": "2026-05-03", "reportId": 2, "rrdId": 5, "rrDate": "2026-04-30", "docTypeName": "", "quantity": 0, "retailPriceWithDisc": "0", "forPay": "0", "paidAcceptance": "5"},
         {**old, "dateFrom": "2026-04-27", "dateTo": "2026-05-03", "reportId": 2, "rrdId": 6, "rrDate": "2026-05-02", "docTypeName": "", "quantity": 0, "retailPriceWithDisc": "0", "forPay": "0", "paidAcceptance": "10", "deduction": "20", "bonusTypeName": "Услуги доставки транзитных поставок"},
+        {**old, "dateFrom": "2026-04-27", "dateTo": "2026-05-03", "reportId": 2, "rrdId": 7, "rrDate": "2026-05-02", "nmId": 0, "vendorCode": "", "sku": "", "srid": "zero-unit-non-cogs", "docTypeName": "Продажа", "quantity": 0, "retailPriceWithDisc": "0", "forPay": "0", "deduction": "7"},
     ]
     block.ingest_week(date(2026, 4, 27), date(2026, 5, 3), rows)
+
+
+def _assert_nonzero_unresolved_identity_still_blocks() -> None:
+    with TemporaryDirectory(prefix="wb-finance-unresolved-movement-") as tmp:
+        runtime = Path(tmp) / "runtime"
+        runtime.mkdir()
+        block = WbFinanceWeeklyBlock(
+            runtime,
+            seller_id="seller-1",
+            now_factory=lambda: datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        block.ensure_schema()
+        _seed_sources(block.db_path)
+        block.ingest_week(
+            date(2026, 4, 27),
+            date(2026, 5, 3),
+            [
+                {
+                    "dateFrom": "2026-04-27",
+                    "dateTo": "2026-05-03",
+                    "reportId": 9,
+                    "reportType": 1,
+                    "rrdId": 9,
+                    "rrDate": "2026-05-02",
+                    "nmId": 0,
+                    "vendorCode": "",
+                    "sku": "",
+                    "docTypeName": "Продажа",
+                    "quantity": 1,
+                    "retailPriceWithDisc": "200",
+                    "forPay": "150",
+                }
+            ],
+        )
+        plan = block.plan_business_approved_backfill(
+            date_from=date(2026, 4, 27),
+            date_to=date(2026, 5, 3),
+        )
+        blocker_codes = {str(item.get("code") or "") for item in plan["blockers"]}
+        if (
+            plan["apply_allowed"]
+            or "retro_finance_identity_unresolved" not in blocker_codes
+            or plan["source_manifests"]["finance"][
+                "sale_return_identity_issue_count"
+            ]
+            != 1
+        ):
+            raise AssertionError(
+                f"non-zero unresolved movement did not fail closed: {plan}"
+            )
 
 
 if __name__ == "__main__":

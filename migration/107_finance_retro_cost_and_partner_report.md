@@ -50,6 +50,8 @@ The output file must stay outside the Git checkout and is written with mode `060
 
 Block apply for missing/ambiguous SKU identity, missing/non-positive canonical cost, missing operation date at a temporal boundary, immutable-map conflict or incomplete Finance cost coverage. `confirmed_share_pct=0` alone is not a cost gap.
 
+Identity blockers apply only to non-zero sale/return quantity movements. Zero-quantity Finance rows retain count/digest provenance and account-level allocation evidence, but do not require a unit cost. The runner scans full production scope with bounded per-week raw memory so the dry-run remains viable for large historical Finance datasets.
+
 Record the plan file SHA-256, exact plan fingerprint, week/SKU counts, blockers and before/expected controls in the release evidence. No production data is changed in this phase.
 
 ## Human gate and apply

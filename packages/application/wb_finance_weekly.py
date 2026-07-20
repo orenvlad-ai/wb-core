@@ -1059,7 +1059,10 @@ class WbFinanceWeeklyBlock:
             if doc not in {"продажа", "возврат"}:
                 continue
             sign = 1 if doc == "продажа" else -1
-            qty = int(_decimal(row.get("quantity"))) * sign
+            raw_qty = int(_decimal(row.get("quantity")))
+            if raw_qty == 0:
+                continue
+            qty = raw_qty * sign
             raw_keys = [
                 str(row.get("nmId") or ""),
                 str(row.get("vendorCode") or ""),
@@ -1577,8 +1580,7 @@ class WbFinanceWeeklyBlock:
             (date.fromisoformat(row["week_start"]), date.fromisoformat(row["week_end"]))
             for row in candidate_rows
         ]
-        parsed_by_week: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        all_parsed: list[dict[str, Any]] = []
+        cost_movement_rows: list[dict[str, Any]] = []
         finance_weeks: list[dict[str, Any]] = []
         union_nm_ids: set[str] = set()
         identity_issues: list[dict[str, str]] = []
@@ -1595,8 +1597,13 @@ class WbFinanceWeeklyBlock:
                 (self.seller_id, *key),
             ).fetchall()
             parsed = [json.loads(row["raw_json"]) for row in raw_rows]
-            parsed_by_week[key] = parsed
-            all_parsed.extend(parsed)
+            cost_movement_rows.extend(
+                row
+                for row in parsed
+                if str(row.get("docTypeName") or "").casefold()
+                in {"продажа", "возврат"}
+                and int(_decimal(row.get("quantity"))) != 0
+            )
             raw_week_nm_ids = {
                 str(row.get("nmId") or "").strip()
                 for row in parsed
@@ -1606,6 +1613,7 @@ class WbFinanceWeeklyBlock:
             }
             week_nm_ids: set[str] = set()
             week_identity_issues: list[dict[str, str]] = []
+            zero_unit_identity_evidence: list[list[str]] = []
             for row in parsed:
                 if str(row.get("docTypeName") or "").casefold() not in {
                     "продажа",
@@ -1620,6 +1628,16 @@ class WbFinanceWeeklyBlock:
                 if resolved_nm:
                     week_nm_ids.add(resolved_nm)
                 else:
+                    if int(_decimal(row.get("quantity"))) == 0:
+                        zero_unit_identity_evidence.append(
+                            [
+                                str(row.get("reportId") or ""),
+                                str(row.get("rrdId") or ""),
+                                method,
+                                reason,
+                            ]
+                        )
+                        continue
                     issue = {
                         "week_start": key[0],
                         "report_id": str(row.get("reportId") or ""),
@@ -1689,6 +1707,17 @@ class WbFinanceWeeklyBlock:
                     "sale_return_nm_ids": sorted(week_nm_ids),
                     "raw_sale_return_nm_ids": sorted(raw_week_nm_ids),
                     "sale_return_identity_issues": week_identity_issues,
+                    "zero_unit_unresolved_identity_count": len(
+                        zero_unit_identity_evidence
+                    ),
+                    "zero_unit_unresolved_identity_digest": "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            sorted(zero_unit_identity_evidence),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
                     "rows_without_nm_id": no_nm_count,
                     "sync_status": sync_status,
                     "sync_last_error": str(sync_row["last_error"] or "") if sync_row else "",
@@ -1699,7 +1728,7 @@ class WbFinanceWeeklyBlock:
 
         proposed_rows, retro_blockers = self._build_retro_cost_rows(
             conn,
-            rows=all_parsed,
+            rows=cost_movement_rows,
         )
         persisted_map = self._load_retro_cost_map(conn)
         projected_map = {**persisted_map, **{row["nm_id"]: row for row in proposed_rows}}
@@ -1708,9 +1737,18 @@ class WbFinanceWeeklyBlock:
         blockers = [*retro_blockers, *finance_source_blockers]
         for start, end in candidates:
             key = (start.isoformat(), end.isoformat())
+            parsed = [
+                json.loads(row["raw_json"])
+                for row in conn.execute(
+                    """SELECT raw_json FROM wb_finance_weekly_raw_rows
+                       WHERE seller_id=? AND week_start=? AND week_end=?
+                       ORDER BY report_id,rrd_id""",
+                    (self.seller_id, *key),
+                ).fetchall()
+            ]
             aggregate, coverage, unknown = self._aggregate_rows(
                 conn,
-                parsed_by_week[key],
+                parsed,
                 start,
                 retro_cost_map=projected_map,
             )
@@ -1839,6 +1877,25 @@ class WbFinanceWeeklyBlock:
             "sale_return_nm_id_count": len(union_nm_ids),
             "sale_return_identity_issue_count": len(identity_issues),
             "sale_return_identity_issues": identity_issues,
+            "zero_unit_unresolved_identity_count": sum(
+                int(item["zero_unit_unresolved_identity_count"])
+                for item in finance_weeks
+            ),
+            "zero_unit_unresolved_identity_digest": "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    [
+                        [
+                            item["week_start"],
+                            item["zero_unit_unresolved_identity_count"],
+                            item["zero_unit_unresolved_identity_digest"],
+                        ]
+                        for item in finance_weeks
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
             "rows_without_nm_id": rows_without_nm_id,
             "weeks": finance_weeks,
         }
@@ -1950,6 +2007,8 @@ class WbFinanceWeeklyBlock:
         blockers: list[dict[str, Any]] = []
         for row in rows:
             if str(row.get("docTypeName") or "").casefold() not in {"продажа", "возврат"}:
+                continue
+            if int(_decimal(row.get("quantity"))) == 0:
                 continue
             operation_date, operation_source = _operation_date(row, RETRO_COST_PERIOD_START)
             if not (RETRO_COST_PERIOD_START <= operation_date <= RETRO_COST_PERIOD_END):
