@@ -6759,6 +6759,45 @@ def _enrich_customs_goods_items_from_annex_rows(
     normalized["goods_items"] = [item]
     normalized["goods_item_count"] = 1
     normalized["goods_items_parser_version"] = "supplier_customs_goods_items_v2"
+    parent_position = str(item.get("position_number") or "").strip()
+    parent_identifiers = dict(item.get("identifiers") or {})
+    annex_items: list[dict[str, Any]] = []
+    for annex_row in annex_rows:
+        identifiers = {
+            key: _clean_value(annex_row.get(source_key))
+            for key, source_key in (
+                ("manufacturer", "manufacturer"),
+                ("brand", "brand"),
+                ("source_model", "source_model"),
+                ("article", "article"),
+            )
+            if _clean_value(annex_row.get(source_key))
+        }
+        customs_code = _clean_value(parent_identifiers.get("customs_code"))
+        if customs_code:
+            identifiers["customs_code"] = customs_code
+        source_barcode = _clean_value(annex_row.get("barcode"))
+        if source_barcode:
+            identifiers["barcode"] = source_barcode
+        annex_items.append(
+            {
+                "parent_position_number": parent_position,
+                "annex_row_number": _clean_value(annex_row.get("annex_row_number")),
+                "source_name": _clean_value(annex_row.get("source_name")),
+                "article": _clean_value(annex_row.get("article")),
+                "source_model": _clean_value(annex_row.get("source_model")),
+                "quantity": _decimal_to_float_raw(_parse_decimal(annex_row.get("quantity"))),
+                "unit": _clean_value(annex_row.get("unit")),
+                "barcode": source_barcode,
+                "identifiers": identifiers,
+            }
+        )
+    annex_quantity_total = sum((quantity for quantity in quantities if quantity is not None), Decimal("0"))
+    normalized["annex_items"] = annex_items
+    normalized["annex_item_count"] = len(annex_items)
+    normalized["annex_quantity_total"] = _decimal_to_float_raw(annex_quantity_total)
+    normalized["annex_quantity_conserved"] = _parse_decimal(item.get("quantity")) == annex_quantity_total
+    normalized["annex_items_parser_version"] = "supplier_customs_annex_items_v1"
     parsed["normalized_parse"] = normalized
     raw_parse = dict(parsed.get("raw_parse") or {})
     raw_parse["customs_annex_row_count"] = len(annex_rows)
