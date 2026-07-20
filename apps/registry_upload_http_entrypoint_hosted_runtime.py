@@ -38,6 +38,7 @@ WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
         "cutover-dry-run",
         "emergency-dry-run",
         "economics-backfill-dry-run",
+        "supplier-certification-dry-run",
     }
 )
 PROBE_SYSTEM_CA_FILE_CANDIDATES = (
@@ -2220,15 +2221,22 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
         "cutover-apply",
         "emergency-apply",
         "economics-backfill-apply",
+        "supplier-certification-apply",
     } else None
     payload = _run_remote_warehouse_functional_action(
         target,
         action=action,
         plan_path=plan_path,
         fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        reason=str(getattr(args, "reason", "") or ""),
     )
     output = str(getattr(args, "output", "") or "").strip()
-    if action in {"cutover-dry-run", "emergency-dry-run", "economics-backfill-dry-run"} and output:
+    if action in {
+        "cutover-dry-run",
+        "emergency-dry-run",
+        "economics-backfill-dry-run",
+        "supplier-certification-dry-run",
+    } and output:
         output_path = Path(output).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         # The remote cutover dry-run returns diagnostic refresh evidence next to
@@ -2258,12 +2266,15 @@ def _run_remote_warehouse_functional_action(
     action: str,
     plan_path: Path | None = None,
     fingerprint: str = "",
+    reason: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(target, action=f"warehouse-functional-{action}")
     mutation_actions = {
         "cutover-apply",
         "emergency-apply",
         "economics-backfill-apply",
+        "supplier-certification-apply",
+        "supplier-certification-rollback",
         "rollback",
         "hourly-sync",
         "manual-sync",
@@ -2325,7 +2336,12 @@ def _run_remote_warehouse_functional_action(
         action,
     ]
     stdin_text: str | None = None
-    if action in {"cutover-apply", "emergency-apply", "economics-backfill-apply"}:
+    if action in {
+        "cutover-apply",
+        "emergency-apply",
+        "economics-backfill-apply",
+        "supplier-certification-apply",
+    }:
         if plan_path is None:
             raise ValueError(f"warehouse functional {action} requires a plan path")
         stdin_text = plan_path.read_text(encoding="utf-8")
@@ -2344,6 +2360,26 @@ def _run_remote_warehouse_functional_action(
             )
         elif action == "economics-backfill-apply":
             runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional-economics"])
+        elif action == "supplier-certification-apply":
+            runner_args.extend(
+                [
+                    "--backup-dir",
+                    "/opt/wb-core-runtime/backups/warehouse-supplier-certification-replay",
+                ]
+            )
+    elif action == "supplier-certification-rollback":
+        if not str(reason or "").strip():
+            raise ValueError("supplier certification rollback requires a reason")
+        runner_args.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--reason",
+                reason,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-supplier-certification-replay",
+            ]
+        )
     elif action == "rollback":
         runner_args.extend(
             [
@@ -2875,6 +2911,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     functional_economics_apply.set_defaults(
         handler=run_warehouse_functional_command,
         warehouse_functional_action="economics-backfill-apply",
+    )
+
+    functional_certification_dry_run = subparsers.add_parser(
+        "warehouse-functional-supplier-certification-dry-run",
+        help="Build an append-only active-version supplier certification replay plan.",
+    )
+    functional_certification_dry_run.add_argument("--output", default="")
+    functional_certification_dry_run.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="supplier-certification-dry-run",
+    )
+
+    functional_certification_apply = subparsers.add_parser(
+        "warehouse-functional-supplier-certification-apply",
+        help="Apply one exact reviewed supplier certification replay plan.",
+    )
+    functional_certification_apply.add_argument("--plan-file", required=True)
+    functional_certification_apply.add_argument("--fingerprint", required=True)
+    functional_certification_apply.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="supplier-certification-apply",
+    )
+
+    functional_certification_rollback = subparsers.add_parser(
+        "warehouse-functional-supplier-certification-rollback",
+        help="Append an exact rollback tombstone for one supplier certification replay.",
+    )
+    functional_certification_rollback.add_argument("--fingerprint", required=True)
+    functional_certification_rollback.add_argument("--reason", required=True)
+    functional_certification_rollback.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="supplier-certification-rollback",
     )
 
     functional_enable_hourly = subparsers.add_parser(
