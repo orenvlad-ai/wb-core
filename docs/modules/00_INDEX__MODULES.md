@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–48`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–50`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -54,6 +54,8 @@ source_basis:
   - "docs/modules/46_MODULE__SKU_MANAGEMENT_BLOCK.md"
   - "docs/modules/47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
+  - "docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md"
+  - "docs/modules/50_MODULE__PARTNER_REPORT_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -107,8 +109,10 @@ related_docs:
   - "46_MODULE__SKU_MANAGEMENT_BLOCK.md"
   - "47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
   - "48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
+  - "49_MODULE__WB_AUTOANSWERS_SERVER.md"
+  - "50_MODULE__PARTNER_REPORT_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 48: active functional contour объединяет шесть складов, Decimal WAC/капитал, WB snapshot, Proxy 3 settings и guarded production cutover."
+update_note: "Обновлён through module 50: добавлены WB autoanswers server и single-SKU Partner Report с immutable XLSX/ZIP evidence."
 ---
 
 # 1. Назначение индекса
@@ -125,7 +129,7 @@ update_note: "Обновлён through module 48: active functional contour об
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–48`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `46` добавляет operator action/read-model contour без parallel metric truth. Module `47` добавляет защищённую внутреннюю базу знаний. Module `48` владеет active six-stage warehouse/cost state, snapshot WB, targeted replay, hourly sync and guarded functional cutover.
+Канонический индекс охватывает modules `01–50`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `46` добавляет operator action/read-model contour без parallel metric truth. Module `47` добавляет защищённую внутреннюю базу знаний. Module `48` владеет active six-stage warehouse/cost state, snapshot WB, targeted replay, hourly sync and guarded functional cutover. Module `49` владеет server-native WB autoanswers contour. Module `50` владеет Partner Report settings/finalization/XLSX/ZIP contract.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -260,6 +264,7 @@ update_note: "Обновлён through module 48: active functional contour об
 | `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
 | `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal engine with exact-date history, stable nomenclature identity, versioned unmatched audit, localized evidence UI, hourly bounded sync, Proxy 3 and guarded atomic cutover |
 | `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production manual contour with canonical WB sync, safe photo/HLS ingestion, frozen v1.4.2 Node pipeline, media-aware regeneration, policy-epoch mode reconciliation, durable publication/readback and compact protected UI |
+| `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/xlsx-evidence` | Single-SKU Decimal profitability report with versioned server-owned settings, continuous immutable finalized periods, accepted ads snapshots, allocated account expenses and fail-closed confidential XLSX/ZIP reconciliation |
 
 # 5. Как эта папка используется дальше
 

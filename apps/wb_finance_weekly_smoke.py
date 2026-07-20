@@ -62,9 +62,11 @@ def main() -> None:
             "other_deductions": "8.0000",
             "positive_adjustments": "11.0000",
             "total_wb_expenses": "155.0000",
-            "before_cogs_profit": "96.0000",
+            "profit_period_expenses": "147.0000",
+            "wb_expenses_without_marketing_pct": "56.2500",
+            "before_cogs_profit": "104.0000",
             "cogs": "200.0000",
-            "profit_after_cogs": "-104.0000",
+            "profit_after_cogs": "-96.0000",
         }
         for key, value in expected.items():
             if metrics.get(key) != value:
@@ -72,7 +74,7 @@ def main() -> None:
                     f"{key}: expected {value!r}, got {metrics.get(key)!r}"
                 )
         if Decimal(metrics["final_margin_pct"]).quantize(Decimal("0.01")) != Decimal(
-            "-43.33"
+            "-40.00"
         ):
             raise AssertionError(
                 f"final margin mismatch: {metrics['final_margin_pct']}"
@@ -138,6 +140,14 @@ def main() -> None:
             conn.execute(
                 "insert into registry_upload_config_v2 values('bundle',999999,1,'Recovered SKU','Group',2)"
             )
+            conn.execute(
+                """INSERT INTO wb_finance_retro_cost_map VALUES(
+                   'seller-1','999999','100.0000','2026-07-01','fixture',
+                   '{"nm_id":"999999","unit_cost_rub":"100.0000"}',
+                   'sha256:fixture-row-999999','sha256:fixture-calculation-999999',
+                   'exact_2026_07_01','wb_finance_business_approved_retro_cost_v1',
+                   'business_approved_retro','2026-07-01T00:00:00Z')"""
+            )
             conn.commit()
         recovered = block.recalculate_week(date(2026, 6, 29), date(2026, 7, 5))
         recovered_week = next(
@@ -185,6 +195,47 @@ def main() -> None:
         ):
             raise AssertionError(
                 f"different missing SKU movements must not cancel: {distinct_coverage}"
+            )
+        symmetric_missing = block.ingest_week(
+            date(2026, 3, 30),
+            date(2026, 4, 5),
+            [
+                dict(
+                    rows[0],
+                    reportId=403,
+                    rrdId=4030,
+                    rrDate="2026-04-01",
+                    nmId=403,
+                    vendorCode="missing-symmetric",
+                    sku="missing-symmetric",
+                    quantity=1,
+                ),
+                dict(
+                    rows[1],
+                    reportId=404,
+                    rrdId=4040,
+                    rrDate="2026-04-01",
+                    nmId=403,
+                    vendorCode="missing-symmetric",
+                    sku="missing-symmetric",
+                    quantity=1,
+                ),
+            ],
+        )
+        symmetric_coverage = next(
+            week
+            for week in block.build_payload()["weeks"]
+            if week["week_start"] == "2026-03-30"
+        )["cost_coverage"]
+        if (
+            symmetric_missing["aggregate"]["cogs"] is not None
+            or symmetric_coverage["unmatched_units"] != 2
+            or symmetric_coverage["problem_skus"][0]["net_units"] != 0
+            or symmetric_coverage["problem_skus"][0]["unmatched_units"] != 2
+        ):
+            raise AssertionError(
+                "same-SKU sale/return symmetry must not hide missing gross cost coverage: "
+                f"{symmetric_coverage}"
             )
         second_sync = block.ingest_week(date(2026, 6, 22), date(2026, 6, 28), rows)
         if second_sync["status"] != "completed":
@@ -405,6 +456,13 @@ def _seed_canonical_cost(db_path: Path) -> None:
             INSERT INTO cost_price_upload_rows VALUES('cost',2,'Anti-Spy','115','2026-01-28');
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,101,'VC101','4600000000101','["4600000000101"]','other');
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,102,'ANTI102','4600000000102','["4600000000102"]','anti_spy');
+            INSERT INTO wb_finance_retro_cost_map VALUES(
+                'seller-1','101','100.0000','2026-07-01','fixture',
+                '{"nm_id":"101","unit_cost_rub":"100.0000"}',
+                'sha256:fixture-row-101','sha256:fixture-calculation-101',
+                'exact_2026_07_01','wb_finance_business_approved_retro_cost_v1',
+                'business_approved_retro','2026-07-01T00:00:00Z'
+            );
             """
         )
         conn.commit()

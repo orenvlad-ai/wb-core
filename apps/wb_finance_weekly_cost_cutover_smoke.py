@@ -38,13 +38,34 @@ def main() -> None:
         _seed_cost_sources(block.db_path)
         base_rows = _base_rows()
         pre = block.ingest_week(date(2026, 6, 22), date(2026, 6, 28), base_rows)
-        if pre["aggregate"]["cogs"] != "200.0000":
-            raise AssertionError(f"pre-cutover COST_PRICE baseline mismatch: {pre}")
+        if pre["aggregate"]["cogs"] is not None:
+            raise AssertionError(f"May/June cost must remain blocked before retro map: {pre}")
+        plan = block.plan_business_approved_backfill(
+            date_from=date(2026, 6, 22), date_to=date(2026, 6, 28)
+        )
+        if not plan["apply_allowed"] or plan["source_manifests"]["cost"]["proposed_row_count"] != 1:
+            raise AssertionError(f"retro-cost dry-run mismatch: {plan}")
+        applied = block.apply_business_approved_backfill(
+            expected_fingerprint=plan["fingerprint"],
+            approval_reference="smoke-approved",
+            date_from=date(2026, 6, 22),
+            date_to=date(2026, 6, 28),
+        )
+        if applied["status"] != "applied" or _week(block, "2026-06-22")["metrics"]["cogs"] != "300.0000":
+            raise AssertionError(f"business-approved retro apply mismatch: {applied}")
+        repeated = block.apply_business_approved_backfill(
+            expected_fingerprint=plan["fingerprint"],
+            approval_reference="smoke-approved",
+            date_from=date(2026, 6, 22),
+            date_to=date(2026, 6, 28),
+        )
+        if repeated["status"] != "already_current" or repeated["runtime_mutation"]:
+            raise AssertionError(f"repeat exact apply must be no-op: {repeated}")
         _assert_temporal_cost_cutover(block, base_rows)
         _assert_control_week_regression_fixture()
         _assert_our_wb_rebuild_invalidation_wiring()
     print(
-        "wb_finance_weekly_cost_cutover: ok -> 30.06 COST_PRICE, 01.07 Our WB, mixed week, quality, invalidation, idempotency"
+        "wb_finance_weekly_cost_cutover: ok -> retro map, 01.07 Our WB, mixed week, quality, invalidation, idempotency"
     )
 
 
@@ -102,13 +123,14 @@ def _assert_temporal_cost_cutover(
     mixed_week = _week(block, "2026-06-29")
     quality = mixed_week["cost_coverage"]["quality"]
     if (
-        mixed["aggregate"]["cogs"] != "490.0000"
-        or mixed["aggregate"]["profit_after_cogs"] != "-90.0000"
-        or mixed["aggregate"]["final_margin_pct"] != "-16.6667"
+        mixed["aggregate"]["cogs"] != "590.0000"
+        or mixed["aggregate"]["profit_after_cogs"] != "-190.0000"
+        or mixed["aggregate"]["final_margin_pct"] != "-35.1852"
     ):
         raise AssertionError(f"mixed-week COGS/profit mismatch: {mixed}")
     if quality["source_units"] != {
-        "cost_price": 2,
+        "cost_price": 0,
+        "business_approved_retro": 2,
         "our_wb_cost_daily_state": 4,
     }:
         raise AssertionError(f"30.06/01.07 temporal source split mismatch: {quality}")
@@ -253,9 +275,9 @@ def _assert_temporal_cost_cutover(
     mixed_after_change = _week(block, "2026-06-29")
     if (
         invalidated["recalculated_week_count"] != 1
-        or mixed_after_change["metrics"]["cogs"] != "640.0000"
-        or mixed_after_change["metrics"]["profit_after_cogs"] != "-240.0000"
-        or mixed_after_change["metrics"]["final_margin_pct"] != "-44.4444"
+        or mixed_after_change["metrics"]["cogs"] != "740.0000"
+        or mixed_after_change["metrics"]["profit_after_cogs"] != "-340.0000"
+        or mixed_after_change["metrics"]["final_margin_pct"] != "-62.9630"
     ):
         raise AssertionError(
             f"daily-state change did not invalidate affected week: {invalidated}"
@@ -265,9 +287,9 @@ def _assert_temporal_cost_cutover(
     repeated = block.recalculate_week(date(2026, 6, 29), date(2026, 7, 5))
     if repeated != mixed_after_change["metrics"]:
         raise AssertionError("repeated mixed-week recalculation must be idempotent")
-    if _week(block, "2026-06-22")["metrics"]["cogs"] != "200.0000":
+    if _week(block, "2026-06-22")["metrics"]["cogs"] != "300.0000":
         raise AssertionError(
-            "pre-boundary COST_PRICE result changed after Our WB update"
+            "immutable retro projection changed after current Our WB update"
         )
 
     alias_week = block.ingest_week(
@@ -278,7 +300,7 @@ def _assert_temporal_cost_cutover(
                 sale,
                 reportId=727,
                 rrdId=7271,
-                nmId=999,
+            nmId=0,
                 vendorCode="VC101",
                 sku="alias-only",
                 quantity=1,
@@ -302,7 +324,7 @@ def _assert_temporal_cost_cutover(
     if (
         remapped["recalculated_week_count"] != 1
         or remapped_week["metrics"]["cogs"] is not None
-        or remapped_week["cost_coverage"]["problem_skus"][0]["sku"] != "999"
+        or remapped_week["cost_coverage"]["problem_skus"][0]["sku"] != "VC101"
     ):
         raise AssertionError(
             f"nomenclature alias change must invalidate Finance cost: {remapped_week}"

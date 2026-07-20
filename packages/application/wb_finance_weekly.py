@@ -32,7 +32,13 @@ OUR_WB_COST_CUTOVER_DATE = date.fromisoformat(OUR_WB_COST_OPENING_DATE)
 OUR_WB_COST_CUTOVER_WEEK_START = OUR_WB_COST_CUTOVER_DATE - timedelta(
     days=OUR_WB_COST_CUTOVER_DATE.weekday()
 )
-COST_METHOD_VERSION = "wb_finance_cost_temporal_v2"
+RETRO_COST_PERIOD_START = date(2026, 5, 1)
+RETRO_COST_PERIOD_END = date(2026, 6, 30)
+RETRO_COST_REFERENCE_DATE = date(2026, 7, 1)
+RETRO_COST_FIRST_WEEK_START = date(2026, 4, 27)
+RETRO_COST_FORMULA_VERSION = "wb_finance_business_approved_retro_cost_v1"
+PROFIT_METHOD_VERSION = "wb_finance_profit_capitalized_costs_v1"
+COST_METHOD_VERSION = "wb_finance_cost_temporal_v3"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -51,9 +57,113 @@ def _money_text(value: Decimal | None) -> str | None:
 
 
 def _ratio(numerator: Decimal | None, denominator: Decimal) -> Decimal | None:
-    if numerator is None or denominator == ZERO:
+    if numerator is None or denominator <= ZERO:
         return None
     return numerator / denominator * Decimal("100")
+
+
+def _operation_date(row: Mapping[str, Any], fallback: date) -> tuple[date, str]:
+    for field in ("rrDate", "saleDt", "orderDt"):
+        raw_date = str(row.get(field) or "")[:10]
+        try:
+            if raw_date:
+                return date.fromisoformat(raw_date), field
+        except ValueError:
+            continue
+    return fallback, "week_start_fallback"
+
+
+def _nomenclature_identity_index(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, str], set[str], dict[str, str], dict[str, dict[str, Any]]]:
+    """Build deterministic active + historical identity without cross-SKU guessing."""
+
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_nomenclature_items'"
+    ).fetchone()
+    if table_exists is None:
+        return {}, set(), {}, {}
+    columns = {
+        str(row["name"])
+        for row in conn.execute(
+            "PRAGMA table_info(sheet_vitrina_v1_nomenclature_items)"
+        ).fetchall()
+    }
+    rows = conn.execute("SELECT * FROM sheet_vitrina_v1_nomenclature_items").fetchall()
+    aliases: dict[str, set[str]] = {}
+    groups: dict[str, str] = {}
+    items: dict[str, dict[str, Any]] = {}
+    product_type_groups = {
+        "clear": "Clean",
+        "anti_spy": "Anti-Spy",
+        "matte": "Matte",
+    }
+    scalar_fields = (
+        "nm_id",
+        "vendor_code",
+        "barcode",
+        "our_sku",
+        "match_key",
+    )
+    json_fields = ("barcodes_json", "aliases_json")
+    for row in rows:
+        nm = str(row["nm_id"] or "") if "nm_id" in columns else ""
+        if not nm or nm == "0":
+            continue
+        item = {column: row[column] for column in columns}
+        items.setdefault(nm, item)
+        product_type = (
+            str(row["product_type"] or "").casefold()
+            if "product_type" in columns
+            else ""
+        )
+        canonical_group = product_type_groups.get(product_type)
+        if canonical_group:
+            groups[nm] = canonical_group
+        values: list[str] = []
+        for field in scalar_fields:
+            if field in columns and row[field] not in (None, ""):
+                values.append(str(row[field]))
+        for field in json_fields:
+            if field not in columns:
+                continue
+            try:
+                parsed = json.loads(row[field] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                parsed = []
+            if isinstance(parsed, list):
+                values.extend(str(value) for value in parsed if value not in (None, ""))
+        for value in values:
+            aliases.setdefault(value.strip().casefold(), set()).add(nm)
+    ambiguous = {alias for alias, owners in aliases.items() if len(owners) != 1}
+    deterministic = {
+        alias: next(iter(owners))
+        for alias, owners in aliases.items()
+        if len(owners) == 1
+    }
+    return deterministic, ambiguous, groups, items
+
+
+def _resolve_finance_nm_id(
+    row: Mapping[str, Any],
+    *,
+    alias_to_nm: Mapping[str, str],
+    ambiguous_aliases: set[str],
+) -> tuple[str, str, str]:
+    raw_nm = str(row.get("nmId") or "").strip()
+    if raw_nm and raw_nm != "0":
+        return raw_nm, "direct_nm_id", ""
+    for field in ("vendorCode", "sku"):
+        raw = str(row.get(field) or "").strip()
+        if not raw:
+            continue
+        key = raw.casefold()
+        if key in ambiguous_aliases:
+            return "", "ambiguous_alias", f"{field}:{raw}"
+        resolved = alias_to_nm.get(key, "")
+        if resolved:
+            return resolved, f"canonical_{field}", ""
+    return "", "unresolved", "nmId/vendorCode/sku"
 
 
 def _functional_wb_cost_state(
@@ -332,6 +442,30 @@ class WbFinanceWeeklyBlock:
                     quality_json TEXT NOT NULL DEFAULT '{}',
                     cost_state_hash TEXT NOT NULL DEFAULT '',
                     calculated_at TEXT NOT NULL, PRIMARY KEY (seller_id, week_start, week_end)
+                );
+                CREATE TABLE IF NOT EXISTS wb_finance_retro_cost_map (
+                    seller_id TEXT NOT NULL,
+                    nm_id TEXT NOT NULL,
+                    unit_cost_rub TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    source_table TEXT NOT NULL,
+                    source_row_json TEXT NOT NULL,
+                    source_row_sha256 TEXT NOT NULL,
+                    source_calculation_fingerprint TEXT NOT NULL,
+                    selection_method TEXT NOT NULL,
+                    formula_version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (seller_id, nm_id, formula_version)
+                );
+                CREATE TABLE IF NOT EXISTS wb_finance_projection_audit (
+                    audit_id TEXT PRIMARY KEY,
+                    seller_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -681,7 +815,12 @@ class WbFinanceWeeklyBlock:
         return aggregate
 
     def _aggregate_rows(
-        self, conn: sqlite3.Connection, rows: list[dict[str, Any]], week_start: date
+        self,
+        conn: sqlite3.Connection,
+        rows: list[dict[str, Any]],
+        week_start: date,
+        *,
+        retro_cost_map: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
         values: dict[str, Decimal] = {
             key: ZERO
@@ -707,10 +846,14 @@ class WbFinanceWeeklyBlock:
             )
         }
         unknown: set[str] = set()
+        capitalized_acceptance = ZERO
+        capitalized_transit = ZERO
+        profit_semantics_complete = True
         for row in rows:
             doc = str(row.get("docTypeName") or "").casefold()
             quantity = _decimal(row.get("quantity"))
             revenue = _decimal(row.get("retailPriceWithDisc"))
+            operation_date, operation_date_source = _operation_date(row, week_start)
             if doc == "продажа":
                 values["sales_qty"] += quantity
                 values["revenue_before_returns"] += revenue
@@ -725,12 +868,31 @@ class WbFinanceWeeklyBlock:
                 values["to_seller"] -= _decimal(row.get("forPay"))
             values["logistics"] += _decimal(row.get("deliveryService"))
             values["storage"] += _decimal(row.get("paidStorage"))
-            values["acceptance"] += _decimal(row.get("paidAcceptance"))
+            acceptance = _decimal(row.get("paidAcceptance"))
+            values["acceptance"] += acceptance
+            if acceptance and operation_date >= RETRO_COST_PERIOD_START:
+                capitalized_acceptance += acceptance
+            if (
+                acceptance
+                and operation_date_source == "week_start_fallback"
+                and week_start < RETRO_COST_PERIOD_START <= week_start + timedelta(days=6)
+            ):
+                profit_semantics_complete = False
+                unknown.add("Не определена дата платной приёмки в смешанной неделе")
             values["penalties"] += _decimal(row.get("penalty"))
             deduction = _decimal(row.get("deduction"))
             if deduction:
                 bucket = classify_deduction(row)
                 values[bucket] += abs(deduction)
+                if bucket == "transit_logistics" and operation_date >= RETRO_COST_PERIOD_START:
+                    capitalized_transit += abs(deduction)
+                if (
+                    bucket == "transit_logistics"
+                    and operation_date_source == "week_start_fallback"
+                    and week_start < RETRO_COST_PERIOD_START <= week_start + timedelta(days=6)
+                ):
+                    profit_semantics_complete = False
+                    unknown.add("Не определена дата транзитной логистики в смешанной неделе")
                 if bucket == "other_deductions":
                     unknown.add(
                         str(
@@ -765,12 +927,28 @@ class WbFinanceWeeklyBlock:
             ),
             ZERO,
         )
-        before_cogs = net_revenue - total_expenses + values["positive_adjustments"]
-        coverage = self._calculate_cogs(conn, rows, week_start)
+        profit_period_expenses = (
+            total_expenses - capitalized_acceptance - capitalized_transit
+        )
+        before_cogs = (
+            net_revenue - profit_period_expenses + values["positive_adjustments"]
+            if profit_semantics_complete
+            else None
+        )
+        coverage = self._calculate_cogs(
+            conn,
+            rows,
+            week_start,
+            retro_cost_map=retro_cost_map,
+        )
         cogs = (
             _decimal(coverage["cogs_rub"]) if coverage["cogs_rub"] is not None else None
         )
-        profit = before_cogs - cogs if cogs is not None else None
+        profit = (
+            before_cogs - cogs
+            if before_cogs is not None and cogs is not None
+            else None
+        )
         metrics: dict[str, Any] = {
             "sales_qty": int(values["sales_qty"]),
             "returns_qty": int(values["returns_qty"]),
@@ -792,6 +970,12 @@ class WbFinanceWeeklyBlock:
             "positive_adjustments": _money_text(values["positive_adjustments"]),
             "total_wb_expenses": _money_text(total_expenses),
             "wb_expenses_pct": _money_text(_ratio(total_expenses, net_revenue)),
+            "wb_expenses_without_marketing_pct": _money_text(
+                _ratio(total_expenses - values["marketing"], net_revenue)
+            ),
+            "profit_period_expenses": _money_text(profit_period_expenses),
+            "capitalized_acceptance": _money_text(capitalized_acceptance),
+            "capitalized_transit_logistics": _money_text(capitalized_transit),
             "to_seller": _money_text(values["to_seller"]),
             "before_cogs_profit": _money_text(before_cogs),
             "before_cogs_margin_pct": _money_text(_ratio(before_cogs, net_revenue)),
@@ -799,11 +983,32 @@ class WbFinanceWeeklyBlock:
             "profit_after_cogs": _money_text(profit),
             "final_margin_pct": _money_text(_ratio(profit, net_revenue)),
             "acquiring_accounting_note": "included_in_commission_control_total",
+            "acceptance_accounting_note": "included_in_cogs_from_2026_05_01",
+            "transit_accounting_note": "included_in_cogs_from_2026_05_01",
+            "profit_method_version": PROFIT_METHOD_VERSION,
+            "profit_semantics_complete": profit_semantics_complete,
         }
         return metrics, coverage, sorted(unknown)
 
+    def _load_retro_cost_map(
+        self, conn: sqlite3.Connection
+    ) -> dict[str, dict[str, Any]]:
+        rows = conn.execute(
+            """SELECT * FROM wb_finance_retro_cost_map
+               WHERE seller_id=? AND formula_version=? AND status='business_approved_retro'
+               ORDER BY nm_id""",
+            (self.seller_id, RETRO_COST_FORMULA_VERSION),
+        ).fetchall()
+        return {str(row["nm_id"]): dict(row) for row in rows}
+
     def _calculate_cogs(
-        self, conn: sqlite3.Connection, rows: list[dict[str, Any]], week_start: date
+        self,
+        conn: sqlite3.Connection,
+        rows: list[dict[str, Any]],
+        week_start: date,
+        *,
+        retro_cost_map: Mapping[str, Mapping[str, Any]] | None = None,
+        include_details: bool = False,
     ) -> dict[str, Any]:
         group_by_nm = {
             str(row[0]): str(row[1])
@@ -812,35 +1017,12 @@ class WbFinanceWeeklyBlock:
             WHERE bundle_version=(SELECT bundle_version FROM registry_upload_current_state WHERE slot=1)"""
             )
         }
-        nomenclature = conn.execute(
-            "SELECT nm_id,vendor_code,barcode,barcodes_json,product_type FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1"
-        ).fetchall()
-        alias_to_nm: dict[str, str] = {}
-        nomenclature_group_by_nm: dict[str, str] = {}
-        product_type_groups = {
-            "clear": "Clean",
-            "anti_spy": "Anti-Spy",
-            "matte": "Matte",
-        }
-        for item in nomenclature:
-            nm = str(item["nm_id"] or "")
-            canonical_group = product_type_groups.get(
-                str(item["product_type"] or "").casefold()
-            )
-            if nm and canonical_group:
-                nomenclature_group_by_nm[nm] = canonical_group
-            for value in (
-                nm,
-                str(item["vendor_code"] or ""),
-                str(item["barcode"] or ""),
-            ):
-                if value:
-                    alias_to_nm[value.casefold()] = nm
-            try:
-                for value in json.loads(item["barcodes_json"] or "[]"):
-                    alias_to_nm[str(value).casefold()] = nm
-            except json.JSONDecodeError:
-                pass
+        (
+            alias_to_nm,
+            ambiguous_aliases,
+            nomenclature_group_by_nm,
+            _nomenclature_items,
+        ) = _nomenclature_identity_index(conn)
         cost_rows = conn.execute(
             """SELECT group_name,cost_price_rub,effective_from FROM cost_price_upload_rows
             WHERE dataset_version=(SELECT dataset_version FROM cost_price_current_state WHERE slot=1)
@@ -861,11 +1043,15 @@ class WbFinanceWeeklyBlock:
             is not None
         )
         daily_state_cache: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+        if retro_cost_map is None:
+            retro_cost_map = self._load_retro_cost_map(conn)
         cogs = ZERO
         matched_movements: dict[str, dict[str, Any]] = {}
         problems: dict[str, int] = {}
+        problem_gross_units: dict[str, int] = {}
         problem_meta: dict[str, dict[str, Any]] = {}
         dependency_evidence: set[str] = set()
+        detail_rows: list[dict[str, Any]] = []
         operation_date_fallback_rows = 0
         operation_date_fallback_units = 0
         for row in rows:
@@ -879,28 +1065,15 @@ class WbFinanceWeeklyBlock:
                 str(row.get("vendorCode") or ""),
                 str(row.get("sku") or ""),
             ]
-            internal_nm = next(
-                (
-                    alias_to_nm[key.casefold()]
-                    for key in raw_keys
-                    if key and key.casefold() in alias_to_nm
-                ),
-                raw_keys[0],
+            internal_nm, identity_method, identity_problem = _resolve_finance_nm_id(
+                row,
+                alias_to_nm=alias_to_nm,
+                ambiguous_aliases=ambiguous_aliases,
             )
             group = group_by_nm.get(internal_nm) or nomenclature_group_by_nm.get(
                 internal_nm, ""
             )
-            operation_date = week_start
-            operation_date_source = "week_start_fallback"
-            for field in ("rrDate", "saleDt", "orderDt"):
-                raw_date = str(row.get(field) or "")[:10]
-                try:
-                    if raw_date:
-                        operation_date = date.fromisoformat(raw_date)
-                        operation_date_source = field
-                        break
-                except ValueError:
-                    pass
+            operation_date, operation_date_source = _operation_date(row, week_start)
             if operation_date_source == "week_start_fallback":
                 operation_date_fallback_rows += 1
                 operation_date_fallback_units += abs(qty)
@@ -915,7 +1088,7 @@ class WbFinanceWeeklyBlock:
             )
             if (
                 operation_date_source == "week_start_fallback"
-                and week_start + timedelta(days=6) >= OUR_WB_COST_CUTOVER_DATE
+                and week_start + timedelta(days=6) >= RETRO_COST_PERIOD_START
             ):
                 source = "operation_date_missing"
                 movement_key = f"{source}|{identity_key}"
@@ -926,6 +1099,8 @@ class WbFinanceWeeklyBlock:
                     "operation_date_source": operation_date_source,
                     "raw_keys": raw_keys,
                     "internal_nm": internal_nm,
+                    "identity_method": identity_method,
+                    "identity_problem": identity_problem,
                     "group": group,
                     "missing": missing_reason,
                 }
@@ -938,6 +1113,9 @@ class WbFinanceWeeklyBlock:
                     )
                 )
                 problems[movement_key] = problems.get(movement_key, 0) + qty
+                problem_gross_units[movement_key] = (
+                    problem_gross_units.get(movement_key, 0) + abs(qty)
+                )
                 problem_meta[movement_key] = {
                     "sku": identity_key,
                     "operation_date": "",
@@ -948,7 +1126,9 @@ class WbFinanceWeeklyBlock:
                 continue
             source = (
                 "cost_price"
-                if operation_date < OUR_WB_COST_CUTOVER_DATE
+                if operation_date < RETRO_COST_PERIOD_START
+                else "business_approved_retro"
+                if operation_date <= RETRO_COST_PERIOD_END
                 else "our_wb_cost_daily_state"
             )
             movement_key = (
@@ -966,6 +1146,8 @@ class WbFinanceWeeklyBlock:
                 "operation_date_source": operation_date_source,
                 "raw_keys": raw_keys,
                 "internal_nm": internal_nm,
+                "identity_method": identity_method,
+                "identity_problem": identity_problem,
                 "group": group,
             }
             if source == "cost_price":
@@ -984,6 +1166,37 @@ class WbFinanceWeeklyBlock:
                     )
                 else:
                     missing_reason = "cost_price_missing"
+                    dependency["missing"] = missing_reason
+            elif source == "business_approved_retro":
+                selected_retro = retro_cost_map.get(internal_nm) if internal_nm else None
+                if selected_retro is not None:
+                    selected_cost = _decimal(selected_retro.get("unit_cost_rub"))
+                    dependency.update(
+                        {
+                            "unit_cost_rub": _money_text(selected_cost),
+                            "source_date": str(selected_retro.get("source_date") or ""),
+                            "source_table": str(selected_retro.get("source_table") or ""),
+                            "source_row_sha256": str(selected_retro.get("source_row_sha256") or ""),
+                            "source_calculation_fingerprint": str(
+                                selected_retro.get("source_calculation_fingerprint") or ""
+                            ),
+                            "selection_method": str(selected_retro.get("selection_method") or ""),
+                            "formula_version": str(selected_retro.get("formula_version") or ""),
+                            "status": str(selected_retro.get("status") or ""),
+                        }
+                    )
+                    if selected_cost <= ZERO:
+                        selected_cost = None
+                        missing_reason = "retro_cost_non_positive"
+                        dependency["missing"] = missing_reason
+                else:
+                    missing_reason = (
+                        "finance_identity_ambiguous"
+                        if identity_method == "ambiguous_alias"
+                        else "finance_identity_unresolved"
+                        if not internal_nm
+                        else "business_approved_retro_cost_missing"
+                    )
                     dependency["missing"] = missing_reason
             else:
                 cache_key = (operation_date.isoformat(), internal_nm)
@@ -1062,6 +1275,9 @@ class WbFinanceWeeklyBlock:
             )
             if selected_cost is None:
                 problems[movement_key] = problems.get(movement_key, 0) + qty
+                problem_gross_units[movement_key] = (
+                    problem_gross_units.get(movement_key, 0) + abs(qty)
+                )
                 problem_meta[movement_key] = {
                     "sku": identity_key,
                     "operation_date": operation_date.isoformat(),
@@ -1074,29 +1290,52 @@ class WbFinanceWeeklyBlock:
                 movement_key,
                 {
                     "net_units": 0,
+                    "gross_units": 0,
                     "source": source,
                     "quality_shares": quality_shares,
                 },
             )
             movement["net_units"] = int(movement["net_units"]) + qty
+            movement["gross_units"] = int(movement["gross_units"]) + abs(qty)
             cogs += Decimal(qty) * selected_cost
-        problems = {key: units for key, units in problems.items() if units != 0}
+            if include_details:
+                detail_rows.append(
+                    {
+                        "report_id": str(row.get("reportId") or ""),
+                        "rrd_id": str(row.get("rrdId") or ""),
+                        "nm_id": internal_nm,
+                        "operation_date": operation_date.isoformat(),
+                        "operation_date_source": operation_date_source,
+                        "movement": "sale" if sign > 0 else "return",
+                        "quantity": abs(qty),
+                        "signed_quantity": qty,
+                        "unit_cost_rub": _money_text(selected_cost),
+                        "cost_source": source,
+                        "source_date": str(dependency.get("source_date") or dependency.get("effective_from") or operation_date.isoformat()),
+                        "formula_version": COST_METHOD_VERSION,
+                        "signed_cogs_rub": _money_text(Decimal(qty) * selected_cost),
+                    }
+                )
         matched = sum(
-            abs(int(movement["net_units"])) for movement in matched_movements.values()
+            int(movement["gross_units"]) for movement in matched_movements.values()
         )
-        unmatched = sum(abs(units) for units in problems.values())
+        unmatched = sum(problem_gross_units.values())
         denominator = matched + unmatched
         coverage_pct = (
             Decimal(matched) / Decimal(denominator) * Decimal("100")
             if denominator
             else None
         )
-        source_units = {"cost_price": 0, "our_wb_cost_daily_state": 0}
+        source_units = {
+            "cost_price": 0,
+            "business_approved_retro": 0,
+            "our_wb_cost_daily_state": 0,
+        }
         confirmed_units = ZERO
         estimated_units = ZERO
         fallback_units = ZERO
         for movement in matched_movements.values():
-            units = abs(int(movement["net_units"]))
+            units = int(movement["gross_units"])
             source_name = str(movement["source"])
             source_units[source_name] += units
             if source_name != "our_wb_cost_daily_state":
@@ -1122,6 +1361,7 @@ class WbFinanceWeeklyBlock:
             "estimated_units": _money_text(estimated_units),
             "fallback_units": _money_text(fallback_units),
             "estimated_fallback_units": _money_text(estimated_units + fallback_units),
+            "business_approved_retro_units": source_units["business_approved_retro"],
             "confirmed_share_pct": _money_text(confirmed_share_pct),
             "operation_date_fallback_rows": operation_date_fallback_rows,
             "operation_date_fallback_units": operation_date_fallback_units,
@@ -1144,11 +1384,16 @@ class WbFinanceWeeklyBlock:
             "cogs_rub": _money_text(cogs) if unmatched == 0 else None,
             "partial_cogs_rub": _money_text(cogs),
             "problem_skus": [
-                {**problem_meta[key], "net_units": value}
-                for key, value in sorted(problems.items())
+                {
+                    **problem_meta[key],
+                    "net_units": problems[key],
+                    "unmatched_units": gross_units,
+                }
+                for key, gross_units in sorted(problem_gross_units.items())
             ],
             "quality": quality,
             "cost_state_hash": cost_state_hash,
+            "detail_rows": detail_rows if include_details else [],
         }
 
     def build_payload(self) -> dict[str, Any]:
@@ -1284,6 +1529,908 @@ class WbFinanceWeeklyBlock:
                 }
             )
         return {"status": "completed", "week_count": len(results), "weeks": results}
+
+    def plan_business_approved_backfill(
+        self,
+        *,
+        date_from: date = RETRO_COST_FIRST_WEEK_START,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        """Read-only production preflight for the Finance retro projection."""
+
+        if not self.db_path.is_file():
+            raise ValueError(f"Finance runtime SQLite does not exist: {self.db_path}")
+        latest_closed = week_bounds(self.now_factory().astimezone(MOSCOW).date())[0] - timedelta(days=1)
+        scope_end = date_to or latest_closed
+        if scope_end < date_from:
+            raise ValueError("date_to must not be earlier than date_from")
+        if scope_end > latest_closed:
+            raise ValueError(
+                f"date_to must not exceed latest fully closed week end {latest_closed.isoformat()}"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            try:
+                return self._plan_business_approved_backfill_in_connection(
+                    conn,
+                    date_from=date_from,
+                    date_to=scope_end,
+                )
+            finally:
+                conn.rollback()
+
+    def _plan_business_approved_backfill_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> dict[str, Any]:
+        candidate_rows = conn.execute(
+            """SELECT DISTINCT week_start,week_end
+               FROM wb_finance_weekly_raw_rows
+               WHERE seller_id=? AND week_end>=? AND week_end<=?
+               ORDER BY week_start""",
+            (self.seller_id, date_from.isoformat(), date_to.isoformat()),
+        ).fetchall()
+        candidates = [
+            (date.fromisoformat(row["week_start"]), date.fromisoformat(row["week_end"]))
+            for row in candidate_rows
+        ]
+        parsed_by_week: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        all_parsed: list[dict[str, Any]] = []
+        finance_weeks: list[dict[str, Any]] = []
+        union_nm_ids: set[str] = set()
+        identity_issues: list[dict[str, str]] = []
+        finance_source_blockers: list[dict[str, str]] = []
+        rows_without_nm_id = 0
+        alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+        for start, end in candidates:
+            key = (start.isoformat(), end.isoformat())
+            raw_rows = conn.execute(
+                """SELECT report_id,rrd_id,nm_id,row_hash,raw_json
+                   FROM wb_finance_weekly_raw_rows
+                   WHERE seller_id=? AND week_start=? AND week_end=?
+                   ORDER BY report_id,rrd_id""",
+                (self.seller_id, *key),
+            ).fetchall()
+            parsed = [json.loads(row["raw_json"]) for row in raw_rows]
+            parsed_by_week[key] = parsed
+            all_parsed.extend(parsed)
+            raw_week_nm_ids = {
+                str(row.get("nmId") or "").strip()
+                for row in parsed
+                if str(row.get("docTypeName") or "").casefold()
+                in {"продажа", "возврат"}
+                and str(row.get("nmId") or "").strip() not in {"", "0"}
+            }
+            week_nm_ids: set[str] = set()
+            week_identity_issues: list[dict[str, str]] = []
+            for row in parsed:
+                if str(row.get("docTypeName") or "").casefold() not in {
+                    "продажа",
+                    "возврат",
+                }:
+                    continue
+                resolved_nm, method, reason = _resolve_finance_nm_id(
+                    row,
+                    alias_to_nm=alias_to_nm,
+                    ambiguous_aliases=ambiguous_aliases,
+                )
+                if resolved_nm:
+                    week_nm_ids.add(resolved_nm)
+                else:
+                    issue = {
+                        "week_start": key[0],
+                        "report_id": str(row.get("reportId") or ""),
+                        "rrd_id": str(row.get("rrdId") or ""),
+                        "identity_method": method,
+                        "reason": reason,
+                    }
+                    week_identity_issues.append(issue)
+                    identity_issues.append(issue)
+            union_nm_ids.update(week_nm_ids)
+            no_nm_count = sum(
+                1 for row in parsed if str(row.get("nmId") or "").strip() in {"", "0"}
+            )
+            rows_without_nm_id += no_nm_count
+            report_rows = conn.execute(
+                """SELECT report_id,report_type,row_count,content_hash
+                   FROM wb_finance_weekly_reports
+                   WHERE seller_id=? AND week_start=? AND week_end=?
+                   ORDER BY report_id""",
+                (self.seller_id, *key),
+            ).fetchall()
+            sync_row = conn.execute(
+                """SELECT status,last_error FROM wb_finance_weekly_sync
+                   WHERE seller_id=? AND week_start=? AND week_end=?""",
+                (self.seller_id, *key),
+            ).fetchone()
+            sync_status = str(sync_row["status"] or "") if sync_row else "missing"
+            if sync_status not in {"completed", "incomplete_cost"}:
+                finance_source_blockers.append(
+                    {
+                        "code": "finance_source_week_not_completed",
+                        "week_start": key[0],
+                        "week_end": key[1],
+                        "status": sync_status,
+                        "reason": str(sync_row["last_error"] or "") if sync_row else "sync row missing",
+                    }
+                )
+            raw_digest = hashlib.sha256(
+                json.dumps(
+                    [
+                        [
+                            row["report_id"],
+                            row["rrd_id"],
+                            row["nm_id"],
+                            row["row_hash"],
+                            hashlib.sha256(str(row["raw_json"]).encode("utf-8")).hexdigest(),
+                        ]
+                        for row in raw_rows
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            report_digest = hashlib.sha256(
+                json.dumps(
+                    [list(row) for row in report_rows],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            finance_weeks.append(
+                {
+                    "week_start": key[0],
+                    "week_end": key[1],
+                    "raw_row_count": len(raw_rows),
+                    "report_count": len(report_rows),
+                    "sale_return_nm_ids": sorted(week_nm_ids),
+                    "raw_sale_return_nm_ids": sorted(raw_week_nm_ids),
+                    "sale_return_identity_issues": week_identity_issues,
+                    "rows_without_nm_id": no_nm_count,
+                    "sync_status": sync_status,
+                    "sync_last_error": str(sync_row["last_error"] or "") if sync_row else "",
+                    "raw_digest": f"sha256:{raw_digest}",
+                    "report_digest": f"sha256:{report_digest}",
+                }
+            )
+
+        proposed_rows, retro_blockers = self._build_retro_cost_rows(
+            conn,
+            rows=all_parsed,
+        )
+        persisted_map = self._load_retro_cost_map(conn)
+        projected_map = {**persisted_map, **{row["nm_id"]: row for row in proposed_rows}}
+        changed_weeks: list[dict[str, Any]] = []
+        coverage_weeks: list[dict[str, Any]] = []
+        blockers = [*retro_blockers, *finance_source_blockers]
+        for start, end in candidates:
+            key = (start.isoformat(), end.isoformat())
+            aggregate, coverage, unknown = self._aggregate_rows(
+                conn,
+                parsed_by_week[key],
+                start,
+                retro_cost_map=projected_map,
+            )
+            if int(coverage["unmatched_units"]):
+                blockers.append(
+                    {
+                        "code": "finance_cost_coverage_incomplete",
+                        "week_start": key[0],
+                        "week_end": key[1],
+                        "problem_skus": coverage["problem_skus"],
+                    }
+                )
+            stored_aggregate_row = conn.execute(
+                """SELECT metrics_json FROM wb_finance_weekly_aggregates
+                   WHERE seller_id=? AND week_start=? AND week_end=?""",
+                (self.seller_id, *key),
+            ).fetchone()
+            stored_coverage_row = conn.execute(
+                """SELECT matched_units,unmatched_units,coverage_pct,cogs_rub,
+                          problem_skus_json,quality_json,cost_state_hash
+                   FROM wb_finance_weekly_cost_coverage
+                   WHERE seller_id=? AND week_start=? AND week_end=?""",
+                (self.seller_id, *key),
+            ).fetchone()
+            stored_metrics = (
+                json.loads(stored_aggregate_row["metrics_json"])
+                if stored_aggregate_row is not None
+                else {}
+            )
+            stored_coverage = (
+                {
+                    "matched_units": stored_coverage_row["matched_units"],
+                    "unmatched_units": stored_coverage_row["unmatched_units"],
+                    "coverage_pct": stored_coverage_row["coverage_pct"],
+                    "cogs_rub": stored_coverage_row["cogs_rub"],
+                    "problem_skus": json.loads(stored_coverage_row["problem_skus_json"] or "[]"),
+                    "quality": json.loads(stored_coverage_row["quality_json"] or "{}"),
+                    "cost_state_hash": stored_coverage_row["cost_state_hash"] or "",
+                }
+                if stored_coverage_row is not None
+                else {}
+            )
+            expected_coverage = {
+                key_name: coverage[key_name]
+                for key_name in (
+                    "matched_units",
+                    "unmatched_units",
+                    "coverage_pct",
+                    "cogs_rub",
+                    "problem_skus",
+                    "quality",
+                    "cost_state_hash",
+                )
+            }
+            quality = coverage["quality"]
+            confirmed_share = quality.get("confirmed_share_pct")
+            coverage_weeks.append(
+                {
+                    "week_start": key[0],
+                    "week_end": key[1],
+                    "before": stored_coverage,
+                    "expected": expected_coverage,
+                    "complete": int(coverage["unmatched_units"]) == 0,
+                    "confirmed_share_interpretation": (
+                        "complete_historical_frozen_projection"
+                        if int(coverage["unmatched_units"]) == 0
+                        and confirmed_share == "0.0000"
+                        else "not_applicable"
+                        if confirmed_share is None
+                        else "canonical_quality_share"
+                    ),
+                    "unknown_reasons": unknown,
+                }
+            )
+            changed = (
+                stored_metrics != aggregate
+                or stored_coverage != expected_coverage
+            )
+            if changed:
+                changed_weeks.append(
+                    {
+                        "week_start": key[0],
+                        "week_end": key[1],
+                        "before": {
+                            "cogs": stored_metrics.get("cogs"),
+                            "profit_after_cogs": stored_metrics.get("profit_after_cogs"),
+                            "final_margin_pct": stored_metrics.get("final_margin_pct"),
+                            "matched_units": stored_coverage.get("matched_units"),
+                            "unmatched_units": stored_coverage.get("unmatched_units"),
+                            "cost_state_hash": stored_coverage.get("cost_state_hash"),
+                        },
+                        "expected": {
+                            "cogs": aggregate.get("cogs"),
+                            "profit_after_cogs": aggregate.get("profit_after_cogs"),
+                            "final_margin_pct": aggregate.get("final_margin_pct"),
+                            "total_wb_expenses": aggregate.get("total_wb_expenses"),
+                            "profit_period_expenses": aggregate.get("profit_period_expenses"),
+                            "wb_expenses_without_marketing_pct": aggregate.get(
+                                "wb_expenses_without_marketing_pct"
+                            ),
+                            "matched_units": coverage["matched_units"],
+                            "unmatched_units": coverage["unmatched_units"],
+                            "coverage_pct": coverage["coverage_pct"],
+                            "cost_state_hash": coverage["cost_state_hash"],
+                            "problem_skus": coverage["problem_skus"],
+                            "unknown_reasons": unknown,
+                        },
+                    }
+                )
+
+        target_keys = {
+            (self.seller_id, item["week_start"], item["week_end"])
+            for item in changed_weeks
+        }
+        ads_manifest = self._ads_coverage_manifest(
+            conn,
+            nm_ids=sorted(union_nm_ids),
+            date_from=max(date_from, RETRO_COST_PERIOD_START),
+            date_to=date_to,
+        )
+        finance_manifest = {
+            "week_count": len(finance_weeks),
+            "raw_row_count": sum(item["raw_row_count"] for item in finance_weeks),
+            "report_count": sum(item["report_count"] for item in finance_weeks),
+            "sale_return_nm_ids": sorted(union_nm_ids),
+            "sale_return_nm_id_count": len(union_nm_ids),
+            "sale_return_identity_issue_count": len(identity_issues),
+            "sale_return_identity_issues": identity_issues,
+            "rows_without_nm_id": rows_without_nm_id,
+            "weeks": finance_weeks,
+        }
+        coverage_manifest = {
+            "week_count": len(coverage_weeks),
+            "complete_week_count": sum(1 for item in coverage_weeks if item["complete"]),
+            "incomplete_week_count": sum(1 for item in coverage_weeks if not item["complete"]),
+            "weeks": coverage_weeks,
+        }
+        coverage_manifest["digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                coverage_manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cost_manifest = {
+            "formula_version": RETRO_COST_FORMULA_VERSION,
+            "period_start": RETRO_COST_PERIOD_START.isoformat(),
+            "period_end": RETRO_COST_PERIOD_END.isoformat(),
+            "reference_date": RETRO_COST_REFERENCE_DATE.isoformat(),
+            "persisted_row_count": len(persisted_map),
+            "proposed_row_count": len(proposed_rows),
+            "rows": proposed_rows,
+        }
+        source_manifest = {
+            "finance": finance_manifest,
+            "cost": cost_manifest,
+            "ads": ads_manifest,
+            "coverage": coverage_manifest,
+        }
+        source_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                source_manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        plan: dict[str, Any] = {
+            "schema_version": "wb_finance_business_approved_backfill_v1",
+            "status": "dry_run",
+            "runtime_mutation": False,
+            "apply_allowed": not blockers,
+            "seller_id": self.seller_id,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "formula_versions": {
+                "cost": COST_METHOD_VERSION,
+                "retro_cost": RETRO_COST_FORMULA_VERSION,
+                "profit": PROFIT_METHOD_VERSION,
+            },
+            "source_manifests": source_manifest,
+            "source_digest": source_digest,
+            "checked_week_count": len(candidates),
+            "target_week_count": len(changed_weeks),
+            "weeks": changed_weeks,
+            "blockers": blockers,
+            "target_before_digest": self._finance_state_digest(
+                conn,
+                target_keys=target_keys,
+                target_only=True,
+            ),
+            "non_target_digest": self._finance_state_digest(
+                conn,
+                target_keys=target_keys,
+                target_only=False,
+            ),
+            "backup_plan": {
+                "method": "sqlite_online_backup",
+                "integrity_check": "required_ok",
+                "sha256": "required",
+                "mode": "0600",
+                "free_space_check": "required_before_backup",
+            },
+            "apply_plan": {
+                "requires_exact_fingerprint": True,
+                "single_immediate_transaction": True,
+                "rollback_on_drift_or_error": True,
+                "partial_or_force_modes": False,
+            },
+            "reconciliation_plan": {
+                "target_readback": True,
+                "full_cost_coverage": True,
+                "non_target_invariants": True,
+                "repeat_apply_noop": True,
+                "audit_record": True,
+            },
+        }
+        plan["fingerprint"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                plan,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return plan
+
+    def _build_retro_cost_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+        required: set[str] = set()
+        blockers: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("docTypeName") or "").casefold() not in {"продажа", "возврат"}:
+                continue
+            operation_date, operation_source = _operation_date(row, RETRO_COST_PERIOD_START)
+            if not (RETRO_COST_PERIOD_START <= operation_date <= RETRO_COST_PERIOD_END):
+                continue
+            nm_id, identity_method, identity_problem = _resolve_finance_nm_id(
+                row,
+                alias_to_nm=alias_to_nm,
+                ambiguous_aliases=ambiguous_aliases,
+            )
+            if operation_source == "week_start_fallback":
+                blockers.append(
+                    {
+                        "code": "retro_operation_date_missing",
+                        "report_id": str(row.get("reportId") or ""),
+                        "rrd_id": str(row.get("rrdId") or ""),
+                    }
+                )
+            if not nm_id:
+                blockers.append(
+                    {
+                        "code": "retro_finance_identity_unresolved",
+                        "report_id": str(row.get("reportId") or ""),
+                        "rrd_id": str(row.get("rrdId") or ""),
+                        "identity_method": identity_method,
+                        "reason": identity_problem,
+                    }
+                )
+                continue
+            required.add(nm_id)
+
+        existing = self._load_retro_cost_map(conn)
+        proposals: list[dict[str, Any]] = []
+        for nm_id in sorted(required):
+            candidate = self._select_retro_cost_source(conn, nm_id=nm_id)
+            if candidate is None:
+                blockers.append(
+                    {
+                        "code": "retro_canonical_cost_missing",
+                        "nm_id": nm_id,
+                        "reference_date": RETRO_COST_REFERENCE_DATE.isoformat(),
+                    }
+                )
+                continue
+            row_payload = {
+                "seller_id": self.seller_id,
+                "nm_id": nm_id,
+                **candidate,
+                "formula_version": RETRO_COST_FORMULA_VERSION,
+                "status": "business_approved_retro",
+            }
+            fingerprint_payload = {
+                key: row_payload[key]
+                for key in (
+                    "seller_id",
+                    "nm_id",
+                    "unit_cost_rub",
+                    "source_date",
+                    "source_table",
+                    "source_row_sha256",
+                    "selection_method",
+                    "formula_version",
+                    "status",
+                )
+            }
+            row_payload["source_calculation_fingerprint"] = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    fingerprint_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            persisted = existing.get(nm_id)
+            if persisted is not None:
+                if str(persisted.get("source_calculation_fingerprint") or "") != str(
+                    row_payload["source_calculation_fingerprint"]
+                ):
+                    blockers.append(
+                        {
+                            "code": "retro_cost_immutable_conflict",
+                            "nm_id": nm_id,
+                            "persisted_fingerprint": str(
+                                persisted.get("source_calculation_fingerprint") or ""
+                            ),
+                            "expected_fingerprint": row_payload[
+                                "source_calculation_fingerprint"
+                            ],
+                        }
+                    )
+                continue
+            proposals.append(row_payload)
+        deduplicated = {
+            json.dumps(item, ensure_ascii=False, sort_keys=True): item for item in blockers
+        }
+        return proposals, [deduplicated[key] for key in sorted(deduplicated)]
+
+    def _select_retro_cost_source(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nm_id: str,
+    ) -> dict[str, Any] | None:
+        source_table = ""
+        source_row: sqlite3.Row | None = None
+        source_cost_column = ""
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        functional_active = False
+        if {
+            "sheet_vitrina_v1_warehouse_functional_cutovers",
+            "sheet_vitrina_v1_warehouse_wb_daily_cost",
+        }.issubset(tables):
+            functional_active = (
+                conn.execute(
+                    """SELECT 1 FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                       WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+                ).fetchone()
+                is not None
+            )
+        if functional_active:
+            source_row = conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                   WHERE cutover_id='warehouse_functional_cutover_v1'
+                     AND nm_id=? AND as_of_date>=? AND wac_rub IS NOT NULL
+                   ORDER BY CASE WHEN as_of_date=? THEN 0 ELSE 1 END, as_of_date
+                   LIMIT 1""",
+                (
+                    nm_id,
+                    RETRO_COST_REFERENCE_DATE.isoformat(),
+                    RETRO_COST_REFERENCE_DATE.isoformat(),
+                ),
+            ).fetchone()
+            if source_row is not None:
+                source_table = "sheet_vitrina_v1_warehouse_wb_daily_cost"
+                source_cost_column = "wac_rub"
+        if (
+            source_row is None
+            and not functional_active
+            and "sheet_vitrina_v1_wb_cost_daily_state" in tables
+        ):
+            source_row = conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_wb_cost_daily_state
+                   WHERE nm_id=? AND as_of_date>=? AND our_wb_unit_cost_rub IS NOT NULL
+                   ORDER BY CASE WHEN as_of_date=? THEN 0 ELSE 1 END, as_of_date
+                   LIMIT 1""",
+                (
+                    nm_id,
+                    RETRO_COST_REFERENCE_DATE.isoformat(),
+                    RETRO_COST_REFERENCE_DATE.isoformat(),
+                ),
+            ).fetchone()
+            if source_row is not None:
+                source_table = "sheet_vitrina_v1_wb_cost_daily_state"
+                source_cost_column = "our_wb_unit_cost_rub"
+        if source_row is None:
+            return None
+        unit_cost = _decimal(source_row[source_cost_column])
+        if unit_cost <= ZERO:
+            return None
+        source = {key: source_row[key] for key in source_row.keys()}
+        source_row_json = json.dumps(
+            source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        source_date = str(source_row["as_of_date"])
+        return {
+            "unit_cost_rub": _money_text(unit_cost),
+            "source_date": source_date,
+            "source_table": source_table,
+            "source_row_json": source_row_json,
+            "source_row_sha256": "sha256:"
+            + hashlib.sha256(source_row_json.encode("utf-8")).hexdigest(),
+            "selection_method": (
+                "exact_2026_07_01"
+                if source_date == RETRO_COST_REFERENCE_DATE.isoformat()
+                else "first_available_after_2026_07_01"
+            ),
+        }
+
+    def _ads_coverage_manifest(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nm_ids: list[str],
+        date_from: date,
+        date_to: date,
+    ) -> dict[str, Any]:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_source_slot_snapshots'"
+        ).fetchone()
+        wanted = {str(nm_id) for nm_id in nm_ids}
+        cursor = date_from
+        dates: list[dict[str, Any]] = []
+        missing_pairs: list[dict[str, str]] = []
+        invalid_pairs: list[dict[str, str]] = []
+        evidence: list[Any] = []
+        while cursor <= date_to:
+            day = cursor.isoformat()
+            row = (
+                conn.execute(
+                    """SELECT captured_at,payload_json
+                       FROM temporal_source_slot_snapshots
+                       WHERE source_key='ads_compact' AND snapshot_date=?
+                         AND snapshot_role='accepted_closed_day_snapshot'""",
+                    (day,),
+                ).fetchone()
+                if table_exists is not None
+                else None
+            )
+            covered: set[str] = set()
+            source_kind = "missing"
+            payload_digest = ""
+            if row is not None:
+                payload_json = str(row["payload_json"] or "")
+                payload_digest = "sha256:" + hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+                try:
+                    payload = json.loads(payload_json)
+                except json.JSONDecodeError:
+                    payload = {}
+                result = payload.get("result") if isinstance(payload, dict) else {}
+                source_kind = str((result or {}).get("kind") or "missing")
+                items = (result or {}).get("items") or []
+                for item in items if isinstance(items, list) else []:
+                    if isinstance(item, dict):
+                        value = str(item.get("nm_id", item.get("nmId", "")) or "")
+                        if value in wanted:
+                            raw_ads_sum = item.get("ads_sum")
+                            try:
+                                valid_ads_sum = (
+                                    raw_ads_sum not in (None, "")
+                                    and Decimal(str(raw_ads_sum)).is_finite()
+                                )
+                            except (InvalidOperation, ValueError, TypeError):
+                                valid_ads_sum = False
+                            if valid_ads_sum:
+                                covered.add(value)
+                            else:
+                                invalid_pairs.append(
+                                    {"date": day, "nm_id": value, "reason": "ads_sum_invalid"}
+                                )
+                if source_kind == "empty":
+                    covered = set(wanted)
+            for nm_id in sorted(wanted - covered):
+                missing_pairs.append({"date": day, "nm_id": nm_id})
+            date_item = {
+                "date": day,
+                "source_kind": source_kind,
+                "covered_nm_id_count": len(covered),
+                "missing_nm_id_count": len(wanted - covered),
+                "captured_at": str(row["captured_at"] or "") if row is not None else "",
+                "payload_digest": payload_digest,
+            }
+            dates.append(date_item)
+            evidence.append(date_item)
+            cursor += timedelta(days=1)
+        return {
+            "source": "ads_compact/fullstats accepted closed-day snapshots",
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "nm_id_count": len(wanted),
+            "date_count": len(dates),
+            "complete": not missing_pairs,
+            "missing_date_nm_id_count": len(missing_pairs),
+            "missing_date_nm_ids": missing_pairs,
+            "invalid_date_nm_id_count": len(invalid_pairs),
+            "invalid_date_nm_ids": invalid_pairs,
+            "dates": dates,
+            "digest": "sha256:"
+            + hashlib.sha256(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+
+    def apply_business_approved_backfill(
+        self,
+        *,
+        expected_fingerprint: str,
+        approval_reference: str,
+        date_from: date = RETRO_COST_FIRST_WEEK_START,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        approval_reference = str(approval_reference or "").strip()
+        if not approval_reference:
+            raise ValueError("business-approved Finance apply requires approval_reference")
+        latest_closed = week_bounds(self.now_factory().astimezone(MOSCOW).date())[0] - timedelta(days=1)
+        scope_end = date_to or latest_closed
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior_apply = conn.execute(
+                    """SELECT audit_id,scope_json,result_json
+                       FROM wb_finance_projection_audit
+                       WHERE seller_id=? AND action='apply_business_approved_backfill'
+                         AND fingerprint=? ORDER BY created_at DESC LIMIT 1""",
+                    (self.seller_id, expected_fingerprint),
+                ).fetchone()
+                plan = self._plan_business_approved_backfill_in_connection(
+                    conn,
+                    date_from=date_from,
+                    date_to=scope_end,
+                )
+                if prior_apply is not None:
+                    prior_scope = json.loads(str(prior_apply["scope_json"] or "{}"))
+                    expected_scope = {
+                        "date_from": date_from.isoformat(),
+                        "date_to": scope_end.isoformat(),
+                    }
+                    if prior_scope != expected_scope:
+                        raise ValueError("reviewed fingerprint was applied for a different scope")
+                    if plan["blockers"] or int(plan["target_week_count"]) != 0:
+                        raise ValueError(
+                            "previously applied Finance projection no longer reconciles; new dry-run is required"
+                        )
+                    prior_result = json.loads(str(prior_apply["result_json"] or "{}"))
+                    conn.rollback()
+                    return {
+                        "status": "already_current",
+                        "runtime_mutation": False,
+                        "fingerprint": expected_fingerprint,
+                        "retro_cost_rows_inserted": 0,
+                        "recalculated_week_count": 0,
+                        "weeks": [],
+                        "target_before_digest": prior_result.get("target_after_digest", ""),
+                        "target_after_digest": prior_result.get("target_after_digest", ""),
+                        "non_target_digest_before": plan["non_target_digest"],
+                        "non_target_digest_after": plan["non_target_digest"],
+                        "non_target_preserved": True,
+                        "post_apply_target_week_count": 0,
+                        "audit_id": str(prior_apply["audit_id"]),
+                        "approval_reference": str(
+                            prior_result.get("approval_reference") or approval_reference
+                        ),
+                    }
+                if str(plan["fingerprint"]) != expected_fingerprint:
+                    raise ValueError(
+                        "business-approved Finance plan fingerprint changed before apply"
+                    )
+                if not bool(plan["apply_allowed"]):
+                    raise ValueError("business-approved Finance plan contains blockers")
+                now = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                for row in plan["source_manifests"]["cost"]["rows"]:
+                    conn.execute(
+                        """INSERT INTO wb_finance_retro_cost_map(
+                           seller_id,nm_id,unit_cost_rub,source_date,source_table,
+                           source_row_json,source_row_sha256,source_calculation_fingerprint,
+                           selection_method,formula_version,status,created_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            row["seller_id"],
+                            row["nm_id"],
+                            row["unit_cost_rub"],
+                            row["source_date"],
+                            row["source_table"],
+                            row["source_row_json"],
+                            row["source_row_sha256"],
+                            row["source_calculation_fingerprint"],
+                            row["selection_method"],
+                            row["formula_version"],
+                            row["status"],
+                            now,
+                        ),
+                    )
+                target_keys = {
+                    (self.seller_id, item["week_start"], item["week_end"])
+                    for item in plan["weeks"]
+                }
+                recalculated: list[dict[str, Any]] = []
+                for item in plan["weeks"]:
+                    start = date.fromisoformat(item["week_start"])
+                    end = date.fromisoformat(item["week_end"])
+                    metrics = self._recalculate_week_in_connection(conn, start, end)
+                    recalculated.append(
+                        {
+                            "week_start": item["week_start"],
+                            "week_end": item["week_end"],
+                            "cogs": metrics["cogs"],
+                            "profit_after_cogs": metrics["profit_after_cogs"],
+                            "final_margin_pct": metrics["final_margin_pct"],
+                        }
+                    )
+                non_target_after = self._finance_state_digest(
+                    conn,
+                    target_keys=target_keys,
+                    target_only=False,
+                )
+                if non_target_after != plan["non_target_digest"]:
+                    raise ValueError("non-target Finance state changed during backfill")
+                readback = self._plan_business_approved_backfill_in_connection(
+                    conn,
+                    date_from=date_from,
+                    date_to=scope_end,
+                )
+                if int(readback["target_week_count"]) != 0:
+                    raise ValueError("post-apply Finance readback still contains changed weeks")
+                if readback["blockers"]:
+                    raise ValueError("post-apply Finance readback contains blockers")
+                target_after_digest = self._finance_state_digest(
+                    conn,
+                    target_keys=target_keys,
+                    target_only=True,
+                )
+                audit_result = {
+                    "recalculated": recalculated,
+                    "target_before_digest": plan["target_before_digest"],
+                    "target_after_digest": target_after_digest,
+                    "non_target_digest": non_target_after,
+                    "post_apply_target_week_count": 0,
+                    "approval_reference": approval_reference,
+                }
+                audit_id = hashlib.sha256(
+                    f"{self.seller_id}|{expected_fingerprint}|{now}".encode("utf-8")
+                ).hexdigest()
+                conn.execute(
+                    """INSERT INTO wb_finance_projection_audit(
+                       audit_id,seller_id,action,fingerprint,scope_json,result_json,created_at
+                       ) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        audit_id,
+                        self.seller_id,
+                        "apply_business_approved_backfill",
+                        expected_fingerprint,
+                        json.dumps(
+                            {"date_from": date_from.isoformat(), "date_to": scope_end.isoformat()},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        json.dumps(audit_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        now,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "already_current" if not recalculated else "applied",
+            "runtime_mutation": bool(recalculated),
+            "fingerprint": expected_fingerprint,
+            "retro_cost_rows_inserted": len(plan["source_manifests"]["cost"]["rows"]),
+            "recalculated_week_count": len(recalculated),
+            "weeks": recalculated,
+            "target_before_digest": plan["target_before_digest"],
+            "target_after_digest": target_after_digest,
+            "non_target_digest_before": plan["non_target_digest"],
+            "non_target_digest_after": non_target_after,
+            "non_target_preserved": True,
+            "post_apply_target_week_count": 0,
+            "audit_id": audit_id,
+            "approval_reference": approval_reference,
+        }
+
+    def business_approved_fingerprint_applied(
+        self,
+        *,
+        fingerprint: str,
+        date_from: date,
+        date_to: date,
+    ) -> bool:
+        """Return whether the exact reviewed fingerprint already passed this scope."""
+
+        self.ensure_schema()
+        expected_scope = {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+        }
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT scope_json FROM wb_finance_projection_audit
+                   WHERE seller_id=? AND action='apply_business_approved_backfill'
+                     AND fingerprint=? ORDER BY created_at DESC""",
+                (self.seller_id, fingerprint),
+            ).fetchall()
+        return any(
+            json.loads(str(row["scope_json"] or "{}")) == expected_scope for row in rows
+        )
 
     def recalculate_stale_cost_weeks(
         self, *, date_from: date = OUR_WB_COST_CUTOVER_WEEK_START

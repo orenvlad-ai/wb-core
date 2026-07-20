@@ -102,3 +102,7 @@ update_note: "Добавлен как канонический модульны�
 - `CONFIG/METRICS/FORMULAS` migration;
 - jobs/API bundle/deploy;
 - более широкий runtime-pipeline beyond bounded checkpoint.
+
+# 9. Historical Partner Report consumer
+
+`Партнёрский отчёт` consumes only persisted accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. Weekly `Реклама WB` is `SUM(ads_sum)` for the selected `nmId`; it never combines that value with Finance marketing deduction. A persisted `kind=empty` response is confirmed zero. A missing snapshot date, invalid payload or successful payload without selected-SKU coverage remains an explicit blocker and cannot become zero. Partner XLSX exposes only selected-SKU daily values/status/digests; raw campaigns or metrics of other SKU are never exported.

@@ -28,6 +28,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_NOMENCLATURE_PATH,
+    DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+    DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
+    DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
+    DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -43,6 +47,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
     build_registry_upload_http_server,
     _required_section_for_path,
+    WEB_AUTH_SECTION_REPORTS,
     WEB_AUTH_SECTION_SKU_MANAGEMENT,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
@@ -52,6 +57,8 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 def main() -> None:
     if _required_section_for_path(DEFAULT_SKU_MANAGEMENT_PATH) != WEB_AUTH_SECTION_SKU_MANAGEMENT:
         raise AssertionError("SKU management API must use its own section authorization boundary")
+    if _required_section_for_path(DEFAULT_PARTNER_REPORT_OPTIONS_PATH) != WEB_AUTH_SECTION_REPORTS:
+        raise AssertionError("Partner Report API must use the reports authorization boundary")
     username = "owner"
     password = "test-password-not-secret"
     with TemporaryDirectory(prefix="webcore-auth-smoke-") as tmp:
@@ -92,6 +99,40 @@ def main() -> None:
                 sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
                 if sku_code != 401 or sku_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")
+                partner_code, partner_payload = _get_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_OPTIONS_PATH}"
+                )
+                if partner_code != 401 or partner_payload.get("error") != "authentication_required":
+                    raise AssertionError(
+                        f"unauthenticated Partner Report read must return 401 JSON: {partner_code} {partner_payload}"
+                    )
+                partner_package_code, partner_package_payload = _post_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH}",
+                    {"nm_id": "101", "selected_weeks": ["2026-07-06"]},
+                )
+                if partner_package_code != 401 or partner_package_payload.get("error") != "authentication_required":
+                    raise AssertionError(
+                        "unauthenticated Partner Report package route must return 401 JSON: "
+                        f"{partner_package_code} {partner_package_payload}"
+                    )
+                partner_finalize_code, partner_finalize_payload = _post_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_FINALIZE_PATH}",
+                    {"nm_id": "101", "selected_weeks": ["2026-07-06"]},
+                )
+                if (
+                    partner_finalize_code != 401
+                    or partner_finalize_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated Partner Report finalization must be denied")
+                partner_finalized_package_code, partner_finalized_package_payload = _get_json(
+                    f"{base_url}{DEFAULT_PARTNER_REPORT_FINALIZED_PATH}/prf-secret/package.zip"
+                )
+                if (
+                    partner_finalized_package_code != 401
+                    or partner_finalized_package_payload.get("error")
+                    != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated finalized package download must be denied")
                 auto_code, auto_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
                 if auto_code != 401 or auto_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation route must return 401 JSON: {auto_code} {auto_payload}")
