@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
 from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
     _allocated_amount_matches_eligible,
+    _assert_warehouse_balance_cardinality,
     _metric_date_coverage,
     _supplier_financial_detail_url,
     _visible_money,
@@ -50,6 +51,17 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert_warehouse_balance_cardinality(
+        warehouse_key="ff",
+        expected_sku_count=1,
+        detail_balances=[
+            {"quantity": "6750"},
+            {"quantity": "0", "reserved_quantity": "750"},
+            {"quantity": "0", "reserved_quantity": "500"},
+        ],
+        visible_balance_count=3,
+        warehouse_name="Склад FF",
+    )
     _assert(
         _allocated_amount_matches_eligible(
             "120899.32", "120899.3199999999999999999999"
