@@ -2,19 +2,19 @@
 
 Дата локальной приёмки manual increment: 2026-07-20
 
-Актуальный baseline: local `refs/remotes/origin/main` at `e9f90c306763e252790eeb3c921875198d2aca64`
+Актуальный baseline activation release: `4e908732e2c1ba7f7e5fab4508e1613af77ae8be`
 
 Исходный server-v1 baseline: `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`
 
 Рабочая копия: `/Users/ovlmacbook/Downloads/wb-core-autoanswers-manual_20260720T081019Z/repo`
 
-Локальная ветка: `agent/wb-autoanswers-manual`
+Локальная ветка: `agent/wb-autoanswers-enable-manual`
 
 ## Local release-candidate status
 
-`MANUAL_MODE_RELEASE_CANDIDATE_READY__FORCE_OFF_STAGE_FIRST`
+`MANUAL_MODE_ACTIVATION_RELEASE_CANDIDATE_READY`
 
-Первоначальный server-native контур был выпущен из baseline `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`. Текущий manual increment построен от актуального `origin/main` `e9f90c306763e252790eeb3c921875198d2aca64`. Локальная реализация, fake-transport публикация, release hardening, тесты и документация готовы. Первый production deploy сохраняет emergency force-off и устанавливает full worker disabled. Снятие force-off выполняется только последующим tracked config release после OFF acceptance.
+Первоначальный server-native контур был выпущен из baseline `8cd6eeb62c4b9c6ef98d52b0a38270978999b229`. Manual increment и его release-recovery цепочка уже задеплоены exact SHA `4e908732e2c1ba7f7e5fab4508e1613af77ae8be`; authenticated production acceptance доказала persisted OFF, effective force-OFF и нулевые AI/publication jobs. Этот отдельный activation release меняет только tracked HTTP/full-worker/target override на `false`, сохраняя persisted master OFF и timers disabled через deploy. Затем repo-owned lifecycle выполняет GET-only canary, атомарно выбирает manual и включает worker timer только после доказательства нулевых очередей.
 
 ### Release recovery note
 
@@ -31,8 +31,8 @@ PR #679 подтвердил исправление dependency gate, но сле
 - Непосредственно перед write повторно проверяются effective ON, текущий `manual`, permission инициатора, version/hash, отсутствие WB answer, exact reply, hard gates, fallback/media uncertainty и seller_chat invariants.
 - Все autoanswers POST защищены capability checks и JSON/same-origin CSRF marker.
 - Schema v2 создаёт verified pre-migration backup, расширяет persisted mode constraint и хранит manual review/publication evidence. Duplicate publication для одной feedback version запрещён уникальным индексом.
-- Full worker service/timer устанавливается disabled и force-OFF. Repo-owned lifecycle проверяет зависимости/frozen hashes/empty queues, atomically activates manual, запускает только GET-only canary без Node/OpenAI/writer capability и умеет fail closed deactivate.
-- Production UI acceptance имеет два read-only профиля: `off-force` и `manual`; manual profile не нажимает generation/publication и доказывает нулевой job delta.
+- Full worker service/timer устанавливается disabled. В activation release его unit получает tracked override `false`, но timer остаётся disabled до lifecycle; repo-owned lifecycle проверяет зависимости/frozen hashes/empty queues, atomically activates manual, запускает только GET-only canary без Node/OpenAI/writer capability и умеет fail closed deactivate.
+- Production UI acceptance имеет три read-only профиля: `off-force`, `off-unforced` и `manual`; ни один профиль не нажимает generation/publication, а два последних доказывают безопасный переход и нулевой job delta.
 
 ## Что реализовано
 
@@ -104,7 +104,7 @@ PR #679 подтвердил исправление dependency gate, но сле
 - Added `migration/105_wb_autoanswers_server_v1.md` with staged activation and rollback.
 - Updated module index and README.
 - `apps/wb_autoanswers_worker.py` is inert by default. `--run-once` is rejected unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`; full timer устанавливается disabled и включается lifecycle gate только после manual activation proof.
-- Active production target and HTTP systemd unit pin `WB_AUTOANSWERS_FORCE_OFF=true`; OFF→ON is rejected while the override is active.
+- Activation target, HTTP unit and full-worker unit pin `WB_AUTOANSWERS_FORCE_OFF=false`; deploy still preserves persisted OFF and disabled timers. Emergency `true` remains the highest-priority fail-closed override.
 - `apps/wb_autoanswers_readonly.py` is a separate GET-only capability for bounded canary/backfill. It imports no writer/Node/OpenAI code, requires persisted master OFF, reasserts force-off after env load, rate-limits calls and proves zero AI/publication job delta.
 - A dedicated five-minute GET-only steady timer is deployed disabled, then can be enabled only by the repo-owned timer gate after production read acceptance. It also drains UI sync commands without importing AI/publication capabilities.
 - Authenticated production Playwright acceptance has a repo-owned flow that proves exact URL/render, OFF reason and disabled controls, local 50-row pagination, detail/media/status contracts, zero cross-page duplicates, no 5xx/page/console/fatal errors and screenshot evidence.
@@ -120,10 +120,10 @@ SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` arou
 
 ## Проверки
 
-### Autoanswers tests — PASS (76 methods)
+### Autoanswers tests — PASS (79 methods, revalidated by the activation release)
 
 ```text
-apps/wb_autoanswers_activation_test.py         4 PASS
+apps/wb_autoanswers_activation_test.py         7 PASS
 apps/wb_autoanswers_runtime_test.py           21 PASS
 apps/wb_autoanswers_sync_test.py               7 PASS
 apps/wb_autoanswers_node_bridge_test.py        5 PASS
@@ -204,11 +204,10 @@ python3 apps/wb_autoanswers_worker.py --run-once
 
 These are release/owner actions, not missing local implementation:
 
-1. Complete the LOOP release train and exact-SHA hosted deployment while force-off remains true.
-2. Run authenticated production OFF acceptance.
-3. Complete the tracked configuration release that removes force-off while persisted master remains OFF.
-4. Activate `master_enabled=true, mode=manual` only through the repo-owned lifecycle and run read-only manual acceptance without clicking generation.
-5. The first real generation is intentionally left to the owner through the UI; any production WB publication still requires a later explicit confirmation after review and mandatory readback.
+1. Complete the tracked activation release and exact-SHA hosted deployment while persisted master remains OFF and timers remain disabled.
+2. Run authenticated `off-unforced` production acceptance.
+3. Activate `master_enabled=true, mode=manual` only through the repo-owned lifecycle and run read-only manual acceptance without clicking generation.
+4. The first real generation is intentionally left to the owner through the UI; any production WB publication still requires a later explicit confirmation after review and mandatory readback.
 
 No automatic PATCH/edit of an existing answer is planned for v1.
 
