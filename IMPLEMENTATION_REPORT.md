@@ -22,10 +22,11 @@ The increment is local-test complete. It does not modify Doctrine, frozen prompt
 
 ## Exact media root cause and repair
 
-Production read-only evidence identified two independent causes:
+Production read-only evidence identified three independent causes across the original implementation and first canary:
 
 1. Buyer photos are served from `*.geobasket.ru`; the old exact host allowlist did not include that official WB CDN family, so the safe fetcher returned `media_url_blocked`.
 2. Feedback video URLs on `*.wbbasket.ru` return HLS playlists (`application/vnd.apple.mpegurl`, `#EXTM3U`) with relative variant/segment URLs. The old implementation treated that response as a monolithic MP4, so ffmpeg returned `video_extract_failed`.
+3. The first production canary after HLS support downloaded valid 4–5 second MPEG-TS/H.264 segments, but the single-segment `fps=1/15` filter exited successfully with zero frames because the segments retain absolute timestamps and are shorter than the cadence. A read-only decoder probe on the same production segment proved `frame=0` for that filter and `frame=1` for first-decodable-frame selection. The bounded HLS path now uses `select=eq(n,0)` per already deterministically spaced segment; multi-frame MP4 sampling retains the bounded cadence.
 
 The repair keeps the security boundary:
 
@@ -85,7 +86,7 @@ The deploy preflight temporarily forces the migration process OFF, takes an inte
 Free local acceptance on the release-candidate tree:
 
 ```text
-python3 -m unittest apps.wb_autoanswers_*_test  -> 101 PASS
+python3 -m unittest apps.wb_autoanswers_*_test  -> 103 PASS
 python3 -m compileall -q apps packages         -> PASS
 frozen make_mvp npm test                       -> 28/28 PASS
 sheet_vitrina_v1_feedbacks_browser_smoke.py    -> PASS
