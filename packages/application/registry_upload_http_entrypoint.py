@@ -65,7 +65,9 @@ from packages.application.supplier_shipment_factual_correction import (
 from packages.application.supplier_financial_documents import (
     SupplierFinancialDocumentsBlock,
     apply_supplier_order_document_match,
+    parse_financial_document_pdf,
 )
+from packages.application.supplier_customs_breakdown import build_customs_breakdown_xlsx
 from packages.application.cny_ledger import CnyLedgerBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -229,6 +231,11 @@ SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES = (
     TRADE_DOCUMENT_TYPE_CONTRACT,
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+)
+SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES = (
+    TRADE_DOCUMENT_TYPE_INVOICE,
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
 )
 SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     TRADE_DOCUMENT_TYPE_INVOICE: "Invoice",
@@ -2608,6 +2615,12 @@ class RegistryUploadHttpEntrypoint:
                     "label": "Скачать пакет для логистов",
                     "document_types": list(SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES),
                 },
+                "accounting": {
+                    "download_path": _supplier_order_documents_archive_path(shipment_id, "accounting-package.zip"),
+                    "label": "Скачать пакет для бухгалтерии",
+                    "document_types": list(SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES),
+                    "generated_document_type": "customs_declaration_breakdown_xlsx",
+                },
             },
             "missing_required_types": [
                 str(item.get("document_type") or "")
@@ -2621,17 +2634,26 @@ class RegistryUploadHttpEntrypoint:
         shipment_id: str,
         *,
         package_kind: str,
-    ) -> tuple[bytes, str]:
+    ) -> tuple[bytes, str, dict[str, Any]]:
         documents_payload = self.handle_supplier_order_documents_list_request(shipment_id)
-        package_type = "logistics" if package_kind == "logistics-package.zip" else "all"
-        archive_bytes = _build_supplier_order_documents_archive(
+        package_type = {
+            "logistics-package.zip": "logistics",
+            "accounting-package.zip": "accounting",
+        }.get(package_kind, "all")
+        archive_bytes, receipt = _build_supplier_order_documents_archive(
             documents_payload,
             package_type=package_type,
             file_loader=lambda item: self._load_supplier_order_document_file(shipment_id, item),
+            nomenclature_items=self.runtime.list_nomenclature_items(active_only=True),
+            customs_parser=lambda body, filename: parse_financial_document_pdf(
+                body,
+                filename=filename,
+                text_extractor=self.supplier_financial_documents_block.pdf_text_extractor,
+            ),
         )
         invoice_no = str((documents_payload.get("shipment") or {}).get("invoice_no") or shipment_id or "supplier-order").strip()
         filename = _safe_archive_filename(f"{invoice_no}-{package_type}-documents.zip")
-        return archive_bytes, filename
+        return archive_bytes, filename, receipt
 
     def _load_supplier_order_document_file(self, shipment_id: str, item: Mapping[str, Any]) -> tuple[bytes, str, str]:
         document_type = str(item.get("document_type") or "")
@@ -2742,6 +2764,9 @@ class RegistryUploadHttpEntrypoint:
             "amount": amount,
             "currency": currency,
             "download_path": str(document.get("download_path") or ""),
+            "file_original_name": str(
+                document.get("file_original_name") or document.get("original_filename") or ""
+            ),
             "parse_status": str(document.get("parse_status") or document.get("status") or ""),
             "warnings": list(document.get("warnings") or []),
             "errors": list(document.get("errors") or []),
@@ -6159,73 +6184,252 @@ def _build_supplier_order_documents_archive(
     *,
     package_type: str,
     file_loader: Callable[[Mapping[str, Any]], tuple[bytes, str, str]],
-) -> bytes:
-    required_types = (
-        SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES
-        if package_type == "logistics"
-        else SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES
-    )
+    nomenclature_items: Iterable[Mapping[str, Any]] = (),
+    customs_parser: Callable[[bytes, str], Mapping[str, Any]] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    required_types = {
+        "logistics": SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES,
+        "accounting": SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES,
+    }.get(package_type, SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES)
     rows = [
         dict(item)
         for item in payload.get("required_documents") or []
         if isinstance(item, Mapping) and str(item.get("document_type") or "") in required_types
     ]
-    included: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    missing_required_types = [
-        document_type
-        for document_type in required_types
-        if not any(str(item.get("document_type") or "") == document_type and bool(item.get("is_uploaded")) for item in rows)
+    uploaded_rows = [item for item in rows if bool(item.get("is_uploaded"))]
+    expected: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for document_type in required_types:
+        matching = [item for item in uploaded_rows if str(item.get("document_type") or "") == document_type]
+        if matching:
+            for index, row in enumerate(matching, start=1):
+                expected.append(_package_expected_item(row, index=index, kind="document"))
+        else:
+            item = {
+                "expected_key": f"document:{document_type}:missing",
+                "kind": "document",
+                "document_type": document_type,
+                "document_name": SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(document_type, document_type),
+                "document_id": "",
+            }
+            expected.append(item)
+            missing.append(item)
+    customs_rows = [
+        item for item in uploaded_rows
+        if str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
     ]
+    if package_type == "accounting":
+        if customs_rows:
+            for index, row in enumerate(customs_rows, start=1):
+                expected.append(_package_expected_item(row, index=index, kind="generated_customs_breakdown"))
+        else:
+            item = {
+                "expected_key": "generated:customs_declaration_breakdown_xlsx:missing",
+                "kind": "generated_customs_breakdown",
+                "document_type": "customs_declaration_breakdown_xlsx",
+                "document_name": "Расшифровка ДТ",
+                "document_id": "",
+            }
+            expected.append(item)
+            missing.append(item)
+    included: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    generated_files: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    missing_required_types = sorted({str(item.get("document_type") or "") for item in missing if item.get("kind") == "document"})
     if missing_required_types:
         warnings.append(
             "Missing required document(s): "
             + ", ".join(SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(item, item) for item in missing_required_types)
         )
+    used_names: set[str] = set()
+    archive_entries: list[tuple[str, bytes]] = []
+    packing_documents = [
+        dict(item)
+        for item in payload.get("required_documents") or []
+        if isinstance(item, Mapping)
+        and str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_PACKING_LIST
+        and bool(item.get("is_uploaded"))
+    ]
+    shipment = dict(payload.get("shipment") or {})
+    shipment_lines = list(shipment.get("lines") or shipment.get("product_lines") or [])
+    for row in uploaded_rows:
+        expected_item = next(
+            item for item in expected
+            if item.get("kind") == "document"
+            and str(item.get("document_id") or "") == str(row.get("document_id") or "")
+            and str(item.get("document_type") or "") == str(row.get("document_type") or "")
+        )
+        try:
+            file_bytes, filename, content_type = file_loader(row)
+            if not file_bytes:
+                raise ValueError("loaded file is empty")
+        except Exception as exc:
+            failure = {**expected_item, "reason": str(exc)}
+            failed.append(failure)
+            warnings.append(f"{row.get('document_name') or row.get('document_type')}: {exc}")
+            if package_type == "accounting" and str(row.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+                failed.append(
+                    {
+                        **_package_expected_item(row, index=1, kind="generated_customs_breakdown"),
+                        "reason": "source customs declaration could not be read",
+                    }
+                )
+            continue
+        archive_name = _unique_archive_name(used_names, _archive_document_filename(row, filename))
+        archive_entries.append((archive_name, file_bytes))
+        included.append(
+            {
+                **expected_item,
+                "archive_name": archive_name,
+                "source_filename": filename,
+                "content_type": content_type,
+                "status": row.get("status") or "",
+                "order_match_status": row.get("order_match_status") or "",
+                "warnings": _string_list(row.get("warnings")),
+                "size_bytes": len(file_bytes),
+                "sha256": "sha256:" + hashlib.sha256(file_bytes).hexdigest(),
+            }
+        )
+        for warning in _string_list(row.get("warnings")):
+            warnings.append(f"{row.get('document_name') or row.get('document_type')}: {warning}")
+        if package_type != "accounting" or str(row.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+            continue
+        generated_expected = next(
+            item for item in expected
+            if item.get("kind") == "generated_customs_breakdown"
+            and str(item.get("document_id") or "") == str(row.get("document_id") or "")
+        )
+        try:
+            generation_row = dict(row)
+            normalized = dict(generation_row.get("normalized_parse") or {})
+            if not normalized.get("goods_items"):
+                reparsed = (
+                    customs_parser(file_bytes, filename)
+                    if customs_parser is not None
+                    else parse_financial_document_pdf(file_bytes, filename=filename)
+                )
+                reparsed_normalized = dict(reparsed.get("normalized_parse") or {})
+                if reparsed_normalized:
+                    generation_row["normalized_parse"] = reparsed_normalized
+            workbook_bytes, workbook_filename, generation_receipt = build_customs_breakdown_xlsx(
+                customs_document=generation_row,
+                shipment=shipment,
+                shipment_lines=shipment_lines,
+                nomenclature_items=nomenclature_items,
+                packing_documents=packing_documents,
+            )
+            workbook_archive_name = _unique_archive_name(used_names, workbook_filename)
+            archive_entries.append((workbook_archive_name, workbook_bytes))
+            generated_item = {
+                **generated_expected,
+                "archive_name": workbook_archive_name,
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "size_bytes": len(workbook_bytes),
+                "sha256": "sha256:" + hashlib.sha256(workbook_bytes).hexdigest(),
+                "status": "generated",
+                "validation": generation_receipt,
+                "requires_review": bool(generation_receipt.get("requires_review")),
+            }
+            generated_files.append(generated_item)
+            included.append(generated_item)
+            if generated_item["requires_review"]:
+                warnings.append("Расшифровка ДТ требует проверки")
+        except Exception as exc:
+            failed.append({**generated_expected, "reason": str(exc)})
+            warnings.append(f"Расшифровка ДТ: {exc}")
+
+    final_status = "error" if failed else "partial" if missing else "complete"
+    requires_review = any(bool(item.get("requires_review")) for item in generated_files)
+    receipt = {
+        "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_receipt",
+        "status": final_status,
+        "package_type": package_type,
+        "supplier_order_id": payload.get("supplier_order_id") or "",
+        "required_document_types": list(required_types),
+        "expected": expected,
+        "uploaded": [
+            _package_expected_item(row, index=index, kind="document")
+            for index, row in enumerate(uploaded_rows, start=1)
+        ],
+        "included": included,
+        "missing": missing,
+        "failed": failed,
+        "warnings": _dedupe_strings(warnings),
+        "generated_files": generated_files,
+        "requires_review": requires_review,
+        "review_message": "Расшифровка ДТ требует проверки" if requires_review else "",
+        "counts": {
+            "expected": len(expected),
+            "uploaded": len(uploaded_rows),
+            "included": len(included),
+            "missing": len(missing),
+            "failed": len(failed),
+            "warnings": len(_dedupe_strings(warnings)),
+            "generated_files": len(generated_files),
+        },
+        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    manifest = {
+        **receipt,
+        "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_manifest",
+        "missing_required_types": missing_required_types,
+    }
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        used_names: set[str] = set()
-        for row in rows:
-            if not bool(row.get("is_uploaded")):
-                continue
-            try:
-                file_bytes, filename, content_type = file_loader(row)
-            except ValueError as exc:
-                warnings.append(f"{row.get('document_name') or row.get('document_type')}: {exc}")
-                continue
-            archive_name = _unique_archive_name(
-                used_names,
-                _archive_document_filename(row, filename),
-            )
-            archive.writestr(archive_name, file_bytes)
-            included.append(
-                {
-                    "archive_name": archive_name,
-                    "document_type": row.get("document_type") or "",
-                    "document_name": row.get("document_name") or "",
-                    "document_id": row.get("document_id") or "",
-                    "source_filename": filename,
-                    "content_type": content_type,
-                    "status": row.get("status") or "",
-                    "order_match_status": row.get("order_match_status") or "",
-                    "warnings": _string_list(row.get("warnings")),
-                }
-            )
-            for warning in _string_list(row.get("warnings")):
-                warnings.append(f"{row.get('document_name') or row.get('document_type')}: {warning}")
-        manifest = {
-            "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_manifest",
-            "status": "ok",
-            "package_type": package_type,
-            "supplier_order_id": payload.get("supplier_order_id") or "",
-            "required_document_types": list(required_types),
-            "missing_required_types": missing_required_types,
-            "included": included,
-            "warnings": warnings,
-            "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        }
+        for archive_name, body in archive_entries:
+            archive.writestr(archive_name, body)
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    return buffer.getvalue()
+    archive_bytes = buffer.getvalue()
+    _validate_supplier_order_package_archive(archive_bytes, manifest)
+    return archive_bytes, receipt
+
+
+def _package_expected_item(
+    row: Mapping[str, Any],
+    *,
+    index: int,
+    kind: str,
+) -> dict[str, Any]:
+    document_type = str(row.get("document_type") or "")
+    document_id = str(row.get("document_id") or "")
+    key_prefix = "generated" if kind == "generated_customs_breakdown" else "document"
+    key_type = "customs_declaration_breakdown_xlsx" if kind == "generated_customs_breakdown" else document_type
+    return {
+        "expected_key": f"{key_prefix}:{key_type}:{document_id or index}",
+        "kind": kind,
+        "document_type": key_type,
+        "document_name": (
+            "Расшифровка ДТ"
+            if kind == "generated_customs_breakdown"
+            else str(row.get("document_name") or SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(document_type, document_type))
+        ),
+        "document_id": document_id,
+    }
+
+
+def _validate_supplier_order_package_archive(
+    archive_bytes: bytes,
+    manifest: Mapping[str, Any],
+) -> None:
+    with zipfile.ZipFile(BytesIO(archive_bytes), "r") as archive:
+        names = archive.namelist()
+        if names.count("manifest.json") != 1:
+            raise ValueError("package must contain exactly one manifest.json")
+        included = list(manifest.get("included") or [])
+        expected_names = [str(item.get("archive_name") or "") for item in included]
+        if sorted(name for name in names if name != "manifest.json") != sorted(expected_names):
+            raise ValueError("package files do not match manifest included entries")
+        for item in included:
+            archive_name = str(item.get("archive_name") or "")
+            body = archive.read(archive_name)
+            if len(body) != int(item.get("size_bytes") or -1):
+                raise ValueError(f"package member size mismatch: {archive_name}")
+            if "sha256:" + hashlib.sha256(body).hexdigest() != str(item.get("sha256") or ""):
+                raise ValueError(f"package member checksum mismatch: {archive_name}")
+        parsed_manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        if parsed_manifest.get("included") != included:
+            raise ValueError("package manifest readback differs from assembly receipt")
 
 
 def _archive_document_filename(row: Mapping[str, Any], source_filename: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from http import HTTPStatus
 from io import BytesIO
@@ -14,8 +15,9 @@ from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 from urllib import request as urllib_request
 import zipfile
+import zlib
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -336,6 +338,19 @@ CN   305.200 ОООО-ОО
 28 7020008000 С N
 CN   107.250 ОООО-ОО
 4000 000 96.530
+"""
+
+CUSTOMS_ITEMS_TEXT = CUSTOMS_TEXT + """
+ТОВАР № 1
+Наименование товара: Exact Model Alpha
+Количество: 10 ШТ
+Штрихкод: 4600000000001
+Код ТН ВЭД: 7020008000
+Модель: ALPHA-1
+ТОВАР № 2
+Наименование товара: Exact Model Group
+Количество: 5 ШТ
+Единица: ШТ
 """
 
 CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT = """
@@ -704,8 +719,20 @@ def _assert_parser_smoke() -> None:
         or not _approx(customs.get("customs_gross_weight_kg"), 9784.6, tolerance=0.01)
         or not _approx(customs.get("customs_net_weight_kg"), 8806.18, tolerance=0.01)
         or customs.get("total_customs_payments_rub") != 2892511.6
+        or customs.get("goods_item_count") != 28
+        or customs.get("goods_items", [{}, {}])[1].get("identifiers", {}).get("customs_code") != "7020008000"
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
+    customs_items = parse_financial_document_text(CUSTOMS_ITEMS_TEXT, filename="customs-items.txt")["normalized_parse"]
+    if (
+        customs_items.get("declaration_number") != customs.get("declaration_number")
+        or customs_items.get("total_customs_payments_rub") != customs.get("total_customs_payments_rub")
+        or customs_items.get("goods_item_count") != 2
+        or customs_items.get("goods_items", [{}])[0].get("barcode") != "4600000000001"
+        or customs_items.get("goods_items", [{}])[0].get("quantity") != 10.0
+        or customs_items.get("goods_items", [{}, {}])[1].get("source_name") != "Exact Model Group"
+    ):
+        raise AssertionError(f"customs item parser must extend, not replace, aggregate contract: {customs_items}")
 
     customs_with_old_ref = parse_financial_document_text(
         CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT,
@@ -2357,7 +2384,7 @@ def _assert_http_api_smoke() -> None:
             payment_rows = [item for item in document_rows if item.get("document_type") == "bank_transfer_application"]
             if len(payment_rows) != 1:
                 raise AssertionError(f"linked CNY supplier payment must not duplicate order document rows: {bank_order_documents}")
-            logistics_status, logistics_bytes, _ = _get_bytes(f"{documents_url}/logistics-package.zip")
+            logistics_status, logistics_bytes, logistics_headers = _get_bytes(f"{documents_url}/logistics-package.zip")
             if logistics_status != 200:
                 raise AssertionError(f"logistics package route failed: {logistics_status}")
             logistics_manifest = _zip_manifest(logistics_bytes)
@@ -2368,6 +2395,36 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"logistics package included wrong document types: {logistics_manifest}")
             if not any("другому заказу" in warning for warning in logistics_manifest.get("warnings", [])):
                 raise AssertionError(f"logistics package must expose mismatch warnings: {logistics_manifest}")
+            logistics_receipt = _package_receipt_header(logistics_headers)
+            if (
+                logistics_receipt.get("status") != "complete"
+                or logistics_receipt.get("counts", {}).get("included") != len(logistics_manifest.get("included", []))
+                or logistics_receipt.get("included") != logistics_manifest.get("included")
+            ):
+                raise AssertionError(f"logistics HTTP receipt must come from exact ZIP assembly: {logistics_receipt}")
+            accounting_status, accounting_bytes, accounting_headers = _get_bytes(f"{documents_url}/accounting-package.zip")
+            if accounting_status != 200:
+                raise AssertionError(f"accounting package route failed: {accounting_status}")
+            accounting_manifest = _zip_manifest(accounting_bytes)
+            accounting_receipt = _package_receipt_header(accounting_headers)
+            accounting_types = [item.get("document_type") for item in accounting_manifest.get("included", [])]
+            if (
+                accounting_manifest.get("status") != "complete"
+                or accounting_receipt.get("included") != accounting_manifest.get("included")
+                or set(accounting_types) != {"invoice", "contract", "customs_declaration", "customs_declaration_breakdown_xlsx"}
+                or accounting_types.count("customs_declaration") != 1
+                or accounting_types.count("customs_declaration_breakdown_xlsx") != 1
+                or not accounting_manifest.get("requires_review")
+                or accounting_manifest.get("review_message") != "Расшифровка ДТ требует проверки"
+            ):
+                raise AssertionError(f"accounting package contract mismatch: {accounting_manifest} {accounting_receipt}")
+            with zipfile.ZipFile(BytesIO(accounting_bytes)) as accounting_archive:
+                workbook_names = [name for name in accounting_archive.namelist() if name.endswith(".xlsx") and "rasshifrovka" in name]
+                if len(workbook_names) != 1:
+                    raise AssertionError(f"accounting package must contain one DT workbook: {accounting_archive.namelist()}")
+                workbook = load_workbook(BytesIO(accounting_archive.read(workbook_names[0])), read_only=True, data_only=True)
+                if set(workbook.sheetnames) != {"Расшифровка ДТ", "Контроль"}:
+                    raise AssertionError(f"generated DT workbook sheets changed: {workbook.sheetnames}")
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
@@ -2523,6 +2580,23 @@ def _zip_manifest(archive_bytes: bytes) -> dict[str, Any]:
 
     with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
         return json.loads(archive.read("manifest.json").decode("utf-8"))
+
+
+def _package_receipt_header(headers: Mapping[str, str]) -> dict[str, Any]:
+    encoded = next(
+        (str(value) for key, value in headers.items() if str(key).lower() == "x-wb-core-package-receipt"),
+        "",
+    )
+    if not encoded:
+        raise AssertionError(f"package response receipt header is missing: {headers}")
+    encoding = next(
+        (str(value) for key, value in headers.items() if str(key).lower() == "x-wb-core-package-receipt-encoding"),
+        "",
+    )
+    if encoding != "deflate-base64url":
+        raise AssertionError(f"package receipt must use bounded deflate encoding: {encoding!r}")
+    padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+    return json.loads(zlib.decompress(base64.urlsafe_b64decode(padded)).decode("utf-8"))
 
 
 def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id: str, shipment_id: str) -> str:

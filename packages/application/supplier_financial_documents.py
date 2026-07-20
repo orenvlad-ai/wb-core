@@ -3552,6 +3552,7 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
     total_payments = _extract_customs_total_payments(text, customs_fee, import_duty, import_vat)
     release_status = "выпуск товаров разрешен" if "ВЫПУСК ТОВАРОВ РАЗРЕШЕН" in text.upper() else ""
     linked_references = _extract_customs_linked_references(text)
+    goods_items = _extract_customs_goods_items(text)
     normalized = {
         "vendor": "",
         "document_number": declaration_number,
@@ -3575,6 +3576,9 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
         "total_customs_payments_rub": _decimal_to_float(total_payments),
         "release_status": release_status,
         "linked_references": linked_references,
+        "goods_items": goods_items,
+        "goods_item_count": len(goods_items),
+        "goods_items_parser_version": "supplier_customs_goods_items_v1",
         "currency": "RUB",
         "total_amount": _decimal_to_float(total_payments),
         "total_amount_rub": _decimal_to_float(total_payments),
@@ -3618,6 +3622,13 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
         warnings.append(f"Customs declaration item weight count {weight_item_count} does not match goods count {total_goods_count}")
     if total_goods_count and not weight_item_count:
         warnings.append("Customs declaration item gross/net weights were not recognized")
+    if total_goods_count and not goods_items:
+        warnings.append("Customs declaration product positions were not recognized")
+    elif total_goods_count and len(goods_items) != total_goods_count:
+        warnings.append(
+            "Customs declaration recognized product position count "
+            f"{len(goods_items)} does not match declared goods count {total_goods_count}"
+        )
     return normalized, lines, warnings
 
 
@@ -6640,6 +6651,126 @@ def _extract_customs_declaration_number(text: str) -> str:
             if candidate:
                 return candidate
     return _first_match(text, r"\b(\d{8}/\d{6}/\d{6,})\b")
+
+
+def _extract_customs_goods_items(text: str) -> list[dict[str, Any]]:
+    """Extract deterministic item evidence without guessing from aggregate DT rows.
+
+    Customs PDF text layers vary considerably.  This bounded parser accepts only
+    explicit position headers and labeled fields.  Unlabeled weights, totals and
+    neighbouring numbers are deliberately ignored so an absent item table cannot
+    become an invented SKU allocation.
+    """
+
+    lines = _text_to_lines(text)
+    headers: list[tuple[int, str, str]] = []
+    header_pattern = re.compile(
+        r"^(?:ТОВАР|ТОВАРНАЯ\s+ПОЗИЦИЯ|ПОЗИЦИЯ|ITEM)\s*(?:№|N|NO\.?|NUMBER)?\s*[:#-]?\s*(\d{1,4})\b",
+        flags=re.I,
+    )
+    for index, line in enumerate(lines):
+        match = header_pattern.search(_clean_value(line))
+        if match:
+            headers.append((index, match.group(1), ""))
+    if not headers:
+        standard_header_pattern = re.compile(
+            r"^(\d{1,4})\s+(\d{10})\s+[СC]\s+[NН]\b",
+            flags=re.I,
+        )
+        for index, line in enumerate(lines):
+            match = standard_header_pattern.search(_clean_value(line))
+            if match:
+                headers.append((index, match.group(1), match.group(2)))
+    items: list[dict[str, Any]] = []
+    for header_index, (start, position_number, header_customs_code) in enumerate(headers):
+        end = headers[header_index + 1][0] if header_index + 1 < len(headers) else len(lines)
+        block_lines = lines[start:end]
+        block = "\n".join(block_lines)
+        source_name = _customs_item_labeled_value(
+            block_lines,
+            (
+                r"(?:НАИМЕНОВАНИЕ(?:\s+ТОВАРА|\s+ИЗ\s+ДТ)?|ОПИСАНИЕ(?:\s+ТОВАРА)?|DESCRIPTION|GOODS\s+DESCRIPTION)",
+            ),
+        )
+        quantity, unit = _extract_customs_item_quantity(block)
+        barcode = _customs_item_labeled_value(
+            block_lines,
+            (r"(?:ШТРИХКОД|ШК|BARCODE|EAN|GTIN)",),
+        )
+        barcode = re.sub(r"\D+", "", barcode)
+        if barcode and not 6 <= len(barcode) <= 32:
+            barcode = ""
+        customs_code = _customs_item_labeled_value(
+            block_lines,
+            (r"(?:КОД\s+ТН\s*ВЭД|ТН\s*ВЭД|HS\s*CODE|COMMODITY\s*CODE)",),
+        )
+        customs_code = customs_code or header_customs_code
+        source_model = _customs_item_labeled_value(
+            block_lines,
+            (r"(?:МОДЕЛЬ|АРТИКУЛ|MODEL|ARTICLE|VENDOR\s*CODE)",),
+        )
+        identifiers = {
+            key: value
+            for key, value in (
+                ("barcode", barcode),
+                ("customs_code", customs_code),
+                ("source_model", source_model),
+            )
+            if value
+        }
+        items.append(
+            {
+                "position_number": position_number,
+                "source_name": source_name,
+                "quantity": _decimal_to_float_raw(quantity),
+                "unit": unit,
+                "barcode": barcode,
+                "identifiers": identifiers,
+                "evidence_status": "labeled_fields_only",
+            }
+        )
+    return items
+
+
+def _customs_item_labeled_value(
+    lines: list[str],
+    label_patterns: tuple[str, ...],
+) -> str:
+    for index, line in enumerate(lines):
+        cleaned = _clean_value(line)
+        for label_pattern in label_patterns:
+            match = re.match(
+                rf"^\s*{label_pattern}\s*(?:[:：=-]|\s)\s*(.*?)\s*$",
+                cleaned,
+                flags=re.I,
+            )
+            if not match:
+                continue
+            value = _clean_value(match.group(1))
+            if value:
+                return value
+            if index + 1 < len(lines):
+                next_value = _clean_value(lines[index + 1])
+                if next_value:
+                    return next_value
+    return ""
+
+
+def _extract_customs_item_quantity(block: str) -> tuple[Decimal | None, str]:
+    patterns = (
+        r"(?:КОЛИЧЕСТВО(?:\s+В\s+ДОП(?:ОЛНИТЕЛЬНОЙ)?\.?\s+ЕДИНИЦЕ)?|QUANTITY)\s*(?:[:：=-]|\s)\s*([\d\s.,]+)\s*([A-Za-zА-Яа-яЁё.]+)",
+        r"(?:ДОПОЛНИТЕЛЬНАЯ\s+ЕДИНИЦА|SUPPLEMENTARY\s+UNIT)\s*(?:[:：=-]|\s)\s*([\d\s.,]+)\s*([A-Za-zА-Яа-яЁё.]+)",
+        r"^\s*41\s+[^\n\r]*?([\d\s.,]+)\s*([A-Za-zА-Яа-яЁё.]+)\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, block, flags=re.I | re.M)
+        if not match:
+            continue
+        quantity = _parse_decimal(match.group(1))
+        unit = _clean_value(match.group(2)).rstrip(".")
+        if quantity is not None and quantity >= 0 and unit:
+            return quantity, unit
+    return None, ""
 
 
 def _parse_delivery_days(value: str) -> tuple[int | None, int | None]:
