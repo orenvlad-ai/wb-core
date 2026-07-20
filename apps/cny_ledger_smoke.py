@@ -363,17 +363,32 @@ def _assert_application_ledger_replay() -> None:
             raise AssertionError("backdated conversion must change subsequent effective order rate")
         if _dec(order_a_after["cny_payment_currency_rub_cost"]) != Decimal("1057.14"):
             raise AssertionError(f"backdated conversion cost replay changed: {order_a_after}")
+        operations_before_repeat = runtime.list_cny_ledger_operations()
         operation_ids_before_repeat = [
-            str(item.get("operation_id") or "") for item in runtime.list_cny_ledger_operations()
+            str(item.get("operation_id") or "") for item in operations_before_repeat
         ]
+        revisions_before_repeat = {
+            str(item.get("operation_id") or ""): str(item.get("updated_at") or "")
+            for item in operations_before_repeat
+        }
         ledger.replay_ledger(reason="idempotency_probe")
+        operations_after_repeat = runtime.list_cny_ledger_operations()
         operation_ids_after_repeat = [
-            str(item.get("operation_id") or "") for item in runtime.list_cny_ledger_operations()
+            str(item.get("operation_id") or "") for item in operations_after_repeat
         ]
         if operation_ids_after_repeat != operation_ids_before_repeat:
             raise AssertionError(
                 "CNY replay must retain deterministic operation identities: "
                 f"{operation_ids_before_repeat} -> {operation_ids_after_repeat}"
+            )
+        revisions_after_repeat = {
+            str(item.get("operation_id") or ""): str(item.get("updated_at") or "")
+            for item in operations_after_repeat
+        }
+        if revisions_after_repeat != revisions_before_repeat:
+            raise AssertionError(
+                "CNY no-op replay must preserve semantic operation revisions: "
+                f"{revisions_before_repeat} -> {revisions_after_repeat}"
             )
         deleted = ledger.delete_document("conv-backdated")
         if deleted.get("deleted") is not False or deleted.get("archived") is not True:
