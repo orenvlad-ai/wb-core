@@ -13045,6 +13045,14 @@
         if (!value) {
           return "";
         }
+        const extendedMatch = /filename\*=UTF-8''([^;]+)/i.exec(value);
+        if (extendedMatch) {
+          try {
+            return decodeURIComponent(extendedMatch[1].replace(/^"|"$/g, ""));
+          } catch (error) {
+            // Fall back to the ASCII filename below when a proxy returns malformed encoding.
+          }
+        }
         const match = /filename=\"?([^\";]+)\"?/i.exec(value);
         return match ? match[1] : "";
       }
@@ -13435,12 +13443,22 @@
           setRegionalMessage("Архив рекомендаций ещё не доступен.", "error");
           return;
         }
-        await downloadBinary(
-          zipPath,
-          "wb_regional_recommendations.zip",
-          "Архив рекомендаций скачан.",
-          setRegionalMessage
-        );
+        const idleLabel = downloadRegionalRecommendationsZipButton.textContent;
+        downloadRegionalRecommendationsZipButton.disabled = true;
+        downloadRegionalRecommendationsZipButton.textContent = "Формируем архив...";
+        try {
+          await downloadBinary(
+            zipPath,
+            "Рекомендации_поставок.zip",
+            "Архив рекомендаций скачан.",
+            setRegionalMessage
+          );
+        } finally {
+          downloadRegionalRecommendationsZipButton.textContent = idleLabel;
+          downloadRegionalRecommendationsZipButton.disabled = (
+            !regionalLastResultPayload || !regionalRecommendationsZipPath(regionalLastResultPayload)
+          );
+        }
       }
 
       refreshButton.addEventListener("click", () => runAction("refresh"));
