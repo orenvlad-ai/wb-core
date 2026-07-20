@@ -448,6 +448,10 @@ class CnyLedgerBlock:
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
         now = self.timestamp_factory()
         self._sync_supplier_payment_documents_from_financial_documents(now=now)
+        existing_operations = {
+            str(item.get("operation_id") or ""): dict(item)
+            for item in self.runtime.list_cny_ledger_operations()
+        }
         documents = [
             dict(item)
             for item in self.runtime.list_cny_documents()
@@ -589,6 +593,15 @@ class CnyLedgerBlock:
                     errors = bucket.setdefault("errors", [])
                     if isinstance(errors, list):
                         errors.append(str(op.get("error_reason") or "blocked"))
+            existing = existing_operations.get(str(op.get("operation_id") or ""))
+            if existing is not None and _cny_operation_revision_payload(
+                existing
+            ) == _cny_operation_revision_payload(op):
+                # ``updated_at`` is a semantic source revision used by guarded
+                # downstream certification.  A full deterministic ledger
+                # replay must not make every unchanged operation look newer.
+                op["created_at"] = str(existing.get("created_at") or op.get("created_at") or "")
+                op["updated_at"] = str(existing.get("updated_at") or op.get("updated_at") or "")
             posted_operations.append(op)
 
         self.runtime.replace_cny_ledger_operations(posted_operations)
@@ -1249,6 +1262,31 @@ def _build_planned_operations(documents: list[Mapping[str, Any]], *, created_at:
             )
     _mark_date_only_sequence_warnings(operations)
     return operations
+
+
+def _cny_operation_revision_payload(operation: Mapping[str, Any]) -> dict[str, str]:
+    """Return every persisted semantic field except audit timestamps."""
+
+    return {
+        key: str(operation.get(key) or "")
+        for key in (
+            "operation_id",
+            "operation_type",
+            "source_document_id",
+            "source_order_id",
+            "operation_date",
+            "operation_datetime",
+            "sequence_key",
+            "cny_delta",
+            "rub_value_delta",
+            "effective_rate_before",
+            "balance_cny_after",
+            "balance_rub_value_after",
+            "average_rate_after",
+            "status",
+            "error_reason",
+        )
+    }
 
 
 def _stable_cny_operation_id(document_id: str, component: str) -> str:

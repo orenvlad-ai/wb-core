@@ -22,6 +22,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.warehouse_functional import (  # noqa: E402
     _effective_supplier_cost_states,
     _supplier_cost_allocations,
+    _watermark,
     ensure_warehouse_functional_schema,
     load_supplier_line_cost_breakdown,
 )
@@ -31,16 +32,53 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
     build_supplier_cost_state_replay_plan,
     rollback_supplier_cost_state_replay,
     _frozen_supplier_states_from_version,
-    _functional_local_source_digest_candidates,
+    _legacy_supplier_source_watermarks,
     _legacy_balance_proof_matches_allocation,
     _supplier_sources,
 )
 
 
 NOW = "2026-07-20T10:00:00Z"
+VERSION_EFFECTIVE_AT = "2026-07-20T10:00:01Z"
 
 
 def main() -> int:
+    financial_documents = [
+        {
+            "supplier_order_id": "order-b",
+            "document_date": "2026-01-01",
+            "document_id": "document-1",
+            "updated_at": "2026-07-20T09:00:00Z",
+        },
+        {
+            "supplier_order_id": "order-a",
+            "document_date": "2026-07-20",
+            "document_id": "document-2",
+            "updated_at": "2026-07-20T10:00:00Z",
+        },
+    ]
+    supplier_watermarks = _legacy_supplier_source_watermarks(
+        {
+            "shipments": [],
+            "cny_operations": [],
+            "financial_documents": financial_documents,
+        }
+    )
+    _assert(
+        supplier_watermarks["financial_documents"]
+        == _watermark(
+            sorted(
+                financial_documents,
+                key=lambda row: (
+                    row["document_date"],
+                    row["document_id"],
+                ),
+            ),
+            "updated_at",
+        ),
+        "legacy financial-document watermark reproduces functional source ordering",
+    )
+
     with TemporaryDirectory(prefix="warehouse-supplier-certification-replay-") as raw:
         root = Path(raw)
         runtime_dir = root / "runtime"
@@ -64,7 +102,7 @@ def main() -> int:
         )
         _assert(
             _legacy_balance_proof_matches_allocation(frozen, allocation),
-            "legacy per-SKU capital and document identities match",
+            "nested FF proof preserves legacy per-SKU capital and document identities",
         )
         mismatched_frozen = json.loads(json.dumps(frozen))
         mismatched_frozen["proof"]["balance_lines"]["391660889"]["capital_rub"] = "101"
@@ -73,9 +111,74 @@ def main() -> int:
             "legacy capital mismatch fails closed",
         )
 
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_financial_documents(
+                       document_id,supplier_order_id,document_type,original_filename,
+                       stored_file_path,file_content_type,file_sha256,uploaded_at,updated_at,
+                       parse_status,raw_parse_json,normalized_parse_json,warnings_json,errors_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "informational-contract-after-version",
+                    "26GN390",
+                    "contract",
+                    "sanitized-contract.pdf",
+                    "/sanitized/contract.pdf",
+                    "application/pdf",
+                    "sha256:sanitized",
+                    "2026-07-20T10:01:00Z",
+                    "2026-07-20T10:01:00Z",
+                    "stored",
+                    "{}",
+                    "{}",
+                    "[]",
+                    "[]",
+                ),
+            )
+            conn.commit()
+
         plan = build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         _assert(plan["correction_count"] == 1, "dry-run finds one bounded correction")
+        _assert(
+            plan["immutable_supplier_source_watermarks_match"] is False,
+            "unrelated informational document changes only the global diagnostic watermark",
+        )
+        _assert(
+            plan["corrections"][0]["shipment_id"] == "26GN390",
+            "exact target conservation admits the unchanged legacy supplier flow",
+        )
+        _assert(
+            plan["legacy_target_revision_proofs"]["26GN390"]["unchanged_since_version"]
+            is True,
+            "only source rows contributing to the target are revision-gated",
+        )
         _assert(plan["corrections"][0]["supersedes_state_fingerprint"] == "missing", "supersedes is explicit")
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_cny_ledger_operations
+                   SET cny_delta='-11',updated_at=?
+                   WHERE operation_id='payment-390'""",
+                (VERSION_EFFECTIVE_AT,),
+            )
+            conn.commit()
+        try:
+            build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
+        except WarehouseSupplierCostStateReplayError as exc:
+            _assert(
+                "legacy_target_source_revision_after_version" in str(exc),
+                "fingerprint-driving target drift fails even when RUB capital is unchanged",
+            )
+        else:
+            raise AssertionError("target CNY source drift unexpectedly certified a legacy version")
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_cny_ledger_operations
+                   SET cny_delta='-10',updated_at=? WHERE operation_id='payment-390'""",
+                (NOW,),
+            )
+            conn.commit()
+        plan = build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         original_backup = runtime.backup_database
         invalid_backup_paths: list[Path] = []
 
@@ -188,7 +291,7 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='110',updated_at='2026-07-20T11:00:00Z'
+                   SET rub_value_delta='110'
                    WHERE operation_id='payment-390'"""
             )
             conn.commit()
@@ -199,7 +302,7 @@ def main() -> int:
             build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         except WarehouseSupplierCostStateReplayError as exc:
             _assert(
-                "immutable_local_source_digest_changed" in str(exc),
+                "legacy_target_conservation_proof_mismatch" in str(exc),
                 "changed source cannot certify stale immutable balances",
             )
         else:
@@ -207,9 +310,8 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='-100',updated_at=?
+                   SET rub_value_delta='-100'
                    WHERE operation_id='payment-390'""",
-                (NOW,),
             )
             conn.commit()
 
@@ -276,7 +378,7 @@ def main() -> int:
             )
         except WarehouseSupplierCostStateReplayError as exc:
             _assert(
-                "immutable_local_source_digest_changed" in str(exc),
+                "legacy_target_source_revision_after_version" in str(exc),
                 "optimistic source conflict fails closed against immutable proof",
             )
         else:
@@ -425,7 +527,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
                 "whfv_smoke",
                 "warehouse_functional_cutover_v1",
                 "hourly_wb_sync",
-                NOW,
+                VERSION_EFFECTIVE_AT,
                 "good",
                 "sha256:immutable-version",
                 "sha256:legacy-source-capture",
@@ -465,7 +567,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 "whfv_smoke",
-                "china_to_ff",
+                "ff",
                 391660889,
                 "1",
                 "100",
@@ -484,13 +586,24 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
                 ),
             ),
         )
-        legacy_digest = _functional_local_source_digest_candidates(conn)[
-            "pre_684_without_cny_documents"
-        ]
+        supplier_watermarks = _legacy_supplier_source_watermarks(
+            _supplier_sources(conn)
+        )
         conn.execute(
             """UPDATE sheet_vitrina_v1_warehouse_functional_versions
-               SET local_source_digest=? WHERE version_id='whfv_smoke'""",
-            (legacy_digest,),
+               SET local_source_digest=?,source_watermarks_json=?
+               WHERE version_id='whfv_smoke'""",
+            (
+                "sha256:legacy-version-wide-digest-can-advance-independently",
+                json.dumps(supplier_watermarks, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        # A later derived-history publication legitimately changes the broad
+        # functional source set, but not any supplier source or frozen balance.
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_canonical_cost_daily_state(
+                   as_of_date,nm_id,physical_quantity,stage
+               ) VALUES('2026-07-20',391660889,'1','WB')"""
         )
         conn.commit()
 
