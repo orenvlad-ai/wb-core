@@ -977,11 +977,6 @@ def deploy_current_checkout(
     run_stage("dependencies", autoanswers_os_dependencies_command)
     run_stage("dependencies", autoanswers_node_dependencies_command)
     run_stage(
-        "autoanswers-capacity",
-        autoanswers_prepare_capacity_command,
-        allow_transport_reconciliation=False,
-    )
-    run_stage(
         "autoanswers-schema-preflight",
         autoanswers_prepare_deploy_command,
         allow_transport_reconciliation=False,

@@ -19,6 +19,8 @@ from apps.wb_autoanswers_activation import (
     _capacity_heartbeat,
     _compress_verified_backup,
     _create_current_compressed_schema_backup,
+    _prepare_backup_capacity,
+    _schema_preparation_lock,
     run,
 )
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback
@@ -142,6 +144,27 @@ class ActivationTest(unittest.TestCase):
         self.assertEqual(backup["format"], "zstd")
         with sqlite3.connect(database) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "current")
+
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v2"
+        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__redundant.sqlite3"
+        shutil.copy2(database, redundant)
+        sidecar = redundant.with_name(redundant.name + "-journal")
+        sidecar.write_bytes(b"orphan")
+        cleanup = _prepare_backup_capacity(self.runtime_dir)
+        self.assertFalse(redundant.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertEqual(cleanup["compaction"]["redundant_autoanswers_raw_removed"], 1)
+        self.assertGreaterEqual(cleanup["compaction"]["orphan_autoanswers_sidecars_removed"], 1)
+
+    def test_repository_can_migrate_inside_activation_owned_schema_lock(self) -> None:
+        with _schema_preparation_lock(self.runtime_dir):
+            repository = AutoanswersRepository(
+                runtime_dir=self.runtime_dir,
+                now_factory=MutableClock(),
+                env={},
+                schema_lock_held=True,
+            )
+        self.assertEqual(repository.settings().mode, "draft_only")
 
 
 if __name__ == "__main__":
