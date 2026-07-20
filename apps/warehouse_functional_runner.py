@@ -28,6 +28,11 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
 )
+from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
+    apply_supplier_cost_state_replay_plan,
+    build_supplier_cost_state_replay_plan,
+    rollback_supplier_cost_state_replay,
+)
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 from packages.application.stocks_block import StocksBlock  # noqa: E402
 
@@ -63,6 +68,19 @@ def build_parser() -> argparse.ArgumentParser:
     economics_apply = commands.add_parser("economics-backfill-apply")
     _add_exact_plan_args(economics_apply)
     economics_apply.add_argument("--backup-dir", required=True)
+
+    certification_dry_run = commands.add_parser("supplier-certification-dry-run")
+    certification_dry_run.add_argument("--output", default="")
+    certification_dry_run.add_argument("--shipment-id", action="append", default=[])
+
+    certification_apply = commands.add_parser("supplier-certification-apply")
+    _add_exact_plan_args(certification_apply)
+    certification_apply.add_argument("--backup-dir", required=True)
+
+    certification_rollback = commands.add_parser("supplier-certification-rollback")
+    certification_rollback.add_argument("--fingerprint", required=True)
+    certification_rollback.add_argument("--reason", required=True)
+    certification_rollback.add_argument("--backup-dir", required=True)
 
     rollback = commands.add_parser("rollback")
     rollback.add_argument("--fingerprint", required=True)
@@ -172,6 +190,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 expected_kind="functional_economics_backfill",
             ),
             confirm_fingerprint=str(args.fingerprint),
+            backup_dir=Path(str(args.backup_dir)).resolve(),
+        )
+    if args.command == "supplier-certification-dry-run":
+        return _write_optional_plan(
+            build_supplier_cost_state_replay_plan(
+                runtime,
+                shipment_ids=args.shipment_id,
+            ),
+            str(args.output or ""),
+        )
+    if args.command == "supplier-certification-apply":
+        return apply_supplier_cost_state_replay_plan(
+            runtime,
+            _read_exact_plan(
+                args.plan_file,
+                args.fingerprint,
+                expected_kind="supplier_certification_replay",
+            ),
+            confirm_fingerprint=str(args.fingerprint),
+            backup_dir=Path(str(args.backup_dir)).resolve(),
+        )
+    if args.command == "supplier-certification-rollback":
+        return rollback_supplier_cost_state_replay(
+            runtime,
+            replay_plan_fingerprint=str(args.fingerprint),
+            reason=str(args.reason),
             backup_dir=Path(str(args.backup_dir)).resolve(),
         )
     if args.command == "rollback":
@@ -305,6 +349,11 @@ def _read_exact_plan(plan_file: str, fingerprint: str, *, expected_kind: str) ->
     if expected_kind == "functional_economics_backfill":
         if str(payload.get("contract_name") or "") != "sheet_vitrina_v1_functional_economics_backfill":
             raise ValueError("expected functional economics backfill plan")
+    elif expected_kind == "supplier_certification_replay":
+        if str(payload.get("contract_name") or "") != (
+            "sheet_vitrina_v1_warehouse_supplier_cost_state_replay"
+        ):
+            raise ValueError("expected supplier certification replay plan")
     elif actual_kind != expected_kind:
         raise ValueError(f"expected {expected_kind} plan")
     if str(payload.get("plan_fingerprint") or "") != str(fingerprint or ""):

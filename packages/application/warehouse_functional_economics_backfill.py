@@ -481,6 +481,38 @@ def _warehouse_input_manifest_digest(
                             ORDER BY version_id,shipment_id""",
                         tuple(version_ids),
                     )
+                if "sheet_vitrina_v1_warehouse_supplier_cost_state_replays" in table_names:
+                    manifest["supplier_cost_state_replays"] = _query_manifest_rows(
+                        conn,
+                        f"""SELECT *
+                            FROM sheet_vitrina_v1_warehouse_supplier_cost_state_replays
+                            WHERE version_id IN ({version_placeholders})
+                            ORDER BY version_id,sequence_no""",
+                        tuple(version_ids),
+                    )
+                if "sheet_vitrina_v1_warehouse_supplier_cost_state_corrections" in table_names:
+                    manifest["supplier_cost_state_corrections"] = _query_manifest_rows(
+                        conn,
+                        f"""SELECT *
+                            FROM sheet_vitrina_v1_warehouse_supplier_cost_state_corrections
+                            WHERE version_id IN ({version_placeholders})
+                            ORDER BY version_id,shipment_id,replay_id""",
+                        tuple(version_ids),
+                    )
+                if (
+                    "sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks"
+                    in table_names
+                ):
+                    manifest["supplier_cost_state_replay_rollbacks"] = _query_manifest_rows(
+                        conn,
+                        f"""SELECT rollback.*
+                            FROM sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks rollback
+                            JOIN sheet_vitrina_v1_warehouse_supplier_cost_state_replays replay
+                              ON replay.replay_id=rollback.replay_id
+                            WHERE replay.version_id IN ({version_placeholders})
+                            ORDER BY replay.version_id,replay.sequence_no""",
+                        tuple(version_ids),
+                    )
         if "sheet_vitrina_v1_warehouse_functional_active" in table_names:
             manifest["active_version"] = _query_manifest_rows(
                 conn,
