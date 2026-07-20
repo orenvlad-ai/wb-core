@@ -11,7 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
-from urllib import error, request as urllib_request
+from urllib import error, parse as urllib_parse, request as urllib_request
 import zipfile
 
 from openpyxl import load_workbook
@@ -39,6 +39,7 @@ from packages.application.factory_order_sales_history import persist_sales_histo
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.wb_regional_supply_export import recommendation_identity, recommendation_prefix
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 from packages.contracts.supplier_shipments import (
@@ -185,6 +186,8 @@ def main() -> None:
                 "Доставка, дней",
                 "Без ДВ/Сибирь",
                 "Скачать все рекомендации",
+                "Формируем архив...",
+                "Рекомендации_поставок.zip",
                 "Скачать Excel",
                 "<th>Рекомендовано / к поставке</th>",
                 "<th>Дефицит</th>",
@@ -484,14 +487,13 @@ def main() -> None:
                 raise AssertionError(f"central district download filename must be ASCII translit, got {central_disposition!r}")
             load_workbook(BytesIO(district_bytes), data_only=True)
             district_rows = read_first_sheet_rows(district_bytes)
-            if district_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
-                raise AssertionError(f"district XLSX must expose the deficit column, got {district_rows[2]}")
+            if district_rows[2] != ["nmId", "SKU", "Количество к поставке"]:
+                raise AssertionError(f"district XLSX must remove the deficit column, got {district_rows[2]}")
+            if any(cell == "Дефицит" for row in district_rows for cell in row):
+                raise AssertionError("district XLSX must not contain deficit header or values")
             district_qty_sum = sum(int(row[2]) for row in district_rows[3:] if len(row) >= 3 and str(row[2]).strip())
-            district_deficit_sum = sum(int(row[3]) for row in district_rows[3:] if len(row) >= 4 and str(row[3]).strip())
             if district_qty_sum != districts[PLANNING_ZONE_CENTRAL_NORTH]["total_qty"]:
                 raise AssertionError("district XLSX must match the regional summary total for the same district")
-            if district_deficit_sum != districts[PLANNING_ZONE_CENTRAL_NORTH]["deficit_qty"]:
-                raise AssertionError("district XLSX deficit must match the regional summary deficit for the same district")
 
             northwest_download_path = selected_districts[DISTRICT_NORTHWEST].get("download_path")
             northwest_status, northwest_bytes, northwest_headers = _get_bytes(f"{base_url}{northwest_download_path}")
@@ -515,23 +517,56 @@ def main() -> None:
             zip_disposition = str(zip_headers.get("Content-Disposition", ""))
             if zip_status != 200 or str(zip_headers.get("Content-Type", "")).split(";")[0] != "application/zip":
                 raise AssertionError(f"ZIP route must return application/zip, got {zip_status} {zip_headers}")
+            zip_filename = _filename_from_content_disposition(zip_disposition)
             if (
-                'filename="wb_regional_recommendations_2026-04-18.zip"' not in zip_disposition
-                or not _is_ascii(zip_disposition)
+                not zip_filename.startswith("Рекомендации_поставок_2026-04-18_14-00_")
+                or str(selected_payload.get("calculation_id") or "") not in zip_filename
+                or not zip_filename.endswith(".zip")
             ):
-                raise AssertionError(f"ZIP content-disposition filename must be ASCII, got {zip_disposition!r}")
+                raise AssertionError(f"ZIP content-disposition must expose the Unicode run filename, got {zip_disposition!r}")
+            expected_archive_names: list[str] = []
+            for ordinal, district in enumerate(selected_payload.get("districts") or [], start=1):
+                recommendation_id = recommendation_identity(
+                    report_date=str(selected_payload.get("report_date") or ""),
+                    calculation_id=str(selected_payload.get("calculation_id") or ""),
+                    ordinal=ordinal,
+                )
+                prefix = recommendation_prefix(
+                    ordinal=ordinal,
+                    recommendation_id=recommendation_id,
+                    destination_name=str(
+                        district.get("planning_zone_label")
+                        or district.get("district_name_ru")
+                        or ""
+                    ),
+                )
+                expected_archive_names.extend(
+                    [
+                        f"{prefix}/{prefix}__01_РЕКОМЕНДАЦИЯ.xlsx",
+                        f"{prefix}/{prefix}__02_ЗАГРУЗКА_WB.xlsx",
+                    ]
+                )
             with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
-                archive_names = sorted(archive.namelist())
-                if archive_names != ["wb_regional_central_north_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
-                    raise AssertionError(f"ZIP must contain one XLSX per included district only, got {archive_names}")
+                archive_names = archive.namelist()
+                if archive_names != expected_archive_names:
+                    raise AssertionError(f"ZIP must contain paired XLSX folders in UI order, got {archive_names}")
                 for name in archive_names:
-                    if not _is_ascii(name):
-                        raise AssertionError(f"ZIP member filename must be ASCII translit, got {name!r}")
                     workbook_bytes = archive.read(name)
                     load_workbook(BytesIO(workbook_bytes), data_only=True)
-                    rows = read_first_sheet_rows(workbook_bytes)
-                    if rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
-                        raise AssertionError(f"ZIP workbook {name} must keep expected headers, got {rows[2]}")
+                    if name.endswith("__01_РЕКОМЕНДАЦИЯ.xlsx"):
+                        rows = read_first_sheet_rows(workbook_bytes)
+                        if rows[2] != ["nmId", "SKU", "Количество к поставке"]:
+                            raise AssertionError(f"ZIP operator workbook {name} must remove deficit, got {rows[2]}")
+                    elif name.endswith("__02_ЗАГРУЗКА_WB.xlsx"):
+                        workbook = load_workbook(BytesIO(workbook_bytes), data_only=True)
+                        try:
+                            sheet = workbook["Sheet1"]
+                            if (sheet["A1"].value, sheet["B1"].value) != ("Баркод", "Количество"):
+                                raise AssertionError(f"ZIP WB workbook {name} must preserve canonical headers")
+                            if sum(int(sheet.cell(row=index, column=2).value) for index in range(2, sheet.max_row + 1)) <= 0:
+                                raise AssertionError(f"ZIP WB workbook {name} must contain positive recommendation rows")
+                        finally:
+                            workbook.close()
 
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
             _seed_runtime_stock_history(
@@ -606,7 +641,6 @@ def main() -> None:
             print(f"regional_central_north_deficit: ok -> {districts[PLANNING_ZONE_CENTRAL_NORTH]['deficit_qty']}")
             print(f"regional_lead_times: ok -> central {mixed_central_row.get('lead_time_to_region_days')}, northwest {mixed_northwest_row.get('lead_time_to_region_days')}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
-            print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
             print(f"regional_recommendations_zip: ok -> {archive_names}")
             print(f"regional_seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
             print(f"regional_missing_shared_blocker: ok -> {blocked_payload.get('error')}")
@@ -772,6 +806,17 @@ def _seed_planning_nomenclature(runtime: RegistryUploadDbBackedRuntime, *, activ
             }
         )
     runtime.save_nomenclature_items_atomic(rows)
+
+
+def _filename_from_content_disposition(value: str) -> str:
+    for part in str(value or "").split(";"):
+        normalized = part.strip()
+        if normalized.lower().startswith("filename*="):
+            encoded = normalized.split("=", 1)[1].strip().strip('"')
+            if "''" in encoded:
+                encoded = encoded.split("''", 1)[1]
+            return urllib_parse.unquote(encoded)
+    return ""
 
 
 def _reserve_free_port() -> int:

@@ -16,7 +16,7 @@ from packages.application.factory_order_sales_history import FactoryOrderAuthori
 from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
-from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
+from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.stocks_block import StocksBlock, build_elektrostal_stock_override
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
 from packages.application.wb_supply_overlay import (
@@ -29,6 +29,15 @@ from packages.application.wb_supply_overlay import (
 from packages.application.wb_regional_demand import (
     build_result_diagnostics as _build_regional_demand_result_diagnostics,
     estimate_wb_regional_demand as _estimate_wb_regional_demand,
+)
+from packages.application.wb_regional_supply_export import (
+    WbSupplyExportValidationError,
+    archive_filename,
+    build_wb_upload_rows,
+    build_wb_upload_workbook_bytes,
+    recommendation_identity,
+    recommendation_prefix,
+    validate_raw_district_quantities,
 )
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
@@ -89,7 +98,7 @@ _DISTRICT_FILENAME_STEMS = {
     DISTRICT_FAR_SIBERIA: "far_siberia",
 }
 _SHARED_STOCK_LABEL = "Остатки ФФ"
-_DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке", "Дефицит"]
+_DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
@@ -650,6 +659,9 @@ class WbRegionalSupplyBlock:
         return self._build_district_workbook_bytes(district), district.filename
 
     def download_all_recommendations_archive(self) -> tuple[bytes, str]:
+        raw_result = self.runtime.load_wb_regional_supply_result_state()
+        if not isinstance(raw_result, Mapping):
+            raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
@@ -663,12 +675,84 @@ class WbRegionalSupplyBlock:
         if not included_districts:
             raise ValueError("В последнем результате нет рекомендаций для выбранных округов")
 
+        raw_districts_by_key: dict[str, list[Mapping[str, Any]]] = {}
+        for item in raw_result.get("districts") or []:
+            if not isinstance(item, Mapping):
+                continue
+            raw_key = str(item.get("district_key") or "").strip().lower()
+            raw_districts_by_key.setdefault(raw_key, []).append(item)
+        nomenclature_items = self.runtime.list_nomenclature_items(active_only=True)
+        archive_members: list[tuple[str, bytes]] = []
+        archive_member_names: set[str] = set()
+        export_errors: list[str] = []
+
+        for ordinal, district in enumerate(included_districts, start=1):
+            recommendation_id = recommendation_identity(
+                report_date=result.report_date,
+                calculation_id=result.calculation_id,
+                ordinal=ordinal,
+            )
+            destination_name = district.planning_zone_label or district.district_name_ru
+            prefix = recommendation_prefix(
+                ordinal=ordinal,
+                recommendation_id=recommendation_id,
+                destination_name=destination_name,
+            )
+            context = f"{prefix} — {destination_name}"
+            raw_candidates = raw_districts_by_key.get(district.district_key) or []
+            raw_district = raw_candidates.pop(0) if raw_candidates else None
+            if raw_district is None:
+                export_errors.append(f"{context}: исходные строки рекомендации отсутствуют")
+                continue
+            raw_quantity_issues = validate_raw_district_quantities(raw_district)
+            if raw_quantity_issues:
+                export_errors.append(f"{context}: " + "; ".join(raw_quantity_issues))
+                continue
+            try:
+                operator_bytes = self._build_district_workbook_bytes(district)
+                wb_rows = build_wb_upload_rows(
+                    district=district,
+                    nomenclature_items=nomenclature_items,
+                )
+                wb_bytes = build_wb_upload_workbook_bytes(
+                    wb_rows,
+                    expected_total=district.total_qty,
+                )
+            except WbSupplyExportValidationError as exc:
+                export_errors.append(f"{context}: " + "; ".join(exc.issues))
+                continue
+            except ValueError as exc:
+                export_errors.append(f"{context}: {exc}")
+                continue
+
+            member_names = (
+                f"{prefix}/{prefix}__01_РЕКОМЕНДАЦИЯ.xlsx",
+                f"{prefix}/{prefix}__02_ЗАГРУЗКА_WB.xlsx",
+            )
+            if any(name in archive_member_names for name in member_names):
+                export_errors.append(f"{context}: обнаружена коллизия имён файлов")
+                continue
+            if not operator_bytes or not wb_bytes:
+                export_errors.append(f"{context}: сформирован пустой XLSX-файл")
+                continue
+            archive_member_names.update(member_names)
+            archive_members.extend(((member_names[0], operator_bytes), (member_names[1], wb_bytes)))
+
+        if export_errors:
+            raise ValueError(
+                "Архив не сформирован: массовая выгрузка атомарно отменена. "
+                + " | ".join(export_errors)
+            )
+
         archive_buffer = BytesIO()
         with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for district in included_districts:
-                archive.writestr(district.filename, self._build_district_workbook_bytes(district))
-        report_date = _safe_report_date_for_filename(result.report_date)
-        return archive_buffer.getvalue(), f"wb_regional_recommendations_{report_date}.zip"
+            for member_name, member_bytes in archive_members:
+                archive.writestr(member_name, member_bytes)
+        return archive_buffer.getvalue(), archive_filename(
+            report_date=result.report_date,
+            calculated_at=result.calculated_at,
+            calculation_id=result.calculation_id,
+        )
 
     def _load_active_skus(self) -> list[tuple[int, str]]:
         current_state = self.runtime.load_current_state()
@@ -953,19 +1037,25 @@ class WbRegionalSupplyBlock:
 
     def _build_district_workbook_bytes(self, district: WbRegionalSupplyDistrictResult) -> bytes:
         rows: list[list[Any]] = [
-            ["Федеральный округ", district.district_name_ru, "", ""],
+            ["Федеральный округ", district.district_name_ru, ""],
             [],
             _DISTRICT_FILE_HEADERS,
         ]
         rows.extend(
             [
-                [row.nm_id, row.sku_comment, row.allocated_qty, row.deficit_qty]
+                [row.nm_id, row.sku_comment, row.allocated_qty]
                 for row in district.rows
                 if row.allocated_qty > 0 or row.deficit_qty > 0
             ]
         )
         sheet_name = _truncate_sheet_name(district.district_name_ru)
-        return build_single_sheet_workbook_bytes(sheet_name, rows)
+        workbook_bytes = build_single_sheet_workbook_bytes(sheet_name, rows)
+        parsed_rows = read_first_sheet_rows(workbook_bytes)
+        if any(str(cell or "").strip() == "Дефицит" for row in parsed_rows for cell in row):
+            raise ValueError("Операторский XLSX содержит удалённый столбец «Дефицит»")
+        if parsed_rows[2] != _DISTRICT_FILE_HEADERS:
+            raise ValueError(f"Заголовки операторского XLSX повреждены: {parsed_rows[2]!r}")
+        return workbook_bytes
 
 
 def _default_now_factory() -> datetime:
@@ -1254,14 +1344,6 @@ def _district_filename(district_key: str) -> str:
     stem = "".join(char if char.isascii() and (char.isalnum() or char == "_") else "_" for char in raw_stem).strip("_")
     stem = stem or "district"
     return f"wb_regional_{stem}_fo.xlsx"
-
-
-def _safe_report_date_for_filename(value: Any) -> str:
-    normalized = str(value or "").strip()
-    try:
-        return date.fromisoformat(normalized).isoformat()
-    except ValueError:
-        return _default_now_factory().date().isoformat()
 
 
 def _allocate_boxes(
