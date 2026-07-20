@@ -577,7 +577,10 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             locked_before = _pre_migration_safety(runtime_dir)
             if not force_off:
                 raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
-            if bool(locked_before.get("master_enabled")):
+            if (
+                not bool(locked_before.get("schema_v2_applied"))
+                and bool(locked_before.get("master_enabled"))
+            ):
                 raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
             capacity = _prepare_backup_capacity(runtime_dir)
             repository = AutoanswersRepository(runtime_dir=runtime_dir, schema_lock_held=True)
