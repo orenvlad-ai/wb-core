@@ -194,7 +194,7 @@ AUTOANSWERS_NODE_SHA256 = {
     "amd64": "680d3f30b24a7ff24b98db5e96f294c0070f8f9078df658da1bce1b9c9873c88",
     "arm64": "e660365729b434af422bcd2e8e14228637ecf24a1de2cd7c916ad48f2a0521e1",
 }
-AUTOANSWERS_BASE_OS_PACKAGES = ["ca-certificates", "curl", "xz-utils", "ffmpeg"]
+AUTOANSWERS_BASE_OS_PACKAGES = ["ca-certificates", "curl", "xz-utils", "zstd", "ffmpeg"]
 SELLER_PORTAL_RECOVERY_REQUIRED_COMMANDS = [
     "python3",
     "xvfb-run",
@@ -875,6 +875,7 @@ def deploy_current_checkout(
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
     autoanswers_os_dependencies_command = _build_autoanswers_os_dependencies_command(target)
     autoanswers_node_dependencies_command = _build_autoanswers_node_dependencies_command(target)
+    autoanswers_prepare_capacity_command = _build_autoanswers_prepare_capacity_command(target)
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
@@ -905,6 +906,7 @@ def deploy_current_checkout(
             "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
             "autoanswers_os_dependencies": autoanswers_os_dependencies_command,
             "autoanswers_node_dependencies": autoanswers_node_dependencies_command,
+            "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -965,6 +967,7 @@ def deploy_current_checkout(
     run_stage("dependencies", seller_recovery_playwright_browser_command)
     run_stage("dependencies", autoanswers_os_dependencies_command)
     run_stage("dependencies", autoanswers_node_dependencies_command)
+    run_stage("readback", autoanswers_prepare_capacity_command)
     run_stage("readback", autoanswers_prepare_deploy_command)
     if systemd_commands["install"]:
         run_stage("systemd-install", systemd_commands["install"])
@@ -1063,6 +1066,17 @@ def _build_autoanswers_prepare_deploy_command(target: HostedRuntimeTarget) -> li
         f"cd {shlex.quote(target.target_dir)} && "
         "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true "
         "python3 apps/wb_autoanswers_activation.py prepare-deploy "
+        f"--runtime-dir {shlex.quote(runtime_dir)}"
+    )
+    return _remote_shell_command(target, command)
+
+
+def _build_autoanswers_prepare_capacity_command(target: HostedRuntimeTarget) -> list[str]:
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true "
+        "python3 apps/wb_autoanswers_activation.py prepare-capacity "
         f"--runtime-dir {shlex.quote(runtime_dir)}"
     )
     return _remote_shell_command(target, command)
