@@ -57,8 +57,11 @@ from apps.github_release_train import (  # noqa: E402
 from apps.github_release_train_spec import (  # noqa: E402
     GoalDecision,
     GoalDisposition,
+    GoalPhase,
+    GoalPhaseContext,
     GoalReasonCode,
     STATUS_COMMENT_MARKER,
+    phase_goal_decision,
     select_ui_runtime,
 )
 
@@ -69,6 +72,8 @@ EXIT_RESUMED = 4
 EXIT_OWN_ACTION = 5
 EXIT_CONTINUE_WAITING = 6
 EXIT_TERMINAL_FAILURE = 7
+EXIT_CONTINUE_SAFE_PHASES = 8
+EXIT_AWAIT_PHASE_CAPABILITY = 9
 EXIT_INTERRUPTED = 130
 
 
@@ -324,6 +329,12 @@ def _decision(
         user_intervention_required=False,
         evidence=evidence,
         remediation_exhausted=False,
+        current_phase=GoalPhase.GITHUB_RELEASE,
+        blocked_phase=None,
+        safe_phases_remaining=(),
+        required_capability="",
+        capability_evidence=(),
+        next_executable_action=next_action,
     )
 
 
@@ -393,6 +404,12 @@ def _evidence_blocker_decision(
         user_intervention_required=user_required,
         evidence=(dict(blocker_evidence),),
         remediation_exhausted=True,
+        current_phase=GoalPhase.GITHUB_RELEASE,
+        blocked_phase=GoalPhase.GITHUB_RELEASE,
+        safe_phases_remaining=(),
+        required_capability=str(blocker_evidence.get("required_capability") or ""),
+        capability_evidence=(dict(blocker_evidence),),
+        next_executable_action=user_action,
     )
 
 
@@ -401,6 +418,7 @@ def goal_disposition(
     own_pr: int,
     *,
     blocker_evidence: Mapping[str, Any] | None = None,
+    phase_context: GoalPhaseContext | None = None,
 ) -> GoalDecision:
     """Return the only canonical Goal interpretation for own PR and global gate."""
 
@@ -426,6 +444,16 @@ def goal_disposition(
         {"kind": "own-pr", **own},
         {"kind": "queue", **queue_state},
     )
+
+    if phase_context is not None:
+        phase_decision = phase_goal_decision(
+            phase_context,
+            own_pr=own_pr,
+            action_pr=own_pr,
+            canonical_github_state=canonical,
+        )
+        if phase_decision is not None:
+            return phase_decision
 
     follows_existing_chain = (
         own["loop_root"] == own_pr
@@ -843,6 +871,7 @@ def shepherd_release(
     poll_seconds: float,
     once: bool,
     blocker_evidence: Mapping[str, Any] | None = None,
+    phase_context: GoalPhaseContext | None = None,
     owner: str = "codex-cli",
     emit: Callable[[str], None] = print,
 ) -> int:
@@ -851,7 +880,12 @@ def shepherd_release(
     next_status = time.monotonic() + status_seconds if status_seconds > 0 else None
     previous = ""
     while True:
-        decision = goal_disposition(api, own_pr, blocker_evidence=blocker_evidence)
+        decision = goal_disposition(
+            api,
+            own_pr,
+            blocker_evidence=blocker_evidence,
+            phase_context=phase_context,
+        )
         rendered = json.dumps(decision.as_dict(), ensure_ascii=False, sort_keys=True)
         if rendered != previous:
             emit(rendered)
@@ -863,6 +897,10 @@ def shepherd_release(
             return EXIT_BLOCKED
         if disposition == GoalDisposition.TERMINAL_FAILURE:
             return EXIT_TERMINAL_FAILURE
+        if disposition == GoalDisposition.CONTINUE_SAFE_PHASES:
+            return EXIT_CONTINUE_SAFE_PHASES
+        if disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY:
+            return EXIT_AWAIT_PHASE_CAPABILITY
         if disposition == GoalDisposition.RECOVER_OWN_CHAIN:
             return EXIT_AWAITING_UI
         if disposition == GoalDisposition.TAKEOVER_PREDECESSOR:
@@ -923,6 +961,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Shepherd exits: 0 terminal success; 2 proven EXTERNAL_BLOCKER; "
             "3 own LOOP UI/recovery action; 4 predecessor takeover/resume next action; "
             "5 other own repo action; 6 --once normal waiting; 7 proven TERMINAL_FAILURE; "
+            "8 CONTINUE_SAFE_PHASES; 9 AWAIT_PHASE_CAPABILITY; "
             "130 interrupt. Elapsed time is never terminal."
         ),
     )
@@ -972,6 +1011,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--phase-state",
+        type=Path,
+        help=(
+            "JSON keys: current_phase, safe_phases_remaining, required_capability, "
+            "capability_available, capability_evidence, repo_owned_remediation_available, "
+            "remediation_exhausted, user_intervention_required, next_executable_action, "
+            "minimal_user_action; future production capability cannot block safe phases"
+        ),
+    )
+    parser.add_argument(
         "--playwright-preflight",
         action="store_true",
         help=(
@@ -989,6 +1038,8 @@ def main() -> int:
             raise ValueError("--once requires --shepherd")
         if args.blocker_evidence is not None and not args.shepherd:
             raise ValueError("--blocker-evidence requires --shepherd")
+        if args.phase_state is not None and not args.shepherd:
+            raise ValueError("--phase-state requires --shepherd")
         if args.playwright_preflight:
             report = local_playwright_preflight(own_pr=args.pr)
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -999,6 +1050,12 @@ def main() -> int:
             if not isinstance(loaded, dict):
                 raise ValueError("blocker evidence must be a JSON object")
             blocker_evidence = loaded
+        phase_context: GoalPhaseContext | None = None
+        if args.phase_state is not None:
+            loaded_phase = json.loads(args.phase_state.read_text(encoding="utf-8"))
+            if not isinstance(loaded_phase, dict):
+                raise ValueError("phase state must be a JSON object")
+            phase_context = GoalPhaseContext.from_mapping(loaded_phase)
         ensure_ca_bundle()
         api = GitHubApi(
             repository=_repository(args.repository),
@@ -1013,6 +1070,7 @@ def main() -> int:
                 poll_seconds=args.poll_seconds,
                 once=args.once,
                 blocker_evidence=blocker_evidence,
+                phase_context=phase_context,
                 owner=args.owner,
             )
         return wait_for_release(

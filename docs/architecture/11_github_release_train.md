@@ -58,13 +58,28 @@ Goal disposition является отдельной интерпретацие�
 
 - `TERMINAL_SUCCESS` — применимый terminal state подтверждён repo-owned exact-SHA proof;
 - `CONTINUE_WAITING` — штатное ожидание own/foreign queue state;
+- `CONTINUE_SAFE_PHASES` — будущая production capability недоступна, но dependency plan ещё содержит безопасную исполнимую repository work;
+- `AWAIT_PHASE_CAPABILITY` — все независимые safe phases завершены, а непосредственный production/UI step ждёт доказанную внешнюю capability;
 - `OWN_ACTION` — доступно действие над собственным PR или canonical reconciliation;
 - `TAKEOVER_PREDECESSOR` — чужой predecessor имеет доказанный lost-owner overlay и безопасный resume path;
 - `RECOVER_OWN_CHAIN` — нужно завершить UI/recovery собственной LOOP-chain;
 - `EXTERNAL_BLOCKER` — требуется human/external authority, repo-owned actions отсутствуют и remediation исчерпана;
 - `TERMINAL_FAILURE` — evidence доказывает невосстановимую ошибку протокола после исчерпания remediation.
 
-Каждый результат содержит `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`. `EXTERNAL_BLOCKER` конструктивно запрещён, если evidence содержит доступную repo-owned команду.
+Каждый результат содержит `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`, `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`. `EXTERNAL_BLOCKER` конструктивно запрещён, если evidence содержит доступную repo-owned команду или `safe_phases_remaining` непуст. `AWAIT_PHASE_CAPABILITY` не является terminal failure всей цели: он допустим только на непосредственной phase boundary с фактическим capability preflight, исчерпанным repo-owned remediation и минимальным human-only действием.
+
+## Phase-Local Production Gates
+
+Одна machine specification также задаёт dependency order и четыре независимых preflight boundary:
+
+- `REPOSITORY_PREFLIGHT` читает repository/worktree, `AGENTS.md`, architecture/runners, local dependencies, tests и при необходимости GitHub baseline; production credentials/database, MCP, browser, manifests, digest и backup ему не нужны;
+- `PRODUCTION_READ_PREFLIGHT` запускается только перед конкретным read-only production evidence и проверяет лишь требуемую capability/source;
+- `PRODUCTION_MUTATION_PREFLIGHT` запускается непосредственно перед apply и доказывает bounded scope, dry-run/coverage, manifest/digests, backup/restore, expected records, non-target invariants, authorization, exact deployed runner/version и reconciliation;
+- `PRODUCTION_UI_PREFLIGHT` запускается только перед UI acceptance и проверяет local Playwright/Chromium плюс authorization, реально нужную этой navigation/operation.
+
+Prompt order не является dependency order. Для production-data flow каноническая последовательность: `repository development → fixtures/tests → repo-owned runner → PR/CI/review → deploy runner → production read/dry-run → backup/manifests/digests/evidence → explicit apply → readback/reconciliation → UI acceptance`. Невозможность выполнить поздние steps не блокирует ранние. До production gate runner всё равно реализуется и тестируется на fixtures/mocks; он имеет dry-run default, отдельный apply flag, bounded scope, machine-readable manifest, pre-change digest, backup/evidence contract, expected affected records, non-target invariants, idempotency/documented recovery и post-apply reconciliation. Ad-hoc/local/server-only scripts production mutation не выполняют.
+
+WebCore Data MCP используется только для конкретной read capability из его allowlist. Он не предоставляет автоматически arbitrary SQL, production filesystem, raw exports, backup/backfill, manifests или digests; его отсутствие не является общим blocker, а mutation через него запрещена. Если allowlist не покрывает требуемый evidence, shepherd выбирает type-appropriate repo-owned runner и не просит пользователя подключить бесполезную capability.
 
 ## LOOP Registration И Root Invariants
 
@@ -139,7 +154,7 @@ Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновре�
 
 UI Flow следует production UI contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). HTTP `200`, `curl`, наличие HTML или только canonical public probe недостаточны: требуется фактический browser render с DOM/final URL, отсутствием `5xx`/`pageerror`/fatal surface, классификацией существенных console errors и визуально проверенным screenshot. В Codex CLI сразу используется Playwright с новым изолированным Chrome/Chromium context; встроенный Browser в CLI недоступен и не требуется. В ChatGPT web/desktop встроенный Browser допустим, если доступен. Пользовательский profile/cookies/credentials и любые clicks/input/business mutations запрещены по умолчанию. Если UI Flow не проходит, gate остаётся fail-closed.
 
-CLI preflight: `python3 apps/github_release_train_wait.py <ACTION_PR> --playwright-preflight`. Helper фактически импортирует local Playwright и запускает fresh isolated non-persistent Chromium context. Успех продолжает UI Flow независимо от embedded Browser. Ошибка сначала означает repo-owned repair action; browser `EXTERNAL_BLOCKER` допустим только после зафиксированных import/launch errors, исчерпанного восстановления, `repo_owned_action_available=false`, `remediation_exhausted=true` и нового human permission/authority. Auth blocker также требует фактической navigation/auth evidence.
+CLI preflight: `python3 apps/github_release_train_wait.py <ACTION_PR> --playwright-preflight`. Helper фактически импортирует local Playwright и запускает fresh isolated non-persistent Chromium context. Browser session не нужна для repository development и проверяется только в `PRODUCTION_UI_PREFLIGHT`; будущая UI gate не останавливает code/tests/PR. Успех продолжает UI Flow независимо от embedded Browser. Публичная/неавторизованная проверка выполняется, если достаточна текущему этапу. Ошибка сначала означает repo-owned repair action; browser `EXTERNAL_BLOCKER` допустим только после зафиксированных import/launch errors, исчерпанного восстановления, `repo_owned_action_available=false`, `remediation_exhausted=true` и нового human permission/authority. Auth blocker также требует фактической navigation/auth evidence и относится только к конкретной требующей auth операции.
 
 При успешном UI Flow активная Codex-сессия оставляет точную GitHub-native command на текущей итерации:
 
@@ -179,9 +194,28 @@ Goal/shepherd command:
 python3 apps/github_release_train_wait.py <OWN_PR> --shepherd
 ```
 
-Shepherd читает own PR и global gate, выводит machine-readable Goal disposition и не принимает UI без evidence. `--once` нужен для bounded pre-handoff проверки. Exit codes: `0` = `TERMINAL_SUCCESS`; `2` = доказанный `EXTERNAL_BLOCKER`; `3` = `RECOVER_OWN_CHAIN`; `4` = `TAKEOVER_PREDECESSOR`/ownership resumed next action; `5` = `OWN_ACTION`; `6` = одно наблюдение `CONTINUE_WAITING`; `7` = доказанный `TERMINAL_FAILURE`; `130` = interrupt. Timeout, unchanged state и коды `3/4/5/6` не terminal. После кода `4` выполняется exact resume/action predecessor, затем та же команда с `OWN_PR` возвращает наблюдение к исходной очереди.
+Shepherd читает own PR и global gate, выводит machine-readable Goal disposition и не принимает UI без evidence. `--phase-state <JSON>` передаёт `current_phase`/capability evidence в тот же classifier; `--once` нужен для bounded pre-handoff проверки. Exit codes: `0` = `TERMINAL_SUCCESS`; `2` = доказанный `EXTERNAL_BLOCKER`; `3` = `RECOVER_OWN_CHAIN`; `4` = `TAKEOVER_PREDECESSOR`/ownership resumed next action; `5` = `OWN_ACTION`; `6` = одно наблюдение `CONTINUE_WAITING`; `7` = доказанный `TERMINAL_FAILURE`; `8` = `CONTINUE_SAFE_PHASES`; `9` = `AWAIT_PHASE_CAPABILITY`; `130` = interrupt. Timeout, unchanged state и коды `3/4/5/6/8/9` не terminal. После кода `4` выполняется exact resume/action predecessor, затем та же команда с `OWN_PR` возвращает наблюдение к исходной очереди.
 
-Перед blocked handoff обязателен `--shepherd --once`. Handoff разрешён только для `EXTERNAL_BLOCKER` или `TERMINAL_FAILURE` вместе с canonical reason, evidence, выполненными recovery attempts и `remediation_exhausted=true`. При `CONTINUE_WAITING`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN` handoff запрещён. `EXTERNAL_BLOCKER` запрещён, если доступна repo-owned команда.
+Минимальный phase-state для будущей недоступной production capability:
+
+```json
+{
+  "current_phase": "REPOSITORY_IMPLEMENTATION",
+  "safe_phases_remaining": ["REPOSITORY_IMPLEMENTATION", "REPOSITORY_VALIDATION", "PULL_REQUEST"],
+  "required_capability": "production-credentials",
+  "capability_available": false,
+  "capability_evidence": [],
+  "repo_owned_remediation_available": false,
+  "remediation_exhausted": false,
+  "user_intervention_required": false,
+  "next_executable_action": "finish implementation and fixture-backed validation",
+  "minimal_user_action": ""
+}
+```
+
+Classifier сам выводит `blocked_phase`: при непустом `safe_phases_remaining` он остаётся `null` и возвращается `CONTINUE_SAFE_PHASES`; выставить его можно только для immediate evidenced capability gate.
+
+Перед blocked handoff обязателен `--shepherd --once` с актуальным `--phase-state`, если задача имеет последующие production/UI phases. Handoff всей цели разрешён только для `EXTERNAL_BLOCKER` или `TERMINAL_FAILURE` вместе с canonical reason, evidence, выполненными recovery attempts и `remediation_exhausted=true`. При `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN` общий blocked handoff запрещён. `EXTERNAL_BLOCKER` запрещён, если доступна repo-owned команда или осталась независимая safe phase.
 
 ## Failures И Idempotency
 

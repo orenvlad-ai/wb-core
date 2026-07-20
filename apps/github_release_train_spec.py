@@ -28,6 +28,8 @@ class GoalDisposition(str, Enum):
 
     TERMINAL_SUCCESS = "TERMINAL_SUCCESS"
     CONTINUE_WAITING = "CONTINUE_WAITING"
+    CONTINUE_SAFE_PHASES = "CONTINUE_SAFE_PHASES"
+    AWAIT_PHASE_CAPABILITY = "AWAIT_PHASE_CAPABILITY"
     OWN_ACTION = "OWN_ACTION"
     TAKEOVER_PREDECESSOR = "TAKEOVER_PREDECESSOR"
     RECOVER_OWN_CHAIN = "RECOVER_OWN_CHAIN"
@@ -41,6 +43,11 @@ class GoalReasonCode(str, Enum):
     TERMINAL_PROOF_VERIFIED = "terminal-proof-verified"
     TERMINAL_PROOF_MISSING = "terminal-proof-missing"
     NORMAL_QUEUE_WAITING = "normal-queue-waiting"
+    SAFE_PHASES_REMAIN = "safe-phases-remain"
+    PHASE_ACTION_READY = "phase-action-ready"
+    PHASE_CAPABILITY_PREFLIGHT_REQUIRED = "phase-capability-preflight-required"
+    PHASE_CAPABILITY_REMEDIATION_AVAILABLE = "phase-capability-remediation-available"
+    PHASE_CAPABILITY_AWAITED = "phase-capability-awaited"
     FOREIGN_OWNER_ACTIVE = "foreign-owner-active"
     FOREIGN_GATE_NEEDS_TAKEOVER = "foreign-gate-needs-takeover"
     LOST_OWNER_EVIDENCE_INCOMPLETE = "lost-owner-evidence-incomplete"
@@ -53,6 +60,93 @@ class GoalReasonCode(str, Enum):
     HALTED_RECONCILIATION_AVAILABLE = "halted-reconciliation-available"
     EXTERNAL_AUTHORITY_REQUIRED = "external-authority-required"
     PROTOCOL_IRRECOVERABLE = "protocol-irrecoverable"
+
+
+class GoalPhase(str, Enum):
+    """Dependency-ordered Goal phases; production gates apply only to their phase."""
+
+    REPOSITORY_PREFLIGHT = "REPOSITORY_PREFLIGHT"
+    REPOSITORY_IMPLEMENTATION = "REPOSITORY_IMPLEMENTATION"
+    REPOSITORY_VALIDATION = "REPOSITORY_VALIDATION"
+    REPOSITORY_RUNNER_PREPARATION = "REPOSITORY_RUNNER_PREPARATION"
+    PULL_REQUEST = "PULL_REQUEST"
+    GITHUB_RELEASE = "GITHUB_RELEASE"
+    RUNNER_DEPLOYMENT = "RUNNER_DEPLOYMENT"
+    PRODUCTION_READ_PREFLIGHT = "PRODUCTION_READ_PREFLIGHT"
+    PRODUCTION_MUTATION_PREFLIGHT = "PRODUCTION_MUTATION_PREFLIGHT"
+    PRODUCTION_APPLY = "PRODUCTION_APPLY"
+    PRODUCTION_RECONCILIATION = "PRODUCTION_RECONCILIATION"
+    PRODUCTION_UI_PREFLIGHT = "PRODUCTION_UI_PREFLIGHT"
+    PRODUCTION_UI_ACCEPTANCE = "PRODUCTION_UI_ACCEPTANCE"
+    COMPLETE = "COMPLETE"
+
+
+GOAL_PHASE_ORDER = tuple(GoalPhase)
+class GoalCapability(str, Enum):
+    """Capabilities are checked for a concrete phase, never as global availability."""
+
+    REPOSITORY = "repository"
+    GITHUB = "github"
+    PRODUCTION_READ = "production-read"
+    PRODUCTION_CREDENTIALS = "production-credentials"
+    PRODUCTION_DATABASE = "production-database"
+    PRODUCTION_MANIFEST = "production-manifest"
+    PRODUCTION_DIGEST = "production-digest"
+    PRODUCTION_BACKUP = "production-backup"
+    PRODUCTION_MUTATION = "production-mutation"
+    PRODUCTION_FILESYSTEM = "production-filesystem"
+    ARBITRARY_SQL = "arbitrary-sql"
+    RAW_EXPORT = "raw-export"
+    BACKFILL = "backfill"
+    LOCAL_PLAYWRIGHT = "local-playwright"
+    PRODUCTION_UI_AUTH = "production-ui-auth"
+    WEBCORE_DATA_MCP_READ = "webcore-data-mcp-read"
+
+
+MCP_NEVER_PROVIDES = frozenset(
+    {
+        GoalCapability.PRODUCTION_MUTATION.value,
+        GoalCapability.PRODUCTION_FILESYSTEM.value,
+        GoalCapability.ARBITRARY_SQL.value,
+        GoalCapability.RAW_EXPORT.value,
+        GoalCapability.PRODUCTION_BACKUP.value,
+        GoalCapability.BACKFILL.value,
+    }
+)
+
+PRODUCTION_MUTATION_RUNNER_REQUIREMENTS = frozenset(
+    {
+        "repo_owned_runner",
+        "dry_run_default",
+        "explicit_apply_flag",
+        "bounded_scope",
+        "machine_readable_manifest",
+        "pre_change_digest",
+        "backup_evidence_contract",
+        "expected_affected_records",
+        "non_target_invariants",
+        "idempotency_or_documented_recovery",
+        "post_apply_readback",
+        "reconciliation",
+    }
+)
+
+
+def production_mutation_runner_contract(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return machine-readable readiness for a canonical production-data runner."""
+
+    missing = sorted(
+        requirement
+        for requirement in PRODUCTION_MUTATION_RUNNER_REQUIREMENTS
+        if manifest.get(requirement) is not True
+    )
+    return {
+        "valid": not missing,
+        "missing_requirements": missing,
+        "apply_allowed": not missing,
+    }
 
 
 class UiRuntime(str, Enum):
@@ -75,6 +169,12 @@ class GoalDecision:
     user_intervention_required: bool
     evidence: tuple[Mapping[str, Any], ...]
     remediation_exhausted: bool
+    current_phase: GoalPhase = GoalPhase.GITHUB_RELEASE
+    blocked_phase: GoalPhase | None = None
+    safe_phases_remaining: tuple[GoalPhase, ...] = ()
+    required_capability: str = ""
+    capability_evidence: tuple[Mapping[str, Any], ...] = ()
+    next_executable_action: str = ""
 
     def __post_init__(self) -> None:
         if self.own_pr <= 0 or self.action_pr <= 0:
@@ -83,6 +183,40 @@ class GoalDecision:
             raise ValueError("Goal decision requires a canonical reason code")
         if not self.canonical_github_state:
             raise ValueError("Goal decision requires canonical GitHub state")
+        if self.next_executable_action != self.allowed_next_action:
+            raise ValueError("next_executable_action must equal allowed_next_action")
+        if self.blocked_phase is not None and self.blocked_phase != self.current_phase:
+            raise ValueError("blocked_phase must be the immediate current phase")
+        if self.disposition == GoalDisposition.CONTINUE_SAFE_PHASES:
+            if not self.safe_phases_remaining or self.blocked_phase is not None:
+                raise ValueError(
+                    "CONTINUE_SAFE_PHASES requires executable safe phases and no current blocker"
+                )
+        if self.disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY:
+            if not (
+                self.blocked_phase == self.current_phase
+                and not self.safe_phases_remaining
+                and self.required_capability
+                and self.capability_evidence
+                and self.user_intervention_required
+                and self.remediation_exhausted
+                and self.allowed_next_action
+            ):
+                raise ValueError(
+                    "AWAIT_PHASE_CAPABILITY requires an immediate evidenced phase gate, "
+                    "exhausted remediation and a human-only action"
+                )
+            if not phase_capability_evidence_sufficient(self.capability_evidence):
+                raise ValueError(
+                    "AWAIT_PHASE_CAPABILITY requires actual failed preflight attempts"
+                )
+            if any(
+                bool(item.get("repo_owned_action_available"))
+                for item in self.capability_evidence
+            ):
+                raise ValueError(
+                    "AWAIT_PHASE_CAPABILITY is forbidden while repo-owned remediation is available"
+                )
         if self.disposition == GoalDisposition.EXTERNAL_BLOCKER:
             if not (
                 self.user_intervention_required
@@ -93,6 +227,10 @@ class GoalDecision:
                 raise ValueError(
                     "EXTERNAL_BLOCKER requires evidence, exhausted remediation and a human-only action"
                 )
+            if self.safe_phases_remaining:
+                raise ValueError(
+                    "EXTERNAL_BLOCKER is forbidden while safe executable phases remain"
+                )
             if any(bool(item.get("repo_owned_action_available")) for item in self.evidence):
                 raise ValueError(
                     "EXTERNAL_BLOCKER is forbidden while repo-owned remediation is available"
@@ -102,7 +240,10 @@ class GoalDecision:
                 raise ValueError(
                     "TERMINAL_FAILURE requires evidence and exhausted remediation without handoff"
                 )
-        elif self.user_intervention_required or self.remediation_exhausted:
+        elif (
+            self.disposition != GoalDisposition.AWAIT_PHASE_CAPABILITY
+            and (self.user_intervention_required or self.remediation_exhausted)
+        ):
             raise ValueError(
                 "non-blocking Goal dispositions cannot require user intervention or exhausted remediation"
             )
@@ -118,7 +259,58 @@ class GoalDecision:
             "user_intervention_required": self.user_intervention_required,
             "evidence": [dict(item) for item in self.evidence],
             "remediation_exhausted": self.remediation_exhausted,
+            "current_phase": self.current_phase.value,
+            "blocked_phase": self.blocked_phase.value if self.blocked_phase else None,
+            "safe_phases_remaining": [phase.value for phase in self.safe_phases_remaining],
+            "required_capability": self.required_capability,
+            "capability_evidence": [dict(item) for item in self.capability_evidence],
+            "next_executable_action": self.next_executable_action,
         }
+
+
+@dataclass(frozen=True)
+class GoalPhaseContext:
+    """Current dependency state supplied to the canonical Goal shepherd."""
+
+    current_phase: GoalPhase
+    safe_phases_remaining: tuple[GoalPhase, ...] = ()
+    required_capability: str = ""
+    capability_available: bool = True
+    capability_evidence: tuple[Mapping[str, Any], ...] = ()
+    repo_owned_remediation_available: bool = False
+    remediation_exhausted: bool = False
+    user_intervention_required: bool = False
+    next_executable_action: str = ""
+    minimal_user_action: str = ""
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "GoalPhaseContext":
+        raw_safe = payload.get("safe_phases_remaining") or []
+        if not isinstance(raw_safe, list):
+            raise ValueError("safe_phases_remaining must be a JSON array")
+        raw_evidence = payload.get("capability_evidence") or []
+        if not isinstance(raw_evidence, list) or any(
+            not isinstance(item, Mapping) for item in raw_evidence
+        ):
+            raise ValueError("capability_evidence must be an array of JSON objects")
+        return cls(
+            current_phase=GoalPhase(str(payload.get("current_phase") or "")),
+            safe_phases_remaining=order_goal_phases(
+                GoalPhase(str(item)) for item in raw_safe
+            ),
+            required_capability=str(payload.get("required_capability") or ""),
+            capability_available=payload.get("capability_available") is True,
+            capability_evidence=tuple(dict(item) for item in raw_evidence),
+            repo_owned_remediation_available=(
+                payload.get("repo_owned_remediation_available") is True
+            ),
+            remediation_exhausted=payload.get("remediation_exhausted") is True,
+            user_intervention_required=(
+                payload.get("user_intervention_required") is True
+            ),
+            next_executable_action=str(payload.get("next_executable_action") or ""),
+            minimal_user_action=str(payload.get("minimal_user_action") or ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -137,6 +329,215 @@ class UiRuntimeDecision:
             "reason_code": self.reason_code,
             "evidence": [dict(item) for item in self.evidence],
         }
+
+
+def order_goal_phases(phases: Iterable[GoalPhase]) -> tuple[GoalPhase, ...]:
+    """Return unique phases in dependency order, independent of prompt ordering."""
+
+    requested = set(phases)
+    return tuple(phase for phase in GOAL_PHASE_ORDER if phase in requested)
+
+
+def mcp_capability_sufficient(
+    required_capability: GoalCapability | str,
+    allowlist: Iterable[GoalCapability | str],
+) -> bool:
+    """Check the concrete read capability; MCP is never generic production access."""
+
+    required = (
+        required_capability.value
+        if isinstance(required_capability, GoalCapability)
+        else str(required_capability)
+    )
+    allowed = {
+        item.value if isinstance(item, GoalCapability) else str(item) for item in allowlist
+    }
+    return required not in MCP_NEVER_PROVIDES and required in allowed
+
+
+def production_evidence_route(
+    required_capability: GoalCapability | str,
+    *,
+    mcp_allowlist: Iterable[GoalCapability | str],
+) -> str:
+    """Select the type-appropriate evidence path without assuming MCP sufficiency."""
+
+    return (
+        "webcore-data-mcp"
+        if mcp_capability_sufficient(required_capability, mcp_allowlist)
+        else "repo-owned-runner"
+    )
+
+
+def phase_capability_evidence_sufficient(
+    evidence: Iterable[Mapping[str, Any]],
+) -> bool:
+    """Require an actual failed attempt, not a capability word or assumption."""
+
+    items = tuple(evidence)
+    return bool(items) and not any(
+        item.get("repo_owned_action_available") is True for item in items
+    ) and any(
+        isinstance(item.get("attempts"), list)
+        and bool(item.get("attempts"))
+        and item.get("repo_owned_action_available") is False
+        for item in items
+    )
+
+
+def phase_goal_decision(
+    context: GoalPhaseContext,
+    *,
+    own_pr: int,
+    action_pr: int,
+    canonical_github_state: Mapping[str, Any],
+) -> GoalDecision | None:
+    """Classify the current phase before Release Train state is interpreted.
+
+    ``None`` delegates to the Release Train classifier because the current phase
+    is itself the GitHub release phase (or the declared Goal is complete).
+    """
+
+    if context.safe_phases_remaining:
+        action = context.next_executable_action or (
+            f"execute {context.safe_phases_remaining[0].value} before any production gate"
+        )
+        return GoalDecision(
+            disposition=GoalDisposition.CONTINUE_SAFE_PHASES,
+            own_pr=own_pr,
+            action_pr=action_pr,
+            canonical_github_state=canonical_github_state,
+            reason_code=GoalReasonCode.SAFE_PHASES_REMAIN.value,
+            allowed_next_action=action,
+            user_intervention_required=False,
+            evidence=(
+                {
+                    "kind": "phase-dependency-plan",
+                    "current_phase": context.current_phase.value,
+                    "future_capability_available": context.capability_available,
+                    "repo_owned_action_available": True,
+                },
+            ),
+            remediation_exhausted=False,
+            current_phase=context.current_phase,
+            blocked_phase=None,
+            safe_phases_remaining=context.safe_phases_remaining,
+            required_capability=context.required_capability,
+            capability_evidence=context.capability_evidence,
+            next_executable_action=action,
+        )
+
+    if context.current_phase in {GoalPhase.GITHUB_RELEASE, GoalPhase.COMPLETE} and not (
+        context.required_capability and not context.capability_available
+    ):
+        return None
+
+    if not context.required_capability or context.capability_available:
+        action = context.next_executable_action or f"execute {context.current_phase.value}"
+        return GoalDecision(
+            disposition=GoalDisposition.OWN_ACTION,
+            own_pr=own_pr,
+            action_pr=action_pr,
+            canonical_github_state=canonical_github_state,
+            reason_code=GoalReasonCode.PHASE_ACTION_READY.value,
+            allowed_next_action=action,
+            user_intervention_required=False,
+            evidence=(
+                {
+                    "kind": "phase-capability",
+                    "current_phase": context.current_phase.value,
+                    "required_capability": context.required_capability,
+                    "capability_available": context.capability_available,
+                    "repo_owned_action_available": True,
+                },
+            ),
+            remediation_exhausted=False,
+            current_phase=context.current_phase,
+            blocked_phase=None,
+            safe_phases_remaining=(),
+            required_capability=context.required_capability,
+            capability_evidence=context.capability_evidence,
+            next_executable_action=action,
+        )
+
+    if context.repo_owned_remediation_available or not (
+        phase_capability_evidence_sufficient(context.capability_evidence)
+        and context.remediation_exhausted
+    ):
+        reason = (
+            GoalReasonCode.PHASE_CAPABILITY_REMEDIATION_AVAILABLE
+            if context.repo_owned_remediation_available
+            else GoalReasonCode.PHASE_CAPABILITY_PREFLIGHT_REQUIRED
+        )
+        action = context.next_executable_action or (
+            f"run repo-owned {context.current_phase.value} capability preflight/remediation"
+        )
+        return GoalDecision(
+            disposition=GoalDisposition.OWN_ACTION,
+            own_pr=own_pr,
+            action_pr=action_pr,
+            canonical_github_state=canonical_github_state,
+            reason_code=reason.value,
+            allowed_next_action=action,
+            user_intervention_required=False,
+            evidence=(
+                {
+                    "kind": "phase-capability",
+                    "current_phase": context.current_phase.value,
+                    "required_capability": context.required_capability,
+                    "capability_available": False,
+                    "repo_owned_action_available": True,
+                },
+                *context.capability_evidence,
+            ),
+            remediation_exhausted=False,
+            current_phase=context.current_phase,
+            blocked_phase=None,
+            safe_phases_remaining=(),
+            required_capability=context.required_capability,
+            capability_evidence=context.capability_evidence,
+            next_executable_action=action,
+        )
+
+    if not context.user_intervention_required or not context.minimal_user_action:
+        action = context.next_executable_action or (
+            f"record the exact {context.required_capability} capability boundary and owner"
+        )
+        return GoalDecision(
+            disposition=GoalDisposition.OWN_ACTION,
+            own_pr=own_pr,
+            action_pr=action_pr,
+            canonical_github_state=canonical_github_state,
+            reason_code=GoalReasonCode.PHASE_CAPABILITY_PREFLIGHT_REQUIRED.value,
+            allowed_next_action=action,
+            user_intervention_required=False,
+            evidence=context.capability_evidence,
+            remediation_exhausted=False,
+            current_phase=context.current_phase,
+            blocked_phase=None,
+            safe_phases_remaining=(),
+            required_capability=context.required_capability,
+            capability_evidence=context.capability_evidence,
+            next_executable_action=action,
+        )
+
+    return GoalDecision(
+        disposition=GoalDisposition.AWAIT_PHASE_CAPABILITY,
+        own_pr=own_pr,
+        action_pr=action_pr,
+        canonical_github_state=canonical_github_state,
+        reason_code=GoalReasonCode.PHASE_CAPABILITY_AWAITED.value,
+        allowed_next_action=context.minimal_user_action,
+        user_intervention_required=True,
+        evidence=context.capability_evidence,
+        remediation_exhausted=True,
+        current_phase=context.current_phase,
+        blocked_phase=context.current_phase,
+        safe_phases_remaining=(),
+        required_capability=context.required_capability,
+        capability_evidence=context.capability_evidence,
+        next_executable_action=context.minimal_user_action,
+    )
 
 
 EXPLICIT_TASK_PROMPTS = {

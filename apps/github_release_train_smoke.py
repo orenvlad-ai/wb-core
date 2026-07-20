@@ -64,8 +64,10 @@ from apps.github_release_train import (  # noqa: E402
     upsert_status_comment,
 )
 from apps.github_release_train_wait import (  # noqa: E402
+    EXIT_AWAIT_PHASE_CAPABILITY,
     EXIT_AWAITING_UI,
     EXIT_BLOCKED,
+    EXIT_CONTINUE_SAFE_PHASES,
     EXIT_CONTINUE_WAITING,
     EXIT_OWN_ACTION,
     EXIT_RESUMED,
@@ -85,11 +87,15 @@ from apps.github_release_train_spec import (  # noqa: E402
     CRITICAL_TRANSITIONS,
     EXPLICIT_TASK_PROMPTS,
     GoalDisposition,
+    GoalCapability,
+    GoalPhase,
+    GoalPhaseContext,
     MONITORED_RELEASE_LABELS,
     PRIMARY_STATE_LABELS,
     TERMINAL_LABELS,
     TERMINAL_FORBIDDEN_INHERITANCE,
     TRANSITION_MATRIX,
+    PRODUCTION_MUTATION_RUNNER_REQUIREMENTS,
     TaskClass,
     TaskContinuity,
     TaskIntent,
@@ -98,6 +104,11 @@ from apps.github_release_train_spec import (  # noqa: E402
     classify_continuity,
     classify_task,
     explicit_task_class,
+    mcp_capability_sufficient,
+    order_goal_phases,
+    phase_goal_decision,
+    production_evidence_route,
+    production_mutation_runner_contract,
     select_ui_runtime,
 )
 
@@ -1044,6 +1055,8 @@ def _assert_goal_shepherd_regressions() -> None:
     assert {item.value for item in GoalDisposition} == {
         "TERMINAL_SUCCESS",
         "CONTINUE_WAITING",
+        "CONTINUE_SAFE_PHASES",
+        "AWAIT_PHASE_CAPABILITY",
         "OWN_ACTION",
         "TAKEOVER_PREDECESSOR",
         "RECOVER_OWN_CHAIN",
@@ -1073,6 +1086,12 @@ def _assert_goal_shepherd_regressions() -> None:
         "user_intervention_required",
         "evidence",
         "remediation_exhausted",
+        "current_phase",
+        "blocked_phase",
+        "safe_phases_remaining",
+        "required_capability",
+        "capability_evidence",
+        "next_executable_action",
     }
     identity = next(item for item in takeover.evidence if item.get("kind") == "loop-identity")
     assert identity["exact_head_verified"] is True
@@ -1457,12 +1476,20 @@ def _assert_goal_shepherd_regressions() -> None:
         for required in (
             "TERMINAL_SUCCESS",
             "CONTINUE_WAITING",
+            "CONTINUE_SAFE_PHASES",
+            "AWAIT_PHASE_CAPABILITY",
             "OWN_ACTION",
             "TAKEOVER_PREDECESSOR",
             "RECOVER_OWN_CHAIN",
             "EXTERNAL_BLOCKER",
             "TERMINAL_FAILURE",
             "remediation_exhausted",
+            "current_phase",
+            "blocked_phase",
+            "safe_phases_remaining",
+            "required_capability",
+            "capability_evidence",
+            "next_executable_action",
             "--shepherd",
             "--playwright-preflight",
         ):
@@ -1477,11 +1504,15 @@ def _assert_goal_shepherd_regressions() -> None:
         "--shepherd",
         "--once",
         "--blocker-evidence",
+        "--phase-state",
         "--playwright-preflight",
         "2 proven EXTERNAL_BLOCKER",
         "6 --once normal waiting",
         "7 proven TERMINAL_FAILURE",
-        "Elapsed time is never terminal",
+        "CONTINUE_SAFE_PHASES",
+        "AWAIT_PHASE_CAPABILITY",
+        "Elapsed time is",
+        "never terminal",
     ):
         assert required in help_text
     completed.append("13_cli_protocol_never_requires_embedded_browser")
@@ -1493,6 +1524,329 @@ def _assert_goal_shepherd_regressions() -> None:
 
     assert len(completed) == 14, completed
     print(f"goal_shepherd_regressions: {len(completed)}/14 ok")
+
+
+def _assert_phase_local_goal_regressions() -> None:
+    completed: list[str] = []
+    canonical = {
+        "own": {"pr": 810, "release_state": "release:none", "head_sha": SHA_A},
+        "queue": {"status": "idle", "gate_pr": 0},
+    }
+
+    def classify(context: GoalPhaseContext):
+        decision = phase_goal_decision(
+            context,
+            own_pr=810,
+            action_pr=810,
+            canonical_github_state=canonical,
+        )
+        assert decision is not None
+        return decision
+
+    repository_work = (
+        GoalPhase.REPOSITORY_PREFLIGHT,
+        GoalPhase.REPOSITORY_IMPLEMENTATION,
+        GoalPhase.REPOSITORY_VALIDATION,
+        GoalPhase.REPOSITORY_RUNNER_PREPARATION,
+        GoalPhase.PULL_REQUEST,
+    )
+    missing_credentials = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_PREFLIGHT,
+            safe_phases_remaining=repository_work,
+            required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+            capability_available=False,
+            next_executable_action="inspect repository and implement the fixture-backed runner",
+        )
+    )
+    assert missing_credentials.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert missing_credentials.blocked_phase is None
+    assert GoalPhase.PULL_REQUEST in missing_credentials.safe_phases_remaining
+    completed.append("01_future_backfill_credentials_do_not_block_repository")
+
+    missing_mcp = classify(
+        GoalPhaseContext.from_mapping(
+            {
+                "current_phase": GoalPhase.REPOSITORY_IMPLEMENTATION.value,
+                "safe_phases_remaining": [GoalPhase.REPOSITORY_IMPLEMENTATION.value],
+                "required_capability": GoalCapability.WEBCORE_DATA_MCP_READ.value,
+                "capability_available": False,
+            }
+        )
+    )
+    assert missing_mcp.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    completed.append("02_missing_mcp_is_irrelevant_to_repository_phase")
+
+    mcp_allowlist = {GoalCapability.PRODUCTION_READ.value}
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_MANIFEST,
+        mcp_allowlist,
+    )
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_DIGEST,
+        mcp_allowlist,
+    )
+    assert production_evidence_route(
+        GoalCapability.PRODUCTION_MANIFEST,
+        mcp_allowlist=mcp_allowlist,
+    ) == "repo-owned-runner"
+    assert not mcp_capability_sufficient(
+        GoalCapability.PRODUCTION_MUTATION,
+        {GoalCapability.PRODUCTION_MUTATION.value},
+    )
+    completed.append("03_mcp_allowlist_is_checked_per_capability")
+
+    no_browser_session = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_IMPLEMENTATION,
+            safe_phases_remaining=(
+                GoalPhase.REPOSITORY_IMPLEMENTATION,
+                GoalPhase.REPOSITORY_VALIDATION,
+                GoalPhase.PULL_REQUEST,
+            ),
+            required_capability=GoalCapability.PRODUCTION_UI_AUTH.value,
+            capability_available=False,
+        )
+    )
+    assert no_browser_session.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert GoalPhase.PULL_REQUEST in no_browser_session.safe_phases_remaining
+    completed.append("04_future_browser_auth_does_not_block_development")
+
+    apply_count = 0
+    missing_backup = GoalPhaseContext(
+        current_phase=GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+        safe_phases_remaining=(),
+        required_capability="production-backup-and-pre-change-digest",
+        capability_available=False,
+        capability_evidence=(
+            {
+                "kind": "production-mutation-preflight",
+                "backup_available": False,
+                "pre_change_digest_available": False,
+                "attempts": ["canonical runner dry-run", "backup evidence lookup"],
+                "repo_owned_action_available": False,
+            },
+        ),
+        remediation_exhausted=True,
+        user_intervention_required=True,
+        minimal_user_action="restore read access to the canonical backup evidence",
+    )
+    pre_apply_wait = classify(missing_backup)
+    assert pre_apply_wait.disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY
+    assert pre_apply_wait.blocked_phase == GoalPhase.PRODUCTION_MUTATION_PREFLIGHT
+    incomplete_runner = {
+        requirement: True
+        for requirement in PRODUCTION_MUTATION_RUNNER_REQUIREMENTS
+        if requirement not in {"pre_change_digest", "backup_evidence_contract"}
+    }
+    incomplete_contract = production_mutation_runner_contract(incomplete_runner)
+    assert incomplete_contract["apply_allowed"] is False
+    assert incomplete_contract["missing_requirements"] == [
+        "backup_evidence_contract",
+        "pre_change_digest",
+    ]
+    assert apply_count == 0
+    completed.append("05_missing_backup_fails_closed_only_before_apply")
+
+    restored = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+            required_capability="production-backup-and-pre-change-digest",
+            capability_available=True,
+            capability_evidence=(
+                {
+                    "kind": "production-mutation-preflight",
+                    "backup_available": True,
+                    "pre_change_digest_available": True,
+                    "repo_owned_action_available": True,
+                },
+            ),
+            next_executable_action="run the canonical runner once with explicit --apply",
+        )
+    )
+    assert restored.disposition == GoalDisposition.OWN_ACTION
+    manifest = {requirement: True for requirement in PRODUCTION_MUTATION_RUNNER_REQUIREMENTS}
+    manifest["operation_id"] = "synthetic-fixture-operation"
+    runner_contract = production_mutation_runner_contract(manifest)
+    assert runner_contract == {
+        "valid": True,
+        "missing_requirements": [],
+        "apply_allowed": True,
+    }
+    applied_operations: set[str] = set()
+    for _ in range(2):
+        if manifest["operation_id"] not in applied_operations:
+            apply_count += 1
+            applied_operations.add(str(manifest["operation_id"]))
+    reconciliation = {
+        "operation_id": manifest["operation_id"],
+        "affected_records": 2,
+        "expected_affected_records": 2,
+        "non_target_invariants_preserved": True,
+    }
+    assert apply_count == 1
+    assert reconciliation["affected_records"] == reconciliation["expected_affected_records"]
+    assert reconciliation["non_target_invariants_preserved"] is True
+    assert set(PRODUCTION_MUTATION_RUNNER_REQUIREMENTS) <= set(manifest)
+    completed.append("06_restored_capability_applies_once_and_reconciles")
+
+    prompt_order = order_goal_phases(
+        (
+            GoalPhase.PRODUCTION_MUTATION_PREFLIGHT,
+            GoalPhase.PRODUCTION_UI_PREFLIGHT,
+            GoalPhase.REPOSITORY_PREFLIGHT,
+            GoalPhase.PULL_REQUEST,
+            GoalPhase.REPOSITORY_IMPLEMENTATION,
+        )
+    )
+    assert prompt_order[:3] == (
+        GoalPhase.REPOSITORY_PREFLIGHT,
+        GoalPhase.REPOSITORY_IMPLEMENTATION,
+        GoalPhase.PULL_REQUEST,
+    )
+    assert prompt_order.index(GoalPhase.PRODUCTION_MUTATION_PREFLIGHT) > prompt_order.index(
+        GoalPhase.PULL_REQUEST
+    )
+    completed.append("07_prompt_order_is_rebuilt_from_dependencies")
+
+    future_database = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.REPOSITORY_VALIDATION,
+            safe_phases_remaining=(
+                GoalPhase.REPOSITORY_VALIDATION,
+                GoalPhase.REPOSITORY_RUNNER_PREPARATION,
+            ),
+            required_capability=GoalCapability.PRODUCTION_DATABASE.value,
+            capability_available=False,
+            capability_evidence=(
+                {
+                    "kind": "future-capability",
+                    "repo_owned_action_available": False,
+                },
+            ),
+            remediation_exhausted=True,
+            user_intervention_required=True,
+            minimal_user_action="provide future production database authorization",
+        )
+    )
+    assert future_database.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+    assert not future_database.user_intervention_required
+    completed.append("08_future_missing_capability_keeps_safe_work_running")
+
+    phase_api = FakeApi()
+    phase_api.pulls[810] = _pull(
+        810,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-20T06:00:00Z",
+        sha=SHA_A,
+    )
+    immediate_auth = GoalPhaseContext(
+        current_phase=GoalPhase.PRODUCTION_READ_PREFLIGHT,
+        required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+        capability_available=False,
+        capability_evidence=(
+            {
+                "kind": "production-read-preflight",
+                "authentication_result": "permission-denied",
+                "attempts": ["canonical read-only runner preflight"],
+                "repo_owned_action_available": False,
+            },
+        ),
+        remediation_exhausted=True,
+        user_intervention_required=True,
+        minimal_user_action="grant read-only access for the named production evidence source",
+    )
+    awaited = goal_disposition(phase_api, 810, phase_context=immediate_auth)
+    assert awaited.disposition == GoalDisposition.AWAIT_PHASE_CAPABILITY
+    assert awaited.user_intervention_required and awaited.remediation_exhausted
+    assert awaited.safe_phases_remaining == ()
+    assert shepherd_release(
+        phase_api,
+        810,
+        status_seconds=0,
+        poll_seconds=0,
+        once=True,
+        phase_context=immediate_auth,
+        emit=lambda _: None,
+    ) == EXIT_AWAIT_PHASE_CAPABILITY
+    completed.append("09_immediate_external_auth_awaits_exact_capability")
+
+    for keyword, capability in (
+        ("MCP", GoalCapability.WEBCORE_DATA_MCP_READ),
+        ("browser", GoalCapability.LOCAL_PLAYWRIGHT),
+        ("credentials", GoalCapability.PRODUCTION_CREDENTIALS),
+        ("production database", GoalCapability.PRODUCTION_DATABASE),
+    ):
+        keyword_decision = classify(
+            GoalPhaseContext(
+                current_phase=GoalPhase.REPOSITORY_PREFLIGHT,
+                safe_phases_remaining=(GoalPhase.REPOSITORY_PREFLIGHT,),
+                required_capability=capability.value,
+                capability_available=False,
+                capability_evidence=(
+                    {
+                        "kind": "keyword-only",
+                        "keyword": keyword,
+                        "repo_owned_action_available": False,
+                    },
+                ),
+            )
+        )
+        assert keyword_decision.disposition == GoalDisposition.CONTINUE_SAFE_PHASES
+        assert keyword_decision.disposition != GoalDisposition.EXTERNAL_BLOCKER
+    assumption_only = classify(
+        GoalPhaseContext(
+            current_phase=GoalPhase.PRODUCTION_READ_PREFLIGHT,
+            required_capability=GoalCapability.PRODUCTION_CREDENTIALS.value,
+            capability_available=False,
+            capability_evidence=(
+                {
+                    "kind": "keyword-only",
+                    "keyword": "credentials",
+                    "repo_owned_action_available": False,
+                },
+            ),
+            remediation_exhausted=True,
+            user_intervention_required=True,
+            minimal_user_action="provide credentials",
+        )
+    )
+    assert assumption_only.disposition == GoalDisposition.OWN_ACTION
+    assert assumption_only.reason_code == "phase-capability-preflight-required"
+    phase_protocol_sources = [
+        (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+        (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
+            encoding="utf-8"
+        ),
+    ]
+    for source in phase_protocol_sources:
+        for required in (
+            "REPOSITORY_PREFLIGHT",
+            "PRODUCTION_READ_PREFLIGHT",
+            "PRODUCTION_MUTATION_PREFLIGHT",
+            "PRODUCTION_UI_PREFLIGHT",
+            "CONTINUE_SAFE_PHASES",
+            "AWAIT_PHASE_CAPABILITY",
+            "current_phase",
+            "blocked_phase",
+            "safe_phases_remaining",
+            "required_capability",
+            "capability_evidence",
+            "next_executable_action",
+            "allowlist",
+            "repo-owned runner",
+            "dry-run",
+            "fixtures/mocks",
+        ):
+            assert required in source
+    assert EXIT_CONTINUE_SAFE_PHASES == 8
+    completed.append("10_capability_words_never_create_global_blocker")
+
+    assert len(completed) == 10, completed
+    print(f"phase_local_goal_regressions: {len(completed)}/10 ok")
 
 
 def _assert_workflow_contract() -> None:
@@ -2502,6 +2856,7 @@ def main() -> int:
         return 0
     if args.goal_only:
         _assert_goal_shepherd_regressions()
+        _assert_phase_local_goal_regressions()
         return 0
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
@@ -2514,6 +2869,7 @@ def main() -> int:
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
     _assert_goal_shepherd_regressions()
+    _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
     _assert_codex_task_class_and_monitor_contract()
     _assert_machine_classification_and_state_spec()
