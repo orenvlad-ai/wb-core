@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+import apps.finance_partner_production_ui_flow as finance_ui_flow  # noqa: E402
 import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
 import apps.warehouse_stocks_production_ui_flow as warehouse_ui_flow  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
@@ -314,6 +315,31 @@ def main() -> None:
     )
     if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
+        ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]
+    )
+    if finance_ui_flow_args.handler is not hosted_runtime.run_finance_ui_flow_command:
+        raise AssertionError("hosted runner must expose canonical finance-ui-flow command")
+    if finance_ui_flow.REPORTS_PATH != "/sheet-vitrina-v1/vitrina?tab=reports":
+        raise AssertionError("Finance UI Flow must enter through canonical unified navigation")
+    required_partner_fields = ("partner_share_pct", "invested_capital_rub")
+    if not finance_ui_flow._has_complete_partner_settings(
+        {
+            "settings": {
+                "parameters": {
+                    "partner_share_pct": "40",
+                    "invested_capital_rub": "1",
+                }
+            }
+        },
+        required_partner_fields,
+    ):
+        raise AssertionError("Finance UI Flow must recognize complete existing Partner settings")
+    if finance_ui_flow._has_complete_partner_settings(
+        {"settings": {"parameters": {"partner_share_pct": "40"}}},
+        required_partner_fields,
+    ):
+        raise AssertionError("Finance UI Flow must not preview incomplete Partner settings")
     period_vitrina_url = warehouse_ui_flow._period_vitrina_url(
         "https://api.selleros.pro/",
         date_to="2026-07-19",
