@@ -37,6 +37,7 @@ class AutoanswersCoordinator:
             "reconciliation": None,
             "processing": None,
             "publication": None,
+            "stale_reservations_released": 0,
             "errors": [],
         }
         command = self.repository.claim_sync_command(worker_id=self.worker_id)
@@ -62,6 +63,10 @@ class AutoanswersCoordinator:
         self.repository.save_sync_cursor(
             "wb_autoanswers_coordinator", cursor={"tick": tick}, successful=not report["errors"]
         )
+        # Reservation cleanup is local and safe in every mode, including OFF.
+        # It never claims work and preserves the reservation row as released
+        # evidence, so a crashed worker cannot block future budgets forever.
+        report["stale_reservations_released"] = self.repository.reconcile_stale_reservations()
         try:
             report["reconciliation"] = self.repository.reconcile_policy_sweep_once(
                 worker_id=self.worker_id,
@@ -83,4 +88,5 @@ class AutoanswersCoordinator:
             report["errors"].append({"stage": "publication", "code": exc.code})
         except Exception as exc:
             report["errors"].append({"stage": "publication", "code": getattr(exc, "code", "publication_error")})
+        self.repository.record_scheduler_tick(errors=report["errors"])
         return report

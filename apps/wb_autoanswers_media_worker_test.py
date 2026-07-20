@@ -410,12 +410,16 @@ process.stdout.write(JSON.stringify({images: content.filter((item) => item.type 
         self.assertEqual(detail["publications"], [])
         self.assertEqual(detail["route"], "public_only")
 
-    def test_empty_five_star_stops_before_role_calls(self) -> None:
+    def test_empty_five_star_uses_zero_cost_template_without_role_calls(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="draft_only", actor_id="admin")
         self.enqueue("empty", rating=5, text="")
         result = self.worker().run_once(execution_mode="fixture", fixture_scenario="public_only")
-        self.assertEqual(result["state"], "skipped")
+        self.assertEqual(result["state"], "generated")
         self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(result["processing_kind"], "rating_only_template")
+        detail = self.repo.get_feedback("empty")
+        self.assertEqual(detail["route"], "rating_only_template")
+        self.assertEqual(detail["ai_jobs"][0]["actual_cost_usd"], "0")
 
     def test_media_uncertainty_blocks_paid_pipeline_and_requires_regeneration(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="draft_only", actor_id="admin")

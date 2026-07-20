@@ -64,6 +64,34 @@ test("classifier appends every downloaded photo after the dynamic text and cache
   assert.ok(content.findIndex((item) => item.prompt_cache_breakpoint) < content.findIndex((item) => item.type === "input_image"));
 });
 
+test("embedded media bytes appear only as classifier images after the cache breakpoint", async () => {
+  const productContext = await readJson("contracts/product_context.json");
+  const photo = "data:image/jpeg;base64," + "A".repeat(24000);
+  const frame = "data:image/jpeg;base64," + "B".repeat(18000);
+  const reviewInput = normalizeTelegramInput({
+    ingestion_id: "payload-media-binary",
+    review_id: "payload-media-binary",
+    review_version: "1",
+    rating: 1,
+    text: "Дефект виден на фото и кадре",
+    seller_article: "UNKNOWN",
+    media: {
+      photos: [{full_size_url: null, fetch_status: "downloaded", local_ref: photo}],
+      video: {present: true, processing_status: "frames_extracted", frame_refs: [frame]}
+    }
+  }, productContext);
+  const request = await buildClassifierRequest(reviewInput);
+  const payload = await buildResponsesPayload("classifier", request, "payload-media-binary");
+  const content = payload.input[0].content;
+  const textContent = content.filter((item) => item.type === "input_text").map((item) => item.text).join("\n");
+  const images = content.filter((item) => item.type === "input_image");
+  assert.equal(images.length, 2);
+  assert.equal(images[0].image_url, photo);
+  assert.equal(images[1].image_url, frame);
+  assert.doesNotMatch(textContent, /A{100}|B{100}|data:image/u);
+  assert.ok(content.findIndex((item) => item.prompt_cache_breakpoint) < content.findIndex((item) => item.type === "input_image"));
+});
+
 test("runtime scripts contain no network client and package contains no credential value", async () => {
   const scriptFiles = (await readdir(path.join(mvpRoot, "scripts"))).filter((name) => name.endsWith(".mjs"));
   const scriptText = (await Promise.all(scriptFiles.map((name) => readFile(path.join(mvpRoot, "scripts", name), "utf8")))).join("\n");

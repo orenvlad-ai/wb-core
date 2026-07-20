@@ -7,6 +7,7 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 
 import {runJob} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/orchestrator.mjs";
+import {calculateJobCost, usageRecord} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/cost_accounting.mjs";
 import {MemoryStore} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/memory_store.mjs";
 import {runDraftGuard} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/draft_guard.mjs";
 import {assertContract} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/schema_validation.mjs";
@@ -105,11 +106,11 @@ function outputText(response) {
   fail("OPENAI_OUTPUT_MISSING", "Responses API output text missing");
 }
 
-function liveRoleRunner() {
+function liveRoleRunner(observedTrace) {
   const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
   if (!apiKey) fail("OPENAI_API_KEY_MISSING", "OPENAI_API_KEY is not configured");
   const baseUrl = String(process.env.OPENAI_RESPONSES_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/u, "");
-  return async ({payload}) => {
+  return async ({role, payload}) => {
     const started = Date.now();
     const response = await fetch(`${baseUrl}/responses`, {
       method: "POST",
@@ -118,7 +119,19 @@ function liveRoleRunner() {
       signal: AbortSignal.timeout(120000)
     });
     const body = await response.json().catch(() => null);
-    if (!response.ok || !body) fail(`OPENAI_HTTP_${response.status}`, `Responses API HTTP ${response.status}`);
+    if (body?.usage) {
+      observedTrace.push(usageRecord({
+        role,
+        responseId: body.id || null,
+        usage: body.usage,
+        latencyMs: Date.now() - started
+      }));
+    }
+    if (!response.ok || !body) {
+      const providerCode = String(body?.error?.code || "");
+      if (providerCode === "insufficient_quota") fail("OPENAI_INSUFFICIENT_QUOTA", "Responses API quota is exhausted");
+      fail(`OPENAI_HTTP_${response.status}`, `Responses API HTTP ${response.status}`);
+    }
     let parsed;
     try {
       parsed = JSON.parse(outputText(body));
@@ -148,10 +161,23 @@ async function execute(envelope) {
   if (envelope.operation === "verify") return {verified};
   if (envelope.operation === "guard_final") return {verified, guard: await guardFinal(envelope.guard_input)};
   const store = new MemoryStore();
+  const observedTrace = [];
   const roleRunner = envelope.execution_mode === "fixture"
     ? await fixtureRoleRunner(envelope.fixture_scenario)
-    : liveRoleRunner();
-  const result = await runJob(envelope.raw_input, {store, roleRunner});
+    : liveRoleRunner(observedTrace);
+  let result;
+  try {
+    result = await runJob(envelope.raw_input, {store, roleRunner});
+  } catch (error) {
+    if (observedTrace.length) {
+      const pricingProfile = JSON.parse(await readFile(path.join(mvpRoot, "pricing_profiles/terra.json"), "utf8"));
+      const partial = calculateJobCost(observedTrace, pricingProfile);
+      error.partialUsage = partial.usage;
+      error.partialCostUsd = partial.estimated_cost_usd;
+      error.partialRoleCalls = observedTrace.length;
+    }
+    throw error;
+  }
   return {
     processing_key: envelope.processing_key,
     pipeline: result,
@@ -179,7 +205,13 @@ async function main() {
       bundle_version: PROMPT_BUNDLE_VERSION,
       evaluation_signature: EVALUATION_SIGNATURE,
       ok: false,
-      error: {code: error.code || "NODE_BOUNDARY_ERROR", message: String(error.message || error)}
+      error: {
+        code: error.code || "NODE_BOUNDARY_ERROR",
+        message: String(error.message || error),
+        partial_usage: error.partialUsage || null,
+        partial_cost_usd: Number(error.partialCostUsd || 0),
+        partial_role_calls: Number(error.partialRoleCalls || 0)
+      }
     }));
     process.exitCode = 1;
   }

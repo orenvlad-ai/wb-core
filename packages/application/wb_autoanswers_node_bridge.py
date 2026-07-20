@@ -22,10 +22,22 @@ MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class NodeBoundaryError(RuntimeError):
-    def __init__(self, message: str, *, code: str, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        retryable: bool = False,
+        partial_cost_usd: float = 0.0,
+        partial_usage: Mapping[str, Any] | None = None,
+        partial_role_calls: int = 0,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.partial_cost_usd = max(0.0, float(partial_cost_usd or 0))
+        self.partial_usage = dict(partial_usage or {})
+        self.partial_role_calls = max(0, int(partial_role_calls or 0))
 
 
 def _data_url(path_value: str | None, mime_type: str | None = None) -> str | None:
@@ -227,7 +239,12 @@ class NodeAutoanswersBridge:
         try:
             response = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise NodeBoundaryError("frozen Node boundary returned invalid JSON", code="node_invalid_json") from exc
+            code = "node_invalid_json" if completed.returncode == 0 else f"node_process_exit_{completed.returncode}"
+            raise NodeBoundaryError(
+                "frozen Node boundary returned no valid JSON",
+                code=code,
+                retryable=completed.returncode in {-9, -15},
+            ) from exc
         if (
             response.get("boundary_version") != NODE_BOUNDARY_VERSION
             or response.get("bundle_version") != PROMPT_BUNDLE_VERSION
@@ -238,5 +255,13 @@ class NodeAutoanswersBridge:
             error = response.get("error") if isinstance(response.get("error"), Mapping) else {}
             code = str(error.get("code") or "node_boundary_error")
             retryable = code.startswith("OPENAI_HTTP_429") or code.startswith("OPENAI_HTTP_5") or code == "node_timeout"
-            raise NodeBoundaryError(str(error.get("message") or "Node boundary failed"), code=code, retryable=retryable)
+            partial_usage = error.get("partial_usage") if isinstance(error.get("partial_usage"), Mapping) else {}
+            raise NodeBoundaryError(
+                str(error.get("message") or "Node boundary failed"),
+                code=code,
+                retryable=retryable,
+                partial_cost_usd=float(error.get("partial_cost_usd") or 0),
+                partial_usage=partial_usage,
+                partial_role_calls=int(error.get("partial_role_calls") or 0),
+            )
         return dict(response["data"])

@@ -106,7 +106,7 @@ class HttpUiTest(unittest.TestCase):
         self.assertEqual(off["selector_state"], "off")
         self.assertFalse(off["settings"]["master_enabled"])
         preview = self.app.handle_sheet_feedbacks_autoanswers_transition_preview_request(
-            {"selector_state": "draft_only"}, actor_id="admin"
+            {"selector_state": "draft_only", "run_max_usd": "0.50"}, actor_id="admin"
         )
         draft = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
             {"selector_state": "draft_only", "preview_id": preview["preview_id"]}, actor_id="admin"
@@ -127,7 +127,7 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("data-feedbacks-subtab=\"server-reviews\"", html)
         self.assertIn("data-autoanswers-master-status", html)
         self.assertIn("data-autoanswers-backlog", html)
-        self.assertIn("Исторический backlog", html)
+        self.assertIn("Legacy backlog отключён", html)
         self.assertIn("Автоответы выключены", html)
         self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", html)
         self.assertIn("feedbacks_autoanswers_settings_path", html)
@@ -144,6 +144,18 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("data-autoanswers-copy", html)
         self.assertIn("Скопировано", html)
         self.assertIn("overflow: auto", html)
+        self.assertIn("Обработка отзывов", html)
+        self.assertIn("data-autoanswers-queue-metrics", html)
+        self.assertIn("data-autoanswers-budget-available", html)
+        self.assertIn("data-autoanswers-budget-unverified", html)
+        self.assertIn("Ответа системы нет", html)
+        self.assertIn("run_max_paid_reviews", html)
+        self.assertIn("data-autoanswers-progress-bars", html)
+        self.assertIn("data-autoanswers-stop-reason", html)
+        self.assertIn("Без ответа Wildberries", html)
+        self.assertIn('data-autoanswers-filter="system_answer"', html)
+        self.assertIn("run_max_usd", html)
+        self.assertIn("background: var(--control-bg)", html)
         self.assertIn("https://platform.openai.com/settings/organization/billing/overview", html)
         self.assertIn('rel="noopener noreferrer"', html)
         self.assertIn("row.pros ?", html)
