@@ -45,7 +45,6 @@ from apps.github_release_train import (  # noqa: E402
     loop_ack_label,
     loop_root_from_labels,
     loop_registration_kind,
-    mark_classification_blocked,
     queue_gate_state,
     release_state_from_labels,
     scope_from_labels,
@@ -166,8 +165,6 @@ def wait_for_release(
             try:
                 loop_registration_kind(api, pull)
             except ReleaseClassificationBlocked as exc:
-                if state != AWAITING_UI_LABEL:
-                    mark_classification_blocked(api, pr_number, exc)
                 emit(
                     f"PR #{pr_number} fail-closed classification `{exc.code}`: {exc}"
                 )
