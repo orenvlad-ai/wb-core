@@ -52,6 +52,8 @@ def main() -> None:
     )
     if partial_projection["status"] != "partial" or partial_projection["diagnostics"]["allocated_components"] != 1:
         raise AssertionError(f"document partial diagnostics mismatch: {partial_projection}")
+    if partial_projection["diagnostics"]["unallocated_amount_rub"] != "100":
+        raise AssertionError(f"document exact unallocated amount mismatch: {partial_projection}")
 
     uncertified_breakdown = _breakdown(
         controls=[_document_control("customs", eligible=2, allocated=2, conserved=True)],

@@ -3,8 +3,8 @@ title: "Модуль: ff_stock_ledger_block"
 doc_id: "WB-CORE-MODULE-43-FF-STOCK-LEDGER-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract server-owned FF quantity ledger: единый пользовательский остаток в `Остатки -> Склады и себестоимость -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, автосписание WB supplies и расчётный источник `Остатки ФФ`."
-scope: "Operator supply contour for FF quantity operations plus the reused balance source for the unified warehouse screen: runtime SQLite operation headers/lines/previews, original manual Excel storage, protected legacy HTTP routes, operator operation journal, idempotent supplier/WB auto movements, and factory-order/WB regional stock_ff source. FIFO, партии, себестоимость, бухгалтерский склад, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
+purpose: "Зафиксировать canonical contract server-owned FF quantity and reservation ledgers: единый пользовательский физический/зарезервированный/доступный остаток в `Остатки -> Склады и себестоимость -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, guarded WB movements и расчётный источник `Остатки ФФ`."
+scope: "Operator supply contour for FF quantity operations and WB-supply reservations plus the reused balance source for the unified warehouse screen: runtime SQLite operation/reservation headers and lines, previews, original manual Excel storage, protected legacy HTTP routes, operator audit journal, idempotent supplier/WB movements, validated downstream-cost guard and factory-order/WB regional stock_ff source. The canonical cost calculation itself, FIFO, accounting stock, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -25,6 +25,8 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_operations"
   - "sheet_vitrina_v1_ff_stock_operation_lines"
   - "sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint"
+  - "sheet_vitrina_v1_ff_stock_reservation_operations"
+  - "sheet_vitrina_v1_ff_stock_reservation_lines"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -36,13 +38,14 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
+  - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, and ordinary WB auto writeoffs remain guarded by an explicit repair/mechanics checkpoint with baseline-known WB cache/source/supply keys, ledger activation/opening balance and no-negative-balance checks. A separate repo-owned v2 runner is bounded to WB supply `40561872`: it can bypass only the exact pair `wb_supply_before_auto_writeoff_checkpoint` + `wb_supply_before_ledger_activation` after a read-only dry-run, exact fingerprint confirmation, integrity-checked SQLite backup and atomic cache/goods/status/activation/nomenclature/balance/total recheck; reversal is an audited compensating receipt and never deletes history. Ordinary pre-activation supplies remain fail closed. Calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus a separate append-only reservation ledger. An eligible WB supply is debited atomically only when its whole composition is physically available and every SKU has validated downstream cost; otherwise its exact revision is reserved without negative quantity/capital. Supplier receipt automatically rechecks reservations. Manual Excel documents require preview then explicit confirm, and ordinary WB operations retain checkpoint/activation guards. A separate repo-owned v2 runner remains bounded to historical WB supply `40561872`."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -59,13 +62,14 @@ The old `Остатки ФФ` navigation item is a compatibility transition to `
 - manual receipt documents add quantity;
 - manual writeoff documents subtract quantity;
 - supplier shipment acceptance on ФФ adds quantity;
-- eligible WB supplies subtract quantity only after the WB auto-writeoff checkpoint exists, the supply is not part of the baseline-known historical cache, the ledger is activated by a positive non-WB receipt/correction and the movement would not make the SKU balance negative.
+- eligible WB supplies subtract quantity only after the WB auto-writeoff checkpoint exists, the supply is not part of the baseline-known historical cache, the ledger is activated by a positive non-WB receipt/correction, the whole composition is available and validated downstream cost exists for every SKU;
+- an eligible but not yet fulfillable WB supply creates or adjusts a reservation keyed by its exact supply revision and `nmID`; reservation quantity is not a physical movement and carries no WAC/capital.
 
 Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
 
 # 2. Operator UI
 
-The unified `Остатки -> Склады и себестоимость -> Склад FF` screen shows the only user-facing current balance registry for active, non-hidden nomenclature SKU and the warehouse opening document. The `Поставки -> ФФ -> Операции остатков ФФ` subsection keeps:
+The unified `Остатки -> Склады и себестоимость -> Склад FF` screen shows the only user-facing current balance registry for active, non-hidden nomenclature SKU and the warehouse opening document. Its summary and each SKU line distinguish `Физический остаток`, `Зарезервировано`, `Доступно` and `Необеспеченный резерв`; a reservation-only line is `Ожидает поступления`, has physical quantity/capital zero and no fabricated WAC. The `Поставки -> ФФ -> Операции остатков ФФ` subsection keeps:
 - operation journal;
 - current-balance XLSX export;
 - manual `Оприходовать`;
@@ -112,6 +116,8 @@ Runtime SQLite tables:
 - `sheet_vitrina_v1_ff_stock_operations` stores durable operation header: operation id, operation type, source type, idempotency/source key, source object id/label, created time, actor, SKU/quantity totals, warnings/diagnostics and optional source file metadata/blob.
 - `sheet_vitrina_v1_ff_stock_operation_lines` stores signed quantity deltas by `nmId`, plus barcode/SKU/group display fields and raw row/source metadata.
 - `sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint` stores the current WB auto-writeoff boundary: checkpoint id/time, actor/reason, baseline-known `cache_key`, `source_key` and `supply_id` sets, source-date watermark and diagnostics.
+- `sheet_vitrina_v1_ff_stock_reservation_operations` stores append-only `reserve/adjust/release/fulfill` revisions with supply id, exact source revision/state fingerprint and provenance.
+- `sheet_vitrina_v1_ff_stock_reservation_lines` stores signed reserved quantity by `nmID`; the current reservation is the sum of lines and is never included in physical balance or capital.
 
 Balance is read as `SUM(quantity_delta)` grouped by `nmId` over durable lines. There is no separate balance snapshot source of truth.
 
@@ -145,7 +151,15 @@ Skipped statuses:
 Idempotency key:
 - `wb_supply_debit:<cache_key or supply_id>`
 
-If composition changes before the first writeoff, the current cached composition is used. After a writeoff exists, the backend does not auto-recalculate historical movement; correction is a manual document.
+If composition/status changes before the first writeoff, one idempotent reservation adjustment or release brings the current reserved composition to the exact current supply revision. After a physical writeoff exists, the backend does not auto-recalculate historical movement; correction is a manual document.
+
+Future-arrival reservation contract:
+- the whole WB supply composition is the atomic unit; no partial fulfillment is inferred from packed/accepted counters without authoritative partial-shipment evidence;
+- insufficient physical availability creates/updates a reservation and never creates negative FF quantity/capital or an FF→WB movement;
+- missing/pending downstream cost may keep the reservation waiting and does not block unrelated official WB snapshot/publication;
+- sufficient physical availability plus validated positive FF/pre-acceptance cost for every SKU creates the physical debit and reservation `fulfill` in the same transaction, fixing FF moving WAC at that moment;
+- a factual supplier FF receipt immediately reconciles active reservations, with no extra operator action;
+- actual movement without validated downstream cost remains fail closed.
 
 Activation and balance guards:
 - WB supply sync/backfill/detail enrichment first ensures a WB auto-writeoff checkpoint against the current cache. This captures already-known historical supplies as baseline by `cache_key`, `wb_supply_debit:<cache_key or supply_id>` and `supply_id`.
@@ -202,9 +216,10 @@ Targeted smoke:
 - `python3 apps/ff_stock_targeted_reconciliation_smoke.py`
 - `python3 apps/ff_stock_targeted_reconciliation_runner_smoke.py`
 - `python3 apps/ff_stock_ledger_smoke.py`
+- `python3 apps/ff_stock_reservation_smoke.py`
 - `python3 apps/ff_stock_ledger_http_smoke.py`
 
-The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
+The smokes cover manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status idempotency, statuses `1/2` skip, `Допринято` skip, future-arrival reservation, multiple reservations of one SKU, supply adjustment/cancellation, waiting-for-cost isolation, full-composition atomic fulfillment, no negative physical/capital and factory-order/WB regional source compatibility.
 It also covers operation journal pagination metadata/second page retrieval, default status backward compatibility, archive-off visibility versus archive-on retrieval, and verifies that the archive view filter does not change computed balances.
 The targeted reconciliation smokes separately cover the baseline-known status `1/2 -> 3` transition with source timestamp earlier than activation, preservation of ordinary checkpoint and ordinary pre-activation fail-closed paths, missing/invalid activation and other-supply blockers, hard-guarded exact `38 250 - 31 500 = 6 750` totals across 13 SKU, dry-run immutability and stable v2 fingerprint, one linked apply plus ordinary-sync idempotency, statuses `1/2`, `Допринято`, missing goods, inactive nomenclature, changed activation/global total and per-SKU shortage blockers, stale goods/status/nomenclature/activation/balance/total plans, coherent CLI backup with `integrity_check=ok`, post-run reconciliation and an audited history-preserving reversal.
 

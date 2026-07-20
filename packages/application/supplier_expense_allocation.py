@@ -218,6 +218,9 @@ def _projection(
     reasons: list[str],
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    unallocated_amount = None
+    if eligible_amount_rub is not None and allocated_amount_rub is not None:
+        unallocated_amount = max(eligible_amount_rub - allocated_amount_rub, Decimal("0"))
     return {
         "status": status,
         "label": STATUS_LABELS_RU[status],
@@ -227,6 +230,7 @@ def _projection(
             "allocated_components": allocated_components,
             "eligible_amount_rub": _decimal_text(eligible_amount_rub),
             "allocated_amount_rub": _decimal_text(allocated_amount_rub),
+            "unallocated_amount_rub": _decimal_text(unallocated_amount),
             **dict(extra or {}),
         },
         "reasons": reasons,

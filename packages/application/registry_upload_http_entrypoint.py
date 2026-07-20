@@ -3205,10 +3205,13 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
         try:
-            supply_payload = self.wb_supplies_block.sync_functional_sources()
+            supply_payload = self.wb_supplies_block.sync_functional_sources(
+                record_ff_movements=False
+            )
             downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
                 opening_date="2026-07-01"
             )
+            ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
             plan = self.warehouse_functional_block.build_sync_plan()
             result = self.warehouse_functional_block.apply_plan(
                 plan,
@@ -3229,6 +3232,7 @@ class RegistryUploadHttpEntrypoint:
                 "accepted_qty_changed_rows": int(sync.get("accepted_qty_changed_rows") or 0),
             },
             "downstream_cost_layers_materialized": downstream_cost_layers,
+            "ff_state": ff_state,
             "plan_fingerprint": plan["plan_fingerprint"],
             "diff": plan["diff"],
             "active_version": result.get("active_version"),
