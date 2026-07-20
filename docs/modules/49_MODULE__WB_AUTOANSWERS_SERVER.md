@@ -150,7 +150,7 @@ PYTHONPATH=. python3 -m unittest \
 python3 -m compileall -q apps packages
 ```
 
-Production acceptance keeps effective manual, performs one GET/media-only `manual-media-canary`, then read-only authenticated UI Flow. It must prove a real photo, real video preview/frames, compact/narrow UI, zero 5xx/page/console errors, zero claimable background AI jobs and zero new publication attempts. It must not click generation/regeneration/publication or switch into an automated mode.
+Production acceptance keeps effective manual, performs one GET/media-only `manual-media-canary`, then read-only authenticated UI Flow. Detail media starts loading when its card opens; the flow waits for successful image decoding and records only redacted private-asset HTTP/MIME evidence. It must prove a real photo, real video preview/frames, compact/narrow UI, zero 5xx/page/console errors, zero claimable background AI jobs and zero new publication attempts. It must not click generation/regeneration/publication or switch into an automated mode.
 
 Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v3 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 

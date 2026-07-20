@@ -70,6 +70,7 @@ def run_autoanswers_ui_flow(
     server_errors: list[dict[str, Any]] = []
     navigation_chain: list[dict[str, Any]] = []
     fatal_surface_matches: list[str] = []
+    media_responses: list[dict[str, Any]] = []
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
@@ -108,6 +109,18 @@ def run_autoanswers_ui_flow(
             "response",
             lambda response: navigation_chain.append({"status": response.status, "url": response.url})
             if response.request.resource_type == "document"
+            else None,
+        )
+        page.on(
+            "response",
+            lambda response: media_responses.append(
+                {
+                    "status": response.status,
+                    "content_type": str(response.headers.get("content-type") or "").split(";", 1)[0],
+                    "url_sha256": hashlib.sha256(response.url.encode("utf-8")).hexdigest(),
+                }
+            )
+            if "/v1/sheet-vitrina-v1/feedbacks/media?" in response.url
             else None,
         )
 
@@ -437,6 +450,7 @@ def run_autoanswers_ui_flow(
         for kind in ("photo", "video"):
             _assert(kind in ready_by_kind, f"production UI has no prepared real {kind} candidate")
             candidate, detail_row = ready_by_kind[kind]
+            media_response_start = len(media_responses)
             page.evaluate("id => openAutoanswersDetail(id)", str(candidate["id"]))
             page.locator("[data-autoanswers-detail-dialog][open]").wait_for(timeout=60_000)
             image = page.locator(
@@ -445,12 +459,33 @@ def run_autoanswers_ui_flow(
                 else '.autoanswers-media-item[alt="Превью видео покупателя"]'
             )
             image.wait_for(timeout=60_000)
+            asset_url_sha256 = hashlib.sha256(str(image.get_attribute("src") or "").encode("utf-8")).hexdigest()
+            page.wait_for_function(
+                "node => node.complete && node.naturalWidth > 0",
+                arg=image.element_handle(),
+                timeout=60_000,
+            )
             image_state = image.evaluate("node => ({complete: node.complete, width: node.naturalWidth})")
             _assert(image_state["complete"] and image_state["width"] > 0, f"real {kind} did not render")
+            matching_responses = [
+                response
+                for response in media_responses[media_response_start:]
+                if response["url_sha256"] == asset_url_sha256
+            ]
+            _assert(matching_responses, f"real {kind} emitted no private media response")
+            media_response = matching_responses[-1]
+            _assert(media_response["status"] == 200, f"real {kind} media returned HTTP {media_response['status']}")
+            _assert(
+                str(media_response["content_type"]).startswith("image/"),
+                f"real {kind} media returned a non-image MIME",
+            )
             media_evidence[kind] = {
                 "feedback_id_sha256": hashlib.sha256(str(candidate["id"]).encode("utf-8")).hexdigest(),
                 "rendered": True,
                 "metadata_count": len(detail_row.get("media") or []),
+                "asset_status": media_response["status"],
+                "asset_content_type": media_response["content_type"],
+                "asset_url_sha256": media_response["url_sha256"],
             }
             page.locator("[data-autoanswers-detail-dialog]").evaluate("node => node.close()")
 
