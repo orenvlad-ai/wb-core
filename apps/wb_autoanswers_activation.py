@@ -2,7 +2,7 @@
 """Fail-closed lifecycle control for the production manual autoanswers contour.
 
 This command never imports a WB writer and never performs external I/O.  It is
-the only repo-owned path used to migrate schema v2, activate manual mode, or
+the only repo-owned path used to migrate the current additive schema, activate manual mode, or
 return the persisted master switch to OFF.
 """
 
@@ -16,6 +16,7 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -261,6 +262,243 @@ def _integrity_check(path: Path) -> str:
         return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
 
+def _compress_verified_current_schema_backup(source: Path) -> dict[str, Any]:
+    """Replace one complete current-schema raw backup with an exact zstd archive."""
+
+    source = source.resolve()
+    expected_parent = f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    expected_prefix = f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__"
+    if (
+        source.parent.name != expected_parent
+        or source.suffix != ".sqlite3"
+        or not source.name.startswith(expected_prefix)
+    ):
+        raise RuntimeError("current-schema capacity recovery target is outside the owned backup boundary")
+    integrity = _integrity_check(source)
+    if integrity != "ok":
+        raise RuntimeError("current-schema raw backup failed integrity_check before compression")
+
+    source_size = source.stat().st_size
+    source_sha256 = _sha256_file(source)
+    archive = source.with_suffix(source.suffix + ".zst")
+    manifest = archive.with_suffix(archive.suffix + ".manifest.json")
+    temporary_archive = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
+    temporary_manifest = manifest.with_name(f".{manifest.name}.tmp-{os.getpid()}")
+    try:
+        if manifest.exists() and not archive.is_file():
+            raise RuntimeError("current-schema compressed manifest exists without its archive")
+        if not archive.exists():
+            completed = subprocess.run(
+                [
+                    "zstd",
+                    "-T1",
+                    "-6",
+                    "--no-progress",
+                    "--force",
+                    "-o",
+                    str(temporary_archive),
+                    str(source),
+                ],
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=7200,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "current-schema backup compression failed: " + completed.stderr.strip()
+                )
+            os.chmod(temporary_archive, 0o600)
+            subprocess.run(
+                ["zstd", "--test", "--quiet", str(temporary_archive)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=7200,
+                check=True,
+            )
+            if _zstd_decompressed_sha256(temporary_archive) != source_sha256:
+                raise RuntimeError("current-schema compressed backup does not restore exact bytes")
+            os.replace(temporary_archive, archive)
+        else:
+            subprocess.run(
+                ["zstd", "--test", "--quiet", str(archive)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=7200,
+                check=True,
+            )
+            if _zstd_decompressed_sha256(archive) != source_sha256:
+                raise RuntimeError("partial current-schema archive has a different restore hash")
+
+        metadata = {
+            "contract": COMPRESSED_SCHEMA_BACKUP_CONTRACT,
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot_filename": source.name,
+            "snapshot_size": source_size,
+            "snapshot_sha256": source_sha256,
+            "compressed_filename": archive.name,
+            "compressed_size": archive.stat().st_size,
+            "compressed_sha256": _sha256_file(archive),
+            "sqlite_integrity_check": integrity,
+            "restore_command": f"zstd --decompress --stdout {archive.name} > {source.name}",
+            "replaces_legacy_autoanswers_backup": None,
+        }
+        temporary_manifest.write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary_manifest, 0o600)
+        os.replace(temporary_manifest, manifest)
+        verified = _verified_compressed_schema_backup_status(source.parents[2], verify_bytes=True)
+        if (
+            int(verified.get("count") or 0) < 1
+            or verified.get("integrity_check") != "ok"
+            or verified.get("snapshot_sha256") != f"sha256:{source_sha256}"
+        ):
+            raise RuntimeError("current-schema compressed backup readback is missing")
+    finally:
+        temporary_archive.unlink(missing_ok=True)
+        temporary_manifest.unlink(missing_ok=True)
+
+    source.unlink()
+    sidecars_removed = 0
+    for suffix in ("-journal", "-shm", "-wal"):
+        sidecar = source.with_name(source.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+            sidecars_removed += 1
+    return {
+        "status": "compressed_current_schema_backup",
+        **verified,
+        "source_filename": source.name,
+        "source_size": source_size,
+        "raw_source_removed_after_verification": True,
+        "sidecars_removed_after_verification": sidecars_removed,
+    }
+
+
+def _prune_superseded_compressed_backups(
+    runtime_dir: Path,
+    *,
+    current_backup: dict[str, Any],
+    required_free: int,
+) -> dict[str, Any]:
+    """Remove the minimum older owned archives after current v3 restore proof."""
+
+    snapshot_sha256 = str(current_backup.get("snapshot_sha256") or "")
+    current_filename = str(current_backup.get("latest_filename") or "")
+    if (
+        int(current_backup.get("count") or 0) < 1
+        or current_backup.get("integrity_check") != "ok"
+        or current_backup.get("format") != "zstd"
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", snapshot_sha256)
+        or Path(current_filename).name != current_filename
+    ):
+        raise RuntimeError("superseded backup pruning requires a verified current-schema restore")
+
+    backup_root = runtime_dir / "backups"
+    free_before = shutil.disk_usage(backup_root).free
+    if free_before >= required_free:
+        return {
+            "status": "not_required",
+            "free_before": free_before,
+            "free_after": free_before,
+            "removed": [],
+            "audit_manifest": None,
+        }
+
+    candidates: list[tuple[int, Path, Path, dict[str, Any], str]] = []
+    for version in range(1, SCHEMA_VERSION):
+        directory = backup_root / f"wb_autoanswers_schema_v{version}"
+        if not directory.is_dir():
+            continue
+        prefix = f"registry_upload_runtime__pre_autoanswers_v{version}__"
+        for archive in sorted(directory.glob(f"{prefix}*.sqlite3.zst")):
+            manifest = archive.with_suffix(archive.suffix + ".manifest.json")
+            if not manifest.is_file():
+                continue
+            metadata = json.loads(manifest.read_text(encoding="utf-8"))
+            contract = str(metadata.get("contract") or "")
+            archive_sha256 = _sha256_file(archive)
+            if (
+                archive.parent != directory
+                or Path(str(metadata.get("compressed_filename") or "")).name != archive.name
+                or int(metadata.get("compressed_size") or -1) != archive.stat().st_size
+                or str(metadata.get("compressed_sha256") or "") != archive_sha256
+                or str(metadata.get("sqlite_integrity_check") or "") != "ok"
+                or not contract.startswith("wb_autoanswers_compressed_")
+            ):
+                raise RuntimeError("superseded autoanswers backup manifest mismatch")
+            candidates.append((version, archive, manifest, metadata, archive_sha256))
+
+    if not candidates:
+        raise RuntimeError("insufficient operational headroom and no superseded backup pair exists")
+
+    current_dir = backup_root / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    current_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    removed: list[dict[str, Any]] = []
+    audit_path: Path | None = None
+    for version, archive, manifest, metadata, archive_sha256 in candidates:
+        entry = {
+            "schema_version": version,
+            "archive_filename": archive.name,
+            "manifest_filename": manifest.name,
+            "archive_size": archive.stat().st_size,
+            "archive_sha256": f"sha256:{archive_sha256}",
+            "snapshot_sha256": f"sha256:{str(metadata.get('snapshot_sha256') or metadata.get('source_sha256') or '')}",
+        }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        audit_path = current_dir / f"superseded_backup_cleanup__{stamp}__{os.getpid()}.json"
+        audit_base = {
+            "contract": "wb_autoanswers_superseded_backup_cleanup_v1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "current_backup": {
+                "filename": current_filename,
+                "snapshot_sha256": snapshot_sha256,
+                "integrity_check": "ok",
+                "format": "zstd",
+            },
+            "required_free": required_free,
+            "free_before": free_before,
+        }
+        _write_json_atomic(
+            audit_path,
+            {
+                **audit_base,
+                "status": "planned",
+                "removed": removed,
+                "planned_removal": entry,
+            },
+        )
+        archive.unlink()
+        manifest.unlink(missing_ok=True)
+        removed.append(entry)
+        free_after = shutil.disk_usage(backup_root).free
+        _write_json_atomic(
+            audit_path,
+            {
+                **audit_base,
+                "status": "applied",
+                "removed": removed,
+                "planned_removal": None,
+                "free_after": free_after,
+            },
+        )
+        if free_after >= required_free:
+            return {
+                "status": "superseded_backups_removed",
+                "free_before": free_before,
+                "free_after": free_after,
+                "removed": removed,
+                "audit_manifest": audit_path.name,
+            }
+    raise RuntimeError("verified superseded backup pruning left insufficient operational headroom")
+
+
 def _create_current_compressed_schema_backup(
     runtime_dir: Path,
     *,
@@ -272,12 +510,14 @@ def _create_current_compressed_schema_backup(
     staging_dir = runtime_dir / ".wb_autoanswers_capacity_recovery"
     staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(staging_dir, 0o700)
-    staging = staging_dir / "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     staging_manifest = staging.with_suffix(staging.suffix + ".manifest.json")
     backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(backup_dir, 0o700)
-    archive = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__capacity_recovery.sqlite3.zst"
+    archive = backup_dir / (
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__capacity_recovery.sqlite3.zst"
+    )
     manifest = archive.with_suffix(archive.suffix + ".manifest.json")
 
     existing = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
@@ -401,7 +641,9 @@ def _create_current_compressed_schema_backup(
         manifest_temporary.unlink(missing_ok=True)
 
     orphan_journals_removed = 0
-    for journal in backup_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3-journal"):
+    for journal in backup_dir.glob(
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__*.sqlite3-journal"
+    ):
         database_candidate = Path(str(journal).removesuffix("-journal"))
         if not database_candidate.exists():
             journal.unlink()
@@ -427,14 +669,16 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     free_before = shutil.disk_usage(backup_root).free
     compressed = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
     if int(compressed.get("count") or 0) > 0:
-        schema_v2_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        current_schema_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         redundant_raw_removed = 0
-        for raw in schema_v2_dir.glob("registry_upload_runtime__pre_autoanswers_v2__*.sqlite3"):
+        for raw in current_schema_dir.glob(
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__*.sqlite3"
+        ):
             raw.unlink()
             redundant_raw_removed += 1
         orphan_sidecars_removed = 0
         for suffix in ("*.sqlite3-journal", "*.sqlite3-shm", "*.sqlite3-wal"):
-            for sidecar in schema_v2_dir.glob(suffix):
+            for sidecar in current_schema_dir.glob(suffix):
                 database_candidate = Path(
                     str(sidecar).removesuffix("-journal").removesuffix("-shm").removesuffix("-wal")
                 )
@@ -442,6 +686,16 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
                     sidecar.unlink()
                     orphan_sidecars_removed += 1
         free_after_cleanup = shutil.disk_usage(backup_root).free
+        superseded_cleanup = None
+        if free_after_cleanup < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+            superseded_cleanup = _prune_superseded_compressed_backups(
+                runtime_dir,
+                current_backup=compressed,
+                required_free=BACKUP_OPERATIONAL_HEADROOM_BYTES,
+            )
+            free_after_cleanup = shutil.disk_usage(backup_root).free
+        if free_after_cleanup < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+            raise RuntimeError("verified backup cleanup left insufficient operational headroom")
         return {
             "status": "ready",
             "free_before": free_before,
@@ -451,7 +705,27 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
                 **compressed,
                 "redundant_autoanswers_raw_removed": redundant_raw_removed,
                 "orphan_autoanswers_sidecars_removed": orphan_sidecars_removed,
+                "superseded_cleanup": superseded_cleanup,
             },
+        }
+    current_schema_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    current_raw = sorted(
+        current_schema_dir.glob(
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__*.sqlite3"
+        )
+    ) if current_schema_dir.is_dir() else []
+    if current_raw:
+        with _capacity_heartbeat():
+            compaction = _compress_verified_current_schema_backup(current_raw[-1])
+        free_after = shutil.disk_usage(backup_root).free
+        if free_after < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+            raise RuntimeError("verified current-schema compression left insufficient operational headroom")
+        return {
+            "status": "ready",
+            "free_before": free_before,
+            "free_after": free_after,
+            "required_free": required_free,
+            "compaction": compaction,
         }
     if free_before >= required_free:
         return {
@@ -461,12 +735,14 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
             "compaction": None,
         }
     candidates = sorted(
-        (runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob(
-            "registry_upload_runtime__pre_autoanswers_v1__*.sqlite3"
+        path
+        for path in (runtime_dir / "backups").glob(
+            "wb_autoanswers_schema_v*/registry_upload_runtime__pre_autoanswers_v*__*.sqlite3"
         )
+        if path.parent.name != f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
     )
     staging = runtime_dir / ".wb_autoanswers_capacity_recovery" / (
-        "registry_upload_runtime__pre_autoanswers_v2__current.sqlite3"
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     )
     if not candidates and not staging.is_file():
         raise RuntimeError("insufficient backup capacity and no recoverable autoanswers backup exists")
@@ -491,7 +767,12 @@ def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
     """Inspect only the two fields needed before constructor-triggered DDL."""
 
     db_path = runtime_dir / "registry_upload_runtime.sqlite3"
-    evidence: dict[str, Any] = {"database_exists": db_path.is_file(), "schema_v2_applied": False}
+    evidence: dict[str, Any] = {
+        "database_exists": db_path.is_file(),
+        "autoanswers_initialized": False,
+        "target_schema_applied": False,
+        "schema_versions": [],
+    }
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return evidence
     with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=30) as conn:
@@ -499,10 +780,14 @@ def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_autoanswers_schema_migrations'"
         ).fetchone()
         if migrations:
-            evidence["schema_v2_applied"] = conn.execute(
-                "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=?",
-                (SCHEMA_VERSION,),
-            ).fetchone() is not None
+            evidence["schema_versions"] = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT version FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+            evidence["autoanswers_initialized"] = bool(evidence["schema_versions"])
+            evidence["target_schema_applied"] = SCHEMA_VERSION in evidence["schema_versions"]
         settings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_autoanswers_settings'"
         ).fetchone()
@@ -555,14 +840,14 @@ def _dependency_status(*, verify_boundary: bool) -> dict[str, Any]:
 def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
     before = _pre_migration_safety(runtime_dir)
     force_off = _truthy(os.environ.get("WB_AUTOANSWERS_FORCE_OFF"))
-    requires_off_preparation = action == "prepare-capacity" or (
-        action == "prepare-deploy" and not before.get("schema_v2_applied")
+    requires_persisted_off = action in {"prepare-capacity", "prepare-deploy"} and not before.get(
+        "autoanswers_initialized"
     )
-    if requires_off_preparation:
+    if action in {"prepare-capacity", "prepare-deploy"}:
         if not force_off:
-            raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
-        if bool(before.get("master_enabled")):
-            raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
+            raise RuntimeError("schema preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
+        if requires_persisted_off and bool(before.get("master_enabled")):
+            raise RuntimeError("initial schema preparation requires persisted master-switch OFF")
 
     if action == "prepare-capacity":
         with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
@@ -576,12 +861,12 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
         with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
             locked_before = _pre_migration_safety(runtime_dir)
             if not force_off:
-                raise RuntimeError("schema v2 preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
+                raise RuntimeError("schema preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
             if (
-                not bool(locked_before.get("schema_v2_applied"))
+                not bool(locked_before.get("autoanswers_initialized"))
                 and bool(locked_before.get("master_enabled"))
             ):
-                raise RuntimeError("schema v2 preparation requires persisted master-switch OFF")
+                raise RuntimeError("initial schema preparation requires persisted master-switch OFF")
             capacity = _prepare_backup_capacity(runtime_dir)
             repository = AutoanswersRepository(runtime_dir=runtime_dir, schema_lock_held=True)
             dependencies = _dependency_status(verify_boundary=True)
@@ -589,11 +874,11 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             if SCHEMA_VERSION not in {
                 int(row.get("version") or 0) for row in status_after["schema_migrations"]
             }:
-                raise RuntimeError("schema v2 migration marker is missing")
+                raise RuntimeError("current schema migration marker is missing")
             backup = repository.verified_schema_backup_status()
-            if before.get("database_exists") and not before.get("schema_v2_applied"):
+            if before.get("database_exists") and not before.get("target_schema_applied"):
                 if int(backup.get("count") or 0) < 1 or backup.get("integrity_check") != "ok":
-                    raise RuntimeError("verified pre-schema-v2 backup is missing")
+                    raise RuntimeError("verified pre-schema backup is missing")
         return {
             "status": "ready",
             "action": action,
@@ -601,6 +886,28 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             "schema_backup": backup,
             "capacity": capacity,
             "dependencies": dependencies,
+        }
+
+    if action == "status" and not before.get("target_schema_applied"):
+        return {
+            "status": "schema_preparation_required",
+            "action": action,
+            "runtime": {
+                "schema_migrations": [
+                    {"version": int(version)} for version in before.get("schema_versions") or []
+                ],
+                "settings": {
+                    "master_enabled": bool(before.get("master_enabled")),
+                    "mode": str(before.get("mode") or ""),
+                    "force_off": force_off,
+                    "effective_enabled": False,
+                },
+            },
+            "schema_backup": _verified_compressed_schema_backup_status(
+                runtime_dir,
+                verify_bytes=False,
+            ),
+            "dependencies": _dependency_status(verify_boundary=False),
         }
 
     repository = AutoanswersRepository(runtime_dir=runtime_dir)

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr
+import hashlib
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import shutil
@@ -12,13 +14,16 @@ import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from apps.wb_autoanswers_activation import (
     _capacity_heartbeat,
     _compress_verified_backup,
+    _compress_verified_current_schema_backup,
     _create_current_compressed_schema_backup,
+    _integrity_check,
     _prepare_backup_capacity,
     _schema_preparation_lock,
     run,
@@ -61,12 +66,12 @@ class ActivationTest(unittest.TestCase):
             result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["schema_backup"]["integrity_check"], "ok")
-        self.assertIn(2, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
+        self.assertIn(3, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
         with sqlite3.connect(db_path) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
-    def test_prepare_deploy_preserves_active_manual_mode_after_schema_v2(self, _dependency: object) -> None:
+    def test_prepare_deploy_preserves_active_manual_mode_after_additive_schema(self, _dependency: object) -> None:
         repository = AutoanswersRepository(runtime_dir=self.runtime_dir, now_factory=MutableClock(), env={})
         repository.update_settings(master_enabled=True, mode="manual", actor_id="release-train")
 
@@ -140,7 +145,7 @@ class ActivationTest(unittest.TestCase):
         self.assertTrue(result["raw_source_removed_after_verification"])
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for backup replacement acceptance")
-    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_schema_v2(self) -> None:
+    def test_current_snapshot_replaces_legacy_backup_and_is_accepted_for_schema_v3(self) -> None:
         database = self.runtime_dir / "registry_upload_runtime.sqlite3"
         with sqlite3.connect(database) as conn:
             conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
@@ -167,8 +172,8 @@ class ActivationTest(unittest.TestCase):
         with sqlite3.connect(database) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "current")
 
-        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v2"
-        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v2__redundant.sqlite3"
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        redundant = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__redundant.sqlite3"
         shutil.copy2(database, redundant)
         sidecar = redundant.with_name(redundant.name + "-journal")
         sidecar.write_bytes(b"orphan")
@@ -177,6 +182,174 @@ class ActivationTest(unittest.TestCase):
         self.assertFalse(sidecar.exists())
         self.assertEqual(cleanup["compaction"]["redundant_autoanswers_raw_removed"], 1)
         self.assertGreaterEqual(cleanup["compaction"]["orphan_autoanswers_sidecars_removed"], 1)
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
+    def test_capacity_compacts_verified_current_schema_raw_backup_before_retry(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('live')")
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir.mkdir(parents=True)
+        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__interrupted.sqlite3"
+        shutil.copy2(database, raw)
+        raw.with_name(raw.name + "-shm").write_bytes(b"sidecar")
+
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            return_value=SimpleNamespace(free=300 * 1024 * 1024),
+        ):
+            result = _prepare_backup_capacity(self.runtime_dir)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(
+            result["compaction"]["status"],
+            "compressed_current_schema_backup",
+        )
+        self.assertFalse(raw.exists())
+        self.assertFalse(raw.with_name(raw.name + "-shm").exists())
+        self.assertTrue(raw.with_suffix(raw.suffix + ".zst").is_file())
+        self.assertTrue(raw.with_suffix(raw.suffix + ".zst.manifest.json").is_file())
+        self.assertEqual(result["compaction"]["integrity_check"], "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
+    def test_current_schema_raw_backup_survives_failed_canonical_readback(self) -> None:
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        backup_dir.mkdir(parents=True)
+        raw = backup_dir / "registry_upload_runtime__pre_autoanswers_v3__recoverable.sqlite3"
+        with sqlite3.connect(raw) as conn:
+            conn.execute("CREATE TABLE backup_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO backup_marker VALUES('recoverable')")
+        sidecar = raw.with_name(raw.name + "-wal")
+        sidecar.write_bytes(b"recoverable-sidecar")
+
+        with patch(
+            "apps.wb_autoanswers_activation._verified_compressed_schema_backup_status",
+            return_value={
+                "count": 1,
+                "integrity_check": "ok",
+                "snapshot_sha256": "sha256:not-the-source",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "readback is missing"):
+                _compress_verified_current_schema_backup(raw)
+
+        self.assertTrue(raw.is_file())
+        self.assertTrue(sidecar.is_file())
+        self.assertEqual(_integrity_check(raw), "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for superseded backup cleanup")
+    def test_verified_current_backup_prunes_minimum_legacy_pair_for_headroom(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('live')")
+
+        current_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v3"
+        current_dir.mkdir(parents=True)
+        current_raw = current_dir / "registry_upload_runtime__pre_autoanswers_v3__current.sqlite3"
+        shutil.copy2(database, current_raw)
+        _compress_verified_current_schema_backup(current_raw)
+
+        legacy_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v2"
+        legacy_dir.mkdir(parents=True)
+        legacy_raw = legacy_dir / "registry_upload_runtime__pre_autoanswers_v2__legacy.sqlite3"
+        shutil.copy2(database, legacy_raw)
+        legacy_archive = legacy_raw.with_suffix(legacy_raw.suffix + ".zst")
+        subprocess.run(
+            ["zstd", "--quiet", "--force", "-o", str(legacy_archive), str(legacy_raw)],
+            check=True,
+        )
+        archive_sha = hashlib.sha256(legacy_archive.read_bytes()).hexdigest()
+        legacy_manifest = legacy_archive.with_suffix(legacy_archive.suffix + ".manifest.json")
+        legacy_manifest.write_text(
+            json.dumps(
+                {
+                    "contract": "wb_autoanswers_compressed_schema_backup_v2",
+                    "compressed_filename": legacy_archive.name,
+                    "compressed_size": legacy_archive.stat().st_size,
+                    "compressed_sha256": archive_sha,
+                    "snapshot_sha256": hashlib.sha256(legacy_raw.read_bytes()).hexdigest(),
+                    "sqlite_integrity_check": "ok",
+                }
+            ),
+            encoding="utf-8",
+        )
+        legacy_raw.unlink()
+        unrelated = legacy_dir / "keep-unrelated.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+
+        mib = 1024 * 1024
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            side_effect=[
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=100 * mib),
+                SimpleNamespace(free=400 * mib),
+                SimpleNamespace(free=400 * mib),
+            ],
+        ):
+            result = _prepare_backup_capacity(self.runtime_dir)
+
+        cleanup = result["compaction"]["superseded_cleanup"]
+        self.assertEqual(cleanup["status"], "superseded_backups_removed")
+        self.assertEqual(len(cleanup["removed"]), 1)
+        self.assertFalse(legacy_archive.exists())
+        self.assertFalse(legacy_manifest.exists())
+        self.assertTrue(unrelated.is_file())
+        audit = current_dir / str(cleanup["audit_manifest"])
+        self.assertTrue(audit.is_file())
+        audit_payload = json.loads(audit.read_text(encoding="utf-8"))
+        self.assertEqual(audit_payload["contract"], "wb_autoanswers_superseded_backup_cleanup_v1")
+        self.assertEqual(audit_payload["status"], "applied")
+        self.assertIsNone(audit_payload["planned_removal"])
+        self.assertEqual(len(audit_payload["removed"]), 1)
+        self.assertEqual(audit_payload["current_backup"]["integrity_check"], "ok")
+        self.assertEqual(audit.stat().st_mode & 0o777, 0o600)
+
+    def test_status_does_not_migrate_a_database_below_target_schema(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "CREATE TABLE sheet_vitrina_v1_wb_autoanswers_schema_migrations(version INTEGER PRIMARY KEY)"
+            )
+            conn.executemany(
+                "INSERT INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations VALUES(?)",
+                [(1,), (2,)],
+            )
+            conn.execute(
+                "CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings("
+                "singleton INTEGER PRIMARY KEY, master_enabled INTEGER NOT NULL, mode TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO sheet_vitrina_v1_wb_autoanswers_settings VALUES(1, 1, 'manual')"
+            )
+
+        with patch("apps.wb_autoanswers_activation.AutoanswersRepository") as repository:
+            result = run(action="status", runtime_dir=self.runtime_dir)
+
+        repository.assert_not_called()
+        self.assertEqual(result["status"], "schema_preparation_required")
+        self.assertEqual(
+            [row["version"] for row in result["runtime"]["schema_migrations"]],
+            [1, 2],
+        )
+        self.assertTrue(result["runtime"]["settings"]["master_enabled"])
+        self.assertEqual(result["runtime"]["settings"]["mode"], "manual")
+        self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
+
+    def test_status_does_not_initialize_a_missing_database(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with patch("apps.wb_autoanswers_activation.AutoanswersRepository") as repository:
+            result = run(action="status", runtime_dir=self.runtime_dir)
+
+        repository.assert_not_called()
+        self.assertEqual(result["status"], "schema_preparation_required")
+        self.assertFalse(database.exists())
+        self.assertEqual(result["runtime"]["schema_migrations"], [])
+        self.assertFalse(result["runtime"]["settings"]["master_enabled"])
+        self.assertFalse(result["runtime"]["settings"]["effective_enabled"])
 
     def test_repository_can_migrate_inside_activation_owned_schema_lock(self) -> None:
         with _schema_preparation_lock(self.runtime_dir):

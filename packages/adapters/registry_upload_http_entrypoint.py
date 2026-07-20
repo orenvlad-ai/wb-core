@@ -110,17 +110,22 @@ DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH = f"{DEFAULT_SHEET_FEEDBACKS_P
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/sync-now"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/preview"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/enqueue"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_TRANSITION_PREVIEW_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/transition/preview"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/review/approve"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/manual/generate"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_REGENERATE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/manual/regenerate"
 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/manual/edit"
+DEFAULT_SHEET_FEEDBACKS_MEDIA_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/media"
 AUTOANSWERS_MUTATION_PATHS = frozenset(
     {
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_TRANSITION_PREVIEW_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+        DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_REGENERATE_PATH,
         DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
     }
 )
@@ -464,6 +469,7 @@ def _build_handler(
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_TRANSITION_PREVIEW_PATH,
             }:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
                     return
@@ -474,6 +480,10 @@ def _build_handler(
                     actor = _current_web_user_actor(self)
                     if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH:
                         payload = entrypoint.handle_sheet_feedbacks_autoanswers_settings_update_request(
+                            body, actor_id=actor
+                        )
+                    elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_TRANSITION_PREVIEW_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_transition_preview_request(
                             body, actor_id=actor
                         )
                     elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH:
@@ -495,6 +505,7 @@ def _build_handler(
             if parsed.path in {
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_REGENERATE_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
             }:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
@@ -506,6 +517,10 @@ def _build_handler(
                     actor = _current_web_user_actor(self)
                     if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH:
                         payload = entrypoint.handle_sheet_feedbacks_autoanswers_generate_request(
+                            body, actor_id=actor
+                        )
+                    elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_REGENERATE_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_regenerate_request(
                             body, actor_id=actor
                         )
                     elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH:
@@ -2270,6 +2285,40 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": "feedback_not_found"})
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_MEDIA_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                try:
+                    feedback_id = _resolve_single_query_param(parsed.query, "id")
+                    content_version = int(_resolve_single_query_param(parsed.query, "version") or "")
+                    kind = _resolve_single_query_param(parsed.query, "kind")
+                    ordinal = int(_resolve_single_query_param(parsed.query, "ordinal") or "")
+                    asset = _resolve_single_query_param(parsed.query, "asset") or "primary"
+                    if not feedback_id or not kind:
+                        raise ValueError("media asset parameters are required")
+                    media = entrypoint.handle_sheet_feedbacks_media_asset_request(
+                        feedback_id,
+                        content_version=content_version,
+                        kind=kind,
+                        ordinal=ordinal,
+                        asset=asset,
+                    )
+                except (TypeError, ValueError):
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid media asset parameters"})
+                    return
+                if media is None:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": "media_asset_not_found"})
+                    return
+                path, mime_type = media
+                body = path.read_bytes()
+                self.send_response(HTTPStatus.OK.value)
+                self.send_header("Content-Type", mime_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                _write_response_body(self, body)
                 return
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
@@ -7825,9 +7874,12 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_autoanswers_sync_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH,
         "feedbacks_autoanswers_backlog_preview_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
         "feedbacks_autoanswers_backlog_enqueue_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+        "feedbacks_autoanswers_transition_preview_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_TRANSITION_PREVIEW_PATH,
         "feedbacks_autoanswers_approve_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
         "feedbacks_autoanswers_generate_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
+        "feedbacks_autoanswers_regenerate_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_REGENERATE_PATH,
         "feedbacks_autoanswers_edit_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_EDIT_PATH,
+        "feedbacks_media_path": DEFAULT_SHEET_FEEDBACKS_MEDIA_PATH,
         "feedbacks_can_ai_review": PERMISSION_AI_REVIEW in normalized_sections,
         "feedbacks_can_admin": PERMISSION_ADMIN in normalized_sections,
         "feedbacks_export_path": DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,

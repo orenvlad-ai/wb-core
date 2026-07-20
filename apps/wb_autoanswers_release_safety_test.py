@@ -56,17 +56,22 @@ class ReleaseSafetyTest(unittest.TestCase):
             str(item["path"]): item
             for item in payload["routes"]
             if "/feedbacks/autoanswers/" in str(item.get("path") or "")
-            or str(item.get("path") or "").endswith(("/feedbacks/local", "/feedbacks/detail"))
+            or str(item.get("path") or "").endswith(
+                ("/feedbacks/local", "/feedbacks/detail", "/feedbacks/media")
+            )
         }
         expected = {
             "/v1/sheet-vitrina-v1/feedbacks/local": ["GET"],
             "/v1/sheet-vitrina-v1/feedbacks/detail": ["GET"],
+            "/v1/sheet-vitrina-v1/feedbacks/media": ["GET"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings": ["GET", "POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/sync-now": ["POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/preview": ["POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/enqueue": ["POST"],
+            "/v1/sheet-vitrina-v1/feedbacks/autoanswers/transition/preview": ["POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/review/approve": ["POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/generate": ["POST"],
+            "/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/regenerate": ["POST"],
             "/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/edit": ["POST"],
         }
         self.assertEqual(set(routes), set(expected))
@@ -180,7 +185,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         )
         self.assertIn("shutil.disk_usage(backup_root).free", activation_source)
         self.assertIn("_create_current_compressed_schema_backup", activation_source)
-        self.assertIn('not bool(locked_before.get("schema_v2_applied"))', activation_source)
+        self.assertIn('not bool(locked_before.get("autoanswers_initialized"))', activation_source)
 
     def test_manual_activation_uses_get_only_canary_before_enabling_worker_timer(self) -> None:
         original = hosted.load_hosted_runtime_target(TARGET)

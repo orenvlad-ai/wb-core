@@ -585,6 +585,8 @@
     .autoanswers-table-wrap {
       overflow: auto;
       margin-top: 12px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .autoanswers-table {
@@ -606,6 +608,42 @@
       white-space: normal;
     }
 
+    .autoanswers-answer-box {
+      position: relative;
+      width: 300px;
+      max-width: 36vw;
+      min-height: 72px;
+      max-height: 72px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f8fafc;
+      padding: 9px 62px 9px 10px;
+      white-space: pre-wrap;
+      line-height: 1.35;
+    }
+
+    .autoanswers-answer-copy {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      min-height: 26px;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--muted);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .autoanswers-answer-empty {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     .autoanswers-detail-dialog {
       width: min(920px, calc(100vw - 32px));
       max-height: calc(100vh - 48px);
@@ -616,16 +654,28 @@
     }
 
     .autoanswers-detail-dialog::backdrop { background: rgba(15, 23, 42, .55); }
-    .autoanswers-detail-body { padding: 20px; overflow: auto; max-height: calc(100vh - 96px); }
-    .autoanswers-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .autoanswers-detail-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px; white-space: pre-wrap; }
-    .autoanswers-reply-editor { width: 100%; min-height: 150px; resize: vertical; }
+    .autoanswers-detail-body { padding: 16px; overflow: auto; max-height: calc(100vh - 96px); }
+    .autoanswers-detail-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(240px, .55fr); gap: 10px; }
+    .autoanswers-detail-block { min-width:0; border: 1px solid var(--line); border-radius: 12px; padding: 12px; white-space: pre-wrap; overflow-wrap:anywhere; }
+    .autoanswers-detail-wide { grid-column: 1 / -1; }
+    .autoanswers-detail-heading { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+    .autoanswers-rating { color:#d97706; font-weight:800; }
+    .autoanswers-optional-line { margin:6px 0 0; }
+    .autoanswers-media-gallery { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .autoanswers-media-item { width:112px; height:112px; object-fit:cover; border-radius:10px; border:1px solid var(--line); background:#f8fafc; }
+    .autoanswers-reply-editor { display:block; box-sizing:border-box; width:100%; min-height:96px; resize:none; overflow:hidden; line-height:1.5; }
+    .autoanswers-technical { grid-column:1/-1; border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+    .autoanswers-technical summary { cursor:pointer; font-weight:700; }
+    .autoanswers-technical-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
+    .autoanswers-technical pre { max-width:100%; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .autoanswers-progress { margin-top:8px; color:var(--muted); font-size:12px; }
     .autoanswers-warning { margin: 8px 0 0; color: #92400e; font-size: 12px; }
 
     .feedbacks-panel,
     .feedbacks-subpanel,
     .feedbacks-workspace > *,
     [data-feedbacks-result],
+    [data-autoanswers-result],
     [data-feedbacks-complaints-result] {
       min-width: 0;
       max-width: 100%;
@@ -4726,6 +4776,7 @@
     @media (max-width: 900px) {
       .page {
         padding: 12px;
+        overflow-x: clip;
       }
 
       .ads-workspace {
@@ -4918,10 +4969,15 @@
       .autoanswers-control-grid,
       .autoanswers-filter-grid,
       .autoanswers-detail-grid,
+      .autoanswers-technical-grid,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
       }
+
+      .autoanswers-answer-box { width:220px; max-width:70vw; }
+      .autoanswers-detail-dialog { width:calc(100vw - 16px); }
+      .autoanswers-detail-body { padding:12px; }
 
       .feedbacks-action-toolbar,
       .feedbacks-table-tools {
@@ -5406,11 +5462,13 @@
 	              </div>
 	              <div class="autoanswers-control-grid">
 	                <label class="research-field"><span class="filter-label">Режим ответов</span><select class="select" data-autoanswers-mode><option value="off">Выключено</option><option value="manual">Ручной</option><option value="draft_only">Черновики</option><option value="auto_safe">Безопасный</option><option value="auto_all">Полный</option></select></label>
-	                <div class="research-field"><span class="filter-label">Бюджет сегодня</span><strong data-autoanswers-budget-day>—</strong></div>
-	                <div class="research-field"><span class="filter-label">Бюджет месяц</span><strong data-autoanswers-budget-month>—</strong></div>
-	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button></div>
+	                <div class="research-field"><span class="filter-label">Расход сегодня</span><strong data-autoanswers-budget-day>—</strong></div>
+	                <div class="research-field"><span class="filter-label">Расход за месяц</span><strong data-autoanswers-budget-month>—</strong></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-backlog>Исторический backlog</button></div>
 	              </div>
 	              <p class="feedbacks-source-helper" data-autoanswers-settings-note>Загружаем настройки…</p>
+	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
+	              <p class="autoanswers-progress" data-autoanswers-progress></p>
 	            </section>
 
 	            <section class="autoanswers-filters">
@@ -5424,7 +5482,7 @@
 	                <label class="research-field"><span class="filter-label">По дату</span><input class="input" type="date" data-autoanswers-filter="date_to"></label>
 	                <label class="research-field"><span class="filter-label">Признак</span><select class="select" data-autoanswers-filter="flag"><option value="">Все</option><option value="has_photo">С фото</option><option value="has_video">С видео</option><option value="needs_review">Требует проверки</option><option value="published">Опубликовано</option><option value="error">Ошибка</option></select></label>
 	              </div>
-	              <div class="feedbacks-action-toolbar"><div class="autoanswers-control-actions"><button class="button primary" type="button" data-autoanswers-apply>Применить фильтры</button><button class="button secondary" type="button" data-autoanswers-sync>Синхронизировать сейчас</button><button class="button secondary" type="button" data-autoanswers-backlog>Исторический backlog</button></div><span class="research-result-note" data-autoanswers-list-meta>Последние 50</span></div>
+	              <div class="feedbacks-action-toolbar"><div class="autoanswers-control-actions"><button class="button primary" type="button" data-autoanswers-apply>Применить фильтры</button><button class="button secondary" type="button" data-autoanswers-sync>Синхронизировать сейчас</button></div><span class="research-result-note" data-autoanswers-list-meta>Последние 50</span></div>
 	            </section>
 
 	            <p class="research-error" data-autoanswers-error></p>
@@ -6292,6 +6350,8 @@
     const autoanswersModeNode = document.querySelector("[data-autoanswers-mode]");
     const autoanswersBudgetDayNode = document.querySelector("[data-autoanswers-budget-day]");
     const autoanswersBudgetMonthNode = document.querySelector("[data-autoanswers-budget-month]");
+    const autoanswersBudgetUpdatedNode = document.querySelector("[data-autoanswers-budget-updated]");
+    const autoanswersProgressNode = document.querySelector("[data-autoanswers-progress]");
     const autoanswersSaveModeButton = document.querySelector("[data-autoanswers-save-mode]");
     const autoanswersSettingsNoteNode = document.querySelector("[data-autoanswers-settings-note]");
     const autoanswersApplyButton = document.querySelector("[data-autoanswers-apply]");
@@ -6794,6 +6854,8 @@
           settings: null,
           budget: null,
           runtime: null,
+          reconciliation: null,
+          copiedId: "",
           items: [],
           page: 1,
           pageSize: 50,
@@ -7178,6 +7240,7 @@
     if (feedbacksPanelNode) {
       feedbacksPanelNode.addEventListener("click", handleFeedbacksClick);
       feedbacksPanelNode.addEventListener("change", handleFeedbacksInputChange);
+      feedbacksPanelNode.addEventListener("input", handleFeedbacksInputChange);
       feedbacksPanelNode.addEventListener("mousedown", handleFeedbacksMouseDown);
       document.addEventListener("mousedown", handleFeedbacksMouseDown, true);
     }
@@ -12213,6 +12276,7 @@
         server.settings = payload.settings || null;
         server.budget = payload.budget || null;
         server.runtime = payload.runtime || null;
+        server.reconciliation = payload.reconciliation || null;
       } catch (error) {
         server.error = String(error && error.message ? error.message : error);
       } finally {
@@ -12240,6 +12304,7 @@
         state.feedbacks.server.settings = payload.settings || null;
         state.feedbacks.server.budget = payload.budget || null;
         state.feedbacks.server.runtime = payload.runtime || null;
+        state.feedbacks.server.reconciliation = payload.reconciliation || null;
       } catch (error) {
         state.feedbacks.server.error = String(error && error.message ? error.message : error);
       }
@@ -12252,9 +12317,39 @@
       if (selectorState === "auto_all") {
         const confirmation = window.prompt("Для режима «Полный» введите ПОЛНЫЙ. Все safety-проверки останутся включены.");
         if (confirmation !== "ПОЛНЫЙ") return;
-      } else if (selectorState !== "off" && !settings.master_enabled) {
+      } else if (selectorState === "manual" && !settings.master_enabled) {
         const confirmation = window.prompt("Для включения AI-контура введите ВКЛЮЧИТЬ. Исторический backlog не запустится.");
         if (confirmation !== "ВКЛЮЧИТЬ") return;
+      }
+      if (["draft_only", "auto_safe", "auto_all"].includes(selectorState)) {
+        try {
+          const preview = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_transition_preview_path, {
+            selector_state: selectorState,
+            scope_from: "2026-01-01"
+          });
+          const counts = preview.counts || {};
+          const budgetAfter = preview.budget_after_estimate || {};
+          const message = [
+            "Диапазон: с 01.01.2026, все неотвеченные отзывы.",
+            "Всего: " + Number(counts.unanswered_total || 0),
+            "Готовых актуальных ответов: " + Number(counts.current_ready || 0),
+            "Требуют генерации: " + Number(counts.needs_generation || 0),
+            "Требуют перегенерации с медиа: " + Number(counts.needs_regeneration || 0),
+            "Можно поставить на автопубликацию: " + Number(counts.automatic_publication || 0),
+            "Останутся на проверке: " + Number(counts.needs_review || 0),
+            "Верхняя оценка генерации: $" + Number(preview.estimated_cost_usd || 0).toFixed(2),
+            "После резерва: день $" + Number(budgetAfter.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budgetAfter.daily_cap_usd || 0).toFixed(2) +
+              ", месяц $" + Number(budgetAfter.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budgetAfter.monthly_cap_usd || 0).toFixed(2),
+            "",
+            "Применить режим и запустить возобновляемую сверку?"
+          ].join("\n");
+          if (!window.confirm(message)) return;
+          await updateAutoanswersSettings({selector_state: selectorState, preview_id: preview.preview_id});
+        } catch (error) {
+          state.feedbacks.server.error = String(error && error.message ? error.message : error);
+          renderAutoanswersServer();
+        }
+        return;
       }
       await updateAutoanswersSettings({selector_state: selectorState});
     }
@@ -12329,6 +12424,54 @@
       }
     }
 
+    async function regenerateAutoanswersDetail(processingKey, feedbackId) {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_ai_review) return;
+      if (!window.confirm("Перегенерировать ответ после безопасной загрузки фото и видео? Старый текст останется в техническом аудите и не будет опубликован.")) return;
+      try {
+        await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_regenerate_path, {
+          processing_key: processingKey
+        });
+        state.feedbacks.server.error = "Перегенерация с учётом медиа поставлена в фоновую очередь.";
+        await openAutoanswersDetail(feedbackId);
+        await loadServerFeedbacks();
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+        renderAutoanswersServer();
+      }
+    }
+
+    async function copyAutoanswersReply(feedbackId) {
+      const row = (state.feedbacks.server.items || []).find(function(item) { return String(item.id) === String(feedbackId); });
+      const reply = String(row && row.generated_reply || "");
+      if (!reply) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(reply);
+        } else {
+          const helper = document.createElement("textarea");
+          helper.value = reply;
+          helper.setAttribute("readonly", "readonly");
+          helper.style.position = "fixed";
+          helper.style.opacity = "0";
+          document.body.appendChild(helper);
+          helper.select();
+          document.execCommand("copy");
+          helper.remove();
+        }
+        state.feedbacks.server.copiedId = String(feedbackId);
+        renderAutoanswersServer();
+        window.setTimeout(function() {
+          if (state.feedbacks.server.copiedId === String(feedbackId)) {
+            state.feedbacks.server.copiedId = "";
+            renderAutoanswersServer();
+          }
+        }, 1500);
+      } catch (error) {
+        state.feedbacks.server.error = "Не удалось скопировать ответ.";
+        renderAutoanswersServer();
+      }
+    }
+
     async function guardManualAutoanswersDetail(processingKey, feedbackId) {
       if (!WEB_VITRINA_CONFIG.feedbacks_can_ai_review) return;
       const editor = document.querySelector("[data-autoanswers-manual-reply]");
@@ -12396,8 +12539,16 @@
         autoanswersBacklogButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
         autoanswersBacklogButton.disabled = server.settingsLoading || !!settings.force_off || !effectiveOn || selectorState === "manual";
       }
-      if (autoanswersBudgetDayNode) autoanswersBudgetDayNode.textContent = "$" + Number(budget.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.daily_cap_usd || 5).toFixed(2);
-      if (autoanswersBudgetMonthNode) autoanswersBudgetMonthNode.textContent = "$" + Number(budget.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.monthly_cap_usd || 50).toFixed(2);
+      if (autoanswersBudgetDayNode) autoanswersBudgetDayNode.textContent = "$" + Number(budget.daily_actual_usd || 0).toFixed(2) + " / $" + Number(budget.daily_cap_usd || 5).toFixed(2);
+      if (autoanswersBudgetMonthNode) autoanswersBudgetMonthNode.textContent = "$" + Number(budget.monthly_actual_usd || 0).toFixed(2) + " / $" + Number(budget.monthly_cap_usd || 50).toFixed(2);
+      if (autoanswersBudgetUpdatedNode) autoanswersBudgetUpdatedNode.textContent = budget.updated_at ? ("Расходы обновлены: " + budget.updated_at) : "Расходы ещё не обновлялись";
+      const reconciliation = server.reconciliation || {};
+      if (autoanswersProgressNode) {
+        const progress = reconciliation.progress || {};
+        autoanswersProgressNode.textContent = reconciliation.state
+          ? ("Сверка режима: " + friendlyAutoanswersStatus(reconciliation.state) + " · готово " + Object.keys(progress).reduce(function(total, key) { return total + Number(progress[key] || 0); }, 0))
+          : "";
+      }
       if (autoanswersSettingsNoteNode) autoanswersSettingsNoteNode.textContent = settings.force_off ? "Автоответы выключены: production force-off WB_AUTOANSWERS_FORCE_OFF=true. AI и публикация заблокированы server-side." : (modeNotes[selectorState] || modeNotes.off);
       if (autoanswersErrorNode) autoanswersErrorNode.textContent = server.error || "";
       if (autoanswersListMetaNode) autoanswersListMetaNode.textContent = server.loading ? "Загрузка…" : ("Найдено: " + server.total + " · по 50 на странице");
@@ -12413,10 +12564,61 @@
         autoanswersResultNode.innerHTML = '<p class="research-result-note">Локальные отзывы по фильтрам не найдены.</p>';
         return;
       }
-      autoanswersResultNode.innerHTML = '<table class="autoanswers-table"><thead><tr><th>Дата</th><th>Оценка</th><th>Товар / SKU</th><th>Отзыв</th><th>Медиа</th><th>AI / route</th><th>Статус</th><th>Ответ / стоимость</th><th></th></tr></thead><tbody>' + server.items.map(function(row) {
+      autoanswersResultNode.innerHTML = '<table class="autoanswers-table"><thead><tr><th>Дата</th><th>Оценка</th><th>Товар / SKU</th><th>Отзыв</th><th>Медиа</th><th>Статус</th><th>Ответ системы</th><th></th></tr></thead><tbody>' + server.items.map(function(row) {
         const product = row.productDetails || {};
-        return '<tr><td>' + escapeHtml(row.createdDate || "—") + '</td><td>' + escapeHtml(row.productValuation || "—") + '</td><td>' + escapeHtml((product.product_name || "—") + "\n" + (product.nm_id || "") + " / " + (product.supplier_article || "")) + '</td><td>' + escapeHtml(row.text || row.pros || row.cons || "—") + '</td><td>' + (row.has_photo ? "Фото " : "") + (row.has_video ? "Видео" : "") + '</td><td>' + escapeHtml(row.route || "—") + '</td><td><span class="cell-badge">AI: ' + escapeHtml(row.processing_status || "synced") + '</span><br><span class="cell-badge">WB: ' + escapeHtml(row.publication_status || "not_queued") + '</span>' + (row.error ? '<br>' + escapeHtml(row.error) : '') + '</td><td class="autoanswers-reply">' + escapeHtml(row.generated_reply || (row.answer || {}).text || "—") + '<br><small>$' + Number(row.cost_usd || 0).toFixed(4) + ' · попыток ' + Number(row.attempts || 0) + '</small></td><td><button class="button ghost" type="button" data-autoanswers-open="' + escapeHtml(row.id) + '">Открыть</button></td></tr>';
+        const systemReply = String(row.generated_reply || "").trim();
+        const copyLabel = server.copiedId === String(row.id) ? "Скопировано" : "Копировать";
+        const answerCell = systemReply
+          ? '<div class="autoanswers-answer-box">' + escapeHtml(systemReply) + '<button class="autoanswers-answer-copy" type="button" data-autoanswers-copy="' + escapeHtml(row.id) + '">' + copyLabel + '</button></div>'
+          : '<span class="autoanswers-answer-empty">Ответ ещё не создан</span>';
+        const mediaLabel = [row.has_photo ? "Фото" : "", row.has_video ? "Видео" : ""].filter(Boolean).join(" · ") || "Нет";
+        return '<tr><td>' + escapeHtml(row.createdDate || "—") + '</td><td>' + escapeHtml(row.productValuation || "—") + '</td><td>' + escapeHtml((product.product_name || "Товар без названия") + "\n" + (product.nm_id || "nmId неизвестен") + " / " + (product.supplier_article || "артикул неизвестен")) + '</td><td>' + escapeHtml(row.text || row.pros || row.cons || "Без текста") + '</td><td>' + escapeHtml(mediaLabel) + '</td><td><span class="cell-badge">' + escapeHtml(friendlyAutoanswersStatus(row.processing_status || "synced")) + '</span><br><span class="cell-badge">' + escapeHtml(friendlyAutoanswersStatus(row.publication_status || "not_queued")) + '</span>' + (row.error ? '<br><small>' + escapeHtml(friendlyAutoanswersStatus(row.error)) + '</small>' : '') + '</td><td>' + answerCell + '</td><td><button class="button ghost" type="button" data-autoanswers-open="' + escapeHtml(row.id) + '">Открыть</button></td></tr>';
       }).join("") + '</tbody></table>';
+    }
+
+    function friendlyAutoanswersStatus(value) {
+      const labels = {
+        discovered: "Найден",
+        synced: "Готов к обработке",
+        not_queued: "Не поставлен на публикацию",
+        queued: "В очереди",
+        processing: "Ответ генерируется",
+        generated: "Ответ готов",
+        needs_review: "Требует проверки",
+        approved: "Готовится публикация",
+        publishing: "Отправляется в Wildberries",
+        publish_pending_readback: "Проверяем публикацию",
+        published: "Опубликован и подтверждён",
+        skipped: "Обработка завершена без публикации",
+        retryable_error: "Повторим позже",
+        terminal_error: "Нужна ручная проверка ошибки",
+        fetch_failed: "Медиа временно недоступно",
+        frames_extracted: "Видео подготовлено",
+        downloaded: "Медиа подготовлено",
+        regeneration_required: "Нужно перегенерировать с учётом медиа",
+        media_fetch_failed: "Медиа не было доступно при генерации",
+        policy_epoch_stale: "Остановлено после смены режима",
+        succeeded: "Завершена"
+      };
+      return labels[String(value || "")] || "Требует внимания";
+    }
+
+    function autoGrowReplyEditors(root) {
+      const scope = root || document;
+      scope.querySelectorAll("[data-autoanswers-manual-reply]").forEach(function(editor) {
+        editor.style.height = "auto";
+        editor.style.height = Math.max(96, editor.scrollHeight + 2) + "px";
+      });
+    }
+
+    function autoanswersMediaAssetUrl(row, item, asset) {
+      const url = new URL(WEB_VITRINA_CONFIG.feedbacks_media_path, window.location.origin);
+      url.searchParams.set("id", String(row.id || ""));
+      url.searchParams.set("version", String(row.content_version || ""));
+      url.searchParams.set("kind", String(item.kind || ""));
+      url.searchParams.set("ordinal", String(item.ordinal || 0));
+      url.searchParams.set("asset", asset || "primary");
+      return url.toString();
     }
 
     function renderAutoanswersDetail() {
@@ -12434,7 +12636,9 @@
       const answerText = String((row.answer || {}).text || "").trim();
       const readyState = latestJob && ["generated", "needs_review"].includes(String(latestJob.state || ""));
       const canGenerate = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && isManual && !answerText && !latestJob;
-      const canEdit = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && isManual && !answerText && readyState && !publication;
+      const regenerationRequired = !!(latestJob && latestJob.regeneration_required);
+      const canRegenerate = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && isManual && !answerText && regenerationRequired && !publication;
+      const canEdit = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && isManual && !answerText && readyState && !publication && !regenerationRequired;
       const canPublish = canEdit && !!latestJob.manual_guard_passed && !!latestJob.manual_reply_sha256;
       let reviewReasons = [];
       let guardErrors = [];
@@ -12447,30 +12651,58 @@
           "\nFallback: " + (latestJob.fallback_used ? "да" : "нет") +
           "\nMedia uncertainty: " + (latestJob.media_uncertain ? "да" : "нет") +
           "\nФинальная проверка ручного текста: " + (latestJob.manual_guard_passed ? "пройдена" : "не пройдена")
-        : "AI ещё не запускался";
+        : "AI ещё не запускался" +
+          "\nJSON contract: не запускался" +
+          "\nHard gates: не запускались" +
+          "\nFallback: не применялся" +
+          "\nMedia uncertainty: не проверялась" +
+          "\nФинальная проверка ручного текста: не запускалась";
       let actions = "";
       if (answerText) {
         actions = '<p class="autoanswers-warning">В Wildberries уже есть ответ. Новая публикация заблокирована.</p>';
+      } else if (canRegenerate) {
+        actions = '<div class="autoanswers-control-actions" style="margin-top:12px"><button class="button primary" type="button" data-autoanswers-regenerate="' + escapeHtml(latestJob.processing_key) + '" data-autoanswers-feedback-id="' + escapeHtml(row.id) + '">Перегенерировать с учётом медиа</button></div><p class="autoanswers-warning">Старый текст создан без доступного медиа и не может быть опубликован.</p>';
       } else if (canGenerate) {
         actions = '<div class="autoanswers-control-actions" style="margin-top:12px"><button class="button primary" type="button" data-autoanswers-generate="' + escapeHtml(row.id) + '" data-autoanswers-content-version="' + Number(row.content_version) + '">Сгенерировать ответ</button></div>';
       } else if (isManual && latestJob && ["queued", "processing", "retryable_error"].includes(String(latestJob.state || ""))) {
-        actions = '<p class="research-result-note">Генерация выполняется в фоновой очереди. Текущий статус: ' + escapeHtml(latestJob.state || "queued") + '.</p>';
+        actions = '<p class="research-result-note">' + escapeHtml(friendlyAutoanswersStatus(latestJob.state || "queued")) + '.</p>';
       } else if (canEdit) {
-        actions = '<section class="autoanswers-detail-block" style="margin-top:12px"><strong>Готовый ответ</strong><textarea class="input autoanswers-reply-editor" data-autoanswers-manual-reply>' + escapeHtml(currentReply) + '</textarea><p class="autoanswers-warning">Перед публикацией проверьте текст. Ответ уйдёт в Wildberries только после отдельного подтверждения.</p><div class="autoanswers-control-actions" style="margin-top:10px"><button class="button secondary" type="button" data-autoanswers-guard="' + escapeHtml(latestJob.processing_key) + '" data-autoanswers-feedback-id="' + escapeHtml(row.id) + '">Сохранить и проверить</button>' + (canPublish ? '<button class="button primary" type="button" data-autoanswers-publish="' + escapeHtml(latestJob.processing_key) + '" data-autoanswers-reply-sha="' + escapeHtml(latestJob.manual_reply_sha256) + '" data-autoanswers-feedback-id="' + escapeHtml(row.id) + '">Опубликовать</button>' : '') + '</div></section>';
+        actions = '<p class="autoanswers-warning">Перед публикацией проверьте текст. Ответ уйдёт в Wildberries только после отдельного подтверждения.</p><div class="autoanswers-control-actions" style="margin-top:10px"><button class="button secondary" type="button" data-autoanswers-guard="' + escapeHtml(latestJob.processing_key) + '" data-autoanswers-feedback-id="' + escapeHtml(row.id) + '">Сохранить и проверить</button>' + (canPublish ? '<button class="button primary" type="button" data-autoanswers-publish="' + escapeHtml(latestJob.processing_key) + '" data-autoanswers-reply-sha="' + escapeHtml(latestJob.manual_reply_sha256) + '" data-autoanswers-feedback-id="' + escapeHtml(row.id) + '">Опубликовать</button>' : '') + '</div>';
       } else if (publication) {
-        actions = '<p class="research-result-note">Публикация: ' + escapeHtml(publication.state || "queued") + '. Readback: ' + escapeHtml(publication.readback_answer || "ожидается") + '.</p>';
+        actions = '<p class="research-result-note">' + escapeHtml(friendlyAutoanswersStatus(publication.state || "queued")) + '. Результат проверки Wildberries: ' + escapeHtml(publication.readback_answer || "ожидается") + '.</p>';
       } else if (!isManual && WEB_VITRINA_CONFIG.feedbacks_can_ai_review && settings.effective_enabled && readyState) {
         actions = '<div class="autoanswers-control-actions" style="margin-top:12px"><button class="button primary" type="button" data-autoanswers-approve="' + escapeHtml(latestJob.processing_key) + '">Проверено: поставить на публикацию</button></div>';
       }
+      const optionalReview = (row.pros ? '<p class="autoanswers-optional-line"><strong>Плюсы:</strong> ' + escapeHtml(row.pros) + '</p>' : '') +
+        (row.cons ? '<p class="autoanswers-optional-line"><strong>Минусы:</strong> ' + escapeHtml(row.cons) + '</p>' : '') +
+        ((row.tags || []).length ? '<p class="autoanswers-optional-line"><strong>Теги:</strong> ' + escapeHtml(row.tags.join(", ")) + '</p>' : '');
+      const mediaItems = media.filter(function(item) { return item.kind !== "video_frame"; }).map(function(item) {
+        if (item.kind === "photo" && item.primary_available) return '<img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "primary")) + '" alt="Фото покупателя">';
+        if (item.kind === "video" && item.preview_available) return '<figure><img class="autoanswers-media-item" src="' + escapeHtml(autoanswersMediaAssetUrl(row, item, "preview")) + '" alt="Превью видео покупателя"><figcaption>Видео · до 4 кадров подготовлено</figcaption></figure>';
+        return '<span class="autoanswers-answer-empty">' + escapeHtml(item.kind === "video" ? "Видео недоступно" : "Фото недоступно") + '</span>';
+      }).join("");
+      const mainStatus = answerText ? "В Wildberries уже есть ответ" : (regenerationRequired ? "Нужно перегенерировать с учётом медиа" : friendlyAutoanswersStatus(row.processing_status || "synced"));
+      const replySection = currentReply && !regenerationRequired
+        ? '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Готовый ответ</strong><textarea class="input autoanswers-reply-editor" data-autoanswers-manual-reply' + (canEdit ? '' : ' readonly') + '>' + escapeHtml(currentReply) + '</textarea></section>'
+        : '';
+      let contractJson = {};
+      try { contractJson = latestJob && latestJob.result_json ? JSON.parse(latestJob.result_json) : {}; } catch (error) { contractJson = {error: "invalid persisted JSON"}; }
       autoanswersDetailBodyNode.innerHTML = '<div class="autoanswers-detail-grid">' +
-        '<section class="autoanswers-detail-block"><strong>Отзыв</strong>\n' + escapeHtml(row.text || "") + '\n\nПлюсы: ' + escapeHtml(row.pros || "—") + '\nМинусы: ' + escapeHtml(row.cons || "—") + '\nТеги: ' + escapeHtml((row.tags || []).join(", ")) + '</section>' +
-        '<section class="autoanswers-detail-block"><strong>Товар</strong>\n' + escapeHtml(product.product_name || "—") + '\nnmId: ' + escapeHtml(product.nm_id || "—") + '\nАртикул: ' + escapeHtml(product.supplier_article || "—") + '\nВерсия: ' + escapeHtml(row.content_version || "—") + '</section>' +
-        '<section class="autoanswers-detail-block"><strong>AI / публикация</strong>\nRoute: ' + escapeHtml(row.route || "—") + '\nCase code: ' + escapeHtml(latestJob && latestJob.case_code || "—") + '\nAI: ' + escapeHtml(row.processing_status || "—") + '\nWB: ' + escapeHtml(row.publication_status || "not_queued") + '\nПопыток: ' + Number(row.attempts || 0) + '\nСтоимость: $' + Number(row.cost_usd || 0).toFixed(6) + '\nПредупреждения: ' + escapeHtml(reviewReasons.concat(guardErrors).join(", ") || "нет") + '</section>' +
-        '<section class="autoanswers-detail-block"><strong>Медиа</strong>\n' + escapeHtml(media.map(function(item) { return item.kind + ": " + item.fetch_status; }).join("\n") || "Нет") + '</section>' +
-        '<section class="autoanswers-detail-block"><strong>Проверки</strong>\n' + escapeHtml(checksText) + '</section>' +
-        '<section class="autoanswers-detail-block"><strong>Ответ Wildberries</strong>\n' + escapeHtml(answerText || "Ответа пока нет") + '</section>' +
-        '<section class="autoanswers-detail-block" style="grid-column:1/-1"><details><summary>Audit trail (' + Number((row.audit || []).length) + ')</summary><pre>' + escapeHtml(JSON.stringify(row.audit || [], null, 2)) + '</pre></details></section>' +
+        '<section class="autoanswers-detail-block"><div class="autoanswers-detail-heading"><span class="autoanswers-rating">★ ' + escapeHtml(row.productValuation || "—") + '</span><span>' + escapeHtml(row.createdDate || "Дата неизвестна") + '</span></div><p>' + escapeHtml(row.text || "Отзыв без текста") + '</p>' + optionalReview + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>Товар</strong><p>' + escapeHtml(product.product_name || "Название неизвестно") + '</p><p>Артикул: ' + escapeHtml(product.supplier_article || "неизвестен") + '</p><p>nmId: ' + escapeHtml(product.nm_id || "неизвестен") + '</p></section>' +
+        (media.length ? '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Фото и видео покупателя</strong><div class="autoanswers-media-gallery">' + mediaItems + '</div></section>' : '') +
+        '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Ответ Wildberries</strong><p>' + escapeHtml(answerText || "Ответа пока нет") + '</p></section>' +
+        '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Статус</strong><p>' + escapeHtml(mainStatus) + '</p></section>' +
+        replySection +
+        '<details class="autoanswers-technical"><summary>Техническая информация</summary><div class="autoanswers-technical-grid">' +
+          '<section class="autoanswers-detail-block"><strong>Маршрут и состояния</strong>\nRoute: ' + escapeHtml(row.route || "—") + '\nCase code: ' + escapeHtml(latestJob && latestJob.case_code || "—") + '\nAI state: ' + escapeHtml(row.processing_status || "—") + '\nPublication state: ' + escapeHtml(row.publication_status || "not_queued") + '\nПопыток: ' + Number(row.attempts || 0) + '\nСтоимость: $' + Number(row.cost_usd || 0).toFixed(6) + '\nWarnings: ' + escapeHtml(reviewReasons.concat(guardErrors).join(", ") || "нет") + '</section>' +
+          '<section class="autoanswers-detail-block"><strong>Проверки</strong>\n' + escapeHtml(checksText) + '\nRegeneration required: ' + (regenerationRequired ? "да" : "нет") + '\nMedia: ' + escapeHtml(media.map(function(item) { return item.kind + ": " + item.fetch_status; }).join(", ") || "нет") + '</section>' +
+          '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Versions / hashes / idempotency</strong><pre>' + escapeHtml(JSON.stringify({content_version: row.content_version, content_version_hash: row.content_version_hash, wb_observation_hash: row.wb_observation_hash, processing_key: latestJob && latestJob.processing_key, media_processing_version: latestJob && latestJob.media_processing_version, policy_epoch: latestJob && latestJob.policy_epoch}, null, 2)) + '</pre></section>' +
+          '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>JSON contract</strong><pre>' + escapeHtml(JSON.stringify(contractJson, null, 2)) + '</pre></section>' +
+          '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Audit trail (' + Number((row.audit || []).length) + ')</strong><pre>' + escapeHtml(JSON.stringify(row.audit || [], null, 2)) + '</pre></section>' +
+        '</div></details>' +
         '</div>' + actions;
+      window.requestAnimationFrame(function() { autoGrowReplyEditors(autoanswersDetailBodyNode); });
     }
 
     function ensureFeedbacksInitialized() {
@@ -12887,6 +13119,12 @@
     }
 
     function handleFeedbacksClick(event) {
+      const autoanswersCopy = event.target.closest("[data-autoanswers-copy]");
+      if (autoanswersCopy) {
+        event.preventDefault();
+        copyAutoanswersReply(String(autoanswersCopy.getAttribute("data-autoanswers-copy") || ""));
+        return;
+      }
       const autoanswersOpen = event.target.closest("[data-autoanswers-open]");
       if (autoanswersOpen) {
         event.preventDefault();
@@ -12899,6 +13137,15 @@
         generateAutoanswersDetail(
           String(autoanswersGenerate.getAttribute("data-autoanswers-generate") || ""),
           Number(autoanswersGenerate.getAttribute("data-autoanswers-content-version") || 0)
+        );
+        return;
+      }
+      const autoanswersRegenerate = event.target.closest("[data-autoanswers-regenerate]");
+      if (autoanswersRegenerate) {
+        event.preventDefault();
+        regenerateAutoanswersDetail(
+          String(autoanswersRegenerate.getAttribute("data-autoanswers-regenerate") || ""),
+          String(autoanswersRegenerate.getAttribute("data-autoanswers-feedback-id") || "")
         );
         return;
       }
@@ -12993,6 +13240,11 @@
     }
 
 	    function handleFeedbacksInputChange(event) {
+	      const replyEditor = event.target.closest("[data-autoanswers-manual-reply]");
+	      if (replyEditor) {
+	        autoGrowReplyEditors(autoanswersDetailBodyNode);
+	        return;
+	      }
 	      const autoInput = event.target.closest("[data-feedbacks-auto-field]");
 	      if (autoInput) {
 	        const scheduleId = String(autoInput.getAttribute("data-feedbacks-auto-id") || "");

@@ -1952,7 +1952,7 @@ def _run_remote_autoanswers_readonly(
         raise ValueError("autoanswers read-only runner requires the canonical active runtime dir")
     if not target.environment_file:
         raise ValueError("autoanswers read-only runner requires the hosted environment file")
-    if operation not in {"status", "canary", "steady", "backfill"}:
+    if operation not in {"status", "canary", "steady", "backfill", "manual-media-canary"}:
         raise ValueError(f"unsupported autoanswers read-only operation: {operation}")
     runner_args = [
         "python3",
@@ -1973,7 +1973,9 @@ def _run_remote_autoanswers_readonly(
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
-            "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
+            "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF="
+            + ("false" if operation == "manual-media-canary" else "true")
+            + " WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
             + " ".join(shlex.quote(item) for item in runner_args),
         ]
     )
@@ -1997,7 +1999,15 @@ def _run_remote_autoanswers_readonly(
     if not isinstance(payload, dict):
         raise RuntimeError("autoanswers read-only runner returned a non-object JSON payload")
     settings = ((payload.get("runtime") or {}).get("settings") or {})
-    if (
+    if operation == "manual-media-canary":
+        if (
+            not bool(settings.get("master_enabled"))
+            or bool(settings.get("force_off"))
+            or not bool(settings.get("effective_enabled"))
+            or str(settings.get("mode") or "") != "manual"
+        ):
+            raise RuntimeError("autoanswers media evidence did not prove effective manual mode")
+    elif (
         bool(settings.get("master_enabled"))
         or not bool(settings.get("force_off"))
         or bool(settings.get("effective_enabled"))
@@ -2739,9 +2749,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     autoanswers_readonly = subparsers.add_parser(
         "autoanswers-readonly",
-        help="Run the force-off, GET-only WB feedback status/canary/backfill on the active runtime.",
+        help="Run a bounded GET-only WB feedback or manual-mode media canary on the active runtime.",
     )
-    autoanswers_readonly.add_argument("operation", choices=("status", "canary", "steady", "backfill"))
+    autoanswers_readonly.add_argument(
+        "operation", choices=("status", "canary", "steady", "backfill", "manual-media-canary")
+    )
     autoanswers_readonly.add_argument("--page-size", type=int, default=100)
     autoanswers_readonly.add_argument("--max-pages", type=int, default=1000)
     autoanswers_readonly.add_argument("--min-request-interval-seconds", type=float, default=1.0)

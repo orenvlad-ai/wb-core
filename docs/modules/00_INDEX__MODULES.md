@@ -259,7 +259,7 @@ update_note: "Обновлён through module 48: active functional contour об
 | `46_MODULE__SKU_MANAGEMENT_BLOCK.md` | `sku_management_block` | `web/operator/sku-actions` | Calculation-only deficit forecast, guarded one-row price/bid operator action workflow and confirmed action-event history without a parallel metric/source-of-truth contour |
 | `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
 | `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal engine with exact-date history, stable nomenclature identity, versioned unmatched audit, localized evidence UI, hourly bounded sync, Proxy 3 and guarded atomic cutover |
-| `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production-deployable force-OFF server contour: canonical WB GET sync/history, frozen v1.4.2 Node pipeline, budgets, durable publication/readback and protected UI; only separately bounded GET sync/backfill is authorized, with OpenAI and WB writes blocked |
+| `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production manual contour with canonical WB sync, safe photo/HLS ingestion, frozen v1.4.2 Node pipeline, media-aware regeneration, policy-epoch mode reconciliation, durable publication/readback and compact protected UI |
 
 # 5. Как эта папка используется дальше
 

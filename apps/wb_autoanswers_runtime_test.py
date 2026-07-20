@@ -110,7 +110,7 @@ class RuntimeTest(unittest.TestCase):
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
-            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v2").glob("*.sqlite3"))
+            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v3").glob("*.sqlite3"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
@@ -120,7 +120,7 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v2").glob("*.sqlite3"))),
+                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v3").glob("*.sqlite3"))),
                 1,
             )
             evidence = AutoanswersRepository(
@@ -145,7 +145,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=2;
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3);
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -161,7 +161,10 @@ class RuntimeTest(unittest.TestCase):
                         updated_at TEXT NOT NULL
                     );
                     INSERT INTO sheet_vitrina_v1_wb_autoanswers_settings
-                    SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings_v2;
+                    SELECT singleton, master_enabled, mode, enable_epoch, enabled_at,
+                           daily_cap_usd, monthly_cap_usd, warning_ratio,
+                           max_reservation_per_review_usd, policy_version, updated_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     DROP TABLE sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     """
                 )
@@ -170,6 +173,61 @@ class RuntimeTest(unittest.TestCase):
             migrated.update_settings(mode="manual", actor_id="admin")
             self.assertEqual(migrated.settings().mode, "manual")
             self.assertEqual(migrated.verified_schema_backup_status()["integrity_check"], "ok")
+
+    def test_schema_v3_invalidates_only_unanswered_unpublished_media_uncertain_results(self) -> None:
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            repo = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
+            repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+            processing_keys: dict[str, str] = {}
+            for feedback_id in ("must-regenerate", "owner-published"):
+                repo.upsert_feedback(
+                    feedback(feedback_id), source_stream="unanswered", run_kind="steady"
+                )
+                job = repo.enqueue_manual_processing(
+                    feedback_id, content_version=1, actor_id="reviewer"
+                )
+                repo.claim_processing_job(worker_id=f"worker-{feedback_id}")
+                repo.complete_generation(
+                    job["processing_key"],
+                    result=successful_result(media_uncertain=True),
+                    worker_id=f"worker-{feedback_id}",
+                )
+                processing_keys[feedback_id] = job["processing_key"]
+            repo.upsert_feedback(
+                feedback("owner-published", answer="Ответ владельца"),
+                source_stream="answered",
+                run_kind="reconciliation",
+            )
+            with sqlite3.connect(repo.db_path) as conn:
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=3"
+                )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                    SET regeneration_required=0, regeneration_reason=NULL,
+                        state='generated', review_reasons_json='[]'
+                    WHERE processing_key IN (?, ?)
+                    """,
+                    (
+                        processing_keys["must-regenerate"],
+                        processing_keys["owner-published"],
+                    ),
+                )
+            migrated = AutoanswersRepository(
+                runtime_dir=runtime_dir, now_factory=self.clock, env={}
+            )
+            must_regenerate = migrated.get_feedback("must-regenerate")["ai_jobs"][0]
+            preserved = migrated.get_feedback("owner-published")["ai_jobs"][0]
+            self.assertTrue(must_regenerate["regeneration_required"])
+            self.assertEqual(must_regenerate["state"], "needs_review")
+            self.assertFalse(preserved["regeneration_required"])
+            self.assertEqual(preserved["state"], "generated")
+            self.assertEqual(
+                migrated.get_feedback("owner-published")["answer"]["text"],
+                "Ответ владельца",
+            )
 
     def test_emergency_force_off_prevents_persisting_master_on(self) -> None:
         self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
@@ -434,6 +492,157 @@ class RuntimeTest(unittest.TestCase):
             filters={"date_from": "2026-07-20", "date_to": "2026-07-20"}
         )
         self.assertEqual({item["createdDate"][:10] for item in same_day["items"]}, {"2026-07-20"})
+
+    def test_transition_preview_policy_epoch_and_resumable_sweep(self) -> None:
+        self.enable("manual")
+        for feedback_id in ("ready", "media-failed", "untouched"):
+            self.insert_new(feedback_id)
+
+        ready = self.repo.enqueue_manual_processing("ready", content_version=1, actor_id="reviewer")
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(ready["processing_key"], actual_cost_usd="0.02")
+        self.repo.complete_generation(
+            ready["processing_key"], result=successful_result("public_only"), worker_id="worker"
+        )
+
+        failed = self.repo.enqueue_manual_processing("media-failed", content_version=1, actor_id="reviewer")
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(failed["processing_key"], actual_cost_usd="0.03")
+        self.repo.complete_generation(
+            failed["processing_key"],
+            result=successful_result("public_only", media_uncertain=True),
+            worker_id="worker",
+        )
+
+        before = self.repo.settings().policy_epoch
+        preview = self.repo.preview_mode_transition("auto_safe", actor_id="admin")
+        self.assertEqual(preview["counts"]["unanswered_total"], 3)
+        self.assertEqual(preview["counts"]["current_ready"], 1)
+        self.assertEqual(preview["counts"]["needs_generation"], 1)
+        self.assertEqual(preview["counts"]["needs_regeneration"], 1)
+        self.assertEqual(preview["counts"]["automatic_publication"], 1)
+        applied = self.repo.apply_mode_transition(
+            "auto_safe", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        self.assertEqual(applied["settings"].policy_epoch, before + 1)
+        self.assertEqual(applied["sweep"]["state"], "queued")
+
+        # A restart uses a new repository object over the same durable DB.
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name), now_factory=self.clock, env=self.env
+        )
+        for _ in range(6):
+            status = restarted.reconcile_policy_sweep_once(worker_id="restarted", batch_size=1)
+            if status and status["state"] == "succeeded":
+                break
+        self.assertEqual(restarted.reconciliation_status()["state"], "succeeded")
+        ready_detail = restarted.get_feedback("ready")
+        self.assertEqual(ready_detail["generated_reply"], "Спасибо за отзыв!")
+        self.assertEqual(len(ready_detail["publications"]), 1)
+        self.assertEqual(restarted.get_feedback("media-failed")["ai_jobs"][0]["state"], "queued")
+        self.assertEqual(len(restarted.get_feedback("media-failed")["ai_revisions"]), 1)
+        self.assertEqual(restarted.get_feedback("untouched")["ai_jobs"][0]["state"], "queued")
+
+    def test_mode_transition_preview_is_snapshot_bound_and_idempotent(self) -> None:
+        self.enable("manual")
+        self.insert_new("scope")
+        preview = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        self.insert_new("scope-changed")
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "scope changed"):
+            self.repo.apply_mode_transition(
+                "draft_only", actor_id="admin", preview_id=preview["preview_id"]
+            )
+        fresh = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        first = self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=fresh["preview_id"]
+        )
+        second = self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=fresh["preview_id"]
+        )
+        self.assertEqual(first["sweep"]["sweep_id"], second["sweep"]["sweep_id"])
+
+        same_mode_preview = self.repo.preview_mode_transition("draft_only", actor_id="admin")
+        policy_before = self.repo.settings().policy_epoch
+        same_mode = self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=same_mode_preview["preview_id"]
+        )
+        self.assertEqual(same_mode["settings"].policy_epoch, policy_before)
+        self.assertEqual(same_mode["sweep"]["sweep_id"], first["sweep"]["sweep_id"])
+
+    def test_all_five_state_transitions_and_force_off_are_fail_closed(self) -> None:
+        states = ("off", "manual", "draft_only", "auto_safe", "auto_all")
+
+        def apply(repo: AutoanswersRepository, target: str, actor: str = "admin") -> None:
+            if target in {"off", "manual"}:
+                repo.apply_mode_transition(target, actor_id=actor)
+                return
+            preview = repo.preview_mode_transition(target, actor_id=actor)
+            repo.apply_mode_transition(target, actor_id=actor, preview_id=preview["preview_id"])
+
+        for source in states:
+            for target in states:
+                with self.subTest(source=source, target=target), TemporaryDirectory() as directory:
+                    env: dict[str, str] = {}
+                    repo = AutoanswersRepository(
+                        runtime_dir=Path(directory), now_factory=self.clock, env=env
+                    )
+                    apply(repo, source)
+                    apply(repo, target)
+                    settings = repo.settings()
+                    self.assertEqual(settings.master_enabled, target != "off")
+                    if target != "off":
+                        self.assertEqual(settings.mode, target)
+
+        with TemporaryDirectory() as directory:
+            env = {}
+            repo = AutoanswersRepository(runtime_dir=Path(directory), now_factory=self.clock, env=env)
+            preview = repo.preview_mode_transition("auto_safe", actor_id="admin")
+            env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+            with self.assertRaisesRegex(AutoanswersRuntimeError, "forced OFF"):
+                repo.apply_mode_transition(
+                    "auto_safe", actor_id="admin", preview_id=preview["preview_id"]
+                )
+
+    def test_transition_preview_is_actor_bound(self) -> None:
+        self.enable("manual")
+        preview = self.repo.preview_mode_transition("auto_safe", actor_id="first-admin")
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "another actor"):
+            self.repo.apply_mode_transition(
+                "auto_safe", actor_id="second-admin", preview_id=preview["preview_id"]
+            )
+
+    def test_regeneration_archives_old_result_and_is_click_idempotent(self) -> None:
+        self.enable("manual")
+        self.insert_new("regen")
+        job = self.repo.enqueue_manual_processing("regen", content_version=1, actor_id="reviewer")
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.04")
+        stored = self.repo.complete_generation(
+            job["processing_key"],
+            result=successful_result(media_uncertain=True),
+            worker_id="worker",
+        )
+        self.assertTrue(stored["regeneration_required"])
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "uncertain"):
+            self.repo.manual_guard_context(job["processing_key"])
+        first = self.repo.request_regeneration(job["processing_key"], actor_id="reviewer")
+        second = self.repo.request_regeneration(job["processing_key"], actor_id="reviewer")
+        self.assertEqual(first["media_processing_version"], 2)
+        self.assertEqual(second["media_processing_version"], 2)
+        detail = self.repo.get_feedback("regen")
+        self.assertEqual(len(detail["ai_revisions"]), 1)
+        self.assertEqual(detail["ai_revisions"][0]["actual_cost_usd"], "0.04000000")
+        self.assertEqual(detail["ai_jobs"][0]["state"], "queued")
+
+    def test_downgrade_changes_policy_epoch_and_blocks_old_processing_claim(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.insert_new("old-policy")
+        self.repo.enqueue_processing("old-policy", trigger_source="steady_sync", actor_id="sync")
+        previous = self.repo.settings().policy_epoch
+        self.repo.update_settings(mode="manual", actor_id="admin")
+        self.assertGreater(self.repo.settings().policy_epoch, previous)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.assertEqual(self.repo.get_feedback("old-policy")["ai_jobs"][0]["state"], "queued")
 
 
 if __name__ == "__main__":

@@ -109,6 +109,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_media",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/media",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_feedbacks_autoanswers_settings",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
@@ -133,6 +139,12 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_autoanswers_transition_preview",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/transition/preview",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_feedbacks_autoanswers_review_approve",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/review/approve",
@@ -142,6 +154,12 @@
       "name": "sheet_vitrina_feedbacks_autoanswers_manual_generate",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/generate",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_manual_regenerate",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/manual/regenerate",
       "methods": ["POST"]
     },
     {

@@ -40,6 +40,23 @@ class FakeReadSource:
         return 1
 
 
+class FakeMediaProcessor:
+    ttl_seconds = 600
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def process(self, **kwargs: object) -> dict:
+        kind = next(iter(kwargs["asset_kinds"]))
+        self.calls.append(str(kind))
+        return {
+            "media_uncertain": False,
+            "photos_downloaded": int(kind == "photo"),
+            "video_previews": int(kind == "video"),
+            "video_frames": 4 if kind == "video" else 0,
+        }
+
+
 class ReadonlyRunnerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
@@ -87,6 +104,36 @@ class ReadonlyRunnerTest(unittest.TestCase):
         self.assertEqual(result["runtime"]["publication_jobs"], {})
         self.assertFalse(result["runtime"]["capabilities"]["openai"])
         self.assertFalse(result["runtime"]["capabilities"]["wb_post_patch"])
+
+    def test_manual_media_canary_is_bounded_and_never_creates_jobs(self) -> None:
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "false"
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        photo = feedback("media-photo")
+        video = feedback("media-video")
+        video["video"] = {
+            "link": "https://videofeedback01.wbbasket.ru/master.m3u8",
+            "previewImage": "https://videofeedback01.wbbasket.ru/preview.webp",
+        }
+        self.repo.upsert_feedback(photo, source_stream="backfill", run_kind="backfill")
+        self.repo.upsert_feedback(video, source_stream="backfill", run_kind="backfill")
+
+        class MediaSource(FakeReadSource):
+            def fetch_detail(inner_self, feedback_id: str) -> dict:
+                inner_self.detail_calls += 1
+                return photo if feedback_id == "media-photo" else video
+
+        processor = FakeMediaProcessor()
+        result = self.run_case(
+            "manual-media-canary",
+            source=MediaSource(),
+            media_processor=processor,
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(processor.calls, ["photo", "video"])
+        self.assertEqual(result["media"]["photo"]["photos_downloaded"], 1)
+        self.assertEqual(result["media"]["video"]["video_frames"], 4)
+        self.assertEqual(result["runtime"]["ai_jobs"], {})
+        self.assertEqual(result["runtime"]["publication_jobs"], {})
 
     def test_backfill_completes_both_streams_without_jobs(self) -> None:
         result = self.run_case("backfill")

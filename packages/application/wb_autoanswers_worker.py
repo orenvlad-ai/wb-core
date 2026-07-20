@@ -43,6 +43,18 @@ class AutoanswersProcessingWorker:
                 feedback_id=str(claimed["feedback_id"]),
                 content_version=int(claimed["content_version"]),
             )
+            if bool(media.get("media_uncertain")):
+                stored = self.repository.complete_media_uncertainty(
+                    key,
+                    uncertainty=media.get("uncertainty") or [],
+                    worker_id=self.worker_id,
+                )
+                return {
+                    "processing_key": key,
+                    "state": stored["state"],
+                    "regeneration_required": True,
+                    "model_calls": 0,
+                }
             self.repository.assert_effective_on(operation="frozen AI invocation")
             detail = self.repository.get_feedback(str(claimed["feedback_id"]))
             if detail is None:
