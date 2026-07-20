@@ -67,7 +67,10 @@ from packages.application.supplier_financial_documents import (
     apply_supplier_order_document_match,
     parse_financial_document_pdf,
 )
-from packages.application.supplier_customs_breakdown import build_customs_breakdown_xlsx
+from packages.application.supplier_customs_breakdown import (
+    build_customs_breakdown_xlsx,
+    validate_customs_breakdown_workbook,
+)
 from packages.application.supplier_expense_allocation import (
     attach_supplier_document_expense_allocations,
     project_supplier_order_expense_allocation,
@@ -2359,8 +2362,11 @@ class RegistryUploadHttpEntrypoint:
         payload["shipments"] = [
             {
                 **dict(item),
-                "expense_allocation": project_supplier_order_expense_allocation(
-                    dict(item.get("supplier_cost_breakdown") or {})
+                "expense_allocation": (
+                    dict(item.get("expense_allocation") or {})
+                    or project_supplier_order_expense_allocation(
+                        dict(item.get("supplier_cost_breakdown") or {})
+                    )
                 ),
             }
             for item in payload.get("shipments") or []
@@ -6235,7 +6241,13 @@ def _build_supplier_order_documents_archive(
     rows = [
         dict(item)
         for item in payload.get("required_documents") or []
-        if isinstance(item, Mapping) and str(item.get("document_type") or "") in required_types
+        if isinstance(item, Mapping)
+        and str(item.get("document_type") or "") in required_types
+        and not (
+            package_type == "accounting"
+            and str(item.get("parse_status") or "").strip().lower()
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        )
     ]
     type_order = {document_type: index for index, document_type in enumerate(required_types)}
     rows.sort(
@@ -6482,6 +6494,18 @@ def _validate_supplier_order_package_archive(
                 raise ValueError(f"package member size mismatch: {archive_name}")
             if "sha256:" + hashlib.sha256(body).hexdigest() != str(item.get("sha256") or ""):
                 raise ValueError(f"package member checksum mismatch: {archive_name}")
+            if str(item.get("kind") or "") == "generated_customs_breakdown":
+                generation = dict(item.get("validation") or {})
+                workbook_validation = validate_customs_breakdown_workbook(
+                    body,
+                    expected_row_count=int(generation.get("workbook_row_count") or 0),
+                    expected_quantity_total=generation.get("workbook_quantity_total"),
+                )
+                if not workbook_validation.get("valid"):
+                    raise ValueError(
+                        "generated customs workbook failed ZIP readback: "
+                        + "; ".join(workbook_validation.get("errors") or [])
+                    )
         parsed_manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
         if parsed_manifest.get("included") != included:
             raise ValueError("package manifest readback differs from assembly receipt")

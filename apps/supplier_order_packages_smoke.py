@@ -83,11 +83,14 @@ def main() -> None:
 
 
 def _assert_matching_and_workbook() -> None:
+    model_only = _goods("5", "", 10)
+    model_only["identifiers"] = {"source_model": "Exact Model Alpha"}
     goods_items = [
         _goods("1", "Exact Model Alpha", 10, barcode="4600000000001"),
         _goods("2", "Exact Model Group", 5),
         _goods("3", "Exact Model Group", 4),
         _goods("4", "Unknown exact source", 7),
+        model_only,
     ]
     matching = match_customs_goods_items(
         goods_items=goods_items,
@@ -95,11 +98,11 @@ def _assert_matching_and_workbook() -> None:
         nomenclature_items=NOMENCLATURE,
     )
     if (
-        matching.get("position_count") != 4
-        or matching.get("output_row_count") != 5
+        matching.get("position_count") != 5
+        or matching.get("output_row_count") != 6
         or matching.get("status_counts") != {
             "ambiguous": 1,
-            "matched": 1,
+            "matched": 2,
             "reconciled_group": 1,
             "unmatched": 1,
         }
@@ -245,6 +248,8 @@ def _assert_accounting_multiple_customs() -> None:
         "declaration_date": "2026-07-03",
         "goods_items": [_goods("1", "Unknown exact source", 7)],
     }
+    excluded_dt = _document("dt-excluded", "customs_declaration", "excluded-dt.pdf")
+    excluded_dt["parse_status"] = "excluded"
     payload = {
         "supplier_order_id": "order-safe",
         "shipment": {
@@ -256,6 +261,7 @@ def _assert_accounting_multiple_customs() -> None:
             _document("contract-1", "contract", "contract.pdf"),
             first_dt,
             second_dt,
+            excluded_dt,
         ],
     }
     archive_bytes, receipt = _build_supplier_order_documents_archive(
@@ -272,6 +278,7 @@ def _assert_accounting_multiple_customs() -> None:
         or receipt.get("counts", {}).get("included") != 6
         or len(generated) != 2
         or len({item.get("archive_name") for item in generated}) != 2
+        or any(item.get("document_id") == "dt-excluded" for item in manifest.get("included") or [])
         or not receipt.get("requires_review")
         or receipt.get("review_message") != "Расшифровка ДТ требует проверки"
     ):

@@ -185,7 +185,20 @@ def match_customs_goods_items(
                 output_quantity_total += quantity
             continue
 
-        name_candidates = _unique_lines(line_by_name.get(_name_key(source_name), [])) if source_name else []
+        source_model = str(_mapping(item.get("identifiers")).get("source_model") or "").strip()
+        exact_source_keys = [
+            key
+            for key in (_name_key(source_name), _name_key(source_model))
+            if key
+        ]
+        candidate_sets = [
+            _unique_lines(line_by_name.get(key, []))
+            for key in dict.fromkeys(exact_source_keys)
+            if line_by_name.get(key)
+        ]
+        name_candidates = _unique_lines(
+            line for candidates_for_key in candidate_sets for line in candidates_for_key
+        )
         if len(name_candidates) == 1:
             rows.append(
                 _mapping_row(
@@ -205,7 +218,26 @@ def match_customs_goods_items(
             continue
         if len(name_candidates) > 1:
             group_total = sum((_decimal(line.get("qty")) for line in name_candidates), ZERO)
-            if quantity is not None and quantity >= ZERO and group_total == quantity:
+            candidate_keys_consistent = bool(
+                candidate_sets
+                and all(
+                    {
+                        str(line.get("line_id") or "")
+                        for line in candidates_for_key
+                    }
+                    == {
+                        str(line.get("line_id") or "")
+                        for line in name_candidates
+                    }
+                    for candidates_for_key in candidate_sets
+                )
+            )
+            if (
+                candidate_keys_consistent
+                and quantity is not None
+                and quantity >= ZERO
+                and group_total == quantity
+            ):
                 for line in name_candidates:
                     allocated_quantity = _decimal(line.get("qty"))
                     rows.append(
@@ -233,7 +265,11 @@ def match_customs_goods_items(
                     quantity,
                     "ambiguous",
                     "Неоднозначно",
-                    "точное source name совпало с несколькими SKU, но контроль количества группы не сошёлся",
+                    (
+                        "точные source model/name дали противоречивые строки заказа"
+                        if not candidate_keys_consistent
+                        else "точное source model/name совпало с несколькими SKU, но контроль количества группы не сошёлся"
+                    ),
                     barcode,
                 )
             )
