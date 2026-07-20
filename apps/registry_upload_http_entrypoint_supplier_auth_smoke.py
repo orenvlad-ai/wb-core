@@ -237,6 +237,10 @@ def main() -> None:
                     "Соответствие цены",
                     "Комиссия банка",
                     "Курс CNY",
+                    "Распределение расходов",
+                    "Скачать пакет для бухгалтерии",
+                    "operator:registry-columns",
+                    "package-receipt",
                     ">Документы<",
                 )
                 if any(token in supplier_page for token in forbidden_supplier_markup):
@@ -395,6 +399,8 @@ def main() -> None:
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents",
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents/archive.zip",
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents/logistics-package.zip",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents/accounting-package.zip",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/unknown-order/documents/accounting-package.zip",
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents",
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents/known-document",
                     f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents/known-document/file",
