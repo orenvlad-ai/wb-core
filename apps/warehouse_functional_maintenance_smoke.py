@@ -27,10 +27,16 @@ from packages.application.warehouse_functional_maintenance import (
 
 
 class FakeSystemd:
-    def __init__(self, *, service_active_reads: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        service_active_reads: int = 0,
+        service_terminal_state: str = "inactive",
+    ) -> None:
         self.enabled = "enabled"
         self.timer_active = "active"
         self.service_active_reads = service_active_reads
+        self.service_terminal_state = service_terminal_state
         self.mutations: list[tuple[str, str]] = []
         self.timer_digest = "sha256:timer"
         self.service_digest = "sha256:service"
@@ -44,7 +50,7 @@ class FakeSystemd:
             if self.service_active_reads > 0:
                 self.service_active_reads -= 1
                 return "active"
-            return "inactive"
+            return self.service_terminal_state
         raise AssertionError((action, unit))
 
     def properties(self, unit: str, names: Sequence[str]) -> dict[str, str]:
@@ -58,9 +64,9 @@ class FakeSystemd:
             }
         return {
             "LoadState": "loaded",
-            "ActiveState": "inactive" if self.service_active_reads == 0 else "active",
-            "Result": "success",
-            "ExecMainStatus": "0",
+            "ActiveState": self.service_terminal_state if self.service_active_reads == 0 else "active",
+            "Result": "exit-code" if self.service_terminal_state == "failed" else "success",
+            "ExecMainStatus": "1" if self.service_terminal_state == "failed" else "0",
         }
 
     def cat_digest(self, unit: str) -> str:
@@ -164,6 +170,28 @@ def _assert_finance_process_blocks_hold() -> None:
         else:
             raise AssertionError("Finance apply must block maintenance hold")
         assert systemd.mutations == []
+
+
+def _assert_failed_oneshot_is_quiescent_evidence() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd(service_terminal_state="failed")
+        before = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
+        assert before["units"]["service"]["is_active"] == "failed"
+        assert before["units"]["service"]["quiescent"] is True
+        assert before["units"]["service"]["properties"]["Result"] == "exit-code"
+        held = maintenance_hold(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            wait_timeout_seconds=0,
+        )
+        assert held["status"] == "held"
+        assert held["units"]["service"]["is_active"] == "failed"
+        assert held["units"]["service"]["quiescent"] is True
 
 
 def _assert_timed_out_hold_preserves_original_baseline() -> None:
@@ -293,6 +321,7 @@ def _assert_finance_apply_holds_shared_lock() -> None:
 def main() -> int:
     _assert_maintenance_lifecycle()
     _assert_finance_process_blocks_hold()
+    _assert_failed_oneshot_is_quiescent_evidence()
     _assert_timed_out_hold_preserves_original_baseline()
     _assert_finance_apply_holds_shared_lock()
     print("warehouse functional maintenance smoke: ok")

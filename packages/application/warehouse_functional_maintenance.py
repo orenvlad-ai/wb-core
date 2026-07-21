@@ -26,6 +26,7 @@ WAREHOUSE_FUNCTIONAL_MAINTENANCE_AUDIT_FILENAME = (
     ".warehouse-functional-maintenance-audit.jsonl"
 )
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
+SERVICE_QUIESCENT_STATES = frozenset({"inactive", "failed"})
 
 
 def _utc_now() -> str:
@@ -94,6 +95,12 @@ class SystemdClient:
             )
 
 
+def warehouse_functional_service_is_quiescent(active_state: str) -> bool:
+    """A failed oneshot is terminal evidence, not a process still executing."""
+
+    return str(active_state or "") in SERVICE_QUIESCENT_STATES
+
+
 def _unit_snapshot(client: SystemdClient) -> dict[str, Any]:
     timer_properties = client.properties(
         WAREHOUSE_FUNCTIONAL_TIMER_UNIT,
@@ -120,6 +127,9 @@ def _unit_snapshot(client: SystemdClient) -> dict[str, Any]:
             "InactiveEnterTimestamp",
         ),
     )
+    service_active = client.scalar(
+        "is-active", WAREHOUSE_FUNCTIONAL_SERVICE_UNIT
+    )
     return {
         "captured_at": _utc_now(),
         "timer": {
@@ -135,9 +145,8 @@ def _unit_snapshot(client: SystemdClient) -> dict[str, Any]:
         },
         "service": {
             "unit": WAREHOUSE_FUNCTIONAL_SERVICE_UNIT,
-            "is_active": client.scalar(
-                "is-active", WAREHOUSE_FUNCTIONAL_SERVICE_UNIT
-            ),
+            "is_active": service_active,
+            "quiescent": warehouse_functional_service_is_quiescent(service_active),
             "properties": service_properties,
             "unit_digest": client.cat_digest(WAREHOUSE_FUNCTIONAL_SERVICE_UNIT),
         },
@@ -288,7 +297,7 @@ def maintenance_hold(
             == recorded_timer.get("is_enabled")
             and current["units"]["timer"]["unit_digest"]
             == recorded_timer.get("unit_digest")
-            and current["units"]["service"]["is_active"] == "inactive"
+            and current["units"]["service"]["quiescent"] is True
             and current["units"]["service"]["unit_digest"]
             == recorded_service.get("unit_digest")
             and not current["warehouse_lock"]["held"]
@@ -325,7 +334,7 @@ def maintenance_hold(
     deadline = time.monotonic() + wait_timeout_seconds
     while True:
         current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
-        service_done = current["units"]["service"]["is_active"] == "inactive"
+        service_done = current["units"]["service"]["quiescent"] is True
         lock_free = not current["warehouse_lock"]["held"]
         if service_done and lock_free:
             break
@@ -388,7 +397,7 @@ def maintenance_restore(
         raise RuntimeError("Finance canonical apply is still running")
     if current["warehouse_lock"]["held"]:
         raise RuntimeError("warehouse functional shared lock is still held")
-    if current["units"]["service"]["is_active"] != "inactive":
+    if current["units"]["service"]["quiescent"] is not True:
         raise RuntimeError("warehouse functional service is still active")
 
     baseline_units = (state.get("baseline") or {}).get("units") or {}
