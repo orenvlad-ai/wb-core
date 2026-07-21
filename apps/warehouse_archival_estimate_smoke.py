@@ -338,7 +338,7 @@ def _seed(path: Path, manifest: dict) -> None:
             nm_id = int(item["nm_id"])
             conn.execute(
                 "INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(?,?,?,NULL)",
-                (nm_id, item["vendor_code"], item["name"]),
+                (nm_id, item["vendor_code"], item["canonical_nomenclature_name"]),
             )
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_opening_cost_map(
@@ -425,6 +425,18 @@ def _assert_plan(plan: dict, manifest: dict) -> None:
         raise AssertionError("production dry-run evidence was not pinned")
     if set(plan["target_nm_ids"]) & set(manifest["active_vitrina_nm_ids"]):
         raise AssertionError("18 legacy targets overlap the 33 active SKU")
+    proof = plan["nomenclature_identity_proof"]
+    if len(proof) != 18 or any(
+        not row["matches"]
+        or row["expected_vendor_code"] != row["actual_vendor_code"]
+        or row["expected_nomenclature_name"] != row["actual_nomenclature_name"]
+        for row in proof
+    ):
+        raise AssertionError(f"canonical nomenclature identity proof failed: {proof}")
+    if not any(
+        row["descriptive_name"] != row["actual_nomenclature_name"] for row in proof
+    ):
+        raise AssertionError("fixture did not distinguish description from canonical name")
 
 
 def _assert_factual_daily_layer_blocks_plan(
@@ -506,11 +518,26 @@ def _assert_duplicate_nomenclature_blocks_plan(
     }
     if blocked["status"] != "blocked" or not {
         "nomenclature_target_ambiguous",
+        "nomenclature_identity_drift",
         "target_now_has_factual_purchase_price",
     }.issubset(blocker_codes):
         raise AssertionError(
             f"duplicate/factual nomenclature evidence was ignored: {blocked}"
         )
+    identity_drift = next(
+        item
+        for item in blocked["blockers"]
+        if item.get("code") == "nomenclature_identity_drift"
+        and item.get("nm_id") == nm_id
+    )
+    if (
+        identity_drift["expected_vendor_code"] != target["vendor_code"]
+        or identity_drift["expected_nomenclature_name"]
+        != target["canonical_nomenclature_name"]
+        or identity_drift["actual_vendor_code"] != "conflicting"
+        or identity_drift["actual_nomenclature_name"] != "Conflicting factual row"
+    ):
+        raise AssertionError(f"identity drift evidence is incomplete: {identity_drift}")
     with _connection(runtime.db_path) as conn:
         conn.execute(
             """DELETE FROM sheet_vitrina_v1_nomenclature_items
