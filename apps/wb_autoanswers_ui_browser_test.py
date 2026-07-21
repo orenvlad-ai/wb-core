@@ -162,7 +162,10 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 page.locator("[data-autoanswers-open]").click()
                 dialog = page.locator("[data-autoanswers-detail-dialog][open]")
                 dialog.wait_for()
-                technical = dialog.locator(".autoanswers-technical")
+                self.assertEqual(page.locator(".autoanswers-technical").count(), 2)
+                self.assertEqual(page.locator("[data-autoanswers-limits]").count(), 1)
+                technical = dialog.locator("[data-autoanswers-detail-technical]")
+                self.assertEqual(technical.count(), 1)
                 self.assertFalse(technical.evaluate("node => node.open"))
                 visible = dialog.locator("[data-autoanswers-detail-body]").inner_text()
                 for marker in ("Товар", "Фото и видео покупателя", "Ответ Wildberries", "Готовый ответ", "Статус"):

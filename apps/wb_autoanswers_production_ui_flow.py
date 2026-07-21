@@ -354,7 +354,8 @@ def run_autoanswers_ui_flow(
             detail_text = detail_body.inner_text()
             for marker in ("Товар", "Ответ Wildberries", "Статус", "Техническая информация"):
                 _assert(marker in detail_text, f"detail drawer misses {marker}")
-            technical = page.locator(".autoanswers-technical")
+            technical = page.locator("[data-autoanswers-detail-technical]")
+            _assert(technical.count() == 1, "detail must expose exactly one technical information spoiler")
             _assert(not technical.evaluate("node => node.open"), "technical information must be closed by default")
             for technical_marker in ("Route:", "JSON contract", "Hard gates", "Audit trail"):
                 _assert(technical_marker not in detail_text, f"closed detail leaked {technical_marker}")
