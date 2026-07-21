@@ -23,6 +23,12 @@ from packages.application.calculation_parameters import CalculationParametersBlo
 from packages.application.canonical_cost_engine import CanonicalCostEngine
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.stocks_block import StocksBlock
+from packages.application.warehouse_archival_estimate import (
+    QUALITY as BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
+    ensure_archival_estimate_schema,
+    overlay_opening_cost_rows,
+)
+from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 from packages.application.warehouse_stocks import (
     INACTIVE_SUPPLIER_STATUSES,
     WB_FINAL_ACCEPTED_STATUS_ID,
@@ -144,6 +150,10 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
     "fallback_average": (
         "Оценка по зафиксированной средней",
         "Применена зафиксированная при cutover оценка с явным provenance.",
+    ),
+    "business_approved_archival_estimate": (
+        "Утверждённая архивная оценка",
+        "Владелец утвердил ретроспективную себестоимость для точного архивного manifest; новые фактические поступления заменят оценочную базу обычной WAC.",
     ),
     "direct_24_06": (
         "Зафиксировано по приёмке 24.06",
@@ -2990,6 +3000,22 @@ class WarehouseFunctionalBlock:
         confirm_fingerprint: str,
         backup_dir: Path | None = None,
     ) -> dict[str, Any]:
+        """Publish at the common serialized boundary used by every caller."""
+
+        with warehouse_functional_write_lock(self.runtime.runtime_dir):
+            return self._apply_plan_locked(
+                plan,
+                confirm_fingerprint=confirm_fingerprint,
+                backup_dir=backup_dir,
+            )
+
+    def _apply_plan_locked(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        confirm_fingerprint: str,
+        backup_dir: Path | None = None,
+    ) -> dict[str, Any]:
         normalized = _clone(plan)
         fingerprint = str(normalized.get("plan_fingerprint") or "")
         if not fingerprint or fingerprint != str(confirm_fingerprint or ""):
@@ -3431,6 +3457,18 @@ class WarehouseFunctionalBlock:
         confirm_fingerprint: str,
         backup_dir: Path,
     ) -> dict[str, Any]:
+        with warehouse_functional_write_lock(self.runtime.runtime_dir):
+            return self._rollback_functional_cutover_locked(
+                confirm_fingerprint=confirm_fingerprint,
+                backup_dir=backup_dir,
+            )
+
+    def _rollback_functional_cutover_locked(
+        self,
+        *,
+        confirm_fingerprint: str,
+        backup_dir: Path,
+    ) -> dict[str, Any]:
         """Remove only derived functional state after exact confirmation.
 
         Primary supplier, CNY, FF and WB records are never touched.  A coherent
@@ -3442,6 +3480,17 @@ class WarehouseFunctionalBlock:
             return {"status": "not_initialized", "idempotent": True}
         if str(cutover["plan_fingerprint"]) != str(confirm_fingerprint or ""):
             raise WarehouseFunctionalError("functional rollback fingerprint mismatch")
+        with _connect(self.runtime.db_path) as conn:
+            ensure_warehouse_functional_schema(conn)
+            archival_active = conn.execute(
+                """SELECT version_id
+                   FROM sheet_vitrina_v1_warehouse_archival_estimate_active
+                   WHERE slot=1"""
+            ).fetchone()
+        if archival_active is not None:
+            raise WarehouseFunctionalError(
+                "active archival estimate must be rolled back before functional cutover rollback"
+            )
         destination_dir = Path(backup_dir)
         if not destination_dir.is_absolute():
             raise WarehouseFunctionalError("absolute backup_dir is required for rollback")
@@ -4958,17 +5007,27 @@ class WarehouseFunctionalBlock:
 
     def _load_opening_cost_map(self) -> dict[int, CostSeed]:
         with _connect(self.runtime.db_path) as conn:
-            rows = conn.execute(
+            raw_rows = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_warehouse_opening_cost_map WHERE cutover_id=? ORDER BY nm_id",
                 (FUNCTIONAL_CUTOVER_ID,),
             ).fetchall()
+            rows = overlay_opening_cost_rows(
+                conn,
+                (
+                    {
+                        **dict(row),
+                        "provenance": _loads(row["provenance_json"], {}),
+                    }
+                    for row in raw_rows
+                ),
+            )
         return {
             int(row["nm_id"]): CostSeed(
                 nm_id=int(row["nm_id"]),
                 ff_unit_cost=_decimal(row["ff_unit_cost_rub"]),
                 wb_unit_cost=_decimal(row["wb_unit_cost_rub"]),
                 quality=str(row["quality"]),
-                provenance=_loads(row["provenance_json"], {}),
+                provenance=dict(row.get("provenance") or {}),
             )
             for row in rows
         }
@@ -5007,6 +5066,13 @@ class WarehouseFunctionalBlock:
             }
             for item in opening_cost_rows
             if int(item.get("nm_id") or 0) > 0
+        }
+        estimate_seed_wac = {
+            int(item["nm_id"]): _decimal(item["wb_unit_cost_rub"])
+            for item in opening_cost_rows
+            if int(item.get("nm_id") or 0) > 0
+            and str(item.get("quality") or "")
+            == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
         }
         candidate_quantities = _wb_snapshot_quantities(candidate_snapshot.get("items") or [])
         candidate_wac = {
@@ -5155,7 +5221,17 @@ class WarehouseFunctionalBlock:
             nm_id: opening_quantity.get(nm_id, ZERO) for nm_id in target_nm_ids
         }
         previous_wac = {
-            nm_id: opening_wac.get(nm_id) or seed_wac.get(nm_id)
+            nm_id: estimate_seed_wac.get(nm_id)
+            or opening_wac.get(nm_id)
+            or seed_wac.get(nm_id)
+            for nm_id in target_nm_ids
+        }
+        previous_quality = {
+            nm_id: (
+                BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
+                if nm_id in estimate_seed_wac
+                else ""
+            )
             for nm_id in target_nm_ids
         }
         result: list[dict[str, Any]] = []
@@ -5191,6 +5267,7 @@ class WarehouseFunctionalBlock:
                                 f"daily WB replay loses positive capital for {day}:{nm_id}"
                             )
                         prior_wac = rolled_capital / rolled_qty
+                    previous_quality[nm_id] = "periodic_snapshot_wac_closed"
                 quantity = (
                     snapshot["quantities"].get(nm_id, ZERO)
                     if snapshot is not None
@@ -5203,7 +5280,10 @@ class WarehouseFunctionalBlock:
                         )
                     continue
                 quality = (
-                    "periodic_snapshot_wac_provisional"
+                    BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
+                    if previous_quality.get(nm_id)
+                    == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
+                    else "periodic_snapshot_wac_provisional"
                     if day == current_date
                     else "periodic_snapshot_wac_closed"
                 )
@@ -5230,6 +5310,7 @@ class WarehouseFunctionalBlock:
                 )
                 previous_quantity[nm_id] = quantity
                 previous_wac[nm_id] = prior_wac
+                previous_quality[nm_id] = quality
         return result
 
     def _active_version_id(self, *, connection: sqlite3.Connection | None = None) -> str:
@@ -5715,6 +5796,8 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
             capital_rub TEXT NOT NULL,provenance_json TEXT NOT NULL,created_at TEXT NOT NULL,
             UNIQUE(event_type,source_fingerprint,nm_id)
         );
+        CREATE INDEX IF NOT EXISTS warehouse_functional_event_cost_lookup
+        ON sheet_vitrina_v1_warehouse_functional_events(event_type,nm_id,business_date);
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_functional_documents(
             document_id TEXT PRIMARY KEY,version_id TEXT NOT NULL,warehouse_key TEXT NOT NULL,
             document_type TEXT NOT NULL,occurred_at TEXT NOT NULL,source_id TEXT NOT NULL,
@@ -5744,6 +5827,7 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ensure_archival_estimate_schema(conn)
 
 
 def _source_rows(
@@ -5773,6 +5857,9 @@ def _source_rows(
         "sheet_vitrina_v1_canonical_cost_daily_state",
         "sheet_vitrina_v1_supplier_ff_cost_layer_lines",
         "sheet_vitrina_v1_nomenclature_items",
+        "sheet_vitrina_v1_warehouse_archival_estimate_versions",
+        "sheet_vitrina_v1_warehouse_archival_estimate_rows",
+        "sheet_vitrina_v1_warehouse_archival_estimate_active",
     }
     missing = sorted(required - tables)
     if missing:
@@ -5819,6 +5906,7 @@ def _source_rows(
         "nomenclature_purchase_prices": "SELECT item_id,nm_id,purchase_price_yuan,updated_at FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1 AND nm_id IS NOT NULL ORDER BY nm_id,item_id",
         "downstream_cost_rows": "SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id",
         "historical_wb_daily_quantities": "SELECT as_of_date,nm_id,physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE stage='WB' AND as_of_date>='2026-07-01' ORDER BY as_of_date,nm_id",
+        "archival_estimate_active": "SELECT version.version_id,version.effective_date,version.unit_cost_rub,version.quality,version.owner_approval_reference,version.manifest_digest,version.production_dry_run_plan_sha256,version.source_digest,version.plan_fingerprint,row.nm_id,row.unit_cost_rub row_unit_cost_rub,row.quality row_quality,row.lineage_json,row.row_fingerprint FROM sheet_vitrina_v1_warehouse_archival_estimate_active active JOIN sheet_vitrina_v1_warehouse_archival_estimate_versions version ON version.version_id=active.version_id JOIN sheet_vitrina_v1_warehouse_archival_estimate_rows row ON row.version_id=version.version_id WHERE active.slot=1 ORDER BY row.nm_id",
     }
     if "sheet_vitrina_v1_cny_documents" in tables:
         queries["cny_documents"] = (
@@ -6013,7 +6101,7 @@ def _frozen_pre_cutover_wb_cost_projection(
 def _frozen_opening_cost_map_rows(
     conn: sqlite3.Connection,
 ) -> list[dict[str, Any]]:
-    return [
+    rows = [
         {
             **dict(row),
             "provenance": _loads(row["provenance_json"], {}),
@@ -6026,6 +6114,7 @@ def _frozen_opening_cost_map_rows(
             (FUNCTIONAL_CUTOVER_ID,),
         ).fetchall()
     ]
+    return overlay_opening_cost_rows(conn, rows)
 
 
 def _merge_historical_wb_quantity_evidence(

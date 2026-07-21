@@ -161,7 +161,7 @@ def _assert_streaming_digest_equivalence() -> None:
     expected_cost = hashlib.sha256(
         json.dumps(
             {
-                "formula_version": "wb_finance_canonical_our_wb_cost_v2",
+                "formula_version": "wb_finance_canonical_our_wb_cost_v3",
                 "dependencies": dependencies,
             },
             ensure_ascii=False,

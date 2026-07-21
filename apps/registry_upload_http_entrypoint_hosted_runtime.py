@@ -2412,6 +2412,149 @@ def _run_remote_finance_canonical_action(
     return payload
 
 
+def run_warehouse_archival_estimate_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.warehouse_archival_estimate_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("archival estimate reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_warehouse_archival_estimate_action(
+        target,
+        action=action,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        reason=str(getattr(args, "reason", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if action == "dry-run" and output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("archival estimate evidence must stay outside the Git checkout")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        output_path.chmod(0o600)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_warehouse_archival_estimate_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    reason: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"warehouse-archival-estimate-{action}",
+    )
+    if action in {"apply", "rollback"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"warehouse-archival-estimate-{action}",
+            dry_run=False,
+        )
+    if action not in {"dry-run", "apply", "readback", "rollback"}:
+        raise ValueError(f"unsupported archival estimate action: {action}")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("archival estimate runner requires the canonical active runtime dir")
+    runner_args = [
+        "python3",
+        "apps/warehouse_archival_estimate.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    stdin_text: str | None = None
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("archival estimate apply requires --plan-file")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("plan_fingerprint") or "") != fingerprint
+            or str(plan.get("contract_name") or "")
+            != "warehouse_business_approved_archival_estimate"
+            or not bool(plan.get("apply_allowed"))
+        ):
+            raise ValueError("archival estimate reviewed plan is not ready for apply")
+        if not approval_reference.strip():
+            raise ValueError("archival estimate apply requires --approval-reference")
+        stdin_text = json.dumps(plan, ensure_ascii=False, sort_keys=True)
+        runner_args.extend(
+            [
+                "--plan-file",
+                "/dev/stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-archival-estimate",
+            ]
+        )
+    elif action == "rollback":
+        if not fingerprint or not reason.strip():
+            raise ValueError("archival estimate rollback requires fingerprint and reason")
+        runner_args.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--reason",
+                reason.strip(),
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-archival-estimate",
+            ]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        input=stdin_text,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=(
+            WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS
+            if action in {"apply", "rollback"}
+            else FINANCE_CANONICAL_READ_TIMEOUT_SECONDS
+        ),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"archival estimate {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("archival estimate runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("archival estimate runner returned a non-object JSON payload")
+    return payload
+
+
 def _run_remote_warehouse_functional_action(
     target: HostedRuntimeTarget,
     *,
@@ -2997,6 +3140,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_canonical_readback.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="readback",
+    )
+
+    archival_estimate_dry_run = subparsers.add_parser(
+        "warehouse-archival-estimate-dry-run",
+        help="Build the exact read-only 18-SKU archival estimate correction plan.",
+    )
+    archival_estimate_dry_run.add_argument("--output", default="")
+    archival_estimate_dry_run.set_defaults(
+        handler=run_warehouse_archival_estimate_command,
+        warehouse_archival_estimate_action="dry-run",
+    )
+
+    archival_estimate_apply = subparsers.add_parser(
+        "warehouse-archival-estimate-apply",
+        help="Apply one exact reviewed archival estimate correction plan.",
+    )
+    archival_estimate_apply.add_argument("--plan-file", required=True)
+    archival_estimate_apply.add_argument("--fingerprint", required=True)
+    archival_estimate_apply.add_argument("--approval-reference", required=True)
+    archival_estimate_apply.set_defaults(
+        handler=run_warehouse_archival_estimate_command,
+        warehouse_archival_estimate_action="apply",
+    )
+
+    archival_estimate_readback = subparsers.add_parser(
+        "warehouse-archival-estimate-readback",
+        help="Read back the active exact-target archival estimate version.",
+    )
+    archival_estimate_readback.set_defaults(
+        handler=run_warehouse_archival_estimate_command,
+        warehouse_archival_estimate_action="readback",
+    )
+
+    archival_estimate_rollback = subparsers.add_parser(
+        "warehouse-archival-estimate-rollback",
+        help="Restore exact pre-apply derived rows while preserving version audit.",
+    )
+    archival_estimate_rollback.add_argument("--fingerprint", required=True)
+    archival_estimate_rollback.add_argument("--reason", required=True)
+    archival_estimate_rollback.set_defaults(
+        handler=run_warehouse_archival_estimate_command,
+        warehouse_archival_estimate_action="rollback",
     )
 
     warehouse_dry_run = subparsers.add_parser(

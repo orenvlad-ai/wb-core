@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V2`
+`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V3`
 
 ## Purpose and source boundary
 
@@ -27,7 +27,7 @@ The per-SKU projection stores metrics, source digest, weekly raw content hash, c
 
 ## Single canonical COGS contract
 
-Formula version is `wb_finance_canonical_our_wb_cost_v2`. Finance calls the shared warehouse-domain resolver and does not reproduce warehouse cost-engine rules.
+Formula version is `wb_finance_canonical_our_wb_cost_v3`. Finance calls the shared warehouse-domain resolver and does not reproduce warehouse cost-engine rules.
 
 For each sale/return operation of the same deterministically resolved `nmId`:
 
@@ -37,9 +37,9 @@ For each sale/return operation of the same deterministically resolved `nmId`:
 - `2026-06-30` therefore uses the 01.07 row, while `2026-07-01` uses the exact 01.07 row;
 - sale quantity adds COGS; return quantity subtracts COGS using the same operation-date policy. Sale-return linkage is intentionally not required.
 
-The resolver accepts only the posted functional contour and `sheet_vitrina_v1_warehouse_wb_daily_cost`. Missing/non-positive cost and qualities `fallback`, `fallback_average` or `zero_quantity_without_cost_basis` are explicit blockers. Cross-SKU guesses, similar-item cost, all-SKU averages, legacy `COST_PRICE`, mutable current cost and silent zero are prohibited.
+The resolver accepts the posted functional daily contour and the warehouse-domain active versioned archival estimate source from migration 109. The latter is limited to its exact 18-SKU manifest, quality `business_approved_archival_estimate`, 100 ₽ and effective date 01.07.2026; it is not a Finance fallback or an ID branch. Missing/non-positive cost and qualities `fallback`, `fallback_average` or `zero_quantity_without_cost_basis` remain explicit blockers. Cross-SKU guesses, similar-item cost, all-SKU averages, legacy `COST_PRICE`, mutable current cost and silent zero are prohibited.
 
-Lineage contains operation date, canonical source date/identity/version/digest, quality, selection method and formula version. Before 01.07 the UI/tooltips describe the value as a retrospective management projection, not factual historical warehouse capital. A canonical source correction changes the digest and invalidates/rebuilds affected Finance projections automatically.
+Lineage contains operation date, canonical source date/identity/version/digest, quality, selection method and formula version. Archival-estimate lineage additionally pins owner approval, effective date, 100 ₽, target manifest, production dry-run source SHA, source digest and calculation/row fingerprints. Before 01.07 the UI/tooltips describe the value as a retrospective management projection, not factual historical warehouse capital. A canonical source correction changes the digest and invalidates/rebuilds affected Finance projections automatically.
 
 Coverage counts gross sale/return units, so a symmetric sale/return pair cannot hide missing cost even if net COGS is zero. Fully covered weeks become calculated; a real gap lists exact `nmId`, operation date, canonical source date and reason. Repeated missing operations are losslessly collapsed by `week + nmId + operation date + reason`: the evidence retains operation count, separate sale/return quantities, gross unmatched units and signed net units, while per-row report/rrd dependencies remain bound by the cost-state hash. The plan therefore does not duplicate one blocker/matrix row per raw operation.
 
