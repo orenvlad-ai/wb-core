@@ -34,6 +34,22 @@ def main() -> int:
             )
             conn.commit()
         source_sha = _sha256(source.read_bytes())
+        source_link = backup_dir / "linked-source.sqlite3"
+        source_link.symlink_to(source)
+        try:
+            run(_args(source_link))
+        except ValueError as exc:
+            _assert("must not be symlinks" in str(exc), "source symlink rejected")
+        else:
+            raise AssertionError("source symlink unexpectedly accepted")
+        archive_link = backup_dir / "linked-archive.sqlite3.zst"
+        archive_link.symlink_to(source)
+        try:
+            run(_args(source, archive=archive_link))
+        except ValueError as exc:
+            _assert("must not be symlinks" in str(exc), "archive symlink rejected")
+        else:
+            raise AssertionError("archive symlink unexpectedly accepted")
         dry = run(_args(source))
         _assert(dry["status"] == "ready", "dry-run ready")
         _assert(dry["source_integrity_check"] == "ok", "source integrity")
@@ -92,8 +108,19 @@ def main() -> int:
     return 0
 
 
-def _args(source: Path, *, apply: bool = False, fingerprint: str = "") -> Namespace:
-    return Namespace(source=str(source), archive=None, apply=apply, fingerprint=fingerprint)
+def _args(
+    source: Path,
+    *,
+    archive: Path | None = None,
+    apply: bool = False,
+    fingerprint: str = "",
+) -> Namespace:
+    return Namespace(
+        source=str(source),
+        archive=str(archive) if archive is not None else None,
+        apply=apply,
+        fingerprint=fingerprint,
+    )
 
 
 def _sha256(value: bytes) -> str:

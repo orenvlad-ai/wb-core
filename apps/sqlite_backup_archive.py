@@ -30,8 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_plan(*, source: Path, archive: Path | None = None) -> dict[str, Any]:
-    source = source.expanduser().resolve()
-    archive = (archive or Path(str(source) + ARCHIVE_SUFFIX)).expanduser().resolve()
+    source_input = source.expanduser()
+    archive_input = (archive or Path(str(source_input) + ARCHIVE_SUFFIX)).expanduser()
+    if source_input.is_symlink() or archive_input.is_symlink():
+        raise ValueError("SQLite backup source and archive paths must not be symlinks")
+    source = source_input.resolve()
+    archive = archive_input.resolve()
     _validate_paths(source, archive)
     zstd = shutil.which("zstd")
     if not zstd:
