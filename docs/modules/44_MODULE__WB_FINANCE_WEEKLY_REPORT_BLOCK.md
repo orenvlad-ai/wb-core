@@ -65,6 +65,8 @@ Official `additionalPayment` / XLSX `Корректировка Вознагра
 
 Paid acceptance/transit addback is allowed only when exact Finance `giId/supplyId + canonical nmId` matches a current canonical supply cost layer with a source fingerprint. Each layer's acceptance/transit cap is allocated deterministically in Finance-operation chronology across the entire loaded history, not reset per week. The aggregate addback can therefore never exceed the layer's current capitalized amount. Unmatched, later-after-cap, or excess Finance amount stays in period expenses and is disclosed in technical lineage. A canonical layer manifest participates in the calculation fingerprint, so a corrected layer forces rebuild/dry-run drift detection. This prevents both blanket addback and double capitalization.
 
+Global capitalization allocations are built once for the coherent SQLite connection used by one plan/apply/readback pass and then reused by the global and every per-SKU aggregate. A new connection always rebuilds the raw/supply-layer manifest and allocations, so a later Finance sync or canonical layer correction invalidates the cache. This avoids the accidental `weeks × SKUs × all cost layers` re-hashing path without weakening source drift detection.
+
 The existing stale-derived hook now checks every loaded week, including the backward historical projection. It compares canonical cost state, classifier version and the complete deterministic metrics payload, so both a corrected 01.07 cost and a corrected supply-layer cap invalidate every affected historical projection instead of only post-cutover COGS.
 
 ```text
@@ -102,7 +104,7 @@ Dry-run is default and read-only. With no date bounds it covers all loaded Finan
 - target/non-target digests, write set, blockers, backup/recovery plan and exact fingerprint;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
-The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Per-operation cost details are released after their week is collapsed into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows, including roughly 148k rows for a deliberately missing canonical-cost SKU, and fails on row/quantity loss, duplicated gap evidence, excessive runtime or excessive peak RSS.
+The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Per-operation cost details are released after their week is collapsed into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows, including roughly 148k rows for a deliberately missing canonical-cost SKU and a 50,000-row supply cost-layer manifest, and fails on row/quantity/layer loss, duplicated gap evidence, excessive runtime or excessive peak RSS.
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 

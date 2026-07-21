@@ -26,6 +26,7 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
 
 RAW_ROW_COUNT = 295_919
 WEEK_COUNT = 26
+COST_LAYER_ROW_COUNT = 50_000
 MAX_SECONDS = 60.0
 MAX_RSS_MIB = 512.0
 
@@ -54,6 +55,11 @@ def main() -> None:
             raise AssertionError(f"all-history week scope mismatch: {plan['week_count']}")
         if plan["source_manifests"]["finance"]["row_count"] != RAW_ROW_COUNT:
             raise AssertionError("streamed Finance manifest lost rows")
+        if (
+            plan["non_target_manifest"]["supply_cost_layers"]["row_count"]
+            != COST_LAYER_ROW_COUNT
+        ):
+            raise AssertionError("large capitalization-layer manifest was not covered")
         if not str(plan["source_manifests"]["finance"]["digest"]).startswith("sha256:"):
             raise AssertionError("streamed Finance manifest digest is absent")
         if (
@@ -198,6 +204,19 @@ def _seed_required_sources(db_path: Path) -> None:
                 'warehouse_functional_cutover_v1','2026-07-01',101,'10','100','1000',
                 'certified','{}','sha256:scale-cost','2026-07-01T00:00:00Z'
             );
+            CREATE TABLE sheet_vitrina_v1_wb_supply_cost_layers(
+                wb_supply_cost_layer_id TEXT PRIMARY KEY,wb_supply_id TEXT,nm_id TEXT,
+                transit_cost_status TEXT,transit_amount_total TEXT,
+                wb_acceptance_amount_total TEXT,inputs_hash TEXT,version INTEGER,
+                is_current INTEGER
+            );
+            WITH RECURSIVE seq(n) AS (
+                SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<50000
+            )
+            INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers
+            SELECT 'layer-' || n,'supply-' || n,CAST(100000+n AS TEXT),'confirmed',
+                   '0','0','sha256:layer-' || n,1,1
+            FROM seq;
             """
         )
         conn.commit()
