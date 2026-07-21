@@ -40,7 +40,7 @@ from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
-from packages.contracts.wb_autoanswers import AUTOANSWER_MODES
+from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -1314,7 +1314,7 @@ class RegistryUploadHttpEntrypoint:
         )
         return {
             "contract_name": "sheet_vitrina_v1_feedbacks_local",
-            "contract_version": "v1",
+            "contract_version": AUTOANSWERS_CONTRACT_VERSION,
             **payload,
         }
 
@@ -1324,7 +1324,7 @@ class RegistryUploadHttpEntrypoint:
             raise KeyError("feedback_not_found")
         return {
             "contract_name": "sheet_vitrina_v1_feedback_detail",
-            "contract_version": "v1",
+            "contract_version": AUTOANSWERS_CONTRACT_VERSION,
             "feedback": payload,
         }
 
@@ -1332,7 +1332,7 @@ class RegistryUploadHttpEntrypoint:
         settings = self.autoanswers_repository.settings()
         return {
             "contract_name": "sheet_vitrina_v1_feedback_autoanswers_settings",
-            "contract_version": "v1",
+            "contract_version": AUTOANSWERS_CONTRACT_VERSION,
             "settings": asdict(settings),
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",

@@ -61,6 +61,16 @@ class PublicationTest(unittest.TestCase):
         detail = self.repo.get_feedback(feedback_id)
         return stored["processing_key"], detail["publications"][0]["publication_key"]
 
+    @staticmethod
+    def empty_feedback(feedback_id: str, *, created_at: str) -> dict:
+        row = feedback(feedback_id, text="")
+        row["pros"] = ""
+        row["cons"] = ""
+        row["photoLinks"] = []
+        row["productValuation"] = 5
+        row["createdDate"] = created_at
+        return row
+
     def manual_reviewed(self, feedback_id: str = "manual", *, route: str = "public_only") -> dict:
         self.env["WB_CORE_WEB_AUTH_USERNAME"] = "reviewer"
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
@@ -133,6 +143,67 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(second_readback["state"], "published")
         self.assertEqual(len(self.transport.readbacks), 0)
         self.assertEqual(len(self.transport.write_calls), 1)
+
+    def test_legacy_rating_publication_waits_for_content_through_confirmed_readback(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(
+            self.empty_feedback("rating-ready", created_at="2026-07-21T11:00:00Z"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        rating_job = self.repo.enqueue_processing(
+            "rating-ready", trigger_source="steady_sync", actor_id="sync"
+        )
+        self.repo.claim_processing_job(worker_id="ai")
+        self.repo.complete_rating_only_template(rating_job["processing_key"], worker_id="ai")
+        legacy_publication = self.repo.get_feedback("rating-ready")["publications"][0]
+        self.assertEqual(legacy_publication["state"], "approved")
+
+        content = feedback("content-first", text="Содержательный отзыв")
+        content["createdDate"] = "2026-07-18T10:00:00Z"
+        self.repo.upsert_feedback(content, source_stream="archive", run_kind="backfill")
+        preview = self.repo.preview_mode_transition(
+            "auto_all", actor_id="admin", run_max_usd="1.00"
+        )
+        self.repo.apply_mode_transition(
+            "auto_all", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+
+        # The already-approved empty review is intentionally not claimable in
+        # the new run while content still has an automatic next step.
+        self.assertIsNone(self.repo.claim_publication_job(worker_id="publication"))
+        content_job = self.repo.claim_processing_job(worker_id="ai")
+        self.assertEqual(content_job["feedback_id"], "content-first")
+        self.repo.settle_budget(content_job["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            content_job["processing_key"], result=successful_result(), worker_id="ai"
+        )
+        content_publication = self.repo.claim_publication_job(worker_id="publication")
+        self.assertEqual(content_publication["feedback_id"], "content-first")
+        started = self.repo.begin_publication_write(
+            content_publication["publication_key"], worker_id="publication"
+        )
+        self.repo.record_publication_transport(
+            content_publication["publication_key"],
+            attempt_id=started["attempt_id"],
+            outcome="http_response",
+            http_status=204,
+            worker_id="publication",
+        )
+        readback = self.repo.claim_publication_job(worker_id="publication")
+        self.assertEqual(readback["action"], "readback")
+        self.assertEqual(readback["feedback_id"], "content-first")
+        self.repo.record_publication_readback(
+            readback["publication_key"],
+            answer_text=readback["exact_reply"],
+            worker_id="publication",
+        )
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        rating_publication = self.repo.claim_publication_job(worker_id="publication")
+        self.assertEqual(rating_publication["feedback_id"], "rating-ready")
+        self.assertEqual(rating_publication["publication_key"], legacy_publication["publication_key"])
 
     def test_off_and_emergency_force_off_block_new_write(self) -> None:
         self.approved()

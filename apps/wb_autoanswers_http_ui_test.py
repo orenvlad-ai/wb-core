@@ -151,6 +151,14 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("Ответа системы нет", html)
         self.assertIn("run_max_paid_reviews", html)
         self.assertIn("data-autoanswers-progress-bars", html)
+        self.assertIn('data-autoanswers-progress-card="all"', html)
+        self.assertIn('data-autoanswers-progress-card="content-bearing"', html)
+        self.assertIn("data-autoanswers-content-progress-bars", html)
+        self.assertIn("Отзывы с содержанием", html)
+        self.assertIn(
+            "Пустые отзывы начнут обрабатываться после завершения автоматически допустимых отзывов с содержанием.",
+            html,
+        )
         self.assertIn("data-autoanswers-stop-reason", html)
         self.assertIn("Без ответа Wildberries", html)
         self.assertIn('data-autoanswers-filter="system_answer"', html)

@@ -5193,6 +5193,8 @@ def _resolve_autoanswers_local_query(query_string: str) -> dict[str, Any]:
         "rating",
         "route",
         "status",
+        "system_answer",
+        "content_classification",
         "sku",
         "has_photo",
         "has_video",

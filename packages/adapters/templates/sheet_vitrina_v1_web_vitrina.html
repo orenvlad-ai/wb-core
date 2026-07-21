@@ -676,9 +676,14 @@
     .autoanswers-queue-metric { min-width:0; padding:8px; border-radius:8px; background:var(--control-bg); }
     .autoanswers-queue-metric span { display:block; color:var(--muted); font-size:11px; }
     .autoanswers-queue-metric strong { display:block; margin-top:3px; font-size:16px; }
-    .autoanswers-progress-row { display:grid; grid-template-columns:150px minmax(140px,1fr) 52px; gap:8px; align-items:center; margin-top:9px; font-size:12px; }
+    .autoanswers-progress-card { min-width:0; margin-top:14px; padding:14px; border:1px solid var(--border); border-radius:12px; background:var(--panel-bg); }
+    .autoanswers-progress-card.is-content { margin-top:18px; border-color:var(--accent); background:var(--control-bg); }
+    .autoanswers-progress-card h4 { margin:0; font-size:15px; }
+    .autoanswers-progress-row { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(140px,1fr) 60px; gap:8px; align-items:center; margin-top:12px; font-size:12px; min-width:0; }
     .autoanswers-progress-track { height:8px; overflow:hidden; border-radius:999px; background:var(--control-bg); }
     .autoanswers-progress-fill { height:100%; background:var(--accent); }
+    .autoanswers-progress-meta { grid-column:1/-1; color:var(--muted); overflow-wrap:anywhere; }
+    .autoanswers-rating-barrier-note { margin:12px 0 0; color:var(--muted); font-size:12px; }
     .autoanswers-stop-reason { margin:10px 0 0; color:var(--warning-text); font-size:12px; }
 
     .feedbacks-panel,
@@ -5502,13 +5507,14 @@
 	              </details>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
-	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><div data-autoanswers-progress-bars></div><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
+	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Пустые отзывы начнут обрабатываться после завершения автоматически допустимых отзывов с содержанием.</p></section><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
 	            </section>
 
 	            <section class="autoanswers-filters">
 	              <div class="autoanswers-filter-grid">
 	                <label class="research-field"><span class="filter-label">Ответ Wildberries</span><select class="select" data-autoanswers-filter="unanswered"><option value="">Все</option><option value="true">Без ответа Wildberries</option></select></label>
 	                <label class="research-field"><span class="filter-label">Ответ системы</span><select class="select" data-autoanswers-filter="system_answer"><option value="">Все</option><option value="created">Ответ создан</option><option value="missing">Ответа нет</option><option value="awaiting_generation">Ожидает генерации</option><option value="processing">Обрабатывается</option><option value="needs_review">Требует проверки</option><option value="ready_publication">Готов к публикации</option><option value="publication_queue">В очереди публикации</option><option value="published">Опубликован и подтверждён</option><option value="error">Ошибка</option></select></label>
+	                <label class="research-field"><span class="filter-label">Тип содержимого</span><select class="select" data-autoanswers-filter="content_classification"><option value="">Все</option><option value="content_bearing">С содержанием</option><option value="rating_only">Пустые с оценкой</option><option value="indeterminate">Требует классификации</option></select></label>
 	                <label class="research-field"><span class="filter-label">Статус</span><input class="input" data-autoanswers-filter="status" placeholder="needs_review"></label>
 	                <label class="research-field"><span class="filter-label">Оценка</span><select class="select" data-autoanswers-filter="rating"><option value="">Все</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
 	                <label class="research-field"><span class="filter-label">Route</span><select class="select" data-autoanswers-filter="route"><option value="">Все</option><option>public_only</option><option>seller_chat</option><option>wb_return</option><option>wb_support</option><option>rating_only_template</option></select></label>
@@ -6393,6 +6399,7 @@
     const autoanswersProgressNode = document.querySelector("[data-autoanswers-progress]");
     const autoanswersQueueMetricsNode = document.querySelector("[data-autoanswers-queue-metrics]");
     const autoanswersProgressBarsNode = document.querySelector("[data-autoanswers-progress-bars]");
+    const autoanswersContentProgressBarsNode = document.querySelector("[data-autoanswers-content-progress-bars]");
     const autoanswersStopReasonNode = document.querySelector("[data-autoanswers-stop-reason]");
     const autoanswersQueueContextNode = document.querySelector("[data-autoanswers-queue-context]");
     const autoanswersLimitsNode = document.querySelector("[data-autoanswers-limits]");
@@ -12675,7 +12682,9 @@
           ["Готовы к публикации", queue.ready_for_publication], ["Publication queue", queue.publication_queue],
           ["Readback pending", queue.readback_pending], ["Опубликованы", queue.published_confirmed],
           ["Ошибки", queue.errors], ["Осталось", queue.remaining],
-          ["Шаблоны $0", queue.zero_cost_template_jobs], ["Скорость / час", queue.throughput_last_hour]
+          ["Шаблоны $0", queue.zero_cost_template_jobs], ["Скорость / час", queue.throughput_last_hour],
+          ["С содержанием", queue.content_bearing_total], ["Пустых осталось", queue.rating_only_remaining],
+          ["Вне текущего run", queue.outside_current_run]
         ];
         autoanswersQueueMetricsNode.innerHTML = metrics.map(function(item) { return '<div class="autoanswers-queue-metric"><span>' + escapeHtml(item[0]) + '</span><strong>' + Number(item[1] || 0) + '</strong></div>'; }).join("");
       }
@@ -12691,8 +12700,40 @@
         autoanswersQueueContextNode.textContent = "Режим: " + (modeLabels[queue.effective_mode] || queue.effective_mode || "—") + " · scope с " + (scope.from || "—") + (scope.to ? (" по " + scope.to) : "") + " (" + scopeEvidence + ") · run " + (queue.transition_run_id || "не запущен") + " · " + timestamps;
       }
       if (autoanswersProgressBarsNode) {
-        const bars = [["Подготовка ответов", queue.preparation_percent], ["Публикация в Wildberries", queue.publication_percent]];
-        autoanswersProgressBarsNode.innerHTML = bars.map(function(item) { const value = Math.max(0, Math.min(100, Number(item[1] || 0))); return '<div class="autoanswers-progress-row"><span>' + escapeHtml(item[0]) + '</span><div class="autoanswers-progress-track"><div class="autoanswers-progress-fill" style="width:' + value + '%"></div></div><strong>' + value.toFixed(1) + '%</strong></div>'; }).join("");
+        const statusLabels = {paused_manual:"Приостановлено вручную",content_readback:"Проверяем публикацию содержательного отзыва",content_processing:"Обрабатывается отзыв с содержанием",content_waiting:"Ожидают отзывы с содержанием",rating_only_waiting:"Ожидают пустые отзывы",complete:"Завершено"};
+        const pauseLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",no_eligible_jobs:"Нет доступных задач"};
+        const renderProgressStage = function(label, stage, kind) {
+          const data = stage || {};
+          const done = Number(data.done || 0);
+          const total = Number(data.total || 0);
+          const remaining = Number(data.remaining || 0);
+          const percentValue = data.percent === null || data.percent === undefined ? null : Math.max(0, Math.min(100, Number(data.percent)));
+          const displayPercent = percentValue === null ? "—" : percentValue.toFixed(1) + "%";
+          const status = String(data.status || data.current_operation || queue.current_operation || "");
+          const pauseReason = String(data.pause_reason || queue.stop_reason || "no_eligible_jobs");
+          const parts = total === 0
+            ? ["Нет отзывов в этой категории"]
+            : [done + " из " + total, "осталось " + remaining];
+          parts.push("Статус: " + (statusLabels[status] || friendlyAutoanswersStatus(status)));
+          parts.push("Причина паузы: " + (pauseLabels[pauseReason] || friendlyAutoanswersStatus(pauseReason)));
+          if (kind === "content") {
+            parts.push("needs_review: " + Number(data.needs_review || 0));
+            parts.push("Текущая операция: " + (statusLabels[String(data.current_operation || status)] || friendlyAutoanswersStatus(data.current_operation || status)));
+            parts.push(data.eta_hours === null || data.eta_hours === undefined ? "ETA пока недоступно" : "ETA около " + Number(data.eta_hours).toFixed(1) + " ч.");
+            parts.push("Скорость: " + Number(data.throughput_last_hour || 0) + " отзывов/ч");
+          }
+          return '<div class="autoanswers-progress-row" data-autoanswers-progress-stage="' + escapeHtml(kind + "-" + label) + '"><span>' + escapeHtml(label) + '</span><div class="autoanswers-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (percentValue === null ? '' : ' aria-valuenow="' + percentValue + '"') + '><div class="autoanswers-progress-fill" style="width:' + Number(percentValue || 0) + '%"></div></div><strong>' + escapeHtml(displayPercent) + '</strong><div class="autoanswers-progress-meta">' + escapeHtml(parts.join(" · ")) + '</div></div>';
+        };
+        autoanswersProgressBarsNode.innerHTML = [
+          renderProgressStage("Подготовка ответов", queue.all_preparation, "all"),
+          renderProgressStage("Публикация ответов в Wildberries", queue.all_publication, "all")
+        ].join("");
+        if (autoanswersContentProgressBarsNode) {
+          autoanswersContentProgressBarsNode.innerHTML = [
+            renderProgressStage("Подготовка ответов на отзывы с содержанием", queue.content_bearing_preparation, "content"),
+            renderProgressStage("Публикация ответов на отзывы с содержанием в Wildberries", queue.content_bearing_publication, "content")
+          ].join("");
+        }
       }
       if (autoanswersStopReasonNode) {
         const stopLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена; paid processing заблокирован",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена; materialization продолжится после обработки",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",no_eligible_jobs:"Нет доступных задач"};

@@ -153,8 +153,33 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 self.assertIn(box_metrics["overflowY"], {"auto", "scroll"})
                 self.assertNotEqual(box_metrics["background"], "rgb(248, 250, 252)")
                 self.assertNotEqual(box_metrics["color"], "rgb(0, 0, 0)")
-                self.assertEqual(page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count(), 18)
+                self.assertEqual(page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count(), 21)
                 self.assertEqual(page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count(), 2)
+                self.assertEqual(page.locator("[data-autoanswers-content-progress-bars] .autoanswers-progress-row").count(), 2)
+                self.assertEqual(page.locator("[data-autoanswers-progress-card]").count(), 2)
+                all_card = page.locator('[data-autoanswers-progress-card="all"]')
+                content_card = page.locator('[data-autoanswers-progress-card="content-bearing"]')
+                self.assertIn("Все отзывы", all_card.inner_text())
+                self.assertIn("Отзывы с содержанием", content_card.inner_text())
+                self.assertIn("1 из 1", content_card.inner_text())
+                card_styles = page.evaluate(
+                    """() => {
+                      const all = document.querySelector('[data-autoanswers-progress-card="all"]');
+                      const content = document.querySelector('[data-autoanswers-progress-card="content-bearing"]');
+                      return {
+                        gap: content.getBoundingClientRect().top - all.getBoundingClientRect().bottom,
+                        allBackground: getComputedStyle(all).backgroundColor,
+                        contentBackground: getComputedStyle(content).backgroundColor,
+                        allBorder: getComputedStyle(all).borderColor,
+                        contentBorder: getComputedStyle(content).borderColor
+                      };
+                    }"""
+                )
+                self.assertGreaterEqual(card_styles["gap"], 14)
+                self.assertTrue(
+                    card_styles["allBackground"] != card_styles["contentBackground"]
+                    or card_styles["allBorder"] != card_styles["contentBorder"]
+                )
                 page.locator("[data-autoanswers-copy]").click()
                 page.get_by_role("button", name="Скопировано").wait_for()
                 self.assertEqual(answer_box.inner_text().replace("Скопировано", "Копировать"), before_text)

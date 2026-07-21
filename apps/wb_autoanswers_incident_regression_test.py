@@ -398,7 +398,7 @@ class IncidentRegressionTest(unittest.TestCase):
         )
         self.assertIsNone(self.repo.claim_processing_job(worker_id="blocked"))
 
-    def test_budget_stop_blocks_paid_materialization_but_allows_bounded_zero_cost(self) -> None:
+    def test_budget_stop_keeps_zero_cost_waiting_behind_automatic_content(self) -> None:
         self.repo.update_settings(
             master_enabled=True,
             mode="draft_only",
@@ -440,7 +440,7 @@ class IncidentRegressionTest(unittest.TestCase):
         sweep = self.repo.reconcile_policy_sweep_once(worker_id="sweep", batch_size=25)
         self.assertEqual(sweep["pause_reason"], "hourly_budget_reached")
         self.assertTrue(self.repo.get_feedback("already-ready")["publications"])
-        self.assertTrue(self.repo.get_feedback("zero-cost")["ai_jobs"])
+        self.assertFalse(self.repo.get_feedback("zero-cost")["ai_jobs"])
         self.assertFalse(self.repo.get_feedback("untouched-paid")["ai_jobs"])
 
     def test_daily_monthly_hourly_review_and_run_caps_have_exact_stop_reasons(self) -> None:
