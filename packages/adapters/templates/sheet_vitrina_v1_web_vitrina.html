@@ -617,7 +617,8 @@
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #f8fafc;
+      background: var(--control-bg);
+      color: var(--text);
       padding: 9px 62px 9px 10px;
       white-space: pre-wrap;
       line-height: 1.35;
@@ -631,8 +632,8 @@
       padding: 3px 7px;
       border: 1px solid var(--line);
       border-radius: 7px;
-      background: #fff;
-      color: var(--muted);
+      background: var(--panel-elevated);
+      color: var(--muted-strong);
       font: inherit;
       font-size: 11px;
       cursor: pointer;
@@ -670,6 +671,15 @@
     .autoanswers-technical pre { max-width:100%; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
     .autoanswers-progress { margin-top:8px; color:var(--muted); font-size:12px; }
     .autoanswers-warning { margin: 8px 0 0; color: #92400e; font-size: 12px; }
+    .autoanswers-queue-dashboard { margin-top:12px; padding:12px; border:1px solid var(--border); border-radius:12px; background:var(--panel-subtle); }
+    .autoanswers-queue-grid { display:grid; grid-template-columns:repeat(6,minmax(110px,1fr)); gap:8px; }
+    .autoanswers-queue-metric { min-width:0; padding:8px; border-radius:8px; background:var(--control-bg); }
+    .autoanswers-queue-metric span { display:block; color:var(--muted); font-size:11px; }
+    .autoanswers-queue-metric strong { display:block; margin-top:3px; font-size:16px; }
+    .autoanswers-progress-row { display:grid; grid-template-columns:150px minmax(140px,1fr) 52px; gap:8px; align-items:center; margin-top:9px; font-size:12px; }
+    .autoanswers-progress-track { height:8px; overflow:hidden; border-radius:999px; background:var(--control-bg); }
+    .autoanswers-progress-fill { height:100%; background:var(--accent); }
+    .autoanswers-stop-reason { margin:10px 0 0; color:var(--warning-text); font-size:12px; }
 
     .feedbacks-panel,
     .feedbacks-subpanel,
@@ -4972,12 +4982,15 @@
       .autoanswers-filter-grid,
       .autoanswers-detail-grid,
       .autoanswers-technical-grid,
+      .autoanswers-queue-grid,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
       }
 
       .autoanswers-answer-box { width:220px; max-width:70vw; }
+      .autoanswers-progress-row { grid-template-columns:1fr 48px; }
+      .autoanswers-progress-row > span:first-child { grid-column:1/-1; }
       .autoanswers-detail-dialog { width:calc(100vw - 16px); }
       .autoanswers-detail-body { padding:12px; }
 
@@ -5467,19 +5480,38 @@
 	                <label class="research-field"><span class="filter-label">Режим ответов</span><select class="select" data-autoanswers-mode><option value="off">Выключено</option><option value="manual">Ручной</option><option value="draft_only">Черновики</option><option value="auto_safe">Безопасный</option><option value="auto_all">Полный</option></select></label>
 	                <div class="research-field"><span class="filter-label">Расход сегодня</span><strong data-autoanswers-budget-day>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Расход за месяц</span><strong data-autoanswers-budget-month>—</strong></div>
-	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-backlog>Исторический backlog</button></div>
+	                <div class="research-field"><span class="filter-label">Расход за час</span><strong data-autoanswers-budget-hour>—</strong></div>
+	                <div class="research-field"><span class="filter-label">Активный резерв</span><strong data-autoanswers-budget-reserved>—</strong></div>
+	                <div class="research-field"><span class="filter-label">Доступно до лимитов</span><strong data-autoanswers-budget-available>—</strong></div>
+	                <div class="research-field"><span class="filter-label">Legacy без usage</span><strong data-autoanswers-budget-unverified>—</strong></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-backlog hidden disabled>Legacy backlog отключён</button></div>
 	              </div>
 	              <p class="feedbacks-source-helper" data-autoanswers-settings-note>Загружаем настройки…</p>
+	              <details class="autoanswers-technical" data-autoanswers-limits>
+	                <summary>Лимиты расхода и скорости</summary>
+	                <div class="autoanswers-filter-grid">
+	                  <label class="research-field"><span class="filter-label">USD в час</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="hourly_cap_usd"></label>
+	                  <label class="research-field"><span class="filter-label">USD в день</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="daily_cap_usd"></label>
+	                  <label class="research-field"><span class="filter-label">USD в месяц</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="monthly_cap_usd"></label>
+	                  <label class="research-field"><span class="filter-label">Платных отзывов / час</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_paid_reviews_per_hour"></label>
+	                  <label class="research-field"><span class="filter-label">Одновременных отзывов</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="global_paid_review_concurrency"></label>
+	                  <label class="research-field"><span class="filter-label">Одновременных role calls</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_inflight_role_calls"></label>
+	                  <label class="research-field"><span class="filter-label">Глубина processing queue</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_materialized_processing_jobs"></label>
+	                </div>
+	                <button class="button secondary" type="button" data-autoanswers-save-limits>Сохранить лимиты</button>
+	              </details>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
+	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><div data-autoanswers-progress-bars></div><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
 	            </section>
 
 	            <section class="autoanswers-filters">
 	              <div class="autoanswers-filter-grid">
-	                <label class="research-field"><span class="filter-label">Ответ</span><select class="select" data-autoanswers-filter="unanswered"><option value="">Все</option><option value="true">Без ответа</option></select></label>
+	                <label class="research-field"><span class="filter-label">Ответ Wildberries</span><select class="select" data-autoanswers-filter="unanswered"><option value="">Все</option><option value="true">Без ответа Wildberries</option></select></label>
+	                <label class="research-field"><span class="filter-label">Ответ системы</span><select class="select" data-autoanswers-filter="system_answer"><option value="">Все</option><option value="created">Ответ создан</option><option value="missing">Ответа нет</option><option value="awaiting_generation">Ожидает генерации</option><option value="processing">Обрабатывается</option><option value="needs_review">Требует проверки</option><option value="ready_publication">Готов к публикации</option><option value="publication_queue">В очереди публикации</option><option value="published">Опубликован и подтверждён</option><option value="error">Ошибка</option></select></label>
 	                <label class="research-field"><span class="filter-label">Статус</span><input class="input" data-autoanswers-filter="status" placeholder="needs_review"></label>
 	                <label class="research-field"><span class="filter-label">Оценка</span><select class="select" data-autoanswers-filter="rating"><option value="">Все</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
-	                <label class="research-field"><span class="filter-label">Route</span><select class="select" data-autoanswers-filter="route"><option value="">Все</option><option>public_only</option><option>seller_chat</option><option>wb_return</option><option>wb_support</option></select></label>
+	                <label class="research-field"><span class="filter-label">Route</span><select class="select" data-autoanswers-filter="route"><option value="">Все</option><option>public_only</option><option>seller_chat</option><option>wb_return</option><option>wb_support</option><option>rating_only_template</option></select></label>
 	                <label class="research-field"><span class="filter-label">SKU / nmId</span><input class="input" data-autoanswers-filter="sku"></label>
 	                <label class="research-field"><span class="filter-label">С даты</span><input class="input" type="date" data-autoanswers-filter="date_from"></label>
 	                <label class="research-field"><span class="filter-label">По дату</span><input class="input" type="date" data-autoanswers-filter="date_to"></label>
@@ -6353,8 +6385,19 @@
     const autoanswersModeNode = document.querySelector("[data-autoanswers-mode]");
     const autoanswersBudgetDayNode = document.querySelector("[data-autoanswers-budget-day]");
     const autoanswersBudgetMonthNode = document.querySelector("[data-autoanswers-budget-month]");
+    const autoanswersBudgetHourNode = document.querySelector("[data-autoanswers-budget-hour]");
+    const autoanswersBudgetReservedNode = document.querySelector("[data-autoanswers-budget-reserved]");
+    const autoanswersBudgetAvailableNode = document.querySelector("[data-autoanswers-budget-available]");
+    const autoanswersBudgetUnverifiedNode = document.querySelector("[data-autoanswers-budget-unverified]");
     const autoanswersBudgetUpdatedNode = document.querySelector("[data-autoanswers-budget-updated]");
     const autoanswersProgressNode = document.querySelector("[data-autoanswers-progress]");
+    const autoanswersQueueMetricsNode = document.querySelector("[data-autoanswers-queue-metrics]");
+    const autoanswersProgressBarsNode = document.querySelector("[data-autoanswers-progress-bars]");
+    const autoanswersStopReasonNode = document.querySelector("[data-autoanswers-stop-reason]");
+    const autoanswersQueueContextNode = document.querySelector("[data-autoanswers-queue-context]");
+    const autoanswersLimitsNode = document.querySelector("[data-autoanswers-limits]");
+    const autoanswersSettingNodes = Array.from(document.querySelectorAll("[data-autoanswers-setting]"));
+    const autoanswersSaveLimitsButton = document.querySelector("[data-autoanswers-save-limits]");
     const autoanswersSaveModeButton = document.querySelector("[data-autoanswers-save-mode]");
     const autoanswersSettingsNoteNode = document.querySelector("[data-autoanswers-settings-note]");
     const autoanswersApplyButton = document.querySelector("[data-autoanswers-apply]");
@@ -7264,6 +7307,7 @@
     if (autoanswersSyncButton) autoanswersSyncButton.addEventListener("click", requestAutoanswersSync);
     if (autoanswersBacklogButton) autoanswersBacklogButton.addEventListener("click", previewAutoanswersBacklog);
     if (autoanswersSaveModeButton) autoanswersSaveModeButton.addEventListener("click", saveAutoanswersMode);
+    if (autoanswersSaveLimitsButton) autoanswersSaveLimitsButton.addEventListener("click", saveAutoanswersLimits);
     if (autoanswersPrevButton) {
       autoanswersPrevButton.addEventListener("click", function() {
         state.feedbacks.server.page = Math.max(1, state.feedbacks.server.page - 1);
@@ -12346,21 +12390,42 @@
       }
       if (["draft_only", "auto_safe", "auto_all"].includes(selectorState)) {
         try {
-          const preview = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_transition_preview_path, {
+          const runCapRaw = window.prompt("Задайте максимальную сумму запуска в USD. Оставьте пустым, чтобы ограничить запуск количеством платных отзывов.", "0.50");
+          if (runCapRaw === null) return;
+          const normalizedRunCap = String(runCapRaw).trim().replace(",", ".");
+          const runCapUsd = normalizedRunCap ? Number(normalizedRunCap) : null;
+          if (runCapUsd !== null && (!Number.isFinite(runCapUsd) || runCapUsd <= 0)) throw new Error("Лимит запуска должен быть положительной суммой в USD.");
+          let runMaxPaidReviews = null;
+          if (runCapUsd === null) {
+            const reviewCapRaw = window.prompt("Задайте максимальное количество платных отзывов этого запуска.", "20");
+            if (reviewCapRaw === null) return;
+            runMaxPaidReviews = Number(String(reviewCapRaw).trim());
+            if (!Number.isInteger(runMaxPaidReviews) || runMaxPaidReviews <= 0) throw new Error("Лимит должен быть положительным целым количеством отзывов.");
+          }
+          const previewRequest = {
             selector_state: selectorState,
             scope_from: "2026-01-01"
-          });
+          };
+          if (runCapUsd !== null) previewRequest.run_max_usd = runCapUsd;
+          if (runMaxPaidReviews !== null) previewRequest.run_max_paid_reviews = runMaxPaidReviews;
+          const preview = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_transition_preview_path, previewRequest);
           const counts = preview.counts || {};
           const budgetAfter = preview.budget_after_estimate || {};
           const message = [
             "Диапазон: с 01.01.2026, все неотвеченные отзывы.",
             "Всего: " + Number(counts.unanswered_total || 0),
             "Готовых актуальных ответов: " + Number(counts.current_ready || 0),
+            "Шаблонов без OpenAI ($0): " + Number(counts.zero_cost_templates || 0),
+            "Требуют OpenAI: " + Number(counts.requires_openai || 0),
             "Требуют генерации: " + Number(counts.needs_generation || 0),
             "Требуют перегенерации с медиа: " + Number(counts.needs_regeneration || 0),
             "Можно поставить на автопубликацию: " + Number(counts.automatic_publication || 0),
+            "Ожидаемые WB write: " + Number(counts.expected_wb_writes || 0) + "–" + Number(counts.maximum_wb_writes || 0),
             "Останутся на проверке: " + Number(counts.needs_review || 0),
             "Верхняя оценка генерации: $" + Number(preview.estimated_cost_usd || 0).toFixed(2),
+            "Лимит этого запуска: " + (preview.run_cap && preview.run_cap.max_usd !== null ? ("$" + Number(preview.run_cap.max_usd).toFixed(2)) : (Number(preview.run_cap && preview.run_cap.max_paid_reviews || 0) + " платных отзывов")),
+            "Часовой лимит: $" + Number(preview.budget && preview.budget.hourly_cap_usd || 0).toFixed(2),
+            "Оценка времени: " + Number(preview.estimated_duration_hours || 0).toFixed(1) + " ч.",
             "После резерва: день $" + Number(budgetAfter.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budgetAfter.daily_cap_usd || 0).toFixed(2) +
               ", месяц $" + Number(budgetAfter.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budgetAfter.monthly_cap_usd || 0).toFixed(2),
             "",
@@ -12375,6 +12440,23 @@
         return;
       }
       await updateAutoanswersSettings({selector_state: selectorState});
+    }
+
+    async function saveAutoanswersLimits() {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
+      try {
+        const change = {};
+        autoanswersSettingNodes.forEach(function(node) {
+          const key = String(node.dataset.autoanswersSetting || "");
+          const value = Number(node.value);
+          if (!key || !Number.isFinite(value) || value <= 0) throw new Error("Все лимиты должны быть положительными числами.");
+          change[key] = value;
+        });
+        await updateAutoanswersSettings(change);
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+        renderAutoanswersServer();
+      }
     }
 
     async function requestAutoanswersSync() {
@@ -12559,18 +12641,64 @@
         autoanswersSaveModeButton.disabled = server.settingsLoading || !!settings.force_off;
       }
       if (autoanswersBacklogButton) {
-        autoanswersBacklogButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
-        autoanswersBacklogButton.disabled = server.settingsLoading || !!settings.force_off || !effectiveOn || selectorState === "manual";
+        autoanswersBacklogButton.hidden = true;
+        autoanswersBacklogButton.disabled = true;
       }
+      if (autoanswersLimitsNode) autoanswersLimitsNode.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersSaveLimitsButton) autoanswersSaveLimitsButton.disabled = server.settingsLoading || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      autoanswersSettingNodes.forEach(function(node) {
+        const key = String(node.dataset.autoanswersSetting || "");
+        if (document.activeElement !== node && settings[key] !== undefined && settings[key] !== null) node.value = String(settings[key]);
+        node.disabled = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      });
       if (autoanswersBudgetDayNode) autoanswersBudgetDayNode.textContent = "$" + Number(budget.daily_actual_usd || 0).toFixed(2) + " / $" + Number(budget.daily_cap_usd || 5).toFixed(2);
       if (autoanswersBudgetMonthNode) autoanswersBudgetMonthNode.textContent = "$" + Number(budget.monthly_actual_usd || 0).toFixed(2) + " / $" + Number(budget.monthly_cap_usd || 50).toFixed(2);
+      if (autoanswersBudgetHourNode) autoanswersBudgetHourNode.textContent = "$" + Number(budget.hourly_actual_usd || 0).toFixed(2) + " / $" + Number(budget.hourly_cap_usd || .5).toFixed(2);
+      if (autoanswersBudgetReservedNode) autoanswersBudgetReservedNode.textContent = "$" + Number(budget.active_reserved_usd || 0).toFixed(2);
+      if (autoanswersBudgetAvailableNode) autoanswersBudgetAvailableNode.textContent = "час $" + Number(budget.available_hourly_usd || 0).toFixed(2) + " · день $" + Number(budget.available_daily_usd || 0).toFixed(2) + " · месяц $" + Number(budget.available_monthly_usd || 0).toFixed(2);
+      if (autoanswersBudgetUnverifiedNode) autoanswersBudgetUnverifiedNode.textContent = "$" + Number(budget.monthly_unverified_legacy_usd || 0).toFixed(2);
       if (autoanswersBudgetUpdatedNode) autoanswersBudgetUpdatedNode.textContent = budget.updated_at ? ("Расходы обновлены: " + budget.updated_at) : "Расходы ещё не обновлялись";
       const reconciliation = server.reconciliation || {};
+      const queue = server.runtime && server.runtime.progress ? server.runtime.progress : {};
       if (autoanswersProgressNode) {
         const progress = reconciliation.progress || {};
         autoanswersProgressNode.textContent = reconciliation.state
           ? ("Сверка режима: " + friendlyAutoanswersStatus(reconciliation.state) + " · готово " + Object.keys(progress).reduce(function(total, key) { return total + Number(progress[key] || 0); }, 0))
           : "";
+      }
+      if (autoanswersQueueMetricsNode) {
+        const metrics = [
+          ["Всего в scope", queue.scope_total], ["Без ответа WB", queue.unanswered], ["Уже имеют ответ WB", queue.wb_answered],
+          ["Ответ создан", queue.system_reply_created], ["Ответа системы нет", queue.system_reply_missing], ["Ожидают materialization", queue.awaiting_materialization],
+          ["В processing queue", queue.processing_queue], ["Обрабатываются", queue.processing_now],
+          ["Retry / backoff", queue.retry_backoff], ["Требуют проверки", queue.needs_review],
+          ["Готовы к публикации", queue.ready_for_publication], ["Publication queue", queue.publication_queue],
+          ["Readback pending", queue.readback_pending], ["Опубликованы", queue.published_confirmed],
+          ["Ошибки", queue.errors], ["Осталось", queue.remaining],
+          ["Шаблоны $0", queue.zero_cost_template_jobs], ["Скорость / час", queue.throughput_last_hour]
+        ];
+        autoanswersQueueMetricsNode.innerHTML = metrics.map(function(item) { return '<div class="autoanswers-queue-metric"><span>' + escapeHtml(item[0]) + '</span><strong>' + Number(item[1] || 0) + '</strong></div>'; }).join("");
+      }
+      if (autoanswersQueueContextNode) {
+        const scope = queue.scope || {};
+        const timestamps = [
+          "sync " + (queue.last_sync_at || "—"),
+          "scheduler " + (queue.last_scheduler_tick_at || "—"),
+          "AI " + (queue.last_successful_ai_call_at || "—"),
+          "публикация " + (queue.last_confirmed_publication_at || "—")
+        ].join(" · ");
+        const scopeEvidence = queue.transition_run_id ? (queue.scope_membership_exact ? "точный snapshot" : "legacy scope реконструирован") : "локальная история";
+        autoanswersQueueContextNode.textContent = "Режим: " + (modeLabels[queue.effective_mode] || queue.effective_mode || "—") + " · scope с " + (scope.from || "—") + (scope.to ? (" по " + scope.to) : "") + " (" + scopeEvidence + ") · run " + (queue.transition_run_id || "не запущен") + " · " + timestamps;
+      }
+      if (autoanswersProgressBarsNode) {
+        const bars = [["Подготовка ответов", queue.preparation_percent], ["Публикация в Wildberries", queue.publication_percent]];
+        autoanswersProgressBarsNode.innerHTML = bars.map(function(item) { const value = Math.max(0, Math.min(100, Number(item[1] || 0))); return '<div class="autoanswers-progress-row"><span>' + escapeHtml(item[0]) + '</span><div class="autoanswers-progress-track"><div class="autoanswers-progress-fill" style="width:' + value + '%"></div></div><strong>' + value.toFixed(1) + '%</strong></div>'; }).join("");
+      }
+      if (autoanswersStopReasonNode) {
+        const stopLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена; paid processing заблокирован",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена; materialization продолжится после обработки",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",no_eligible_jobs:"Нет доступных задач"};
+        const reason = String(queue.stop_reason || "no_eligible_jobs");
+        const eta = queue.eta_hours === null || queue.eta_hours === undefined ? "ETA пока недоступно" : ("ETA около " + Number(queue.eta_hours).toFixed(1) + " ч.");
+        autoanswersStopReasonNode.textContent = (stopLabels[reason] || friendlyAutoanswersStatus(reason)) + " · run $" + Number(queue.run_actual_usd || 0).toFixed(2) + " · reserved $" + Number(queue.run_active_reserved_usd || 0).toFixed(2) + " · " + eta + " · policy epoch " + Number(queue.policy_epoch || 0);
       }
       if (autoanswersSettingsNoteNode) autoanswersSettingsNoteNode.textContent = settings.force_off ? "Автоответы выключены: production force-off WB_AUTOANSWERS_FORCE_OFF=true. AI и публикация заблокированы server-side." : (modeNotes[selectorState] || modeNotes.off);
       if (autoanswersErrorNode) autoanswersErrorNode.textContent = server.error || "";
@@ -12717,7 +12845,7 @@
         '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Ответ Wildberries</strong><p>' + escapeHtml(answerText || "Ответа пока нет") + '</p></section>' +
         '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Статус</strong><p>' + escapeHtml(mainStatus) + '</p></section>' +
         replySection +
-        '<details class="autoanswers-technical"><summary>Техническая информация</summary><div class="autoanswers-technical-grid">' +
+        '<details class="autoanswers-technical" data-autoanswers-detail-technical><summary>Техническая информация</summary><div class="autoanswers-technical-grid">' +
           '<section class="autoanswers-detail-block"><strong>Маршрут и состояния</strong>\nRoute: ' + escapeHtml(row.route || "—") + '\nCase code: ' + escapeHtml(latestJob && latestJob.case_code || "—") + '\nAI state: ' + escapeHtml(row.processing_status || "—") + '\nPublication state: ' + escapeHtml(row.publication_status || "not_queued") + '\nПопыток: ' + Number(row.attempts || 0) + '\nСтоимость: $' + Number(row.cost_usd || 0).toFixed(6) + '\nWarnings: ' + escapeHtml(reviewReasons.concat(guardErrors).join(", ") || "нет") + '</section>' +
           '<section class="autoanswers-detail-block"><strong>Проверки</strong>\n' + escapeHtml(checksText) + '\nRegeneration required: ' + (regenerationRequired ? "да" : "нет") + '\nMedia: ' + escapeHtml(media.map(function(item) { return item.kind + ": " + item.fetch_status; }).join(", ") || "нет") + '</section>' +
           '<section class="autoanswers-detail-block autoanswers-detail-wide"><strong>Versions / hashes / idempotency</strong><pre>' + escapeHtml(JSON.stringify({content_version: row.content_version, content_version_hash: row.content_version_hash, wb_observation_hash: row.wb_observation_hash, processing_key: latestJob && latestJob.processing_key, media_processing_version: latestJob && latestJob.media_processing_version, policy_epoch: latestJob && latestJob.policy_epoch}, null, 2)) + '</pre></section>' +

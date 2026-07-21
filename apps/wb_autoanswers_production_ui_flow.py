@@ -44,6 +44,21 @@ def _validate_feedback_item(item: dict[str, Any]) -> None:
     _assert(isinstance(item.get("answer"), dict), "local feedback answer must be an object")
 
 
+def _deduplicate_feedback_candidates(
+    *groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for group in groups:
+        for candidate in group:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            candidates.append(candidate)
+    return candidates
+
+
 def run_autoanswers_ui_flow(
     *,
     base_url: str,
@@ -181,19 +196,13 @@ def run_autoanswers_ui_flow(
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
         _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
         runtime_before = dict(settings.get("runtime") or {})
-        ai_states_before = dict(runtime_before.get("ai_jobs") or {})
-        publication_states_before = dict(runtime_before.get("publication_jobs") or {})
         _assert(
-            sum(int(ai_states_before.get(state) or 0) for state in ("queued", "processing", "retryable_error")) == 0,
+            int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
             "manual production acceptance requires zero claimable AI jobs",
         )
         _assert(
-            sum(
-                int(publication_states_before.get(state) or 0)
-                for state in ("approved", "publishing", "publish_pending_readback", "retryable_error")
-            )
-            == 0,
-            "manual production acceptance requires zero active publication attempts",
+            int(runtime_before.get("claimable_publication_writes") or 0) == 0,
+            "manual production acceptance requires zero claimable publication writes",
         )
         filter_names = (
             "unanswered",
@@ -204,12 +213,25 @@ def run_autoanswers_ui_flow(
             "date_from",
             "date_to",
             "flag",
+            "system_answer",
         )
         for filter_name in filter_names:
             _assert(
                 page.locator(f'[data-autoanswers-filter="{filter_name}"]').count() == 1,
                 f"feedback filter {filter_name} must be rendered exactly once",
             )
+        _assert(
+            page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count() == 18,
+            "queue dashboard metrics are incomplete",
+        )
+        _assert(
+            page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count() == 2,
+            "preparation/publication progress bars are missing",
+        )
+        _assert(
+            bool(page.locator("[data-autoanswers-stop-reason]").inner_text().strip()),
+            "queue stop reason must be visible",
+        )
 
         first = _json_get(
             context,
@@ -257,8 +279,15 @@ def run_autoanswers_ui_flow(
             all(not str((row.get("answer") or {}).get("text") or "").strip() for row in unanswered_rows),
             "unanswered filter returned a feedback with an existing answer",
         )
+        for system_filter in (
+            "created", "missing", "awaiting_generation", "processing", "needs_review",
+            "ready_publication", "publication_queue", "published", "error",
+        ):
+            filtered_feedbacks("system_" + system_filter, system_answer=system_filter)
+        media_filter_rows: dict[str, list[dict[str, Any]]] = {}
         for media_filter in ("has_photo", "has_video"):
             media_rows = filtered_feedbacks(media_filter, **{media_filter: "true"})
+            media_filter_rows[media_filter] = media_rows
             _assert(
                 all(bool(row.get(media_filter)) for row in media_rows),
                 f"{media_filter} filter returned a non-matching feedback",
@@ -342,7 +371,8 @@ def run_autoanswers_ui_flow(
             detail_text = detail_body.inner_text()
             for marker in ("Товар", "Ответ Wildberries", "Статус", "Техническая информация"):
                 _assert(marker in detail_text, f"detail drawer misses {marker}")
-            technical = page.locator(".autoanswers-technical")
+            technical = page.locator("[data-autoanswers-detail-technical]")
+            _assert(technical.count() == 1, "detail must expose exactly one technical information spoiler")
             _assert(not technical.evaluate("node => node.open"), "technical information must be closed by default")
             for technical_marker in ("Route:", "JSON contract", "Hard gates", "Audit trail"):
                 _assert(technical_marker not in detail_text, f"closed detail leaked {technical_marker}")
@@ -410,10 +440,12 @@ def run_autoanswers_ui_flow(
             answer_box.wait_for(timeout=30_000)
             before_copy = answer_box.inner_text()
             dimensions = answer_box.evaluate(
-                "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY})"
+                "node => ({height: node.getBoundingClientRect().height, overflowY: getComputedStyle(node).overflowY, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})"
             )
             _assert(dimensions["height"] <= 90, "table answer expanded the row")
             _assert(dimensions["overflowY"] in {"auto", "scroll"}, "table answer does not scroll internally")
+            _assert(dimensions["background"] != "rgb(248, 250, 252)", "table answer retained the light background")
+            _assert(dimensions["color"] != "rgb(0, 0, 0)", "table answer contrast is invalid")
             page.locator("[data-autoanswers-copy]").click()
             page.get_by_role("button", name="Скопировано").wait_for(timeout=10_000)
             after_copy = answer_box.inner_text().replace("Скопировано", "Копировать")
@@ -421,13 +453,13 @@ def run_autoanswers_ui_flow(
             table_answer_evidence = {"present": True, "fixed_height": True, "copy_without_mutation": True}
 
         media_evidence: dict[str, Any] = {}
-        media_candidates: list[dict[str, Any]] = []
-        seen_media_ids: set[str] = set()
-        for candidate in [*flag_rows.get("needs_review", []), *unanswered_rows, *items]:
-            candidate_id = str(candidate.get("id") or "")
-            if candidate_id and candidate_id not in seen_media_ids:
-                seen_media_ids.add(candidate_id)
-                media_candidates.append(candidate)
+        media_candidates = _deduplicate_feedback_candidates(
+            media_filter_rows.get("has_photo", []),
+            media_filter_rows.get("has_video", []),
+            flag_rows.get("needs_review", []),
+            unanswered_rows,
+            items,
+        )
         ready_by_kind: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for candidate in media_candidates:
             if len(ready_by_kind) == 2:
