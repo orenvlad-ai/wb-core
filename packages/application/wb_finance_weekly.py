@@ -131,6 +131,11 @@ def _money_text(value: Decimal | None) -> str | None:
     return format(value.quantize(MONEY_QUANT), "f")
 
 
+def _finance_nm_id_sort_key(value: Any) -> tuple[bool, int | str]:
+    text = str(value)
+    return (not text.isdigit(), int(text) if text.isdigit() else text)
+
+
 def _ratio(numerator: Decimal | None, denominator: Decimal) -> Decimal | None:
     if numerator is None or denominator <= ZERO:
         return None
@@ -1100,7 +1105,7 @@ class WbFinanceWeeklyBlock:
                     ),
                 )
 
-        for nm_id in sorted(by_nm, key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value)):
+        for nm_id in sorted(by_nm, key=_finance_nm_id_sort_key):
             store_projection(nm_id, by_nm[nm_id], row_kind="sku")
         store_projection("__account__", account_rows, row_kind="account")
         return projections
@@ -3670,7 +3675,7 @@ class WbFinanceWeeklyBlock:
         canonical_july_first_manifest: list[dict[str, Any]] = []
         for nm_id in sorted(
             union_nm_ids,
-            key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value),
+            key=_finance_nm_id_sort_key,
         ):
             resolution = self._resolve_canonical_cost(
                 conn,
@@ -3703,7 +3708,7 @@ class WbFinanceWeeklyBlock:
                 for item in matrix
                 if item.get("source_quality") == "missing" and item.get("nm_id")
             },
-            key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value),
+            key=_finance_nm_id_sort_key,
         )
         ads_manifest = self._ads_coverage_manifest(
             conn,
@@ -3975,6 +3980,15 @@ class WbFinanceWeeklyBlock:
                             (self.seller_id, start.isoformat(), end.isoformat()),
                         ).fetchall()
                     ]
+                    # The reviewed target digest is built in canonical numeric
+                    # nmID order by ``_rebuild_sku_week_aggregates``. SQLite
+                    # TEXT ordering differs when the catalogue contains both
+                    # 9- and 10-digit nmIDs, so normalize readback with the
+                    # exact same key before hashing. This changes no rows and
+                    # preserves the already reviewed plan fingerprint.
+                    sku_aggregates.sort(
+                        key=lambda item: _finance_nm_id_sort_key(item["nm_id"])
+                    )
                     target_readback_digest.add(
                         {
                             "week_start": start.isoformat(),
