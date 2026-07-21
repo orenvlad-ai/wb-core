@@ -185,7 +185,7 @@ def main() -> None:
                     "is_enabled": "enabled",
                     "is_active": "inactive" if maintenance_action == "hold" else "active",
                 },
-                "service": {"is_active": "inactive"},
+                "service": {"is_active": "inactive", "quiescent": True},
             },
             "warehouse_lock": {"held": False},
             "finance_apply_processes": [],
@@ -214,6 +214,66 @@ def main() -> None:
             )
         ):
             raise AssertionError("hosted maintenance bypassed its repo-owned runner")
+    for unsafe_service_state in (
+        "active",
+        "activating",
+        "reloading",
+        "deactivating",
+        "unknown",
+    ):
+        unsafe_payload = {
+            "status": "held",
+            "units": {
+                "timer": {"is_active": "inactive"},
+                "service": {
+                    "is_active": unsafe_service_state,
+                    "quiescent": True,
+                },
+            },
+            "warehouse_lock": {"held": False},
+            "finance_apply_processes": [],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(unsafe_payload), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ):
+            try:
+                hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+                    active_target,
+                    action="hold",
+                )
+            except RuntimeError as exc:
+                if "hold readback is incomplete" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    f"hosted maintenance accepted unsafe service state {unsafe_service_state}"
+                )
+    failed_quiescent_payload = {
+        "status": "held",
+        "units": {
+            "timer": {"is_active": "inactive"},
+            "service": {"is_active": "failed", "quiescent": True},
+        },
+        "warehouse_lock": {"held": False},
+        "finance_apply_processes": [],
+    }
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(failed_quiescent_payload), stderr=""
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess, "run", return_value=completed
+    ):
+        failed_quiescent = (
+            hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+                active_target,
+                action="hold",
+            )
+        )
+    if failed_quiescent["units"]["service"]["is_active"] != "failed":
+        raise AssertionError("hosted maintenance rejected terminal failed oneshot evidence")
     maintenance_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-functional-maintenance", "hold"]
     )

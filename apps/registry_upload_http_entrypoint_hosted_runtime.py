@@ -93,6 +93,9 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WAREHOUSES_PATH,
 )
+from packages.application.warehouse_functional_maintenance import (
+    warehouse_functional_service_is_quiescent,
+)
 
 
 DEFAULT_TARGET_FILE = (
@@ -2798,10 +2801,12 @@ def _run_remote_warehouse_functional_maintenance_action(
     units = payload.get("units") or {}
     timer = units.get("timer") or {}
     service = units.get("service") or {}
+    service_active = str(service.get("is_active") or "")
     if action == "hold" and (
         str(payload.get("status") or "") != "held"
         or str(timer.get("is_active") or "") != "inactive"
-        or str(service.get("is_active") or "") != "inactive"
+        or not warehouse_functional_service_is_quiescent(service_active)
+        or service.get("quiescent") is not True
         or bool((payload.get("warehouse_lock") or {}).get("held"))
         or bool(payload.get("finance_apply_processes"))
     ):
