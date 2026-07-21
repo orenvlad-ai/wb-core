@@ -20,6 +20,7 @@ from packages.application.ads_snapshot_payload import resolve_ads_snapshot_paylo
 from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
+    CanonicalWbCostSnapshot,
     resolve_finance_canonical_cost,
 )
 from packages.application.warehouse_archival_estimate import (
@@ -497,6 +498,15 @@ class WbFinanceWeeklyBlock:
         self._capitalization_cache_key = ""
         self._capitalization_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._capitalization_cache_connection: sqlite3.Connection | None = None
+        self._canonical_cost_snapshot_connection: sqlite3.Connection | None = None
+        self._canonical_cost_snapshot: CanonicalWbCostSnapshot | None = None
+        self._canonical_cost_resolution_cache: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
+        self._nomenclature_cache_connection: sqlite3.Connection | None = None
+        self._nomenclature_cache: tuple[
+            dict[str, str], set[str], dict[str, str], dict[str, dict[str, Any]]
+        ] = ({}, set(), {}, {})
 
     def ensure_schema(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -867,6 +877,7 @@ class WbFinanceWeeklyBlock:
             raw_rows=db_rows,
             global_metrics=aggregate,
             calculated_at=now,
+            parsed_rows=rows,
         )
         conn.execute(
             """INSERT OR REPLACE INTO wb_finance_weekly_cost_coverage
@@ -941,12 +952,21 @@ class WbFinanceWeeklyBlock:
         global_metrics: Mapping[str, Any],
         calculated_at: str,
         persist: bool = True,
+        parsed_rows: Iterable[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Materialize an indexed, reproducible per-SKU Finance projection."""
 
         records = list(raw_rows)
-        parsed = [json.loads(row["raw_json"]) for row in records]
-        alias_to_nm, ambiguous_aliases, _groups, nomenclature = _nomenclature_identity_index(conn)
+        parsed = (
+            list(parsed_rows)
+            if parsed_rows is not None
+            else [json.loads(row["raw_json"]) for row in records]
+        )
+        if len(parsed) != len(records):
+            raise ValueError("parsed Finance row count differs from stored row count")
+        alias_to_nm, ambiguous_aliases, _groups, nomenclature = (
+            self._nomenclature_identity_index(conn)
+        )
         by_nm: dict[str, list[tuple[dict[str, Any], sqlite3.Row]]] = {
             nm_id: [] for nm_id in nomenclature
         }
@@ -988,12 +1008,17 @@ class WbFinanceWeeklyBlock:
             row_kind: str,
         ) -> None:
             source_rows = [item[0] for item in selected]
-            metrics, coverage, unknown = self._aggregate_rows(conn, source_rows, week_start)
             coverage = self._calculate_cogs(
                 conn,
                 source_rows,
                 week_start,
                 include_details=True,
+            )
+            metrics, _metrics_coverage, unknown = self._aggregate_rows(
+                conn,
+                source_rows,
+                week_start,
+                coverage_override=coverage,
             )
             unique_cost_dependencies: dict[tuple[str, str], dict[str, Any]] = {}
             for detail in coverage["detail_rows"]:
@@ -1085,6 +1110,8 @@ class WbFinanceWeeklyBlock:
         conn: sqlite3.Connection,
         rows: list[dict[str, Any]],
         week_start: date,
+        *,
+        coverage_override: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
         values: dict[str, Decimal] = {
             key: ZERO
@@ -1193,10 +1220,14 @@ class WbFinanceWeeklyBlock:
             total_expenses - capitalized_acceptance - capitalized_transit
         )
         before_cogs = net_revenue - profit_period_expenses + values["positive_adjustments"]
-        coverage = self._calculate_cogs(
-            conn,
-            rows,
-            week_start,
+        coverage = (
+            dict(coverage_override)
+            if coverage_override is not None
+            else self._calculate_cogs(
+                conn,
+                rows,
+                week_start,
+            )
         )
         cogs = (
             _decimal(coverage["cogs_rub"]) if coverage["cogs_rub"] is not None else None
@@ -1269,7 +1300,9 @@ class WbFinanceWeeklyBlock:
         table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_supply_cost_layers'"
         ).fetchone()
-        alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+        alias_to_nm, ambiguous_aliases, _groups, _items = (
+            self._nomenclature_identity_index(conn)
+        )
         candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in rows:
             nm_id, identity_method, identity_problem = _resolve_finance_nm_id(
@@ -1530,7 +1563,9 @@ class WbFinanceWeeklyBlock:
         if cache_key == self._capitalization_cache_key:
             return self._capitalization_cache
 
-        alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+        alias_to_nm, ambiguous_aliases, _groups, _items = (
+            self._nomenclature_identity_index(conn)
+        )
         candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         raw_rows = conn.execute(
             """SELECT report_id,rrd_id,week_start,raw_json
@@ -2068,6 +2103,37 @@ class WbFinanceWeeklyBlock:
             "detail_rows": detail_rows if include_details else [],
         }
 
+    def _nomenclature_identity_index(
+        self, conn: sqlite3.Connection
+    ) -> tuple[dict[str, str], set[str], dict[str, str], dict[str, dict[str, Any]]]:
+        if self._nomenclature_cache_connection is not conn:
+            self._nomenclature_cache = _nomenclature_identity_index(conn)
+            self._nomenclature_cache_connection = conn
+        return self._nomenclature_cache
+
+    def _resolve_canonical_cost(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nm_id: str,
+        operation_date: date,
+    ) -> dict[str, Any]:
+        if self._canonical_cost_snapshot_connection is not conn:
+            self._canonical_cost_snapshot = CanonicalWbCostSnapshot.from_connection(conn)
+            self._canonical_cost_snapshot_connection = conn
+            self._canonical_cost_resolution_cache = {}
+        cache_key = (str(nm_id), operation_date.isoformat())
+        cached = self._canonical_cost_resolution_cache.get(cache_key)
+        if cached is None:
+            cached = resolve_finance_canonical_cost(
+                conn,
+                nm_id=nm_id,
+                operation_date=operation_date,
+                snapshot=self._canonical_cost_snapshot,
+            )
+            self._canonical_cost_resolution_cache[cache_key] = cached
+        return cached
+
     def _calculate_cogs(
         self,
         conn: sqlite3.Connection,
@@ -2078,7 +2144,9 @@ class WbFinanceWeeklyBlock:
     ) -> dict[str, Any]:
         """Calculate signed COGS only through the shared canonical resolver."""
 
-        alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+        alias_to_nm, ambiguous_aliases, _groups, _items = (
+            self._nomenclature_identity_index(conn)
+        )
         cogs = ZERO
         matched_units = 0
         unmatched_units = 0
@@ -2135,7 +2203,7 @@ class WbFinanceWeeklyBlock:
                 cache_key = (nm_id, operation_date.isoformat())
                 resolution = resolution_cache.get(cache_key)
                 if resolution is None:
-                    resolution = resolve_finance_canonical_cost(
+                    resolution = self._resolve_canonical_cost(
                         conn,
                         nm_id=nm_id,
                         operation_date=operation_date,
@@ -3290,8 +3358,13 @@ class WbFinanceWeeklyBlock:
                         str(row["row_hash"]),
                     ]
                 )
-            new_metrics, new_coverage, unknown = self._aggregate_rows(conn, parsed, start)
             detailed = self._calculate_cogs(conn, parsed, start, include_details=True)
+            new_metrics, new_coverage, unknown = self._aggregate_rows(
+                conn,
+                parsed,
+                start,
+                coverage_override={**detailed, "detail_rows": []},
+            )
             stored_aggregate = (
                 conn.execute(
                     """SELECT classifier_version,metrics_json FROM wb_finance_weekly_aggregates
@@ -3568,10 +3641,9 @@ class WbFinanceWeeklyBlock:
                 }
             )
             # The matrix and cost manifest above are the durable operation-level
-            # evidence. Release duplicate parsed/detail objects before the
-            # independently rebuilt per-SKU projection parses this week again.
+            # evidence. Release detail objects, then reuse the already parsed
+            # source rows for the independently rebuilt per-SKU projection.
             del detailed
-            del parsed
             expected_sku_projections = self._rebuild_sku_week_aggregates(
                 conn,
                 week_start=start,
@@ -3580,7 +3652,9 @@ class WbFinanceWeeklyBlock:
                 global_metrics=new_metrics,
                 calculated_at="",
                 persist=False,
+                parsed_rows=parsed,
             )
+            del parsed
             expected_sku_projection_row_count += len(expected_sku_projections)
             target_after_digest.add(
                 {
@@ -3598,7 +3672,7 @@ class WbFinanceWeeklyBlock:
             union_nm_ids,
             key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value),
         ):
-            resolution = resolve_finance_canonical_cost(
+            resolution = self._resolve_canonical_cost(
                 conn,
                 nm_id=nm_id,
                 operation_date=CANONICAL_COST_POLICY_DATE,

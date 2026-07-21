@@ -63,12 +63,12 @@ def main() -> None:
         if not str(plan["source_manifests"]["finance"]["digest"]).startswith("sha256:"):
             raise AssertionError("streamed Finance manifest digest is absent")
         if (
-            plan["finance_nm_id_count"] != 2
-            or len(plan["week_nm_operation_date_matrix"]) != WEEK_COUNT * 2
+            plan["finance_nm_id_count"] != 3
+            or len(plan["week_nm_operation_date_matrix"]) != WEEK_COUNT * 3
             or any(
                 item["canonical_source_date"] != "2026-07-01"
                 for item in plan["week_nm_operation_date_matrix"]
-                if item["nm_id"] == "101"
+                if item["nm_id"] in {"101", "303"}
             )
         ):
             raise AssertionError("production-scale canonical COGS matrix is incomplete")
@@ -78,13 +78,23 @@ def main() -> None:
         resolved_matrix = [
             item for item in plan["week_nm_operation_date_matrix"] if item["nm_id"] == "101"
         ]
+        archival_matrix = [
+            item for item in plan["week_nm_operation_date_matrix"] if item["nm_id"] == "303"
+        ]
         missing_sales_qty = sum(item["sales_qty"] for item in missing_matrix)
         if (
             len(missing_matrix) != WEEK_COUNT
             or any(item["source_quality"] != "missing" for item in missing_matrix)
-            or not 140_000 <= missing_sales_qty <= 150_000
+            or len(archival_matrix) != WEEK_COUNT
+            or any(
+                item["source_quality"] != "business_approved_archival_estimate"
+                or item["unit_cost_rub"] != "100.0000"
+                for item in archival_matrix
+            )
+            or not 95_000 <= missing_sales_qty <= 105_000
             or missing_sales_qty
             + sum(item["sales_qty"] for item in resolved_matrix)
+            + sum(item["sales_qty"] for item in archival_matrix)
             != RAW_ROW_COUNT
         ):
             raise AssertionError("high-volume missing-cost evidence was not aggregated by week/date")
@@ -183,7 +193,8 @@ def _seed_required_sources(db_path: Path) -> None:
             );
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
                 (1,101,'VC101','BAR101','["BAR101"]','other'),
-                (1,202,'VC202','BAR202','["BAR202"]','other');
+                (1,202,'VC202','BAR202','["BAR202"]','other'),
+                (1,303,'VC303','BAR303','["BAR303"]','other');
             CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
                 cutover_id TEXT PRIMARY KEY,cutover_at TEXT,status TEXT,
                 plan_fingerprint TEXT,source_watermarks_json TEXT,
@@ -204,6 +215,52 @@ def _seed_required_sources(db_path: Path) -> None:
                 'warehouse_functional_cutover_v1','2026-07-01',101,'10','100','1000',
                 'certified','{}','sha256:scale-cost','2026-07-01T00:00:00Z'
             );
+            CREATE TABLE sheet_vitrina_v1_warehouse_archival_estimate_versions(
+                version_id TEXT PRIMARY KEY,effective_date TEXT NOT NULL,
+                unit_cost_rub TEXT NOT NULL,quality TEXT NOT NULL,
+                owner_approval_reference TEXT NOT NULL,manifest_digest TEXT NOT NULL,
+                production_dry_run_plan_sha256 TEXT NOT NULL,
+                source_digest TEXT NOT NULL,plan_fingerprint TEXT NOT NULL UNIQUE,
+                supersedes_version_id TEXT,backup_json TEXT NOT NULL,
+                before_daily_rows_json TEXT NOT NULL,after_daily_rows_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_archival_estimate_rows(
+                version_id TEXT NOT NULL,nm_id INTEGER NOT NULL,vendor_code TEXT NOT NULL,
+                item_name TEXT NOT NULL,unit_cost_rub TEXT NOT NULL,quality TEXT NOT NULL,
+                previous_unit_cost_rub TEXT NOT NULL,previous_quality TEXT NOT NULL,
+                lineage_json TEXT NOT NULL,row_fingerprint TEXT NOT NULL,
+                PRIMARY KEY(version_id,nm_id)
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_archival_estimate_active(
+                slot INTEGER PRIMARY KEY CHECK(slot=1),version_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO sheet_vitrina_v1_warehouse_archival_estimate_versions VALUES(
+                'scale-archival-v1','2026-07-01','100.00',
+                'business_approved_archival_estimate','fixture owner approval',
+                'sha256:manifest','sha256:dry-run','sha256:source','sha256:plan',
+                NULL,'{}','[]','[]','2026-07-20T00:00:00Z'
+            );
+            WITH RECURSIVE archival(n) AS (
+                SELECT 303 UNION ALL SELECT n+1 FROM archival WHERE n<320
+            )
+            INSERT INTO sheet_vitrina_v1_warehouse_archival_estimate_rows
+            SELECT 'scale-archival-v1',n,'VC' || n,'Archived ' || n,'100.00',
+                   'business_approved_archival_estimate','113.87','fallback_average',
+                   '{}','sha256:row-' || n
+            FROM archival;
+            INSERT INTO sheet_vitrina_v1_warehouse_archival_estimate_active VALUES(
+                1,'scale-archival-v1','2026-07-20T00:00:00Z'
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_functional_events(
+                event_type TEXT,nm_id INTEGER,business_date TEXT,quantity TEXT,capital_rub TEXT
+            );
+            WITH RECURSIVE event_seq(n) AS (
+                SELECT 1 UNION ALL SELECT n+1 FROM event_seq WHERE n<50000
+            )
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_events
+            SELECT 'warehouse_transfer',900000+n,'2026-07-01','1','1' FROM event_seq;
             CREATE TABLE sheet_vitrina_v1_wb_supply_cost_layers(
                 wb_supply_cost_layer_id TEXT PRIMARY KEY,wb_supply_id TEXT,nm_id TEXT,
                 transit_cost_status TEXT,transit_amount_total TEXT,
@@ -231,7 +288,8 @@ def _seed_raw_history(db_path: Path) -> None:
                ), source AS (
                    SELECT n,
                           date('2026-01-05', printf('+%d days', ((n-1) % ?) * 7)) week_start,
-                          CASE WHEN ((n-1) / ?) % 2 = 0 THEN 202 ELSE 101 END nm_id
+                          CASE ((n-1) / ?) % 3
+                              WHEN 0 THEN 202 WHEN 1 THEN 101 ELSE 303 END nm_id
                    FROM seq
                )
                INSERT INTO wb_finance_weekly_raw_rows(
@@ -241,14 +299,14 @@ def _seed_raw_history(db_path: Path) -> None:
                )
                SELECT 'seller-scale','scale-' || n,'scale-' || n,1,week_start,
                       date(week_start,'+6 days'),CAST(nm_id AS TEXT),
-                      CASE WHEN nm_id=101 THEN 'VC101' ELSE 'VC202' END,
-                      CASE WHEN nm_id=101 THEN 'BAR101' ELSE 'BAR202' END,
+                      CASE nm_id WHEN 101 THEN 'VC101' WHEN 202 THEN 'VC202' ELSE 'VC303' END,
+                      CASE nm_id WHEN 101 THEN 'BAR101' WHEN 202 THEN 'BAR202' ELSE 'BAR303' END,
                       'Продажа','Продажа',
                       'sha256:scale-' || n,
                       json_object(
                           'reportId','scale-' || n,'rrdId','scale-' || n,'nmId',nm_id,
-                          'vendorCode',CASE WHEN nm_id=101 THEN 'VC101' ELSE 'VC202' END,
-                          'sku',CASE WHEN nm_id=101 THEN 'BAR101' ELSE 'BAR202' END,
+                          'vendorCode',CASE nm_id WHEN 101 THEN 'VC101' WHEN 202 THEN 'VC202' ELSE 'VC303' END,
+                          'sku',CASE nm_id WHEN 101 THEN 'BAR101' WHEN 202 THEN 'BAR202' ELSE 'BAR303' END,
                           'rrDate',week_start,
                           'saleDt',week_start,'docTypeName','Продажа','sellerOperName','Продажа',
                           'quantity',1,'retailPriceWithDisc','200','forPay','140','acquiringFee','10'
