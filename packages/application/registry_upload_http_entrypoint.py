@@ -1369,11 +1369,21 @@ class RegistryUploadHttpEntrypoint:
         else:
             master_enabled = payload.get("master_enabled") if "master_enabled" in payload else None
             mode = str(payload["mode"]) if "mode" in payload else None
+            if mode in {"draft_only", "auto_safe", "auto_all"}:
+                raise AutoanswersRuntimeError(
+                    "automated mode changes require a confirmed transition preview",
+                    code="transition_preview_required",
+                )
         settings = self.autoanswers_repository.update_settings(
             master_enabled=master_enabled,
             mode=mode,
             daily_cap_usd=payload.get("daily_cap_usd"),
             monthly_cap_usd=payload.get("monthly_cap_usd"),
+            hourly_cap_usd=payload.get("hourly_cap_usd"),
+            max_paid_reviews_per_hour=payload.get("max_paid_reviews_per_hour"),
+            global_paid_review_concurrency=payload.get("global_paid_review_concurrency"),
+            max_inflight_role_calls=payload.get("max_inflight_role_calls"),
+            max_materialized_processing_jobs=payload.get("max_materialized_processing_jobs"),
             warning_ratio=payload.get("warning_ratio"),
             actor_id=actor_id,
         )
@@ -1393,6 +1403,8 @@ class RegistryUploadHttpEntrypoint:
             actor_id=actor_id,
             scope_from=str(payload.get("scope_from") or "2026-01-01"),
             scope_to=str(payload.get("scope_to") or "") or None,
+            run_max_usd=payload.get("run_max_usd"),
+            run_max_paid_reviews=payload.get("run_max_paid_reviews"),
         )
 
     def handle_sheet_feedbacks_autoanswers_sync_request(

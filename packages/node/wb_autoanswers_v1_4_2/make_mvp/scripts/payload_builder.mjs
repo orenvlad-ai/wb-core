@@ -13,9 +13,23 @@ import {
 import {bundleRoot} from "./schema_validation.mjs";
 
 const CACHEABLE_ROLES = new Set(["classifier", "writer", "validator"]);
+const MAX_CLASSIFIER_PHOTOS = 8;
+const MAX_CLASSIFIER_VIDEO_IMAGES = 5;
 
 function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/** Keep binary media out of repeated tagged JSON while retaining stable facts. */
+function withoutEmbeddedMedia(value) {
+  if (Array.isArray(value)) return value.map(withoutEmbeddedMedia);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, withoutEmbeddedMedia(child)]));
+  }
+  if (typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
+    return `attached_image_sha256:${sha256Hex(value).slice(0, 16)}`;
+  }
+  return value;
 }
 
 export function stableSafetyIdentifier(reviewId) {
@@ -34,7 +48,7 @@ async function roleAssets(role) {
 /** Builds the same Responses API body shape as the frozen evaluator, without credentials. */
 export async function buildResponsesPayload(role, request, reviewId) {
   const {instructions, schema} = await roleAssets(role);
-  const cachePlan = buildCacheableInput(role, request);
+  const cachePlan = buildCacheableInput(role, withoutEmbeddedMedia(request));
   const body = {
     model: MODEL_ID,
     store: false,
@@ -69,12 +83,13 @@ export async function buildResponsesPayload(role, request, reviewId) {
     const photos = (request.review_input?.media?.photos || [])
       .filter((item) => item.fetch_status === "downloaded")
       .map((item) => item.local_ref || item.full_size_url)
-      .filter(Boolean);
+      .filter(Boolean)
+      .slice(0, MAX_CLASSIFIER_PHOTOS);
     const frames = request.review_input?.media?.video?.processing_status === "frames_extracted"
-      ? (request.review_input.media.video.frame_refs || [])
+      ? (request.review_input.media.video.frame_refs || []).slice(0, MAX_CLASSIFIER_VIDEO_IMAGES)
       : [];
     const content = body.input[0]?.content;
-    for (const imageUrl of [...photos, ...frames].slice(0, 40)) {
+    for (const imageUrl of [...photos, ...frames]) {
       content.push({type: "input_image", image_url: imageUrl, detail: "high"});
     }
   }
