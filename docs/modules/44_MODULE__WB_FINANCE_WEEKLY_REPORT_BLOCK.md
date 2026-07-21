@@ -41,7 +41,7 @@ The resolver accepts only the posted functional contour and `sheet_vitrina_v1_wa
 
 Lineage contains operation date, canonical source date/identity/version/digest, quality, selection method and formula version. Before 01.07 the UI/tooltips describe the value as a retrospective management projection, not factual historical warehouse capital. A canonical source correction changes the digest and invalidates/rebuilds affected Finance projections automatically.
 
-Coverage counts gross sale/return units, so a symmetric sale/return pair cannot hide missing cost even if net COGS is zero. Fully covered weeks become calculated; a real gap lists exact `nmId`, operation date, canonical source date and reason.
+Coverage counts gross sale/return units, so a symmetric sale/return pair cannot hide missing cost even if net COGS is zero. Fully covered weeks become calculated; a real gap lists exact `nmId`, operation date, canonical source date and reason. Repeated missing operations are losslessly collapsed by `week + nmId + operation date + reason`: the evidence retains operation count, separate sale/return quantities, gross unmatched units and signed net units, while per-row report/rrd dependencies remain bound by the cost-state hash. The plan therefore does not duplicate one blocker/matrix row per raw operation.
 
 ## Agent remuneration, acquiring and WB correction
 
@@ -102,7 +102,7 @@ Dry-run is default and read-only. With no date bounds it covers all loaded Finan
 - target/non-target digests, write set, blockers, backup/recovery plan and exact fingerprint;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
-The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Per-operation cost details are released after their week is collapsed into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 raw rows and fails on row loss, excessive runtime or excessive peak RSS.
+The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Per-operation cost details are released after their week is collapsed into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows, including roughly 148k rows for a deliberately missing canonical-cost SKU, and fails on row/quantity loss, duplicated gap evidence, excessive runtime or excessive peak RSS.
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 

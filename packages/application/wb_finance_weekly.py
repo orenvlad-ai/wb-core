@@ -2040,7 +2040,7 @@ class WbFinanceWeeklyBlock:
         cogs = ZERO
         matched_units = 0
         unmatched_units = 0
-        problem_rows: list[dict[str, Any]] = []
+        problem_rows: dict[tuple[str, ...], dict[str, Any]] = {}
         detail_rows: list[dict[str, Any]] = []
         dependency_digest = _StreamingCostDependencyDigest()
         resolution_cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2127,23 +2127,50 @@ class WbFinanceWeeklyBlock:
             )
             if resolution.get("status") != "resolved":
                 unmatched_units += gross_qty
-                problem_rows.append(
-                    {
-                        "sku": nm_id or str(row.get("nmId") or row.get("vendorCode") or row.get("sku") or "unknown"),
-                        "nm_id": nm_id,
-                        "operation_date": (
-                            operation_date.isoformat()
-                            if operation_date_source != "week_start_fallback"
-                            else ""
-                        ),
-                        "source": "canonical_our_wb_cost",
-                        "canonical_source_date": str(resolution.get("canonical_source_date") or ""),
-                        "reason": str(resolution.get("reason") or "canonical_cost_missing"),
-                        "operation_date_source": operation_date_source,
-                        "unmatched_units": gross_qty,
-                        "net_units": signed_qty,
-                    }
+                sku = nm_id or str(
+                    row.get("nmId")
+                    or row.get("vendorCode")
+                    or row.get("sku")
+                    or "unknown"
                 )
+                operation_day = (
+                    operation_date.isoformat()
+                    if operation_date_source != "week_start_fallback"
+                    else ""
+                )
+                canonical_source_date = str(
+                    resolution.get("canonical_source_date") or ""
+                )
+                reason = str(resolution.get("reason") or "canonical_cost_missing")
+                problem_key = (
+                    sku,
+                    nm_id,
+                    operation_day,
+                    canonical_source_date,
+                    reason,
+                    operation_date_source,
+                )
+                problem = problem_rows.setdefault(
+                    problem_key,
+                    {
+                        "sku": sku,
+                        "nm_id": nm_id,
+                        "operation_date": operation_day,
+                        "source": "canonical_our_wb_cost",
+                        "canonical_source_date": canonical_source_date,
+                        "reason": reason,
+                        "operation_date_source": operation_date_source,
+                        "operation_count": 0,
+                        "sales_qty": 0,
+                        "returns_qty": 0,
+                        "unmatched_units": 0,
+                        "net_units": 0,
+                    },
+                )
+                problem["operation_count"] += 1
+                problem["sales_qty" if sign > 0 else "returns_qty"] += gross_qty
+                problem["unmatched_units"] += gross_qty
+                problem["net_units"] += signed_qty
                 continue
             unit_cost = _decimal(resolution["unit_cost_rub"])
             signed_cogs = Decimal(signed_qty) * unit_cost
@@ -2207,7 +2234,7 @@ class WbFinanceWeeklyBlock:
             "coverage_pct": _money_text(coverage_pct),
             "cogs_rub": _money_text(cogs) if unmatched_units == 0 else None,
             "partial_cogs_rub": _money_text(cogs),
-            "problem_skus": problem_rows,
+            "problem_skus": [problem_rows[key] for key in sorted(problem_rows)],
             "quality": quality,
             "cost_state_hash": cost_state_hash,
             "detail_rows": detail_rows if include_details else [],
@@ -3479,8 +3506,8 @@ class WbFinanceWeeklyBlock:
                         "nm_id": str(problem.get("nm_id") or problem.get("sku") or ""),
                         "operation_date": str(problem.get("operation_date") or ""),
                         "canonical_source_date": str(problem.get("canonical_source_date") or ""),
-                        "sales_qty": None,
-                        "returns_qty": None,
+                        "sales_qty": int(problem.get("sales_qty") or 0),
+                        "returns_qty": int(problem.get("returns_qty") or 0),
                         "unit_cost_rub": None,
                         "source": "canonical_our_wb_cost",
                         "source_quality": "missing",

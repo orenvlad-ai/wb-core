@@ -57,16 +57,40 @@ def main() -> None:
         if not str(plan["source_manifests"]["finance"]["digest"]).startswith("sha256:"):
             raise AssertionError("streamed Finance manifest digest is absent")
         if (
-            plan["finance_nm_id_count"] != 1
-            or len(plan["week_nm_operation_date_matrix"]) != WEEK_COUNT
+            plan["finance_nm_id_count"] != 2
+            or len(plan["week_nm_operation_date_matrix"]) != WEEK_COUNT * 2
             or any(
                 item["canonical_source_date"] != "2026-07-01"
                 for item in plan["week_nm_operation_date_matrix"]
+                if item["nm_id"] == "101"
             )
         ):
             raise AssertionError("production-scale canonical COGS matrix is incomplete")
-        if plan["blockers"] or not plan["apply_allowed"]:
-            raise AssertionError(f"scale fixture unexpectedly blocked: {plan['blockers']}")
+        missing_matrix = [
+            item for item in plan["week_nm_operation_date_matrix"] if item["nm_id"] == "202"
+        ]
+        resolved_matrix = [
+            item for item in plan["week_nm_operation_date_matrix"] if item["nm_id"] == "101"
+        ]
+        missing_sales_qty = sum(item["sales_qty"] for item in missing_matrix)
+        if (
+            len(missing_matrix) != WEEK_COUNT
+            or any(item["source_quality"] != "missing" for item in missing_matrix)
+            or not 140_000 <= missing_sales_qty <= 150_000
+            or missing_sales_qty
+            + sum(item["sales_qty"] for item in resolved_matrix)
+            != RAW_ROW_COUNT
+        ):
+            raise AssertionError("high-volume missing-cost evidence was not aggregated by week/date")
+        missing_blockers = [
+            item for item in plan["blockers"] if item["code"] == "canonical_cost_coverage_incomplete"
+        ]
+        if (
+            plan["apply_allowed"]
+            or len(missing_blockers) != WEEK_COUNT
+            or any(len(item["problem_skus"]) != 1 for item in missing_blockers)
+        ):
+            raise AssertionError(f"scale missing-cost blockers were duplicated: {plan['blockers']}")
         if elapsed >= MAX_SECONDS:
             raise AssertionError(f"canonical scale dry-run exceeded {MAX_SECONDS}s: {elapsed:.3f}s")
         if rss_mib >= MAX_RSS_MIB:
@@ -152,7 +176,8 @@ def _seed_required_sources(db_path: Path) -> None:
                 barcodes_json TEXT,product_type TEXT
             );
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
-                (1,101,'VC101','BAR101','["BAR101"]','other');
+                (1,101,'VC101','BAR101','["BAR101"]','other'),
+                (1,202,'VC202','BAR202','["BAR202"]','other');
             CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
                 cutover_id TEXT PRIMARY KEY,cutover_at TEXT,status TEXT,
                 plan_fingerprint TEXT,source_watermarks_json TEXT,
@@ -186,7 +211,8 @@ def _seed_raw_history(db_path: Path) -> None:
                    SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<?
                ), source AS (
                    SELECT n,
-                          date('2026-01-05', printf('+%d days', ((n-1) % ?) * 7)) week_start
+                          date('2026-01-05', printf('+%d days', ((n-1) % ?) * 7)) week_start,
+                          CASE WHEN ((n-1) / ?) % 2 = 0 THEN 202 ELSE 101 END nm_id
                    FROM seq
                )
                INSERT INTO wb_finance_weekly_raw_rows(
@@ -195,17 +221,22 @@ def _seed_raw_history(db_path: Path) -> None:
                    first_seen_at,updated_at
                )
                SELECT 'seller-scale','scale-' || n,'scale-' || n,1,week_start,
-                      date(week_start,'+6 days'),'101','VC101','BAR101','Продажа','Продажа',
+                      date(week_start,'+6 days'),CAST(nm_id AS TEXT),
+                      CASE WHEN nm_id=101 THEN 'VC101' ELSE 'VC202' END,
+                      CASE WHEN nm_id=101 THEN 'BAR101' ELSE 'BAR202' END,
+                      'Продажа','Продажа',
                       'sha256:scale-' || n,
                       json_object(
-                          'reportId','scale-' || n,'rrdId','scale-' || n,'nmId',101,
-                          'vendorCode','VC101','sku','BAR101','rrDate',week_start,
+                          'reportId','scale-' || n,'rrdId','scale-' || n,'nmId',nm_id,
+                          'vendorCode',CASE WHEN nm_id=101 THEN 'VC101' ELSE 'VC202' END,
+                          'sku',CASE WHEN nm_id=101 THEN 'BAR101' ELSE 'BAR202' END,
+                          'rrDate',week_start,
                           'saleDt',week_start,'docTypeName','Продажа','sellerOperName','Продажа',
                           'quantity',1,'retailPriceWithDisc','200','forPay','140','acquiringFee','10'
                       ),
                       '2026-07-20T00:00:00Z','2026-07-20T00:00:00Z'
                FROM source""",
-            (RAW_ROW_COUNT, WEEK_COUNT),
+            (RAW_ROW_COUNT, WEEK_COUNT, WEEK_COUNT),
         )
         conn.commit()
 

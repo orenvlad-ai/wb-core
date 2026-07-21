@@ -24,7 +24,7 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 
 The Partner smoke includes the agreed Excel reference fixture and a second confidential SKU. It verifies the UI/XLSX values, no other-SKU content, no ZIP/raw exports, root/nested ads envelopes, missing-source blockers, stale aggregate detection and indexed performance against a measured full-decode baseline with 295,919 unrelated raw rows.
 
-The Finance scale smoke independently builds the complete canonical dry-run for 295,919 sale rows across 26 weeks. Raw/non-target identities use deterministic streaming JSON-array digests, expected target evidence contains only persisted/read-back fields, and per-operation detail is not retained after its weekly matrix collapse. The regression fails on manifest row loss, a 60-second local runtime, or 512 MiB peak RSS.
+The Finance scale smoke independently builds the complete canonical dry-run for 295,919 sale rows across 26 weeks, including roughly 148k operations of an SKU without canonical cost. Raw/non-target identities use deterministic streaming JSON-array digests, expected target evidence contains only persisted/read-back fields, and missing-cost rows collapse by week/SKU/operation-date/reason while retaining operation and sale/return quantities. The regression fails on manifest/quantity loss, duplicated gap evidence, a 60-second local runtime, or 512 MiB peak RSS.
 
 ## Phase 1 — production all-history dry-run
 
