@@ -32,7 +32,7 @@ DEFAULT_MANIFEST_PATH = (
 )
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 CONTRACT_NAME = "warehouse_business_approved_archival_estimate"
-CONTRACT_VERSION = "v1"
+CONTRACT_VERSION = "v2"
 QUALITY = "business_approved_archival_estimate"
 LEGACY_ESTIMATE_DAILY_QUALITIES = frozenset(
     {
@@ -91,7 +91,7 @@ def load_archival_estimate_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[
     target_ids = [int(item.get("nm_id") or 0) for item in targets]
     if (
         payload.get("schema_version")
-        != "warehouse_business_approved_archival_estimate_manifest_v1"
+        != "warehouse_business_approved_archival_estimate_manifest_v2"
         or payload.get("effective_date") != "2026-07-01"
         or _decimal(payload.get("unit_cost_rub")) != Decimal("100.00")
         or payload.get("quality") != QUALITY
@@ -105,6 +105,7 @@ def load_archival_estimate_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[
         raise WarehouseArchivalEstimateError("archival estimate manifest contract mismatch")
     if any(
         not str(item.get("vendor_code") or "").strip()
+        or not str(item.get("canonical_nomenclature_name") or "").strip()
         or not str(item.get("name") or "").strip()
         for item in targets
     ):
@@ -355,6 +356,7 @@ def build_archival_estimate_plan(
         for row in nomenclature_rows:
             nomenclature_by_nm.setdefault(int(row["nm_id"]), []).append(row)
         manifest_by_nm = {int(item["nm_id"]): item for item in manifest["targets"]}
+        nomenclature_identity_proof: list[dict[str, Any]] = []
         for nm_id in target_ids:
             sources = nomenclature_by_nm.get(nm_id) or []
             wanted = manifest_by_nm[nm_id]
@@ -370,14 +372,40 @@ def build_archival_estimate_plan(
                     }
                 )
             for source in sources:
-                if (
-                    str(source.get("vendor_code") or "").strip()
-                    != str(wanted["vendor_code"]).strip()
-                    or str(source.get("nomenclature_name") or "").strip()
-                    != str(wanted["name"]).strip()
-                ):
+                actual_vendor_code = str(source.get("vendor_code") or "").strip()
+                actual_nomenclature_name = str(
+                    source.get("nomenclature_name") or ""
+                ).strip()
+                expected_vendor_code = str(wanted["vendor_code"]).strip()
+                expected_nomenclature_name = str(
+                    wanted["canonical_nomenclature_name"]
+                ).strip()
+                identity_matches = (
+                    actual_vendor_code == expected_vendor_code
+                    and actual_nomenclature_name == expected_nomenclature_name
+                )
+                nomenclature_identity_proof.append(
+                    {
+                        "nm_id": nm_id,
+                        "expected_vendor_code": expected_vendor_code,
+                        "actual_vendor_code": actual_vendor_code,
+                        "expected_nomenclature_name": expected_nomenclature_name,
+                        "actual_nomenclature_name": actual_nomenclature_name,
+                        "descriptive_name": str(wanted["name"]).strip(),
+                        "purchase_price_yuan": source.get("purchase_price_yuan"),
+                        "matches": identity_matches,
+                    }
+                )
+                if not identity_matches:
                     blockers.append(
-                        {"code": "nomenclature_identity_drift", "nm_id": nm_id}
+                        {
+                            "code": "nomenclature_identity_drift",
+                            "nm_id": nm_id,
+                            "expected_vendor_code": expected_vendor_code,
+                            "actual_vendor_code": actual_vendor_code,
+                            "expected_nomenclature_name": expected_nomenclature_name,
+                            "actual_nomenclature_name": actual_nomenclature_name,
+                        }
                     )
                 if source.get("purchase_price_yuan") not in (None, ""):
                     blockers.append(
@@ -496,6 +524,7 @@ def build_archival_estimate_plan(
             "target_nm_ids": target_ids,
             "target_count": len(target_ids),
             "targets": manifest["targets"],
+            "nomenclature_identity_proof": nomenclature_identity_proof,
             "active_vitrina_nm_ids": active_ids,
             "active_vitrina_count": len(active_ids),
             "target_active_intersection": sorted(set(target_ids) & set(active_ids)),
@@ -762,6 +791,10 @@ def _apply_archival_estimate_plan_locked(
                         "source_digest": locked["source_digest"],
                         "calculation_fingerprint": fingerprint,
                         "supersedes_opening_fingerprint": opening["fingerprint"],
+                        "canonical_nomenclature_name": identity[
+                            "canonical_nomenclature_name"
+                        ],
+                        "descriptive_name": identity["name"],
                         "no_quantity_or_capital_created": True,
                     }
                     row_fingerprint = "sha256:" + _hash(
@@ -769,6 +802,9 @@ def _apply_archival_estimate_plan_locked(
                             "version_id": version_id,
                             "nm_id": int(nm_id),
                             "vendor_code": identity["vendor_code"],
+                            "canonical_nomenclature_name": identity[
+                                "canonical_nomenclature_name"
+                            ],
                             "name": identity["name"],
                             "unit_cost_rub": locked["unit_cost_rub"],
                             "quality": QUALITY,

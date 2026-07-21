@@ -4,7 +4,8 @@
 
 This recovery is limited to the exact 18 legacy `nmId` values in
 `migration/data/warehouse_business_approved_archival_estimate_20260701.json`.
-The manifest pins seller article, product name, the production Finance dry-run
+The manifest pins seller article, the exact canonical nomenclature name, a
+separate human-readable Finance product description, the production Finance dry-run
 SHA-256 `dc4802b590a3540a9357f52a8bf04ae1a7e043573813321a61104f7604cfe6da`,
 the former `fallback_average` value `113.8716125306441197313055472`, effective
 date `2026-07-01`, quality `business_approved_archival_estimate`, and the
@@ -45,7 +46,7 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
 ```
 
 Review requires exactly 18 targets, empty intersection with the exact 33,
-matching nomenclature and former fallback evidence, no target factual
+matching canonical nomenclature identity and former fallback evidence, no target factual
 post-effective acceptance event or factual inbound evidence already embedded
 in daily provenance, zero primary/opening/movement writes, target
 before/after rows, full primary/non-target/opening digests, and
@@ -74,8 +75,11 @@ explicit SQLite snapshot. If factual acceptance lands before daily replay,
 consumers and archival readback reject an already materialized estimate row
 until the ordinary WAC projection succeeds; an exact idempotent retry also
 fails closed instead of relabeling that blocked readback as success. Every
-target must have exactly one matching nomenclature row, and any duplicate,
-identity conflict or factual purchase price blocks apply. Readback is:
+target must have exactly one matching nomenclature row. Identity is proved by
+`nmId + seller article + canonical nomenclature name`; the descriptive Finance
+name is retained only as lineage and is never compared as a nomenclature key.
+The dry-run publishes expected and actual identity fields for all 18 rows, and
+any duplicate, identity conflict or factual purchase price blocks apply. Readback is:
 
 ```bash
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
