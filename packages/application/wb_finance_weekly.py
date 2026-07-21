@@ -465,6 +465,7 @@ class WbFinanceWeeklyBlock:
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._capitalization_cache_key = ""
         self._capitalization_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._capitalization_cache_connection: sqlite3.Connection | None = None
 
     def ensure_schema(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -1455,6 +1456,15 @@ class WbFinanceWeeklyBlock:
         self,
         conn: sqlite3.Connection,
     ) -> dict[tuple[str, str, str], dict[str, Any]]:
+        # A plan/apply/readback uses one coherent connection while calculating
+        # the global week and every per-SKU projection. Raw Finance rows and
+        # canonical supply layers are source tables and are not mutated inside
+        # that connection. Re-reading and re-hashing the complete layer manifest
+        # for every aggregate was an accidental O(weeks × SKUs × layers) path.
+        # A new connection always rebuilds the source-bound cache, so ordinary
+        # ingestion or a later canonical-layer correction cannot reuse it.
+        if self._capitalization_cache_connection is conn:
+            return self._capitalization_cache
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -1615,6 +1625,7 @@ class WbFinanceWeeklyBlock:
                 }
         self._capitalization_cache_key = cache_key
         self._capitalization_cache = allocations
+        self._capitalization_cache_connection = conn
         return allocations
 
     def _load_retro_cost_map(
