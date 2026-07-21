@@ -116,7 +116,7 @@ Hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
-Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner re-plans under `BEGIN IMMEDIATE`, rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
+Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner holds the canonical `.warehouse-functional-sync.lock` from its current-plan recheck through coherent backup, `BEGIN IMMEDIATE` apply and transactional readback, so hourly/manual warehouse sync, replay, downstream cost-layer materialization and economics publication cannot change the canonical cost inputs inside that interval. For a long production apply the separate repo-owned `warehouse-functional-maintenance status|hold|restore` lifecycle stops only the hourly timer, waits for an already-running service without killing it, persists the exact mode-`0600` timer/service baseline and later restores its enabled/active state; it does not weaken or normalize the reviewed fingerprint. The runner rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
 
 Production apply is not implied by merge/deploy and remains forbidden until the new all-history dry-run receives explicit human approval.
 
@@ -132,6 +132,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_canonical_scale_smoke.py`;
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
+- `python3 apps/warehouse_functional_maintenance_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.

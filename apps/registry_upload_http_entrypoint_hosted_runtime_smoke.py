@@ -171,6 +171,58 @@ def main() -> None:
         command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
         if any(name.startswith("finance-retro-") for name in command_choices):
             raise AssertionError("revoked hosted Finance retro commands remain executable")
+    for maintenance_action, expected_timeout in (
+        ("status", 300.0),
+        ("hold", 1500.0),
+        ("restore", 300.0),
+    ):
+        maintenance_payload = {
+            "status": "held" if maintenance_action == "hold" else (
+                "restored" if maintenance_action == "restore" else "ok"
+            ),
+            "units": {
+                "timer": {
+                    "is_enabled": "enabled",
+                    "is_active": "inactive" if maintenance_action == "hold" else "active",
+                },
+                "service": {"is_active": "inactive"},
+            },
+            "warehouse_lock": {"held": False},
+            "finance_apply_processes": [],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(maintenance_payload), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ) as run_mock:
+            payload = hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+                active_target,
+                action=maintenance_action,
+            )
+        if payload["status"] != maintenance_payload["status"]:
+            raise AssertionError("hosted maintenance lost runner readback")
+        if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
+            raise AssertionError("hosted maintenance lost its bounded timeout")
+        remote_command = " ".join(run_mock.call_args.args[0])
+        if not all(
+            token in remote_command
+            for token in (
+                "apps/warehouse_functional_maintenance.py",
+                maintenance_action,
+                "/opt/wb-core-runtime/state",
+            )
+        ):
+            raise AssertionError("hosted maintenance bypassed its repo-owned runner")
+    maintenance_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-functional-maintenance", "hold"]
+    )
+    if (
+        maintenance_args.handler
+        is not hosted_runtime.run_warehouse_functional_maintenance_command
+        or maintenance_args.action != "hold"
+    ):
+        raise AssertionError("hosted runner must expose warehouse maintenance hold")
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")
