@@ -46,6 +46,72 @@ PROFIT_METHOD_VERSION = "wb_finance_profit_attributed_capitalization_v2"
 COST_METHOD_VERSION = CANONICAL_COST_FORMULA_VERSION
 
 
+class _StreamingJsonArrayDigest:
+    """Digest a deterministic JSON array without retaining every element."""
+
+    def __init__(self) -> None:
+        self._hash = hashlib.sha256()
+        self._hash.update(b"[")
+        self._count = 0
+        self._finished = False
+
+    def add(self, value: Any) -> None:
+        if self._finished:
+            raise RuntimeError("streaming JSON digest is already finalized")
+        if self._count:
+            self._hash.update(b",")
+        self._hash.update(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        self._count += 1
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def finish(self) -> str:
+        if not self._finished:
+            self._hash.update(b"]")
+            self._finished = True
+        return "sha256:" + self._hash.hexdigest()
+
+
+class _StreamingCostDependencyDigest:
+    """Preserve the canonical cost-state JSON hash without a per-row list."""
+
+    def __init__(self) -> None:
+        self._hash = hashlib.sha256()
+        self._hash.update(b'{"dependencies":[')
+        self._count = 0
+
+    def add(self, value: Mapping[str, Any]) -> None:
+        if self._count:
+            self._hash.update(b",")
+        self._hash.update(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        self._count += 1
+
+    def finish(self) -> str:
+        self._hash.update(b'],"formula_version":')
+        self._hash.update(
+            json.dumps(COST_METHOD_VERSION, ensure_ascii=False).encode("utf-8")
+        )
+        self._hash.update(b"}")
+        return self._hash.hexdigest()
+
+
 def _decimal(value: Any) -> Decimal:
     if value in (None, ""):
         return ZERO
@@ -1430,7 +1496,7 @@ class WbFinanceWeeklyBlock:
                FROM wb_finance_weekly_raw_rows WHERE seller_id=?
                ORDER BY week_start,report_id,rrd_id""",
             (self.seller_id,),
-        ).fetchall()
+        )
         for stored in raw_rows:
             raw = json.loads(str(stored["raw_json"] or "{}"))
             nm_id, identity_method, identity_problem = _resolve_finance_nm_id(
@@ -1976,7 +2042,8 @@ class WbFinanceWeeklyBlock:
         unmatched_units = 0
         problem_rows: list[dict[str, Any]] = []
         detail_rows: list[dict[str, Any]] = []
-        dependency_evidence: list[dict[str, Any]] = []
+        dependency_digest = _StreamingCostDependencyDigest()
+        resolution_cache: dict[tuple[str, str], dict[str, Any]] = {}
         source_units = {"projected_from_2026_07_01": 0, "canonical_exact_date": 0}
         operation_date_fallback_rows = 0
         operation_date_fallback_units = 0
@@ -2023,11 +2090,15 @@ class WbFinanceWeeklyBlock:
                     "formula_version": COST_METHOD_VERSION,
                 }
             else:
-                resolution = resolve_finance_canonical_cost(
-                    conn,
-                    nm_id=nm_id,
-                    operation_date=operation_date,
-                )
+                cache_key = (nm_id, operation_date.isoformat())
+                resolution = resolution_cache.get(cache_key)
+                if resolution is None:
+                    resolution = resolve_finance_canonical_cost(
+                        conn,
+                        nm_id=nm_id,
+                        operation_date=operation_date,
+                    )
+                    resolution_cache[cache_key] = resolution
             dependency = {
                 **resolution,
                 "report_id": str(row.get("reportId") or ""),
@@ -2036,7 +2107,24 @@ class WbFinanceWeeklyBlock:
                 "identity_problem": identity_problem,
                 "operation_date_source": operation_date_source,
             }
-            dependency_evidence.append(dependency)
+            dependency_digest.add(
+                {
+                    key: dependency.get(key)
+                    for key in (
+                        "report_id",
+                        "rrd_id",
+                        "nm_id",
+                        "operation_date",
+                        "canonical_source_date",
+                        "canonical_source_identity",
+                        "source_digest",
+                        "quality",
+                        "selection_method",
+                        "status",
+                        "reason",
+                    )
+                }
+            )
             if resolution.get("status") != "resolved":
                 unmatched_units += gross_qty
                 problem_rows.append(
@@ -2096,36 +2184,7 @@ class WbFinanceWeeklyBlock:
             if total_units
             else None
         )
-        dependency_payload = [
-            {
-                key: item.get(key)
-                for key in (
-                    "report_id",
-                    "rrd_id",
-                    "nm_id",
-                    "operation_date",
-                    "canonical_source_date",
-                    "canonical_source_identity",
-                    "source_digest",
-                    "quality",
-                    "selection_method",
-                    "status",
-                    "reason",
-                )
-            }
-            for item in dependency_evidence
-        ]
-        cost_state_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "formula_version": COST_METHOD_VERSION,
-                    "dependencies": dependency_payload,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        cost_state_hash = dependency_digest.finish()
         quality = {
             "cost_method_version": COST_METHOD_VERSION,
             "policy_date": CANONICAL_COST_POLICY_DATE.isoformat(),
@@ -3136,11 +3195,12 @@ class WbFinanceWeeklyBlock:
         blockers: list[dict[str, Any]] = [
             {"code": "required_schema_missing", "tables": missing_schema}
         ] if missing_schema else []
-        finance_manifest: list[list[str]] = []
+        finance_manifest_digest = _StreamingJsonArrayDigest()
         cost_manifest: dict[str, dict[str, Any]] = {}
         union_nm_ids: set[str] = set()
-        target_before: list[Any] = []
-        target_after: list[Any] = []
+        target_before_digest = _StreamingJsonArrayDigest()
+        target_after_digest = _StreamingJsonArrayDigest()
+        expected_sku_projection_row_count = 0
         for week in week_rows:
             start = date.fromisoformat(str(week["week_start"]))
             end = date.fromisoformat(str(week["week_end"]))
@@ -3152,10 +3212,15 @@ class WbFinanceWeeklyBlock:
                 (self.seller_id, start.isoformat(), end.isoformat()),
             ).fetchall()
             parsed = [json.loads(str(row["raw_json"])) for row in stored_rows]
-            finance_manifest.extend(
-                [start.isoformat(), str(row["report_id"]), str(row["rrd_id"]), str(row["row_hash"])]
-                for row in stored_rows
-            )
+            for row in stored_rows:
+                finance_manifest_digest.add(
+                    [
+                        start.isoformat(),
+                        str(row["report_id"]),
+                        str(row["rrd_id"]),
+                        str(row["row_hash"]),
+                    ]
+                )
             new_metrics, new_coverage, unknown = self._aggregate_rows(conn, parsed, start)
             detailed = self._calculate_cogs(conn, parsed, start, include_details=True)
             stored_aggregate = (
@@ -3425,7 +3490,7 @@ class WbFinanceWeeklyBlock:
                         "reason": str(problem.get("reason") or "canonical_cost_missing"),
                     }
                 )
-            target_before.append(
+            target_before_digest.add(
                 {
                     "week_start": start.isoformat(),
                     "aggregate": dict(stored_aggregate) if stored_aggregate is not None else None,
@@ -3433,6 +3498,11 @@ class WbFinanceWeeklyBlock:
                     "sku_aggregates": stored_sku_aggregates,
                 }
             )
+            # The matrix and cost manifest above are the durable operation-level
+            # evidence. Release duplicate parsed/detail objects before the
+            # independently rebuilt per-SKU projection parses this week again.
+            del detailed
+            del parsed
             expected_sku_projections = self._rebuild_sku_week_aggregates(
                 conn,
                 week_start=start,
@@ -3442,16 +3512,17 @@ class WbFinanceWeeklyBlock:
                 calculated_at="",
                 persist=False,
             )
-            target_after.append(
+            expected_sku_projection_row_count += len(expected_sku_projections)
+            target_after_digest.add(
                 {
                     "week_start": start.isoformat(),
                     "metrics": new_metrics,
-                    "coverage": detailed,
+                    "coverage": new_coverage,
                     "unknown": unknown,
                     "sku_aggregates": expected_sku_projections,
                 }
             )
-        finance_digest = self._json_digest(finance_manifest)
+        finance_digest = finance_manifest_digest.finish()
         cost_rows = [cost_manifest[key] for key in sorted(cost_manifest)]
         canonical_july_first_manifest: list[dict[str, Any]] = []
         for nm_id in sorted(
@@ -3510,12 +3581,12 @@ class WbFinanceWeeklyBlock:
             "date_from": scope_from.isoformat(),
             "date_to": scope_to.isoformat(),
             "week_count": len(weeks),
-            "finance_row_count": len(finance_manifest),
+            "finance_row_count": finance_manifest_digest.count,
             "finance_nm_id_count": len(union_nm_ids),
             "weeks": weeks,
             "week_nm_operation_date_matrix": matrix,
             "source_manifests": {
-                "finance": {"row_count": len(finance_manifest), "digest": finance_digest},
+                "finance": {"row_count": finance_manifest_digest.count, "digest": finance_digest},
                 "cost": {
                     "source": "canonical Our WB Cost",
                     "row_count": len(cost_rows),
@@ -3546,8 +3617,8 @@ class WbFinanceWeeklyBlock:
                 },
                 "ads": ads_manifest,
             },
-            "target_before_digest": self._json_digest(target_before),
-            "expected_target_after_digest": self._json_digest(target_after),
+            "target_before_digest": target_before_digest.finish(),
+            "expected_target_after_digest": target_after_digest.finish(),
             "non_target_manifest": non_target_manifest,
             "non_target_digest": self._json_digest(non_target_manifest),
             "write_set": {
@@ -3565,9 +3636,7 @@ class WbFinanceWeeklyBlock:
                     {"week_start": item["week_start"], "week_end": item["week_end"]}
                     for item in weeks
                 ],
-                "expected_sku_projection_row_count": sum(
-                    len(item["sku_aggregates"]) for item in target_after
-                ),
+                "expected_sku_projection_row_count": expected_sku_projection_row_count,
             },
             "invariants": {
                 "raw_finance_rows_immutable": True,
@@ -3665,8 +3734,10 @@ class WbFinanceWeeklyBlock:
                 (),
             )
         for name, (query, params) in queries.items():
-            rows = [dict(row) for row in conn.execute(query, params).fetchall()]
-            manifests[name] = {"row_count": len(rows), "digest": self._json_digest(rows)}
+            digest = _StreamingJsonArrayDigest()
+            for row in conn.execute(query, params):
+                digest.add(dict(row))
+            manifests[name] = {"row_count": digest.count, "digest": digest.finish()}
         return manifests
 
     def apply_canonical_finance_backfill(
@@ -3731,7 +3802,7 @@ class WbFinanceWeeklyBlock:
                         date.fromisoformat(str(week["week_start"])),
                         date.fromisoformat(str(week["week_end"])),
                     )
-                target_readback: list[dict[str, Any]] = []
+                target_readback_digest = _StreamingJsonArrayDigest()
                 for week in plan["weeks"]:
                     start = date.fromisoformat(str(week["week_start"]))
                     end = date.fromisoformat(str(week["week_end"]))
@@ -3761,12 +3832,12 @@ class WbFinanceWeeklyBlock:
                             (self.seller_id, start.isoformat(), end.isoformat()),
                         ).fetchall()
                     ]
-                    target_readback.append(
+                    target_readback_digest.add(
                         {
                             "week_start": start.isoformat(),
                             "metrics": json.loads(str(aggregate_row["metrics_json"] or "{}")),
                             "coverage": self._calculate_cogs(
-                                conn, raw, start, include_details=True
+                                conn, raw, start
                             ),
                             "unknown": json.loads(
                                 str(aggregate_row["unknown_reasons_json"] or "[]")
@@ -3774,7 +3845,7 @@ class WbFinanceWeeklyBlock:
                             "sku_aggregates": sku_aggregates,
                         }
                     )
-                target_after_digest = self._json_digest(target_readback)
+                target_after_digest = target_readback_digest.finish()
                 if target_after_digest != str(plan["expected_target_after_digest"]):
                     raise ValueError("target Finance readback digest differs from reviewed plan")
                 non_target_after_manifest = self._canonical_non_target_manifest(

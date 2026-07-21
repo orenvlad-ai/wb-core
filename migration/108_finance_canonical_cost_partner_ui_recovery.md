@@ -12,6 +12,7 @@ Repository delivery and production-data mutation are separate gates. Missing pro
 python3 apps/wb_finance_weekly_smoke.py
 python3 apps/wb_finance_weekly_cost_cutover_smoke.py
 python3 apps/wb_finance_weekly_business_approved_backfill_smoke.py
+python3 apps/wb_finance_weekly_canonical_scale_smoke.py
 python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py
 python3 apps/wb_finance_weekly_browser_smoke.py
 python3 apps/partner_report_smoke.py
@@ -22,6 +23,8 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 ```
 
 The Partner smoke includes the agreed Excel reference fixture and a second confidential SKU. It verifies the UI/XLSX values, no other-SKU content, no ZIP/raw exports, root/nested ads envelopes, missing-source blockers, stale aggregate detection and indexed performance against a measured full-decode baseline with 295,919 unrelated raw rows.
+
+The Finance scale smoke independently builds the complete canonical dry-run for 295,919 sale rows across 26 weeks. Raw/non-target identities use deterministic streaming JSON-array digests, expected target evidence contains only persisted/read-back fields, and per-operation detail is not retained after its weekly matrix collapse. The regression fails on manifest row loss, a 60-second local runtime, or 512 MiB peak RSS.
 
 ## Phase 1 — production all-history dry-run
 

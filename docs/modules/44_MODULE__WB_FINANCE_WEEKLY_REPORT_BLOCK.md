@@ -102,6 +102,8 @@ Dry-run is default and read-only. With no date bounds it covers all loaded Finan
 - target/non-target digests, write set, blockers, backup/recovery plan and exact fingerprint;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
+The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Per-operation cost details are released after their week is collapsed into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 raw rows and fails on row loss, excessive runtime or excessive peak RSS.
+
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 
 Hosted operations expose only:
@@ -123,6 +125,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_smoke.py`;
 - `python3 apps/wb_finance_weekly_cost_cutover_smoke.py`;
 - `python3 apps/wb_finance_weekly_business_approved_backfill_smoke.py`;
+- `python3 apps/wb_finance_weekly_canonical_scale_smoke.py`;
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
