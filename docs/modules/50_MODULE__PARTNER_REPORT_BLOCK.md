@@ -2,15 +2,15 @@
 title: "Модуль: Partner Report"
 doc_id: "WB-CORE-MODULE-50-PARTNER-REPORT-BLOCK"
 doc_type: "module"
-status: "active"
-purpose: "Зафиксировать server-owned отчёт доходности одной карточки, immutable finalization и конфиденциальный доказательный XLSX/ZIP."
-scope: "Finance raw rows, exact selected nmId, ads_compact, temporal COGS, allocated account expenses, operator UI, Excel and privacy verification."
+status: "active_ui_first_xlsx"
+purpose: "Server-owned UI-first отчёт доходности одной карточки с indexed Finance projection и соответствующим XLSX."
+scope: "One canonical nmId, versioned settings, selected weeks, Finance per-SKU aggregate, ads_compact, canonical COGS, UI preview and XLSX."
 source_basis:
   - "docs/modules/09_MODULE__ADS_COMPACT_BLOCK.md"
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
-  - "migration/107_finance_retro_cost_and_partner_report.md"
+  - "migration/108_finance_canonical_cost_partner_ui_recovery.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -19,88 +19,116 @@ related_modules:
 related_tables:
   - "partner_report_settings_versions"
   - "partner_report_settings_current"
-  - "partner_report_finalized_reports"
   - "partner_report_audit"
+  - "wb_finance_weekly_sku_aggregates"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/partner-report/options"
   - "POST /v1/sheet-vitrina-v1/partner-report/settings"
   - "POST /v1/sheet-vitrina-v1/partner-report/preview"
-  - "POST /v1/sheet-vitrina-v1/partner-report/finalize"
-  - "POST /v1/sheet-vitrina-v1/partner-report/preview-package.zip"
-  - "GET /v1/sheet-vitrina-v1/partner-report/finalized"
-  - "GET /v1/sheet-vitrina-v1/partner-report/finalized/{report_id}"
-  - "GET /v1/sheet-vitrina-v1/partner-report/finalized/{report_id}/package.zip"
+  - "POST /v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 source_of_truth_level: "module_canonical"
-update_note: "Добавлен single-SKU Partner Report с Decimal v1 formula, server-owned settings, continuous finalized periods, persisted loss carry, immutable evidence and fail-closed privacy scanner."
+update_note: "V2 makes the report UI-first, uses indexed canonical Finance/cost sources, supports root/nested ads envelopes, and limits export to a source-digest-bound XLSX; finalization and ZIP/raw Finance exports are outside this scope."
 ---
 
-# 1. Назначение и границы
+# 1. Purpose and active surface
 
-`Отчёты -> Партнёрский отчёт` строит `Отчёт о доходности карточки` для ровно одного canonical `nmId`. Он не создаёт партнёрскую роль, публичный кабинет или постоянную ссылку. Все routes защищены существующей server-side секцией `reports`; browser/localStorage не являются источником параметров, прав или finalized truth.
+`Отчёты → Партнёрский отчёт` builds `Отчёт о доходности карточки` for exactly one canonical `nmId`. The primary result is the on-screen table. Excel is a secondary export of that same displayed calculation.
 
-Preview допускает любой уникальный набор закрытых недель. Finalization допускает только непрерывный недельный период. Если у карточки уже есть finalized history, следующий период должен непосредственно продолжать предыдущий; его immutable `loss_carry_out` становится новым `loss_carry_in`. Gap, overlap и out-of-order finalization блокируются, поэтому отрицательная неделя не может быть незаметно исключена из выплаты. Exact retry тех же settings/weeks/sources возвращает существующий report, а другой расчёт поверх уже finalized периода запрещён. Исторический finalized report читает сохранённые значения и provenance и не пересчитывается при последующем изменении настроек, себестоимости или источников.
+The active surface has no partner role/public cabinet, finalized payout write, evidence ZIP, raw Finance XLSX or permanent public download. Existing historical finalized tables/rows from an earlier revision may remain untouched for audit compatibility, but no current HTTP route creates or packages them.
 
-# 2. Server-owned параметры и хранение
+All routes use the existing server-side `reports` authorization boundary. Browser/localStorage is not parameter or permission truth.
 
-Обязательные параметры: `nmId`, доля партнёра, вложенный капитал, резерв ТО, офис в неделю, расчётная ставка налога и правило общих расходов. Значения не имеют скрытых business defaults; UI placeholders не записываются. Каждое сохранение создаёт immutable version с автором, временем и fingerprint, а current pointer выбирает актуальную версию карточки.
+# 2. Server-owned settings
 
-Finalized row хранит exact week list, `nmId`, название, settings/formula versions, все weekly/period values, Finance/ads/cost manifests and digests, source coverage, время/автора, loss carry fields, выплату и ROI. Audit фиксирует settings save и finalization. Generated packages не сохраняются и выдаются только как bounded response; finalized package каждый раз собирается из immutable report/provenance и не создаёт public URL.
+Required saved parameters are:
 
-# 3. Источники и распределение
+- one card / `nmId`;
+- investor share of positive net profit, %;
+- invested capital, ₽;
+- replenishment reserve, %;
+- weekly office expense, ₽;
+- tax rate, %;
+- approved common-expense rule.
 
-- Finance source — immutable `wb_finance_weekly_raw_rows`. Direct row используется один раз только после direct `nmId` или deterministic canonical alias resolution. Account-level `nmId=0` не попадает в raw partner export.
-- Общий account-level расход распределяется как `selected SKU net revenue / total weekly net revenue`. Нулевая/отрицательная общая база блокирует расчёт. Internal provenance хранит source amount и coefficient; партнёр получает только category, allocated amount, rule, formula version and safe source digest.
-- Advertising source — только persisted `ads_compact` snapshots с role `accepted_closed_day_snapshot` на уровне `date + nmId`. `kind=empty` означает подтверждённый zero. Missing date или successful payload без выбранного `nmId` блокирует finalization. Finance marketing deduction не вычитается одновременно с `ads_sum`.
-- COGS — тот же operation-date Finance cost contract из module 44. Продажа добавляет, возврат уменьшает COGS; detail сохраняет operation date, quantity, unit cost, source date/version и signed COGS.
-- Acquiring остаётся раскрытием внутри комиссии. Paid acceptance и transit с `2026-05-01` не вычитаются повторно, потому что уже входят в выбранную себестоимость.
+There are no hidden business defaults. UI examples are placeholders only. Every changed settings save creates an immutable version with author, time and fingerprint; unchanged retry is idempotent. Invested capital must be positive, rates must be `0..100`, and office expense must be non-negative.
 
-# 4. Versioned Decimal formula
+The week picker supports all/none/latest four/manual checkboxes. Preview may use any unique selected weeks. Current scope does not create a payout/finalization business record.
 
-Formula version: `partner_report_profitability_v1`.
+# 3. Indexed sources and stale detection
+
+Partner preview never scans all `wb_finance_weekly_raw_rows`. It performs indexed lookups of `wb_finance_weekly_sku_aggregates` for the selected `seller + week + nmId`, plus the `__account__` projection for approved common-expense allocation.
+
+The aggregate is rebuildable from raw Finance rows and shares module 44 classifier/profit/cost services. Preview fails stale when formula version, weekly raw `content_hash`, or canonical cost source digest changed. Source correction therefore requires projection rebuild and cannot silently reuse old values.
+
+Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
+
+Account-level rows with no resolvable `nmId` are not silently lost or assigned wholesale. The approved rule is:
+
+`selected SKU net revenue / total weekly net revenue`.
+
+The allocated amount and coefficient are disclosed in provenance. Non-positive total revenue is a blocker. A different allocation rule requires a separately approved server-owned contract.
+
+Marketing uses only accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. The shared resolver accepts valid root or nested `result` envelopes. `kind=empty` means confirmed zero; a missing date, invalid value/envelope or successful payload without the selected `nmId` is a blocker and never zero. Finance marketing is not deducted simultaneously with `ads_sum`.
+
+# 4. Decimal formulas
+
+Formula version is `partner_report_profitability_ui_first_v2`.
+
+For each week:
 
 ```text
-card_margin = net_revenue
-              - cogs - commission - logistics - ads - storage
-              - other_direct_expenses - allocated_common_expenses
-              + positive_adjustments
+net_revenue = sales − returns
 
-estimated_tax = net_revenue * tax_rate
-replenishment_reserve = MAX(card_margin, 0) * reserve_rate
-distributable_profit = card_margin - office - estimated_tax
-                       - replenishment_reserve - applicable_loss_carry
-partner_payout = MAX(distributable_profit, 0) * partner_share
+finance_margin = net_revenue
+                 − canonical COGS
+                 − agent remuneration
+                 − acquiring
+                 − logistics
+                 − ads_sum
+                 − storage
+                 − non-capitalized acceptance
+                 − penalties/corrections
+                 − other attributable expenses
 
-period_roi = period_partner_payout / invested_capital
-annualized_return = period_roi * 52 / selected_week_count
+tax = net_revenue × tax_rate
+replenishment = MAX(finance_margin, 0) × replenishment_rate
+net_profit = finance_margin − office − tax − replenishment
+dividends = MAX(net_profit, 0) × investor_share
+weekly_annualized_return = dividends × 52 / invested_capital × 100%
 ```
 
-Weekly payout remains an explanatory row. Period payout is recalculated from the aggregate distributable result, so a negative selected week offsets the period and weekly positive payouts are not blindly summed. Period ROI and annualized return are recalculated from period payout and manual capital; weekly percentages are never summed.
+Negative net profit remains visible; negative dividends are not accrued. For several selected weeks:
 
-# 5. XLSX и доказательный ZIP
+`annualized_return = average weekly dividends × 52 / invested capital × 100%`.
 
-The first workbook sheet intentionally follows the supplied light Excel reference: Arial-like black text, white/light-gray surface, calm borders, week columns at top, metric labels at left, compact coefficients, frozen `C2`, print area/fit and blue `Выплата партнёру` row. It contains values without macros or external workbook links.
+Weekly percentages are not summed. Zero capital is a validation error. The UI tooltip explicitly says this is a calculated, not guaranteed, return.
 
-One ZIP contains:
+Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, other attributable expenses, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return.
 
-- `00_Партнёрский_отчёт_...xlsx`;
-- one `Финотчёт_WB_...xlsx` per selected week, explicitly titled `Финотчёт WB — выборка по SKU`;
-- selected-SKU ads and COGS workbooks;
-- safe allocated-common-expense workbook;
-- human-readable methodology/parameter manifest.
+# 5. UI contract and performance
 
-Finance export uses a safe column allowlist and contains no account-level rows or other-SKU records. A zero-operation week still gets headers and an explicit empty state.
+Clicking `Сформировать` immediately shows loading and a visible cancel action. A 30-second AbortController timeout produces a human-readable error. The preview, blockers and source coverage appear directly below settings; blockers are above the table. Available values remain visible in an incomplete preview while missing dependent values stay absent. Excel is enabled only for `status=ready`.
 
-# 6. Privacy and reconciliation gate
+The table has metrics in rows, weeks in columns and `Итого за период`; its first metric column is sticky. At ~390 px, settings/messages/actions remain within the viewport and horizontal scrolling belongs only to the table.
 
-Before ZIP response, the server inspects filenames, all visible/hidden/very-hidden sheets, raw workbook XML/shared strings, formulas, comments, document properties, embedded members, macros and external links. Tokens for every other canonical SKU (`nmId`, vendor code, barcode, name, our SKU) are forbidden. Internal paths and credential-like fragments are forbidden. Any finding blocks delivery.
+The production-like regression fixture adds 295,919 unrelated raw Finance rows after projections, measures an explicit full JSON-decode baseline, and proves a two-week selected-SKU preview remains an indexed sub-two-second lookup without a synchronous raw scan. The smoke prints both timings; the current local evidence was 172 ms for the synthetic full scan versus 1 ms for indexed preview over 295,923 total raw rows (machine-specific, retained as comparative evidence rather than a production SLA).
 
-The same gate reopens the generated workbooks and reconciles their actual cells: selected Finance rows to direct report values, ads rows to `Реклама WB`, signed COGS rows and explicit weekly totals to `Себестоимость`, safe allocated totals to the report, saved parameters to the manifest and weekly/period cells to immutable totals. The negative multi-SKU fixture in `apps/partner_report_smoke.py` proves both reconciliation and leak rejection, including malicious hidden/formula/comment/metadata/embedded-object content.
+# 6. XLSX contract
+
+`POST .../preview.xlsx` receives the selected `nmId`, exact weeks and the visible preview's `expected_source_digest`. Source drift returns a conflict and requires rebuilding the UI preview.
+
+The workbook is generated from the same calculation service as UI. Sheet 1 follows the supplied desktop reference: light/white palette, Arial-like 10 pt text, thin calm gray borders, compact coefficient column, metric labels left, week columns right, total column, frozen `C2`, print area/fit, appropriate widths/heights and blue emphasis for `Дивиденды` and annualized return. Sheet 2 contains only selected report parameters, date, formula version and source digest.
+
+The file has no macros, external workbook links, hidden sheets or other-SKU values. Its filename binds product/SKU, `nmId` and selected period. UI and XLSX values must match to Decimal rounding.
+
+ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scanner are not part of the active V2 output and have no HTTP routes.
 
 # 7. Verification
 
-- formulas, settings, immutability, XLSX/ZIP/privacy: `python3 apps/partner_report_smoke.py`;
-- desktop/narrow UI, week picker, preview/finalize/package: `python3 apps/partner_report_browser_smoke.py`;
-- auth boundary: `python3 apps/registry_upload_http_entrypoint_auth_smoke.py`;
-- public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`.
+- formulas, root/nested ads, stale detection, incomplete states, indexed performance and XLSX: `python3 apps/partner_report_smoke.py`;
+- immediate loading, cancel, UI-first table, digest-bound XLSX and desktop/390 px layout: `python3 apps/partner_report_browser_smoke.py`;
+- authorization: `python3 apps/registry_upload_http_entrypoint_auth_smoke.py`;
+- public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
+- authenticated production read-only acceptance: hosted `finance-ui-flow`.
 
-Production UI acceptance uses preview/read-only package or a disposable contour with cleanup; it must not leave a real partner finalized record.
+The control fixture uses revenue `476034`, COGS `83837`, agent+acquiring `174797`, ads `30904`, office `10000`, tax `6%`, reserve `20%` and investor share `40%`, yielding Finance margin `186496`, net profit `110634.76` and dividends `44253.904`. Invested capital is an explicit fixture input and is not inferred from the reference screenshot.

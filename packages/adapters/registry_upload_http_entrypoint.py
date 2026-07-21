@@ -91,9 +91,7 @@ DEFAULT_PARTNER_REPORT_PREFIX = "/v1/sheet-vitrina-v1/partner-report"
 DEFAULT_PARTNER_REPORT_OPTIONS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/options"
 DEFAULT_PARTNER_REPORT_SETTINGS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/settings"
 DEFAULT_PARTNER_REPORT_PREVIEW_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/preview"
-DEFAULT_PARTNER_REPORT_FINALIZE_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/finalize"
-DEFAULT_PARTNER_REPORT_FINALIZED_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/finalized"
-DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/preview-package.zip"
+DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/preview.xlsx"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
@@ -593,8 +591,7 @@ def _build_handler(
             if parsed.path in {
                 DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
                 DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
-                DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
-                DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
+                DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH,
             }:
                 try:
                     body = _load_request_payload(self)
@@ -605,19 +602,15 @@ def _build_handler(
                         )
                     elif parsed.path == DEFAULT_PARTNER_REPORT_PREVIEW_PATH:
                         payload = entrypoint.handle_partner_report_preview_request(body)
-                    elif parsed.path == DEFAULT_PARTNER_REPORT_FINALIZE_PATH:
-                        payload = entrypoint.handle_partner_report_finalize_request(
-                            body, actor=actor
-                        )
                     else:
-                        package, filename, _verification = (
-                            entrypoint.partner_report_block.build_preview_package(body)
+                        workbook, filename, _verification = (
+                            entrypoint.handle_partner_report_preview_workbook_request(body)
                         )
                         _write_binary_response(
                             self,
                             HTTPStatus.OK,
-                            package,
-                            content_type="application/zip",
+                            workbook,
+                            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             filename=filename,
                             as_attachment=True,
                         )
@@ -629,7 +622,7 @@ def _build_handler(
                         else HTTPStatus.CONFLICT
                         if exc.code in {
                             "source_coverage_incomplete",
-                            "package_verification_failed",
+                            "preview_source_digest_changed",
                         }
                         else HTTPStatus.UNPROCESSABLE_ENTITY
                     )
@@ -3297,59 +3290,6 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"partner report options failed: {exc}"},
-                    )
-                    return
-                _write_json_response(self, HTTPStatus.OK, payload)
-                return
-
-            if parsed.path == DEFAULT_PARTNER_REPORT_FINALIZED_PATH:
-                try:
-                    payload = entrypoint.handle_partner_report_finalized_list_request(
-                        nm_id=_resolve_single_query_param(parsed.query, "nm_id")
-                    )
-                except Exception as exc:  # pragma: no cover - bounded fallback
-                    _write_json_response(
-                        self,
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"partner report finalized list failed: {exc}"},
-                    )
-                    return
-                _write_json_response(self, HTTPStatus.OK, payload)
-                return
-
-            finalized_prefix = DEFAULT_PARTNER_REPORT_FINALIZED_PATH + "/"
-            if parsed.path.startswith(finalized_prefix):
-                suffix = parsed.path[len(finalized_prefix) :]
-                try:
-                    if suffix.endswith("/package.zip"):
-                        report_id = suffix[: -len("/package.zip")].strip("/")
-                        package, filename, _verification = (
-                            entrypoint.partner_report_block.build_finalized_package(report_id)
-                        )
-                        _write_binary_response(
-                            self,
-                            HTTPStatus.OK,
-                            package,
-                            content_type="application/zip",
-                            filename=filename,
-                            as_attachment=True,
-                        )
-                        return
-                    report_id = suffix.strip("/")
-                    payload = entrypoint.partner_report_block.finalized_report(report_id)
-                except PartnerReportError as exc:
-                    status = HTTPStatus.NOT_FOUND if exc.code == "report_not_found" else HTTPStatus.CONFLICT
-                    _write_json_response(
-                        self,
-                        status,
-                        {"error": str(exc), "code": exc.code, "blockers": exc.blockers},
-                    )
-                    return
-                except Exception as exc:  # pragma: no cover - bounded fallback
-                    _write_json_response(
-                        self,
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"partner report download failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -7570,9 +7510,7 @@ def _render_sheet_vitrina_operator_ui(
         "partner_report_options_path": DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
         "partner_report_settings_path": DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
         "partner_report_preview_path": DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
-        "partner_report_finalize_path": DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
-        "partner_report_finalized_path": DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
-        "partner_report_preview_package_path": DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH,
+        "partner_report_preview_xlsx_path": DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH,
         "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
         "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
         "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,

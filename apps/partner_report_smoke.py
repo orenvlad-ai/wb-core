@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Targeted Partner Report formulas, immutability, XLSX and ZIP privacy smoke."""
+"""UI-first indexed Partner Report and XLSX regression smoke."""
 
 from __future__ import annotations
 
@@ -12,705 +12,486 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
-import zipfile
+import time
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.comments import Comment
+from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.partner_report import (  # noqa: E402
-    PARTNER_REPORT_FORMULA_VERSION,
+    COMMON_EXPENSE_RULE,
+    REPORT_ROWS,
     PartnerReportBlock,
     PartnerReportError,
 )
 
-
-TARGET_NM = "101101"
-OTHER_NM = "202202"
 WEEK_ONE = date(2026, 7, 6)
 WEEK_TWO = date(2026, 7, 13)
+TARGET_NM = 101101
+OTHER_NM = 202202
 
 
 def main() -> None:
-    with TemporaryDirectory(prefix="partner-report-") as tmp:
-        runtime = Path(tmp)
+    with TemporaryDirectory(prefix="partner-report-ui-first-") as tmp:
         block = PartnerReportBlock(
-            runtime,
+            Path(tmp),
             seller_id="seller-1",
-            now_factory=lambda: datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc),
+            now_factory=lambda: datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
         )
         block.ensure_schema()
         _seed_sources(block.db_path)
         _seed_finance(block)
         _seed_ads(block.db_path)
-
-        settings = block.save_settings(
-            {
-                "nm_id": TARGET_NM,
-                "partner_share_pct": "40",
-                "invested_capital_rub": "500000",
-                "replenishment_reserve_pct": "20",
-                "weekly_office_expense_rub": "10000",
-                "tax_rate_pct": "6",
-                "common_expense_rule": "net_revenue_share",
-            },
-            actor="smoke-operator",
-        )
-        if settings["parameters"]["invested_capital_rub"] != "500000.0000":
-            raise AssertionError(f"manual invested capital was not persisted: {settings}")
-        if block.save_settings(settings["parameters"], actor="smoke-operator") != settings:
-            raise AssertionError("identical server-owned settings must be idempotent")
-
-        first = block.preview(
-            {"nm_id": TARGET_NM, "selected_weeks": [WEEK_ONE.isoformat()]}
-        )
-        _assert_reference_fixture(first)
-
-        two_week = block.preview(
-            {
-                "nm_id": TARGET_NM,
-                "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()],
-            }
-        )
-        _assert_two_week_formulas(two_week)
-        _assert_preview_and_final_selection_policy(block)
-
-        finalized = block.finalize(
-            {
-                "nm_id": TARGET_NM,
-                "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()],
-            },
-            actor="smoke-operator",
-        )
-        repeated_finalized = block.finalize(
-            {
-                "nm_id": TARGET_NM,
-                "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()],
-            },
-            actor="smoke-operator-retry",
-        )
-        if repeated_finalized["report_id"] != finalized["report_id"]:
-            raise AssertionError("exact finalization retry created a duplicate payout record")
-        with sqlite3.connect(block.db_path) as conn:
-            finalized_count = conn.execute(
-                "SELECT count(*) FROM partner_report_finalized_reports"
-            ).fetchone()[0]
-        if finalized_count != 1:
-            raise AssertionError("exact finalization retry must remain idempotent")
-        original_json = json.dumps(finalized, ensure_ascii=False, sort_keys=True)
-        package, _filename, verification = block.build_finalized_package(
-            finalized["report_id"]
-        )
-        _assert_package(package, finalized, verification)
-        artifact_dir = str(os.environ.get("PARTNER_REPORT_SMOKE_ARTIFACT_DIR") or "").strip()
-        if artifact_dir:
-            destination = Path(artifact_dir)
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "partner-report-fixture.zip").write_bytes(package)
-            with zipfile.ZipFile(BytesIO(package)) as archive:
-                main_name = next(name for name in archive.namelist() if name.startswith("00_"))
-                (destination / "partner-report-fixture.xlsx").write_bytes(archive.read(main_name))
-
-        # Current cost/settings drift must not rewrite the immutable report or package values.
-        with sqlite3.connect(block.db_path) as conn:
-            conn.execute(
-                """UPDATE sheet_vitrina_v1_wb_cost_daily_state
-                   SET our_wb_unit_cost_rub='999999',inputs_hash='drifted'
-                   WHERE nm_id=? AND as_of_date=?""",
-                (int(TARGET_NM), WEEK_ONE.isoformat()),
-            )
-            conn.commit()
-        block.save_settings(
-            {
-                "nm_id": TARGET_NM,
-                "partner_share_pct": "10",
-                "invested_capital_rub": "700000",
-                "replenishment_reserve_pct": "5",
-                "weekly_office_expense_rub": "1",
-                "tax_rate_pct": "1",
-                "common_expense_rule": "net_revenue_share",
-            },
-            actor="later-operator",
-        )
-        readback = block.finalized_report(finalized["report_id"])
-        if json.dumps(readback, ensure_ascii=False, sort_keys=True) != original_json:
-            raise AssertionError("finalized report changed after current source/settings drift")
-        repeat_package, _repeat_name, repeat_verification = block.build_finalized_package(
-            finalized["report_id"]
-        )
-        _assert_package(repeat_package, finalized, repeat_verification)
-        if repeat_verification["source_digest"] != verification["source_digest"]:
-            raise AssertionError("repeat finalized package changed source digest")
-
-        _assert_missing_ads_date_blocks(block)
-        _assert_missing_ads_value_blocks(block)
-        _assert_scanner_rejects_hidden_shared_formula_comment_metadata(block, finalized)
-
-    _assert_persisted_loss_carry_contract()
-
+        _assert_server_owned_settings(block)
+        report = _assert_preview(block)
+        _assert_workbook(block, report)
+        _assert_incomplete_and_stale_states(block)
+        _assert_negative_profit_and_validation(block)
+        performance = _assert_indexed_performance(block)
+        _assert_removed_package_surface(block)
     print(
-        "partner_report: ok -> Decimal fixture, direct/allocated expenses, ads coverage, "
-        "continuous payout/loss carry, immutable finalized report, XLSX structure, ZIP privacy/reconciliation"
+        "partner_report: ok -> server-owned parameters, indexed UI preview, root/nested ads, "
+        "blockers without zero masking, Finance formulas, dividends/annualized return, "
+        "reference-like XLSX, no ZIP/raw export, production-like preview performance; "
+        f"raw_scan_ms={performance['raw_scan_ms']}, indexed_preview_ms={performance['indexed_preview_ms']}, "
+        f"raw_rows={performance['raw_rows']}"
     )
 
 
-def _assert_reference_fixture(report: dict) -> None:
-    if report["status"] != "ready":
-        raise AssertionError(f"reference preview unexpectedly blocked: {report['blockers']}")
-    values = report["weeks"][0]["values"]
-    expected = {
-        "net_revenue": Decimal("476034"),
-        "cogs": Decimal("83837"),
-        "commission": Decimal("174797"),
-        "ads": Decimal("30904"),
-        "card_margin": Decimal("186496"),
-        "office": Decimal("10000"),
-        "estimated_tax": Decimal("28562.04"),
-        "replenishment_reserve": Decimal("37299.20"),
-        "distributable_profit": Decimal("110634.76"),
-        "partner_payout": Decimal("44253.904"),
+def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
+    options = block.options()
+    cards = {item["nm_id"]: item for item in options["cards"]}
+    if str(TARGET_NM) not in cards or str(OTHER_NM) not in cards:
+        raise AssertionError(f"canonical nomenclature options incomplete: {options}")
+    if "XLSX only" not in options["export_contract"]:
+        raise AssertionError(f"current export scope not disclosed: {options}")
+    saved = block.save_settings(_settings(), actor="operator@example.test")
+    repeated = block.save_settings(_settings(), actor="operator@example.test")
+    if saved["settings_version_id"] != repeated["settings_version_id"]:
+        raise AssertionError("unchanged settings created an unnecessary version")
+    updated_payload = _settings()
+    updated_payload["partner_share_pct"] = "41"
+    updated = block.save_settings(updated_payload, actor="operator@example.test")
+    if updated["settings_version_id"] == saved["settings_version_id"]:
+        raise AssertionError("changed server settings did not create an audited version")
+    block.save_settings(_settings(), actor="operator@example.test")
+    with sqlite3.connect(block.db_path) as conn:
+        versions = conn.execute(
+            "SELECT COUNT(*) FROM partner_report_settings_versions WHERE nm_id=?",
+            (str(TARGET_NM),),
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT COUNT(*) FROM partner_report_audit WHERE action='settings_saved'"
+        ).fetchone()[0]
+    if versions != 3 or audit != 3:
+        raise AssertionError("settings audit/version provenance mismatch")
+
+
+def _assert_preview(block: PartnerReportBlock) -> dict:
+    report = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()]}
+    )
+    if report["status"] != "ready" or report["blockers"]:
+        raise AssertionError(f"complete preview was blocked: {report}")
+    if report["performance"]["raw_finance_full_scan"]:
+        raise AssertionError(f"preview regressed to a raw Finance scan: {report}")
+    if report["preview_source"] != "indexed_per_sku_weekly_finance_aggregate":
+        raise AssertionError(f"indexed projection is not the report source: {report}")
+    first = report["weeks"][0]["values"]
+    expected_first = {
+        "net_revenue": "476034.0000",
+        "cogs": "83837.0000",
+        "agent_remuneration": "160000.0000",
+        "acquiring": "14797.0000",
+        "ads": "30904.0000",
+        "finance_margin": "186496.0000",
+        "office": "10000.0000",
+        "estimated_tax": "28562.0400",
+        "replenishment_reserve": "37299.2000",
+        "net_profit": "110634.7600",
+        "dividends": "44253.9040",
+        "annualized_return_pct": "230.1203",
     }
-    for key, wanted in expected.items():
-        actual = Decimal(str(values[key]))
-        if actual != wanted:
-            raise AssertionError(f"reference {key}: expected {wanted}, got {actual}")
-    if Decimal(values["card_margin"]) - Decimal("186495.5") not in {
-        Decimal("0.5"), Decimal("0.5000")
-    }:
-        raise AssertionError("reference margin is outside agreed Decimal range")
-
-
-def _assert_two_week_formulas(report: dict) -> None:
-    if report["status"] != "ready":
-        raise AssertionError(f"two-week preview unexpectedly blocked: {report['blockers']}")
+    for key, expected in expected_first.items():
+        if first.get(key) != expected:
+            raise AssertionError(f"control fixture {key}: {first.get(key)!r} != {expected!r}")
     second = report["weeks"][1]["values"]
-    if Decimal(second["allocated_common_expenses"]) != Decimal("10"):
-        raise AssertionError(f"account expense allocation mismatch: {second}")
-    if Decimal(second["ads"]) != Decimal("10"):
-        raise AssertionError(f"selected nmId ads mismatch: {second}")
-    if Decimal(second["card_margin"]) != Decimal("-60"):
-        raise AssertionError(f"negative week mismatch: {second}")
-    expected_period_payout = (
-        Decimal("110634.76") + Decimal(second["distributable_profit"])
-    ) * Decimal("0.40")
-    if Decimal(report["totals"]["partner_payout"]) != expected_period_payout:
-        raise AssertionError(
-            "period payout must include the negative week instead of summing weekly payouts"
-        )
-    expected_roi = expected_period_payout / Decimal("500000") * Decimal("100")
-    expected_annualized = expected_roi * Decimal("52") / Decimal("2")
-    if Decimal(report["totals"]["period_roi_pct"]) != expected_roi.quantize(Decimal("0.0001")):
-        raise AssertionError(f"period ROI mismatch: {report['totals']}")
-    if Decimal(report["totals"]["annualized_return_pct"]) != expected_annualized.quantize(Decimal("0.0001")):
-        raise AssertionError(f"annualized ROI mismatch: {report['totals']}")
+    if second["other_attributable_expenses"] != "2500.0000":
+        raise AssertionError(f"approved revenue-share allocation mismatch: {second}")
+    if second["dividends"] != "4800.0000":
+        raise AssertionError(f"second-week dividends mismatch: {second}")
+    expected_period_annualized = (
+        (Decimal("44253.9040") + Decimal("4800"))
+        / Decimal("2")
+        * Decimal("52")
+        / Decimal("1000000")
+        * Decimal("100")
+    ).quantize(Decimal("0.0001"))
+    if Decimal(str(report["totals"]["annualized_return_pct"])) != expected_period_annualized:
+        raise AssertionError(f"period annualized return must use average weekly dividends: {report}")
+    if "not guaranteed" not in report["annualized_return_formula"]:
+        raise AssertionError("annualized return disclosure is absent")
+    return report
 
 
-def _assert_preview_and_final_selection_policy(block: PartnerReportBlock) -> None:
-    gap = [WEEK_ONE.isoformat(), (WEEK_ONE + timedelta(days=14)).isoformat()]
-    parsed = block._validate_selected_weeks(gap, require_continuous=False)
-    if parsed != gap:
-        raise AssertionError("preview must accept an arbitrary unique week set")
+def _assert_workbook(block: PartnerReportBlock, report: dict) -> None:
+    body, filename, evidence = block.build_preview_workbook(
+        {"nm_id": str(TARGET_NM), "selected_weeks": report["selected_weeks"]},
+        expected_source_digest=report["source_digest"],
+    )
+    if not filename.endswith(".xlsx") or str(TARGET_NM) not in filename:
+        raise AssertionError(f"XLSX filename does not bind SKU and period: {filename}")
+    if evidence["source_digest"] != report["source_digest"]:
+        raise AssertionError("UI and Excel source digests diverged")
+    wb = load_workbook(BytesIO(body), data_only=False)
+    if wb.sheetnames != ["Партнёрский отчёт", "Параметры"]:
+        raise AssertionError(f"unexpected workbook structure: {wb.sheetnames}")
+    if any(sheet.sheet_state != "visible" for sheet in wb.worksheets):
+        raise AssertionError("workbook contains a hidden evidence surface")
+    if getattr(wb, "vba_archive", None) is not None or getattr(wb, "_external_links", []):
+        raise AssertionError("workbook contains macros or external links")
+    ws = wb["Партнёрский отчёт"]
+    if ws.freeze_panes != "C2" or not ws.print_area:
+        raise AssertionError("reference-like freeze/print contract missing")
+    labels = {str(ws.cell(row, 2).value): row for row in range(2, 2 + len(REPORT_ROWS))}
+    for required in (
+        "Агентское вознаграждение WB",
+        "Эквайринг",
+        "Дивиденды",
+        "Расчётная годовая доходность инвестора, %",
+    ):
+        if required not in labels:
+            raise AssertionError(f"required report row absent from XLSX: {required}")
+    dividends_row = labels["Дивиденды"]
+    roi_row = labels["Расчётная годовая доходность инвестора, %"]
+    if ws.cell(dividends_row, 2).font.color.rgb[-6:] != "0070C0":
+        raise AssertionError("dividends row lost the reference blue accent")
+    if ws.cell(roi_row, 2).font.color.rgb[-6:] != "0070C0":
+        raise AssertionError("annualized return row lost the reference blue accent")
+    if ws.cell(labels["Налог"], 1).value != 0.06:
+        raise AssertionError("actual tax coefficient is absent from the compact left column")
+    if ws.cell(labels["На пополнение товарных остатков"], 1).value != 0.2:
+        raise AssertionError("actual replenishment coefficient is absent from XLSX")
+    if ws.cell(dividends_row, 1).value != 0.4:
+        raise AssertionError("actual investor share is absent from XLSX")
+    for key, label in REPORT_ROWS:
+        ui_value = report["weeks"][0]["values"][key]
+        excel_value = ws.cell(labels[label], 3).value
+        if ui_value is None:
+            if excel_value is not None:
+                raise AssertionError(f"Excel masked missing {key} as a value")
+        elif abs(
+            (Decimal(str(excel_value)) * (Decimal("100") if key.endswith("_pct") else Decimal("1")))
+            - Decimal(ui_value)
+        ) > Decimal("0.0001"):
+            raise AssertionError(f"UI/XLSX mismatch for {key}: {ui_value} vs {excel_value}")
+    serialized_cells = "\n".join(
+        str(cell.value or "") for sheet in wb.worksheets for row in sheet.iter_rows() for cell in row
+    )
+    for forbidden in (str(OTHER_NM), "Другой секретный товар", "VC202", "BAR202"):
+        if forbidden in serialized_cells:
+            raise AssertionError(f"other-SKU data leaked into Partner XLSX: {forbidden}")
+    if body[:2] != b"PK":
+        raise AssertionError("generated Excel is not a valid OOXML archive")
+    artifact_path = os.environ.get("PARTNER_REPORT_SMOKE_XLSX", "").strip()
+    if artifact_path:
+        Path(artifact_path).write_bytes(body)
+
     try:
-        block._validate_selected_weeks(gap, require_continuous=True)
+        block.build_preview_workbook(
+            {"nm_id": str(TARGET_NM), "selected_weeks": report["selected_weeks"]},
+            expected_source_digest="sha256:stale-ui",
+        )
     except PartnerReportError as exc:
-        if exc.code != "weeks_not_continuous":
+        if exc.code != "preview_source_digest_changed":
             raise
     else:
-        raise AssertionError("finalized payout must reject a profitable-only week gap")
+        raise AssertionError("Excel export ignored UI/source digest drift")
 
 
-def _assert_persisted_loss_carry_contract() -> None:
-    with TemporaryDirectory(prefix="partner-report-loss-carry-") as tmp:
-        block = PartnerReportBlock(Path(tmp), seller_id="seller-1")
-        block.ensure_schema()
-        prior_week = date(2026, 6, 29)
-        prior_report = {
-            "source_manifest": {
-                "loss_carry": {
-                    "source_report_id": "",
-                    "source_digest": "",
-                    "loss_carry_in_rub": "0.0000",
-                }
-            },
-            "totals": {"loss_carry_in": "0.0000"},
-        }
-        with sqlite3.connect(block.db_path) as conn:
-            conn.execute(
-                """INSERT INTO partner_report_finalized_reports(
-                   report_id,seller_id,nm_id,product_name,settings_version_id,
-                   formula_version,selected_weeks_json,report_json,provenance_json,
-                   source_digest,loss_carry_in_rub,loss_carry_out_rub,
-                   total_partner_payout_rub,period_roi_pct,annualized_return_pct,
-                   finalized_at,finalized_by
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    "prf_prior_loss",
-                    "seller-1",
-                    TARGET_NM,
-                    "Выбранный товар",
-                    "prs_prior",
-                    PARTNER_REPORT_FORMULA_VERSION,
-                    json.dumps([prior_week.isoformat()]),
-                    json.dumps(prior_report, sort_keys=True),
-                    "{}",
-                    "sha256:prior-loss",
-                    "0.0000",
-                    "500.0000",
-                    "0.0000",
-                    "0.0000",
-                    "0.0000",
-                    "2026-07-06T00:00:00Z",
-                    "smoke-operator",
-                ),
-            )
-            conn.commit()
-        with block._connect() as conn:
-            carry, source, blockers = block._loss_carry_context(
-                conn,
-                nm_id=TARGET_NM,
-                selected_weeks=[WEEK_ONE.isoformat()],
-                finalization=True,
-            )
-            _gap_carry, _gap_source, gap_blockers = block._loss_carry_context(
-                conn,
-                nm_id=TARGET_NM,
-                selected_weeks=[WEEK_TWO.isoformat()],
-                finalization=True,
-            )
-        if carry != Decimal("500") or blockers or source["source_report_id"] != "prf_prior_loss":
-            raise AssertionError(f"persisted loss carry source mismatch: {carry} {source} {blockers}")
-        if not any(item.get("code") == "finalized_period_gap" for item in gap_blockers):
-            raise AssertionError(f"finalized period gap did not fail closed: {gap_blockers}")
-        period_values = {
-            "net_revenue": "0",
-            "cogs": "0",
-            "commission": "0",
-            "logistics": "0",
-            "ads": "0",
-            "storage": "0",
-            "other_direct_expenses": "0",
-            "allocated_common_expenses": "0",
-            "positive_adjustments": "0",
-            "card_margin": "1000",
-            "office": "0",
-            "estimated_tax": "0",
-            "replenishment_reserve": "0",
-            "distributable_profit": "1000",
-            "partner_payout": "400",
-        }
-        totals = block._period_totals(
-            [{"values": period_values}],
-            params={"partner_share_pct": "40", "invested_capital_rub": "500000"},
-            loss_carry_in=carry,
-        )
-        if (
-            Decimal(totals["distributable_profit"]) != Decimal("500")
-            or Decimal(totals["partner_payout"]) != Decimal("200")
-            or Decimal(totals["loss_carry_in"]) != Decimal("500")
-        ):
-            raise AssertionError(f"persisted loss carry was not applied to payout: {totals}")
-
-
-def _assert_package(package: bytes, report: dict, verification: dict) -> None:
-    if not verification["passed"]:
-        raise AssertionError(f"package verification failed: {verification}")
-    if verification["finance_file_count"] != len(report["selected_weeks"]):
-        raise AssertionError(f"weekly Finance file count mismatch: {verification}")
-    with zipfile.ZipFile(BytesIO(package)) as archive:
-        names = archive.namelist()
-        finance_names = [name for name in names if "Финотчёт_WB_" in name]
-        required = ("00_Партнёрский_отчёт_", "Реклама_WB_", "Расчёт_себестоимости_", "Общие_расходы_WB_")
-        if len(finance_names) != len(report["selected_weeks"]):
-            raise AssertionError(f"ZIP weekly Finance count mismatch: {names}")
-        if any(not any(name.startswith(prefix) for name in names) for prefix in required):
-            raise AssertionError(f"ZIP evidence composition mismatch: {names}")
-        for name in names:
-            body = archive.read(name)
-            if name.endswith(".xlsx"):
-                with zipfile.ZipFile(BytesIO(body)) as workbook_zip:
-                    xml = b"\n".join(workbook_zip.read(member) for member in workbook_zip.namelist())
-                text = xml.decode("utf-8", errors="ignore")
-                for forbidden in (OTHER_NM, "VC202", "4600000202202", "Другой секретный товар"):
-                    if forbidden in text:
-                        raise AssertionError(f"other SKU leaked into {name}: {forbidden}")
-                wb = load_workbook(BytesIO(body), data_only=False)
-                if any(ws.sheet_state != "visible" for ws in wb.worksheets):
-                    raise AssertionError(f"hidden sheet found in {name}")
-                if name.startswith("00_"):
-                    ws = wb["Партнёрский отчёт"]
-                    if ws.freeze_panes != "C2" or ws.print_area is None:
-                        raise AssertionError("main XLSX freeze/print contract mismatch")
-                    if ws["B1"].value not in (None, ""):
-                        raise AssertionError("main XLSX must preserve the reference's blank label header")
-                    payout_cell = next(
-                        cell for cell in ws["B"] if cell.value == "Выплата партнёру"
-                    )
-                    if payout_cell.font.color is None or payout_cell.font.color.rgb not in {
-                        "000070C0", "0070C0"
-                    }:
-                        raise AssertionError("payout row lost the blue reference accent")
-                    annualized_cell = next(
-                        cell
-                        for cell in ws["B"]
-                        if cell.value == "Расчётная годовая доходность на вложенный капитал"
-                    )
-                    if ws.cell(annualized_cell.row, 1).value != 0.4:
-                        raise AssertionError("partner share coefficient must stay in the reference row")
-                    if ws.cell(payout_cell.row, 1).value is not None:
-                        raise AssertionError("payout row must not duplicate the partner share coefficient")
-                    if any(cell.value == "####" for row in ws.iter_rows() for cell in row):
-                        raise AssertionError("main XLSX contains a visibly truncated value")
-                    if wb._external_links:
-                        raise AssertionError("main XLSX contains an external workbook link")
-                elif name.startswith("Реклама_WB_"):
-                    ws = wb["Реклама WB"]
-                    headers = {cell.value: cell.column for cell in ws[2]}
-                    first = next(
-                        row
-                        for row in range(3, ws.max_row + 1)
-                        if Decimal(str(ws.cell(row, headers["ads_sum"]).value or "0"))
-                        == Decimal("30904")
-                    )
-                    if (
-                        ws.cell(first, headers["advert_id"]).value != "adv-target"
-                        or ws.cell(first, headers["campaign"]).value != "Target campaign"
-                        or ws.cell(first, headers["placement"]).value != "search"
-                    ):
-                        raise AssertionError("selected-SKU ad disclosure fields were lost")
-                elif name.startswith("Расчёт_себестоимости_"):
-                    ws = wb["Себестоимость"]
-                    headers = {cell.value: cell.column for cell in ws[2]}
-                    totals = {
-                        str(ws.cell(row, headers["week"]).value): Decimal(
-                            str(ws.cell(row, headers["weekly_total_rub"]).value)
-                        )
-                        for row in range(3, ws.max_row + 1)
-                        if ws.cell(row, headers["operation_date"]).value == "ИТОГО НЕДЕЛИ"
-                    }
-                    expected = {
-                        str(week["week_start"]): Decimal(str(week["values"]["cogs"]))
-                        for week in report["weeks"]
-                    }
-                    if totals != expected:
-                        raise AssertionError(f"cost workbook weekly totals mismatch: {totals}")
-                wb.close()
-
-
-def _assert_missing_ads_date_blocks(block: PartnerReportBlock) -> None:
+def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
     missing_day = (WEEK_ONE + timedelta(days=3)).isoformat()
     with sqlite3.connect(block.db_path) as conn:
-        row = conn.execute(
-            """SELECT * FROM temporal_source_slot_snapshots
-               WHERE source_key='ads_compact' AND snapshot_date=?
-                 AND snapshot_role='accepted_closed_day_snapshot'""",
-            (missing_day,),
-        ).fetchone()
-        conn.execute(
-            """DELETE FROM temporal_source_slot_snapshots
-               WHERE source_key='ads_compact' AND snapshot_date=?
-                 AND snapshot_role='accepted_closed_day_snapshot'""",
-            (missing_day,),
-        )
-        conn.commit()
-    preview = block.preview(
-        {"nm_id": TARGET_NM, "selected_weeks": [WEEK_ONE.isoformat()]}
-    )
-    if preview["status"] != "incomplete" or not any(
-        item.get("code") == "ads_date_missing" and item.get("date") == missing_day
-        for item in preview["blockers"]
-    ):
-        raise AssertionError(f"missing ads date was coerced to zero: {preview}")
-    with sqlite3.connect(block.db_path) as conn:
-        conn.execute(
-            """INSERT INTO temporal_source_slot_snapshots
-               (source_key,snapshot_date,snapshot_role,captured_at,payload_json)
-               VALUES(?,?,?,?,?)""",
-            tuple(row),
-        )
-        conn.commit()
-
-
-def _assert_missing_ads_value_blocks(block: PartnerReportBlock) -> None:
-    invalid_day = WEEK_ONE.isoformat()
-    with sqlite3.connect(block.db_path) as conn:
-        row = conn.execute(
+        saved = conn.execute(
             """SELECT payload_json FROM temporal_source_slot_snapshots
-               WHERE source_key='ads_compact' AND snapshot_date=?
-                 AND snapshot_role='accepted_closed_day_snapshot'""",
-            (invalid_day,),
-        ).fetchone()
-        payload = json.loads(row[0])
-        payload["result"]["items"][0].pop("ads_sum")
+               WHERE source_key='ads_compact' AND snapshot_date=?""",
+            (missing_day,),
+        ).fetchone()[0]
         conn.execute(
-            """UPDATE temporal_source_slot_snapshots SET payload_json=?
-               WHERE source_key='ads_compact' AND snapshot_date=?
-                 AND snapshot_role='accepted_closed_day_snapshot'""",
-            (json.dumps(payload, ensure_ascii=False, sort_keys=True), invalid_day),
+            "DELETE FROM temporal_source_slot_snapshots WHERE source_key='ads_compact' AND snapshot_date=?",
+            (missing_day,),
         )
         conn.commit()
-    preview = block.preview(
-        {"nm_id": TARGET_NM, "selected_weeks": [WEEK_ONE.isoformat()]}
+    incomplete = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    if preview["status"] != "incomplete" or not any(
-        item.get("code") == "ads_value_invalid" and item.get("date") == invalid_day
-        for item in preview["blockers"]
-    ):
-        raise AssertionError(f"missing ads_sum was coerced to zero: {preview}")
+    if incomplete["status"] != "incomplete":
+        raise AssertionError(f"missing ads date did not block preview: {incomplete}")
+    if not any(item["code"] == "ads_date_missing" and item["date"] == missing_day for item in incomplete["blockers"]):
+        raise AssertionError(f"missing ads blocker is not specific: {incomplete}")
+    values = incomplete["weeks"][0]["values"]
+    if values["net_revenue"] is None or values["ads"] is not None or values["finance_margin"] is not None:
+        raise AssertionError("partial preview did not preserve available values / missing state")
+    try:
+        block.build_preview_workbook(
+            {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+        )
+    except PartnerReportError as exc:
+        if exc.code != "source_coverage_incomplete":
+            raise
+    else:
+        raise AssertionError("Excel remained available for incomplete preview")
     with sqlite3.connect(block.db_path) as conn:
         conn.execute(
-            """UPDATE temporal_source_slot_snapshots SET payload_json=?
-               WHERE source_key='ads_compact' AND snapshot_date=?
-                 AND snapshot_role='accepted_closed_day_snapshot'""",
-            (row[0], invalid_day),
+            "INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
+            ("ads_compact", missing_day, "accepted_closed_day_snapshot", missing_day + "T23:00:00Z", saved),
+        )
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+               SET fingerprint='sha256:corrected-cost'
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
         )
         conn.commit()
-
-
-def _assert_scanner_rejects_hidden_shared_formula_comment_metadata(
-    block: PartnerReportBlock, report: dict
-) -> None:
-    with block._connect() as conn:
-        settings = block._load_settings(conn, nm_id=TARGET_NM)
-        _current, provenance = block._calculate_report(
-            conn,
-            settings=settings,
-            selected_weeks=[WEEK_ONE.isoformat(), WEEK_TWO.isoformat()],
-            finalization=True,
-        )
-    wb = Workbook()
-    visible = wb.active
-    visible.title = "Visible"
-    visible["A1"] = f'=IF(1=1,"VC202","")'
-    visible["A1"].comment = Comment("4600000202202", "Другой секретный товар")
-    hidden = wb.create_sheet("Hidden source")
-    hidden["A1"] = f"nmId {OTHER_NM}"
-    hidden.sheet_state = "veryHidden"
-    wb.properties.subject = "Другой секретный товар"
-    output = BytesIO()
-    wb.save(output)
-    wb.close()
-    malicious = BytesIO()
-    with zipfile.ZipFile(BytesIO(output.getvalue())) as source, zipfile.ZipFile(
-        malicious, "w", compression=zipfile.ZIP_DEFLATED
-    ) as target:
-        for member in source.namelist():
-            target.writestr(member, source.read(member))
-        target.writestr("xl/embeddings/leak.bin", f"nmId {OTHER_NM}".encode("utf-8"))
-    verification = block._verify_package(
-        [("malicious.xlsx", malicious.getvalue())],
-        report=report,
-        provenance=provenance,
-        finance_names=["week-1", "week-2"],
-        forbidden_tokens={OTHER_NM, "VC202", "4600000202202", "Другой секретный товар"},
+    stale = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    codes = {item["code"] for item in verification["findings"]}
-    if verification["passed"] or not {
-        "hidden_sheet",
-        "other_sku_leak",
-        "embedded_object",
-    }.issubset(codes):
-        raise AssertionError(f"privacy scanner accepted a malicious workbook: {verification}")
+    if not any(item["code"] == "finance_sku_aggregate_cost_stale" for item in stale["blockers"]):
+        raise AssertionError(f"canonical cost correction did not invalidate aggregate: {stale}")
+    block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
+
+
+def _assert_negative_profit_and_validation(block: PartnerReportBlock) -> None:
+    negative_settings = _settings()
+    negative_settings["weekly_office_expense_rub"] = "500000"
+    block.save_settings(negative_settings, actor="operator@example.test")
+    negative = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    values = negative["weeks"][0]["values"]
+    if Decimal(str(values["net_profit"])) >= 0 or values["dividends"] != "0.0000":
+        raise AssertionError(f"loss must remain visible without negative dividends: {negative}")
+    invalid = _settings()
+    invalid["invested_capital_rub"] = "0"
+    try:
+        block.save_settings(invalid, actor="operator@example.test")
+    except PartnerReportError as exc:
+        if exc.code != "settings_invalid" or "greater than zero" not in str(exc):
+            raise
+    else:
+        raise AssertionError("zero invested capital was accepted")
+    block.save_settings(_settings(), actor="operator@example.test")
+
+
+def _assert_indexed_performance(block: PartnerReportBlock) -> dict[str, int]:
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """WITH RECURSIVE seq(n) AS (
+                   SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<295919
+               )
+               INSERT INTO wb_finance_weekly_raw_rows(
+                   seller_id,report_id,rrd_id,report_type,week_start,week_end,nm_id,
+                   vendor_code,barcode,doc_type_name,seller_oper_name,row_hash,raw_json,
+                   first_seen_at,updated_at
+               )
+               SELECT 'seller-1','perf-' || n,'perf-' || n,1,'2025-01-06','2025-01-12',
+                      '202202','VC202','BAR202','Продажа','Продажа','hash-' || n,
+                      '{"nmId":202202}','2026-07-20T00:00:00Z','2026-07-20T00:00:00Z'
+               FROM seq"""
+        )
+        conn.commit()
+    raw_scan_started = time.perf_counter()
+    with sqlite3.connect(block.db_path) as conn:
+        raw_rows = conn.execute(
+            "SELECT raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id='seller-1'"
+        ).fetchall()
+        decoded_nm_ids = [
+            str(json.loads(str(row[0] or "{}" )).get("nmId") or "") for row in raw_rows
+        ]
+    raw_scan_ms = int((time.perf_counter() - raw_scan_started) * 1000)
+    if len(raw_rows) < 295919 or not decoded_nm_ids:
+        raise AssertionError("production-like full-scan baseline was not exercised")
+    started = time.perf_counter()
+    report = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()]}
+    )
+    elapsed = time.perf_counter() - started
+    if report["status"] != "ready" or elapsed >= 2.0 or report["performance"]["duration_ms"] >= 2000:
+        raise AssertionError(f"indexed preview performance regression: elapsed={elapsed}, report={report}")
+    return {
+        "raw_scan_ms": raw_scan_ms,
+        "indexed_preview_ms": int(report["performance"]["duration_ms"]),
+        "raw_rows": len(raw_rows),
+    }
+
+
+def _assert_removed_package_surface(block: PartnerReportBlock) -> None:
+    for action in (
+        lambda: block.build_preview_package(
+            {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+        ),
+        lambda: block.build_finalized_package("any"),
+        lambda: block.finalize(
+            {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]},
+            actor="operator@example.test",
+        ),
+    ):
+        try:
+            action()
+        except PartnerReportError as exc:
+            if exc.code not in {"partner_package_removed", "partner_finalization_removed"}:
+                raise
+        else:
+            raise AssertionError("removed ZIP/raw/finalization surface remained callable")
 
 
 def _seed_sources(db_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
             """
-            CREATE TABLE registry_upload_current_state(
-                slot INTEGER PRIMARY KEY,bundle_version TEXT,activated_at TEXT
-            );
-            CREATE TABLE registry_upload_config_v2(
-                bundle_version TEXT,nm_id INTEGER,enabled INTEGER,display_name TEXT,
-                group_name TEXT,display_order INTEGER
-            );
-            CREATE TABLE cost_price_current_state(
-                slot INTEGER PRIMARY KEY,dataset_version TEXT,activated_at TEXT
-            );
-            CREATE TABLE cost_price_upload_rows(
-                dataset_version TEXT,row_order INTEGER,group_name TEXT,
-                cost_price_rub TEXT,effective_from TEXT
-            );
             CREATE TABLE sheet_vitrina_v1_nomenclature_items(
                 is_active INTEGER,nm_id INTEGER,vendor_code TEXT,barcode TEXT,
                 barcodes_json TEXT,product_type TEXT,nomenclature_name TEXT,
                 wb_title TEXT,is_hidden INTEGER,created_at TEXT,our_sku TEXT,
                 aliases_json TEXT,match_key TEXT
             );
-            CREATE TABLE sheet_vitrina_v1_wb_cost_daily_state(
-                as_of_date TEXT NOT NULL,nm_id INTEGER NOT NULL,stock_qty REAL NOT NULL,
-                our_wb_unit_cost_rub REAL,confirmed_qty REAL NOT NULL,
-                estimated_qty REAL NOT NULL,fallback_qty REAL NOT NULL,
-                confirmed_share_pct REAL,source_status TEXT NOT NULL,
-                component_status_json TEXT NOT NULL,calculated_at TEXT NOT NULL,
-                inputs_hash TEXT NOT NULL,PRIMARY KEY(as_of_date,nm_id)
+            INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
+                (1,101101,'VC101','BAR101','["BAR101"]','other','Выбранный товар',
+                 'Выбранный товар WB',0,'2026-01-01','OUR101','[]','target'),
+                (0,202202,'VC202','BAR202','["BAR202"]','other','Другой секретный товар',
+                 'Другой секретный товар WB',1,'2026-01-01','OUR202','[]','other');
+            CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
+                cutover_id TEXT PRIMARY KEY,cutover_at TEXT,status TEXT,
+                plan_fingerprint TEXT,source_watermarks_json TEXT,
+                absorbed_supply_revisions_json TEXT,backup_json TEXT,
+                created_at TEXT,updated_at TEXT
             );
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers VALUES(
+                'warehouse_functional_cutover_v1','2026-07-01T00:00:00Z','posted',
+                'sha256:cutover','{}','[]','{}','2026-07-01T00:00:00Z','2026-07-01T00:00:00Z'
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_wb_daily_cost(
+                cutover_id TEXT,as_of_date TEXT,nm_id INTEGER,quantity TEXT,wac_rub TEXT,
+                capital_rub TEXT,quality TEXT,provenance_json TEXT,fingerprint TEXT,
+                created_at TEXT,PRIMARY KEY(cutover_id,as_of_date,nm_id)
+            );
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES
+                ('warehouse_functional_cutover_v1','2026-07-07',101101,'10','83837','838370','certified','{}','sha256:target-jul7','2026-07-07T00:00:00Z'),
+                ('warehouse_functional_cutover_v1','2026-07-14',101101,'10','100000','1000000','certified','{}','sha256:target-jul14','2026-07-14T00:00:00Z'),
+                ('warehouse_functional_cutover_v1','2026-07-14',202202,'10','50000','500000','certified','{}','sha256:other-jul14','2026-07-14T00:00:00Z');
             CREATE TABLE temporal_source_slot_snapshots(
                 source_key TEXT NOT NULL,snapshot_date TEXT NOT NULL,
                 snapshot_role TEXT NOT NULL,captured_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY(source_key,snapshot_date,snapshot_role)
             );
-            INSERT INTO registry_upload_current_state VALUES(1,'bundle','2026-01-01');
-            INSERT INTO registry_upload_config_v2 VALUES
-                ('bundle',101101,1,'Выбранный товар','Target',1),
-                ('bundle',202202,1,'Другой секретный товар','Other',2);
-            INSERT INTO cost_price_current_state VALUES(1,'cost','2026-01-01');
-            INSERT INTO cost_price_upload_rows VALUES
-                ('cost',1,'Target','10','2026-01-01'),
-                ('cost',2,'Other','20','2026-01-01');
-            INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
-                (1,101101,'VC101','4600000101101','["4600000101101"]','other',
-                 'Выбранный товар','Выбранный товар WB',0,'2026-01-01','OUR101','["OLD101"]','target'),
-                (0,202202,'VC202','4600000202202','["4600000202202"]','other',
-                 'Другой секретный товар','Другой секретный товар WB',1,'2026-01-01','OUR202','[]','other');
             """
         )
-        for day, target_cost, other_cost in (
-            (WEEK_ONE, "83837", "50"),
-            (WEEK_TWO, "120", "50"),
-        ):
-            for nm_id, cost in ((101101, target_cost), (202202, other_cost)):
-                conn.execute(
-                    """INSERT INTO sheet_vitrina_v1_wb_cost_daily_state VALUES(
-                       ?,?,100,?,100,0,0,1,'confirmed','{}',?,'cost-' || ? || '-' || ?)""",
-                    (
-                        day.isoformat(),
-                        nm_id,
-                        cost,
-                        day.isoformat() + "T23:00:00Z",
-                        day.isoformat(),
-                        nm_id,
-                    ),
-                )
         conn.commit()
 
 
 def _seed_finance(block: PartnerReportBlock) -> None:
-    week_one_rows = [
-        _finance_row(
-            WEEK_ONE,
-            report_id=1001,
-            rrd_id=1,
-            nm_id=int(TARGET_NM),
-            vendor_code="VC101",
-            barcode="4600000101101",
-            doc_type="Продажа",
-            quantity=1,
-            revenue="476034",
-            for_pay="301237",
-            acquiring="123",
-        ),
-        _finance_row(WEEK_ONE, report_id=1001, rrd_id=2, nm_id=int(TARGET_NM), deduction="999", bonus="WB Продвижение"),
-        _finance_row(WEEK_ONE, report_id=1001, rrd_id=3, nm_id=int(TARGET_NM), acceptance="111"),
-        _finance_row(WEEK_ONE, report_id=1001, rrd_id=4, nm_id=int(TARGET_NM), deduction="222", bonus="Услуги доставки транзитных поставок"),
-    ]
-    week_two_rows = [
-        _finance_row(
-            WEEK_TWO,
-            report_id=2001,
-            rrd_id=1,
-            nm_id=int(TARGET_NM),
-            vendor_code="VC101",
-            barcode="4600000101101",
-            doc_type="Продажа",
-            quantity=1,
-            revenue="100",
-            for_pay="80",
-            acquiring="5",
-        ),
-        _finance_row(
-            WEEK_TWO,
-            report_id=2002,
-            rrd_id=2,
-            nm_id=int(OTHER_NM),
-            vendor_code="VC202",
-            barcode="4600000202202",
-            doc_type="Продажа",
-            quantity=1,
-            revenue="100",
-            for_pay="70",
-        ),
-        _finance_row(WEEK_TWO, report_id=2001, rrd_id=3, nm_id=0, deduction="20", bonus="Общий платный сервис"),
-    ]
-    for start, rows in ((WEEK_ONE, week_one_rows), (WEEK_TWO, week_two_rows)):
-        block.finance.ingest_week(start, start + timedelta(days=6), rows)
-        block.finance.ingest_week(start, start + timedelta(days=6), rows)
-
-
-def _finance_row(
-    week_start: date,
-    *,
-    report_id: int,
-    rrd_id: int,
-    nm_id: int,
-    vendor_code: str = "",
-    barcode: str = "",
-    doc_type: str = "",
-    quantity: int = 0,
-    revenue: str = "0",
-    for_pay: str = "0",
-    acquiring: str = "0",
-    deduction: str = "0",
-    bonus: str = "",
-    acceptance: str = "0",
-) -> dict:
-    return {
-        "dateFrom": week_start.isoformat(),
-        "dateTo": (week_start + timedelta(days=6)).isoformat(),
-        "reportId": report_id,
-        "reportType": 1,
-        "rrdId": rrd_id,
-        "rrDate": week_start.isoformat(),
-        "nmId": nm_id,
-        "vendorCode": vendor_code,
-        "sku": barcode,
-        "docTypeName": doc_type,
-        "sellerOperName": doc_type or "Удержание",
-        "quantity": quantity,
-        "retailPriceWithDisc": revenue,
-        "forPay": for_pay,
-        "acquiringFee": acquiring,
-        "deduction": deduction,
-        "bonusTypeName": bonus,
-        "paidAcceptance": acceptance,
-    }
+    block.finance.ingest_week(
+        WEEK_ONE,
+        WEEK_ONE + timedelta(days=6),
+        [
+            _sale(
+                1,
+                WEEK_ONE + timedelta(days=1),
+                TARGET_NM,
+                revenue="476034",
+                for_pay="301237",
+                acquiring="14797",
+            )
+        ],
+    )
+    block.finance.ingest_week(
+        WEEK_TWO,
+        WEEK_TWO + timedelta(days=6),
+        [
+            _sale(2, WEEK_TWO + timedelta(days=1), TARGET_NM, revenue="200000", for_pay="155000", acquiring="5000"),
+            _sale(3, WEEK_TWO + timedelta(days=1), OTHER_NM, revenue="200000", for_pay="170000", acquiring="4000"),
+            {
+                **_sale(4, WEEK_TWO + timedelta(days=1), 0, revenue="0", for_pay="0", acquiring="0"),
+                "nmId": 0,
+                "vendorCode": "",
+                "sku": "",
+                "docTypeName": "",
+                "sellerOperName": "Удержание",
+                "quantity": 0,
+                "deduction": "5000",
+                "bonusTypeName": "Общее удержание продавца",
+            },
+        ],
+    )
 
 
 def _seed_ads(db_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
-        for week_start, weekly_target in ((WEEK_ONE, Decimal("30904")), (WEEK_TWO, Decimal("10"))):
+        for week, total, nested in ((WEEK_ONE, Decimal("30904"), False), (WEEK_TWO, Decimal("10000"), True)):
             for offset in range(7):
-                day = week_start + timedelta(days=offset)
-                target = weekly_target if offset == 0 else Decimal("0")
-                payload = {
-                    "result": {
-                        "kind": "success",
-                        "items": [
-                            {
-                                "nm_id": TARGET_NM,
-                                "advert_id": "adv-target",
-                                "campaign": "Target campaign",
-                                "placement": "search",
-                                "ads_sum": str(target),
-                            },
-                            {"nm_id": OTHER_NM, "ads_sum": "777"},
-                        ],
-                    }
+                day = (week + timedelta(days=offset)).isoformat()
+                value = total if offset == 0 else Decimal("0")
+                result = {
+                    "kind": "success",
+                    "snapshot_date": day,
+                    "items": [{"nm_id": TARGET_NM, "ads_sum": str(value), "advert_id": "safe-target"}],
                 }
+                payload = {"result": result} if nested else result
                 conn.execute(
-                    """INSERT INTO temporal_source_slot_snapshots
-                       (source_key,snapshot_date,snapshot_role,captured_at,payload_json)
-                       VALUES('ads_compact',?,'accepted_closed_day_snapshot',?,?)""",
+                    "INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
                     (
-                        day.isoformat(),
-                        day.isoformat() + "T23:59:00Z",
-                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        "ads_compact",
+                        day,
+                        "accepted_closed_day_snapshot",
+                        day + "T23:00:00Z",
+                        json.dumps(payload, separators=(",", ":")),
                     ),
                 )
         conn.commit()
+
+
+def _sale(
+    rrd_id: int,
+    operation_date: date,
+    nm_id: int,
+    *,
+    revenue: str,
+    for_pay: str,
+    acquiring: str,
+) -> dict:
+    return {
+        "dateFrom": operation_date.isoformat(),
+        "dateTo": operation_date.isoformat(),
+        "reportId": rrd_id,
+        "reportType": 1,
+        "rrdId": rrd_id,
+        "nmId": nm_id,
+        "vendorCode": f"VC{str(nm_id)[:3]}" if nm_id else "",
+        "sku": f"BAR{str(nm_id)[:3]}" if nm_id else "",
+        "rrDate": operation_date.isoformat(),
+        "saleDt": operation_date.isoformat(),
+        "docTypeName": "Продажа",
+        "sellerOperName": "Продажа",
+        "quantity": 1,
+        "retailPriceWithDisc": revenue,
+        "forPay": for_pay,
+        "acquiringFee": acquiring,
+    }
+
+
+def _settings() -> dict[str, str]:
+    return {
+        "nm_id": str(TARGET_NM),
+        "partner_share_pct": "40",
+        "invested_capital_rub": "1000000",
+        "replenishment_reserve_pct": "20",
+        "weekly_office_expense_rub": "10000",
+        "tax_rate_pct": "6",
+        "common_expense_rule": COMMON_EXPENSE_RULE,
+    }
 
 
 if __name__ == "__main__":
