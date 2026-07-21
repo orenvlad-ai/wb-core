@@ -2731,6 +2731,107 @@ def _run_remote_warehouse_functional_action(
     return payload
 
 
+def _run_remote_warehouse_functional_maintenance_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    """Inspect, hold or restore only the warehouse functional timer boundary."""
+
+    _ensure_active_hosted_runtime_target(
+        target, action=f"warehouse-functional-maintenance-{action}"
+    )
+    if action not in {"status", "hold", "restore"}:
+        raise ValueError(f"unsupported warehouse maintenance action: {action}")
+    if action in {"hold", "restore"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"warehouse-functional-maintenance-{action}",
+            dry_run=False,
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("warehouse maintenance requires the canonical active runtime dir")
+    runner_args = [
+        "python3",
+        "apps/warehouse_functional_maintenance.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    if action == "hold":
+        runner_args.extend(
+            [
+                "--wait-timeout-seconds",
+                "1200",
+                "--poll-interval-seconds",
+                "2",
+            ]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=1500.0 if action == "hold" else 300.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"warehouse functional maintenance {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("warehouse maintenance runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("warehouse maintenance runner returned a non-object JSON payload")
+    units = payload.get("units") or {}
+    timer = units.get("timer") or {}
+    service = units.get("service") or {}
+    if action == "hold" and (
+        str(payload.get("status") or "") != "held"
+        or str(timer.get("is_active") or "") != "inactive"
+        or str(service.get("is_active") or "") != "inactive"
+        or bool((payload.get("warehouse_lock") or {}).get("held"))
+        or bool(payload.get("finance_apply_processes"))
+    ):
+        raise RuntimeError("warehouse maintenance hold readback is incomplete")
+    if action == "restore" and str(payload.get("status") or "") != "restored":
+        raise RuntimeError("warehouse maintenance restore readback is incomplete")
+    return payload
+
+
+def run_warehouse_functional_maintenance_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_warehouse_functional_maintenance_action(
+        target,
+        action=str(args.action),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"warehouse-functional-maintenance-{args.action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def _run_remote_warehouse_opening_action(
     target: HostedRuntimeTarget,
     *,
@@ -3301,6 +3402,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     functional_sync.set_defaults(
         handler=run_warehouse_functional_command,
         warehouse_functional_action="manual-sync",
+    )
+
+    functional_maintenance = subparsers.add_parser(
+        "warehouse-functional-maintenance",
+        help=(
+            "Inspect, hold or exactly restore only the hourly warehouse timer "
+            "through the audited maintenance boundary."
+        ),
+    )
+    functional_maintenance.add_argument(
+        "action",
+        choices=("status", "hold", "restore"),
+    )
+    functional_maintenance.set_defaults(
+        handler=run_warehouse_functional_maintenance_command,
     )
 
     functional_emergency_dry_run = subparsers.add_parser(
