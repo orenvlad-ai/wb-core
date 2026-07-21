@@ -20,6 +20,7 @@ related_modules:
 related_tables:
   - "sheet_vitrina_v1_warehouse_functional_balances"
   - "sheet_vitrina_v1_warehouse_wb_daily_cost"
+  - "sheet_vitrina_v1_warehouse_archival_estimate_versions/rows/active"
   - "sheet_vitrina_v1_calculation_parameter_versions"
   - "sheet_vitrina_v1_wb_cost_daily_state (legacy audit/fallback before functional apply only)"
 related_endpoints:
@@ -32,7 +33,7 @@ update_note: "С 2026-07-01 active Proxy 3 читает versioned settings и ex
 
 # 1. Canonical WB WAC
 
-`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` (`Себестоимость WB наша`) — direct read projection canonical daily WB WAC. Отдельная formula/baseline в module 40 запрещена.
+`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` (`Себестоимость WB наша`) — direct read projection canonical daily WB WAC. Отдельная formula/baseline в module 40 запрещена. Единственное data-backed archival исключение — active versioned manifest migration 109: ровно 18 legacy `nmId`, 100 ₽ с effective date 01.07.2026 и quality `business_approved_archival_estimate`; Finance не содержит веток по этим ID.
 
 WB quantity задаёт только complete official contour snapshot:
 
@@ -84,12 +85,12 @@ Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3
 
 # 4. Quality and consumers
 
-Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers). Vitrina does not invent a value when a required persisted source is truly absent. All direct consumers, including товарный капитал, его рентабельность, web-vitrina and `Управление SKU`, resolve the same functional daily projection from `2026-07-01`; hidden fallback to 1C/legacy cost after activation is prohibited.
+Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All direct consumers, including товарный капитал, его рентабельность, web-vitrina and `Управление SKU`, resolve the same functional daily projection from `2026-07-01`; hidden fallback to 1C/legacy cost after activation is prohibited.
 
-Finance has no separately valued cost source. Its shared consumer resolver projects the exact same-`nmId` canonical WB WAC from `2026-07-01` backwards for every Finance operation before that date, and uses the exact canonical operation-date row from `2026-07-01` onward. A missing 01.07 row is a blocker: Finance cannot choose a later/other-SKU/average/legacy/zero value. The backward projection is management metadata only; it does not create warehouse quantity/capital/events or alter this module's daily state. Existing `wb_finance_retro_cost_map` rows from a superseded migration are ignored historical evidence, not a parallel source.
+Finance has no separately valued cost source. Its shared consumer resolver projects the exact same-`nmId` canonical WB WAC from `2026-07-01` backwards for every Finance operation before that date, and uses the exact canonical operation-date row from `2026-07-01` onward. A missing 01.07 row is a blocker unless the same `nmId` is present in the active migration-109 archival manifest. That manifest is a warehouse-domain canonical cost source, not a Finance fallback: it pins owner approval, effective date, 100 ₽, target/source digests and fingerprints. With no later factual cost basis the last valid 100 ₽ survives zero stock and returns; a real accepted quantity/capital layer resumes ordinary moving WAC and supersedes the estimate. No quantity, capital, supply or movement is created by the estimate. Finance still cannot choose a later/other-SKU/average/legacy/zero value. Existing `wb_finance_retro_cost_map` rows from a superseded migration are ignored historical evidence, not a parallel source.
 
 # 5. Migration boundary
 
-Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models from `2026-07-01`; it removes only the centrally enumerated archived metric rows, preserves every other non-target snapshot cell/digest, pins the exact ready-snapshot manifest and is idempotent.
+Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. In particular migration 109 does not edit the frozen opening map: append-only version/row/active audit supplies a bounded overlay and only already materialized exact-target daily cost rows are corrected with their quantities preserved. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models from `2026-07-01`; it removes only the centrally enumerated archived metric rows, preserves every other non-target snapshot cell/digest, pins the exact ready-snapshot manifest and is idempotent.
 
 Non-goals: accounting FIFO, event-based WB customer movements, Proxy 2 rewrite before the boundary, marketing as a percentage, transit double count, Google Sheets/GAS truth or ad-hoc production SQL.

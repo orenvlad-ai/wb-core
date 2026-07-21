@@ -58,7 +58,7 @@ The week picker supports all/none/latest four/manual checkboxes. Preview may use
 
 Partner preview never scans all `wb_finance_weekly_raw_rows`. It performs indexed lookups of `wb_finance_weekly_sku_aggregates` for the selected `seller + week + nmId`, plus the `__account__` projection for approved common-expense allocation.
 
-The aggregate is rebuildable from raw Finance rows and shares module 44 classifier/profit/cost services. Preview fails stale when formula version, weekly raw `content_hash`, or canonical cost source digest changed. Source correction therefore requires projection rebuild and cannot silently reuse old values.
+The aggregate is rebuildable from raw Finance rows and shares module 44 classifier/profit/cost services. Preview fails stale when formula version, weekly raw `content_hash`, or canonical cost source digest changed. This includes migration-109 `business_approved_archival_estimate` lineage for its exact 18 legacy `nmId`; Partner never resolves that manifest independently. Source correction therefore requires projection rebuild and cannot silently reuse old values.
 
 Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
 

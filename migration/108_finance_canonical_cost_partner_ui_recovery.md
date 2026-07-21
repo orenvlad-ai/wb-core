@@ -80,3 +80,14 @@ Readback requires zero blockers and zero COGS/profit/margin/before-COGS deltas a
 Then run authenticated `finance-ui-flow` in a fresh isolated Chromium context. The flow may calculate preview and download the source-digest-bound preview XLSX, but never saves settings, creates finalized reports or mutates business data. It verifies Finance rows/microcells, Partner UI preview/blockers, desktop/390 px layout and downloaded XLSX. Render the XLSX to PDF/PNG and compare it with the supplied light desktop reference before LOOP acceptance.
 
 LOOP acceptance remains fail closed until post-apply reconciliation, production UI/Excel evidence and the exact active PR acknowledgement reach terminal `release:production`.
+
+## Migration-109 source prerequisite
+
+For the owner-approved exact 18 legacy `nmId`, migration 109 must be deployed,
+applied and read back before a new Finance plan is generated. Its versioned
+warehouse-domain source replaces only the rejected `fallback_average` basis
+with quality `business_approved_archival_estimate` and 100 ₽ effective
+01.07.2026. The Finance plan must then report 51 resolved `nmId`, zero missing,
+zero forbidden fallback and a new V3 formula/source fingerprint; the 33 active
+Vitrina SKU remain byte-semantic non-target. Migration 108's separate Finance
+fingerprint/human gate and apply/readback requirements remain unchanged.

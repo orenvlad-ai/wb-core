@@ -22,6 +22,9 @@ from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_POLICY_DATE,
     resolve_finance_canonical_cost,
 )
+from packages.application.warehouse_archival_estimate import (
+    archival_estimate_for_nm_id,
+)
 from packages.business_time import business_date_from_timestamp
 
 
@@ -273,6 +276,12 @@ def _functional_wb_cost_state(
     if row is not None:
         quantity = max(_decimal(row["quantity"]), ZERO)
         quality = str(row["quality"] or "historical_provisional")
+        if quality == "business_approved_archival_estimate" and archival_estimate_for_nm_id(
+            conn,
+            nm_id=nm_id,
+            as_of_date=as_of_date,
+        ) is None:
+            return None, True
         fallback = quantity if quality == "fallback_average" else ZERO
         estimated = max(quantity - fallback, ZERO)
         return {
@@ -288,6 +297,28 @@ def _functional_wb_cost_state(
             "source_status": quality,
             "component_status_json": row["provenance_json"],
             "inputs_hash": row["fingerprint"],
+        }, True
+    estimate = archival_estimate_for_nm_id(
+        conn,
+        nm_id=nm_id,
+        as_of_date=as_of_date,
+    )
+    if estimate is not None:
+        return {
+            "our_wb_unit_cost_rub": str(estimate["unit_cost_rub"]),
+            "confirmed_qty": "0",
+            "estimated_qty": "0",
+            "fallback_qty": "0",
+            "confirmed_share_pct": "0",
+            "source_status": str(estimate.get("quality") or ""),
+            "component_status_json": json.dumps(
+                estimate,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ),
+            "inputs_hash": str(estimate.get("row_fingerprint") or ""),
         }, True
     if as_of_date < cutover_date:
         return None, True

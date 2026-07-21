@@ -9,9 +9,14 @@ import json
 import sqlite3
 from typing import Any, Mapping
 
+from packages.application.warehouse_archival_estimate import (
+    QUALITY as BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
+    archival_estimate_for_nm_id,
+)
+
 
 CANONICAL_COST_POLICY_DATE = date(2026, 7, 1)
-CANONICAL_COST_FORMULA_VERSION = "wb_finance_canonical_our_wb_cost_v2"
+CANONICAL_COST_FORMULA_VERSION = "wb_finance_canonical_our_wb_cost_v3"
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 FUNCTIONAL_DAILY_TABLE = "sheet_vitrina_v1_warehouse_wb_daily_cost"
 FORBIDDEN_QUALITIES = frozenset(
@@ -101,8 +106,53 @@ def resolve_finance_canonical_cost(
             WHERE cutover_id=? AND as_of_date=? AND nm_id=?""",
         (FUNCTIONAL_CUTOVER_ID, source_date.isoformat(), normalized_nm),
     ).fetchone()
+    estimate = archival_estimate_for_nm_id(
+        conn,
+        nm_id=normalized_nm,
+        as_of_date=source_date.isoformat(),
+    )
     if row is None:
-        return {**base, "status": "missing", "reason": "canonical_cost_exact_date_missing"}
+        if estimate is None:
+            return {**base, "status": "missing", "reason": "canonical_cost_exact_date_missing"}
+        source_payload = {
+            "version_id": str(estimate["version_id"]),
+            "effective_date": str(estimate["effective_date"]),
+            "nm_id": normalized_nm,
+            "unit_cost_rub": str(estimate["unit_cost_rub"]),
+            "quality": str(estimate["quality"]),
+            "owner_approval_reference": str(estimate["owner_approval_reference"]),
+            "manifest_digest": str(estimate["manifest_digest"]),
+            "production_dry_run_plan_sha256": str(
+                estimate["production_dry_run_plan_sha256"]
+            ),
+            "source_digest": str(estimate["source_digest"]),
+            "plan_fingerprint": str(estimate["plan_fingerprint"]),
+            "row_fingerprint": str(estimate["row_fingerprint"]),
+            "lineage": dict(estimate.get("lineage") or {}),
+        }
+        source_digest = _digest(source_payload)
+        source_identity = (
+            f"{BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY}:"
+            f"{estimate['version_id']}:{source_date.isoformat()}:{normalized_nm}:"
+            f"{estimate['row_fingerprint']}"
+        )
+        return {
+            **base,
+            "status": "resolved",
+            "reason": "",
+            "quality": BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
+            "unit_cost_rub": format(_decimal_or_none(estimate["unit_cost_rub"]) or Decimal("0"), "f"),
+            "source_table": "sheet_vitrina_v1_warehouse_archival_estimate_rows",
+            "canonical_source_identity": source_identity,
+            "canonical_source_version": str(estimate["row_fingerprint"]),
+            "source_digest": source_digest,
+            "source_row": source_payload,
+            "projection_quality": (
+                "business_approved_retro_projection"
+                if operation_date < CANONICAL_COST_POLICY_DATE
+                else "business_approved_archival_estimate"
+            ),
+        }
     quality = str(row["quality"] or "missing")
     unit_cost = _decimal_or_none(row["wac_rub"])
     source_payload = {
@@ -118,6 +168,33 @@ def resolve_finance_canonical_cost(
         "created_at": str(row["created_at"] or ""),
         "cutover_plan_fingerprint": str(cutover["plan_fingerprint"] or ""),
     }
+    if quality == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY and estimate is None:
+        source_digest = _digest(source_payload)
+        return {
+            **base,
+            "status": "missing",
+            "reason": "canonical_archival_estimate_superseded_pending_replay",
+            "quality": quality,
+            "canonical_source_identity": (
+                f"{FUNCTIONAL_CUTOVER_ID}:{source_date.isoformat()}:{normalized_nm}:"
+                f"{source_payload['fingerprint']}"
+            ),
+            "source_digest": source_digest,
+        }
+    if quality == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY and estimate is not None:
+        source_payload["business_approved_lineage"] = {
+            key: estimate[key]
+            for key in (
+                "version_id",
+                "effective_date",
+                "owner_approval_reference",
+                "manifest_digest",
+                "production_dry_run_plan_sha256",
+                "source_digest",
+                "plan_fingerprint",
+                "row_fingerprint",
+            )
+        }
     source_digest = _digest(source_payload)
     source_identity = (
         f"{FUNCTIONAL_CUTOVER_ID}:{source_date.isoformat()}:{normalized_nm}:"

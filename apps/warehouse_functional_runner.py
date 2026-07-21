@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -29,6 +27,9 @@ from packages.application.warehouse_functional import (  # noqa: E402
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
+)
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
 )
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     apply_supplier_cost_state_replay_plan,
@@ -142,7 +143,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "readback":
         return block.readback()
     if args.command == "backup":
-        with _warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_functional_write_lock(runtime.runtime_dir):
             return {
                 "status": "success",
                 "mode": "backup",
@@ -153,7 +154,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             }
     if args.command in {"hourly-sync", "manual-sync"}:
-        with _warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_functional_write_lock(runtime.runtime_dir):
             backup_result = (
                 _create_pre_sync_backup(
                     runtime,
@@ -316,18 +317,6 @@ def _fresh_stocks_block() -> StocksBlock:
     """Return an official source whose cutover/hourly fetch cannot reuse a prior capture."""
 
     return StocksBlock(HttpBackedStocksSource(reuse_ttl_seconds=0.0))
-
-
-@contextmanager
-def _warehouse_sync_lock(runtime_dir: Path):
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = runtime_dir / ".warehouse-functional-sync.lock"
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _create_pre_sync_backup(
