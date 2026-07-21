@@ -148,6 +148,51 @@ def main() -> int:
             except WarehouseSyncBusyError:
                 pass
 
+        settings_lock_runtime_dir = root / "settings-lock-runtime"
+        settings_lock_runtime_dir.mkdir()
+        settings_parameters = CalculationParametersBlock(
+            runtime=RegistryUploadDbBackedRuntime(runtime_dir=settings_lock_runtime_dir)
+        )
+        with warehouse_sync_lock(settings_lock_runtime_dir):
+            try:
+                settings_parameters.create_version(
+                    {},
+                    preview_fingerprint="sha256:not-reached",
+                    created_by="smoke",
+                )
+            except WarehouseSyncBusyError:
+                pass
+            else:
+                raise AssertionError("settings publication overlapped warehouse synchronization")
+
+        wal_runtime_dir = root / "wal-runtime"
+        wal_runtime_dir.mkdir()
+        wal_runtime = RegistryUploadDbBackedRuntime(runtime_dir=wal_runtime_dir)
+        wal_connection = sqlite3.connect(wal_runtime.db_path)
+        try:
+            wal_connection.execute("PRAGMA journal_mode=WAL")
+            wal_connection.execute("PRAGMA wal_autocheckpoint=0")
+            wal_connection.execute("CREATE TABLE wal_evidence(value BLOB NOT NULL)")
+            wal_connection.execute("INSERT INTO wal_evidence(value) VALUES(zeroblob(2097152))")
+            wal_connection.commit()
+            wal_path = Path(str(wal_runtime.db_path) + "-wal")
+            if not wal_path.is_file() or wal_path.stat().st_size <= 0:
+                raise AssertionError("WAL capacity fixture was not created")
+            coherent_size = wal_runtime.coherent_backup_size_bytes()
+            if coherent_size < wal_runtime.db_path.stat().st_size + wal_path.stat().st_size:
+                raise AssertionError("coherent backup capacity omitted committed WAL bytes")
+            wal_backup = wal_runtime.backup_database(
+                (root / "backups" / "wal-runtime.sqlite3").resolve()
+            )
+            with sqlite3.connect(str(wal_backup["path"])) as backup_conn:
+                stored_bytes = int(
+                    backup_conn.execute("SELECT length(value) FROM wal_evidence").fetchone()[0]
+                )
+            if stored_bytes != 2097152:
+                raise AssertionError("coherent backup lost committed WAL content")
+        finally:
+            wal_connection.close()
+
         daily_runtime_dir = root / "daily-runtime"
         daily_runtime_dir.mkdir()
         daily_db = daily_runtime_dir / "registry_upload_runtime.sqlite3"
@@ -159,9 +204,28 @@ def main() -> int:
         parameters = CalculationParametersBlock(runtime=daily_runtime)
         daily_backup = parameters.prepare_functional_economics_backup()
         daily_path = Path(str(daily_backup.get("path") or ""))
+        daily_manifest_path = Path(str(daily_backup.get("raw_manifest_path") or ""))
         if not daily_path.is_file() or daily_backup.get("integrity_check") != "ok":
             raise AssertionError("daily economics restore point was not created before mutation")
+        if (
+            not daily_manifest_path.is_file()
+            or daily_manifest_path.stat().st_mode & 0o777 != 0o600
+        ):
+            raise AssertionError("daily economics restore point lacks private provenance")
         economics_backfill._validate_verified_backup(daily_backup)
+        drift_path = (root / "backups" / "drifted-raw.sqlite3").resolve()
+        declared_daily_backup = daily_runtime.backup_database(drift_path)
+        drift_path.chmod(0o600)
+        with sqlite3.connect(drift_path) as conn:
+            conn.execute("INSERT INTO evidence(value) VALUES('unexpected-backup-drift')")
+            conn.commit()
+        try:
+            economics_backfill._validate_verified_backup(declared_daily_backup)
+        except economics_backfill.FunctionalEconomicsBackfillError as exc:
+            if "declared fingerprint" not in str(exc):
+                raise AssertionError("raw backup drift failed for the wrong reason") from exc
+        else:
+            raise AssertionError("modified raw backup was trusted")
         fake_plan = {"plan_fingerprint": "sha256:daily-fixture"}
         fake_result = {
             "status": "applied",

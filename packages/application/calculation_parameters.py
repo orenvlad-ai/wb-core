@@ -7,12 +7,15 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
 from typing import Any, Mapping
+from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.business_time import current_business_date_iso
 
 
@@ -264,6 +267,20 @@ class CalculationParametersBlock:
         preview_fingerprint: str,
         created_by: str,
     ) -> dict[str, Any]:
+        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
+            return self._create_version_locked(
+                payload,
+                preview_fingerprint=preview_fingerprint,
+                created_by=created_by,
+            )
+
+    def _create_version_locked(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        preview_fingerprint: str,
+        created_by: str,
+    ) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as preflight_conn:
             initial = preflight_conn.execute(
                 "SELECT 1 FROM sheet_vitrina_v1_calculation_parameter_versions WHERE version_id=?",
@@ -389,6 +406,7 @@ class CalculationParametersBlock:
         source = backup_root / f"functional-economics-daily-{business_date.replace('-', '')}.sqlite3"
         archive = Path(str(source) + ".zst")
         manifest_path = archive.with_name(archive.name + ".manifest.json")
+        raw_manifest_path = source.with_name(source.name + ".manifest.json")
         if archive.is_file() and manifest_path.is_file():
             from apps.sqlite_backup_archive import verify_archive_manifest
 
@@ -414,9 +432,11 @@ class CalculationParametersBlock:
         if archive.exists() or manifest_path.exists():
             raise ValueError("daily functional economics backup archive is incomplete")
         if source.exists():
-            from apps.sqlite_backup_archive import build_plan
-
-            plan = build_plan(source=source)
+            plan = _verify_daily_raw_backup_manifest(
+                source=source,
+                manifest_path=raw_manifest_path,
+                business_date=business_date,
+            )
             self._require_economics_backup_capacity(
                 backup_root,
                 source_size=int(plan["source_size_bytes"]),
@@ -429,19 +449,34 @@ class CalculationParametersBlock:
                 "integrity_check": str(plan["source_integrity_check"]),
                 "backup_scope": "business_day",
                 "business_date": business_date,
+                "raw_manifest_path": str(raw_manifest_path),
                 "reused": True,
             }
+        if raw_manifest_path.exists():
+            raise ValueError("daily functional economics raw backup manifest is incomplete")
         self._require_economics_backup_capacity(
             backup_root,
-            source_size=self.runtime.db_path.stat().st_size,
+            source_size=self.runtime.coherent_backup_size_bytes(),
             raw_backup_exists=False,
         )
         backup = self.runtime.backup_database(source)
         source.chmod(0o600)
+        try:
+            _write_daily_raw_backup_manifest(
+                source=source,
+                manifest_path=raw_manifest_path,
+                business_date=business_date,
+                backup=backup,
+            )
+        except Exception:
+            source.unlink(missing_ok=True)
+            raw_manifest_path.unlink(missing_ok=True)
+            raise
         return {
             **backup,
             "backup_scope": "business_day",
             "business_date": business_date,
+            "raw_manifest_path": str(raw_manifest_path),
             "reused": False,
         }
 
@@ -499,7 +534,7 @@ class CalculationParametersBlock:
         backup_root.mkdir(parents=True, exist_ok=True)
         return self._require_economics_backup_capacity(
             backup_root,
-            source_size=self.runtime.db_path.stat().st_size,
+            source_size=self.runtime.coherent_backup_size_bytes(),
             raw_backup_exists=False,
         )
 
@@ -774,6 +809,84 @@ def _settings_fingerprint(value: Mapping[str, Any]) -> str:
 
 def _same_filesystem(left: Path, right: Path) -> bool:
     return left.stat().st_dev == right.stat().st_dev
+
+
+def _write_daily_raw_backup_manifest(
+    *,
+    source: Path,
+    manifest_path: Path,
+    business_date: str,
+    backup: Mapping[str, Any],
+) -> None:
+    source_sha256 = str(backup.get("sha256") or "")
+    source_sha256 = (
+        source_sha256 if source_sha256.startswith("sha256:") else f"sha256:{source_sha256}"
+    )
+    evidence = {
+        "contract_name": "functional_economics_daily_raw_backup_v1",
+        "source_path": str(source.resolve()),
+        "source_size_bytes": int(backup.get("size_bytes") or -1),
+        "source_sha256": source_sha256,
+        "source_integrity_check": str(backup.get("integrity_check") or ""),
+        "business_date": str(business_date)[:10],
+    }
+    payload = {
+        **evidence,
+        "fingerprint": "sha256:" + hashlib.sha256(_json(evidence).encode("utf-8")).hexdigest(),
+        "created_at": _now(),
+    }
+    temp_path = manifest_path.with_name(manifest_path.name + f".tmp-{uuid4().hex}")
+    descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+        directory_descriptor = os.open(manifest_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _verify_daily_raw_backup_manifest(
+    *,
+    source: Path,
+    manifest_path: Path,
+    business_date: str,
+) -> dict[str, Any]:
+    from apps.sqlite_backup_archive import build_plan
+
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("daily functional economics raw backup manifest is unavailable")
+    if manifest_path.stat().st_mode & 0o777 != 0o600:
+        raise ValueError("daily functional economics raw backup manifest must use mode 0600")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    semantic = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"fingerprint", "created_at"}
+    }
+    fingerprint = "sha256:" + hashlib.sha256(_json(semantic).encode("utf-8")).hexdigest()
+    actual = build_plan(source=source)
+    if (
+        str(manifest.get("contract_name") or "")
+        != "functional_economics_daily_raw_backup_v1"
+        or str(manifest.get("fingerprint") or "") != fingerprint
+        or str(manifest.get("source_path") or "") != str(source.resolve())
+        or str(manifest.get("business_date") or "")[:10] != str(business_date)[:10]
+        or str(manifest.get("source_integrity_check") or "") != "ok"
+        or int(manifest.get("source_size_bytes") or -1)
+        != int(actual.get("source_size_bytes") or -2)
+        or str(manifest.get("source_sha256") or "")
+        != str(actual.get("source_sha256") or "")
+    ):
+        raise ValueError("daily functional economics raw backup manifest failed provenance validation")
+    return actual
 
 
 def _connect(db_path: Any) -> sqlite3.Connection:

@@ -579,6 +579,9 @@ def _build_handler(
                             body,
                             actor=_current_web_user_config_key(self),
                         )
+                except WarehouseSyncBusyError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return

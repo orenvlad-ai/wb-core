@@ -292,14 +292,17 @@ def apply_functional_economics_backfill_plan(
         raise FunctionalEconomicsBackfillError(
             "functional cost/settings or ready snapshots drifted after dry-run"
         )
-    if not normalized.get("updates"):
-        return {**fresh, "status": "applied", "idempotent": True, "database_written": False}
-    if verified_backup is not None:
-        backup = _validate_verified_backup(
+    backup = (
+        _validate_verified_backup(
             verified_backup,
             expected_business_date=operation_business_date,
         )
-    else:
+        if verified_backup is not None
+        else None
+    )
+    if not normalized.get("updates"):
+        return {**fresh, "status": "applied", "idempotent": True, "database_written": False}
+    if backup is None:
         backup_root = Path(backup_dir)
         if not backup_root.is_absolute():
             raise FunctionalEconomicsBackfillError("absolute backup_dir is required")
@@ -420,23 +423,63 @@ def _validate_verified_backup(
             "verified economics backup belongs to another business date"
         )
     if raw_path:
+        from apps.sqlite_backup_archive import build_plan
+
         path = Path(raw_path)
-        if not path.is_absolute() or not path.is_file():
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
             raise FunctionalEconomicsBackfillError("verified economics backup file is unavailable")
         if path.stat().st_mode & 0o777 != 0o600:
             raise FunctionalEconomicsBackfillError("verified economics backup must use mode 0600")
+        actual = build_plan(source=path)
+        declared_sha = str(backup.get("sha256") or backup.get("source_sha256") or "")
+        declared_sha = declared_sha if declared_sha.startswith("sha256:") else f"sha256:{declared_sha}"
+        declared_size = int(backup.get("size_bytes") or backup.get("source_size_bytes") or -1)
+        if (
+            declared_sha != str(actual.get("source_sha256") or "")
+            or declared_size != int(actual.get("source_size_bytes") or -2)
+            or str(actual.get("source_integrity_check") or "") != "ok"
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup bytes do not match their declared fingerprint"
+            )
+        backup.update(
+            {
+                "path": str(actual["source_path"]),
+                "size_bytes": int(actual["source_size_bytes"]),
+                "sha256": str(actual["source_sha256"]).removeprefix("sha256:"),
+                "integrity_check": "ok",
+            }
+        )
     else:
+        from apps.sqlite_backup_archive import verify_archive_manifest
+
         archive = Path(archive_path)
-        if not archive.is_absolute() or not archive.is_file():
+        if not archive.is_absolute() or archive.is_symlink() or not archive.is_file():
             raise FunctionalEconomicsBackfillError("verified economics backup archive is unavailable")
         if archive.stat().st_mode & 0o777 != 0o600:
             raise FunctionalEconomicsBackfillError("verified economics backup archive must use mode 0600")
-        if str(backup.get("zstd_test") or "") != "ok":
-            raise FunctionalEconomicsBackfillError("verified economics backup archive test is required")
-        if not str(backup.get("decompressed_sha256") or backup.get("source_sha256") or "").startswith(
-            "sha256:"
-        ):
-            raise FunctionalEconomicsBackfillError("verified economics backup archive SHA-256 is required")
+        actual = verify_archive_manifest(
+            archive.with_name(archive.name + ".manifest.json")
+        )
+        if str(actual.get("archive_path") or "") != str(archive.resolve()):
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup archive provenance does not match"
+            )
+        for field in ("archive_sha256", "decompressed_sha256", "source_sha256"):
+            declared = str(backup.get(field) or "")
+            if declared and declared != str(actual.get(field) or ""):
+                raise FunctionalEconomicsBackfillError(
+                    "verified economics backup archive fingerprint changed"
+                )
+        backup.update(actual)
+    if str(backup.get("backup_scope") or "") == "business_day":
+        provenance_date = str(expected_business_date or backup_business_date)[:10]
+        expected_name = f"functional-economics-daily-{provenance_date.replace('-', '')}.sqlite3"
+        source_identity = Path(str(backup.get("source_path") or backup.get("path") or ""))
+        if source_identity.name != expected_name:
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup has invalid business-day provenance"
+            )
     return backup
 
 
