@@ -233,7 +233,10 @@ def main() -> None:
         if (
             symmetric_missing["aggregate"]["cogs"] is not None
             or symmetric_coverage["unmatched_units"] != 2
-            or len(symmetric_coverage["problem_skus"]) != 2
+            or len(symmetric_coverage["problem_skus"]) != 1
+            or symmetric_coverage["problem_skus"][0]["operation_count"] != 2
+            or symmetric_coverage["problem_skus"][0]["sales_qty"] != 1
+            or symmetric_coverage["problem_skus"][0]["returns_qty"] != 1
             or sum(item["net_units"] for item in symmetric_coverage["problem_skus"]) != 0
             or sum(item["unmatched_units"] for item in symmetric_coverage["problem_skus"]) != 2
         ):
