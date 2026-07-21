@@ -25,6 +25,7 @@ from apps.registry_upload_smoke_support import (
     build_synthetic_oversized_bundle,
     write_runtime_registry_fixture,
 )
+from packages.adapters import registry_upload_http_entrypoint as registry_http_adapter
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH,
     DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
@@ -318,6 +319,27 @@ def main() -> None:
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "plan_report_path": DEFAULT_SHEET_PLAN_REPORT_PATH,
                 "wb_finance_report_path": DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
+                **(
+                    {
+                        "partner_report_options_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+                        "partner_report_settings_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+                        "partner_report_preview_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+                        "partner_report_preview_xlsx_path": (
+                            registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH
+                        ),
+                    }
+                    if hasattr(registry_http_adapter, "DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH")
+                    else {
+                        "partner_report_options_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+                        "partner_report_settings_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+                        "partner_report_preview_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+                        "partner_report_finalize_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
+                        "partner_report_finalized_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
+                        "partner_report_preview_package_path": (
+                            registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH
+                        ),
+                    }
+                ),
                 "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
                 "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
                 "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
