@@ -44,6 +44,21 @@ def _validate_feedback_item(item: dict[str, Any]) -> None:
     _assert(isinstance(item.get("answer"), dict), "local feedback answer must be an object")
 
 
+def _deduplicate_feedback_candidates(
+    *groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for group in groups:
+        for candidate in group:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            candidates.append(candidate)
+    return candidates
+
+
 def run_autoanswers_ui_flow(
     *,
     base_url: str,
@@ -269,8 +284,10 @@ def run_autoanswers_ui_flow(
             "ready_publication", "publication_queue", "published", "error",
         ):
             filtered_feedbacks("system_" + system_filter, system_answer=system_filter)
+        media_filter_rows: dict[str, list[dict[str, Any]]] = {}
         for media_filter in ("has_photo", "has_video"):
             media_rows = filtered_feedbacks(media_filter, **{media_filter: "true"})
+            media_filter_rows[media_filter] = media_rows
             _assert(
                 all(bool(row.get(media_filter)) for row in media_rows),
                 f"{media_filter} filter returned a non-matching feedback",
@@ -436,13 +453,13 @@ def run_autoanswers_ui_flow(
             table_answer_evidence = {"present": True, "fixed_height": True, "copy_without_mutation": True}
 
         media_evidence: dict[str, Any] = {}
-        media_candidates: list[dict[str, Any]] = []
-        seen_media_ids: set[str] = set()
-        for candidate in [*flag_rows.get("needs_review", []), *unanswered_rows, *items]:
-            candidate_id = str(candidate.get("id") or "")
-            if candidate_id and candidate_id not in seen_media_ids:
-                seen_media_ids.add(candidate_id)
-                media_candidates.append(candidate)
+        media_candidates = _deduplicate_feedback_candidates(
+            media_filter_rows.get("has_photo", []),
+            media_filter_rows.get("has_video", []),
+            flag_rows.get("needs_review", []),
+            unanswered_rows,
+            items,
+        )
         ready_by_kind: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for candidate in media_candidates:
             if len(ready_by_kind) == 2:

@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+from apps.wb_autoanswers_production_ui_flow import _deduplicate_feedback_candidates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,19 @@ PUBLIC_ROUTES = ROOT / "artifacts/registry_upload_http_entrypoint/nginx/public_r
 
 
 class ReleaseSafetyTest(unittest.TestCase):
+    def test_ui_media_candidates_include_media_filters_first_and_deduplicate(self) -> None:
+        photo = {"id": "photo"}
+        video = {"id": "video"}
+        ordinary = {"id": "ordinary"}
+        self.assertEqual(
+            _deduplicate_feedback_candidates(
+                [photo],
+                [video, photo],
+                [ordinary, video],
+            ),
+            [photo, video, ordinary],
+        )
+
     def test_production_target_http_and_worker_remove_force_off_for_manual_activation(self) -> None:
         target_payload = json.loads(TARGET.read_text(encoding="utf-8"))
         self.assertEqual(target_payload["runtime_env"]["WB_AUTOANSWERS_FORCE_OFF"], "false")
