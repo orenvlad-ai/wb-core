@@ -59,6 +59,7 @@ from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.partner_report import PartnerReportError
 from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
+from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.application.demand_estimation import parse_sales_avg_period_days
@@ -663,6 +664,9 @@ def _build_handler(
                         payload = entrypoint.handle_warehouse_emergency_preview_request()
                     else:
                         payload = entrypoint.handle_warehouse_emergency_apply_request(body)
+                except WarehouseSyncBusyError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return

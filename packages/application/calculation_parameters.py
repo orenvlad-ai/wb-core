@@ -7,6 +7,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+from pathlib import Path
+import shutil
 import sqlite3
 from typing import Any, Mapping
 
@@ -275,6 +277,7 @@ class CalculationParametersBlock:
         if preview["preview_fingerprint"] != str(preview_fingerprint or ""):
             raise ValueError("calculation parameters changed after preview")
         parameters = _parameters_from_payload(payload)
+        economics_backup = self.prepare_functional_economics_backup()
         now = _now()
         with _connect(self.runtime.db_path) as conn:
             ensure_calculation_parameters_schema(conn)
@@ -314,7 +317,9 @@ class CalculationParametersBlock:
                 (f"proxy_recalc:{version_id}", parameters.effective_date, version_id, "pending", now),
             )
             conn.commit()
-        recalculation = self.process_pending_targeted_recalculations()
+        recalculation = self.process_pending_targeted_recalculations(
+            verified_backup=economics_backup,
+        )
         return {
             **self.get_payload(),
             "created_version_id": version_id,
@@ -322,7 +327,11 @@ class CalculationParametersBlock:
             "targeted_recalculation": recalculation,
         }
 
-    def process_pending_targeted_recalculations(self) -> dict[str, Any]:
+    def process_pending_targeted_recalculations(
+        self,
+        *,
+        verified_backup: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
             ensure_calculation_parameters_schema(conn)
             pending = [dict(row) for row in conn.execute(
@@ -333,7 +342,10 @@ class CalculationParametersBlock:
             return {"status": "idle", "request_count": 0}
         request_ids = [str(item["request_id"]) for item in pending]
         try:
-            result = self.publish_current_functional_economics()
+            effective_backup = verified_backup or self.prepare_functional_economics_backup()
+            result = self.publish_current_functional_economics(
+                verified_backup=effective_backup,
+            )
         except Exception as exc:
             with _connect(self.runtime.db_path) as conn:
                 placeholders = ",".join("?" for _ in request_ids)
@@ -360,9 +372,142 @@ class CalculationParametersBlock:
             "plan_fingerprint": result["plan_fingerprint"],
             "changed_snapshot_count": int(result.get("changed_snapshot_count") or 0),
             "database_written": bool(result.get("database_written")),
+            "backup_archive": result.get("backup_archive"),
         }
 
-    def publish_current_functional_economics(self) -> dict[str, Any]:
+    def prepare_functional_economics_backup(self) -> dict[str, Any]:
+        """Prepare or reuse one coherent restore point per open business day.
+
+        Hourly publications change only reconstructable derived cells.  A single
+        pre-first-mutation restore point is therefore retained for that business
+        day instead of writing a new full-database copy on every hourly refresh.
+        """
+
+        business_date = current_business_date_iso()
+        backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
+        backup_root.mkdir(parents=True, exist_ok=True)
+        source = backup_root / f"functional-economics-daily-{business_date.replace('-', '')}.sqlite3"
+        archive = Path(str(source) + ".zst")
+        manifest_path = archive.with_name(archive.name + ".manifest.json")
+        if archive.is_file() and manifest_path.is_file():
+            from apps.sqlite_backup_archive import verify_archive_manifest
+
+            manifest = verify_archive_manifest(manifest_path)
+            if (
+                str(manifest.get("source_path") or "") != str(source)
+                or str(manifest.get("archive_path") or "") != str(archive)
+            ):
+                raise ValueError("daily functional economics backup archive failed provenance validation")
+            self._require_economics_backup_capacity(
+                backup_root,
+                source_size=int(manifest["source_size_bytes"]),
+                raw_backup_exists=False,
+                archive_exists=True,
+            )
+            return {
+                **manifest,
+                "integrity_check": "ok",
+                "backup_scope": "business_day",
+                "business_date": business_date,
+                "reused": True,
+            }
+        if archive.exists() or manifest_path.exists():
+            raise ValueError("daily functional economics backup archive is incomplete")
+        if source.exists():
+            from apps.sqlite_backup_archive import build_plan
+
+            plan = build_plan(source=source)
+            self._require_economics_backup_capacity(
+                backup_root,
+                source_size=int(plan["source_size_bytes"]),
+                raw_backup_exists=True,
+            )
+            return {
+                "path": str(source),
+                "size_bytes": int(plan["source_size_bytes"]),
+                "sha256": str(plan["source_sha256"]).removeprefix("sha256:"),
+                "integrity_check": str(plan["source_integrity_check"]),
+                "backup_scope": "business_day",
+                "business_date": business_date,
+                "reused": True,
+            }
+        self._require_economics_backup_capacity(
+            backup_root,
+            source_size=self.runtime.db_path.stat().st_size,
+            raw_backup_exists=False,
+        )
+        backup = self.runtime.backup_database(source)
+        source.chmod(0o600)
+        return {
+            **backup,
+            "backup_scope": "business_day",
+            "business_date": business_date,
+            "reused": False,
+        }
+
+    def _require_economics_backup_capacity(
+        self,
+        backup_root: Path,
+        *,
+        source_size: int,
+        raw_backup_exists: bool,
+        archive_exists: bool = False,
+    ) -> dict[str, Any]:
+        margin = max(256 * 1024 * 1024, source_size // 20)
+        pipeline_write_margin = max(4 * 1024 * 1024 * 1024, source_size // 3)
+        raw_bytes = 0 if raw_backup_exists or archive_exists else source_size
+        archive_worst_case_bytes = 0 if archive_exists else source_size + margin
+        backup_required = raw_bytes + archive_worst_case_bytes
+        runtime_root = self.runtime.db_path.parent.resolve()
+        backup_available = shutil.disk_usage(backup_root).free
+        runtime_available = shutil.disk_usage(runtime_root).free
+        same_filesystem = _same_filesystem(backup_root, runtime_root)
+        if same_filesystem:
+            required = backup_required + pipeline_write_margin
+            if backup_available < required:
+                raise ValueError(
+                    "insufficient filesystem capacity for coherent daily backup and lossless archive: "
+                    f"required_free_bytes={required}, available_free_bytes={backup_available}"
+                )
+        elif backup_available < backup_required:
+            raise ValueError(
+                "insufficient backup-filesystem capacity for coherent daily backup and lossless archive: "
+                f"required_free_bytes={backup_required}, available_free_bytes={backup_available}"
+            )
+        elif runtime_available < pipeline_write_margin:
+            raise ValueError(
+                "insufficient runtime-filesystem capacity for bounded warehouse publication: "
+                f"required_free_bytes={pipeline_write_margin}, available_free_bytes={runtime_available}"
+            )
+        return {
+            "required_free_bytes": (
+                backup_required + pipeline_write_margin
+                if same_filesystem
+                else backup_required
+            ),
+            "available_free_bytes": backup_available,
+            "backup_required_free_bytes": backup_required,
+            "backup_available_free_bytes": backup_available,
+            "runtime_required_free_bytes": pipeline_write_margin,
+            "runtime_available_free_bytes": runtime_available,
+            "pipeline_write_margin_bytes": pipeline_write_margin,
+            "same_filesystem": same_filesystem,
+        }
+
+    def preflight_fresh_economics_backup_capacity(self, backup_root: Path) -> dict[str, Any]:
+        backup_root = backup_root.resolve()
+        backup_root.mkdir(parents=True, exist_ok=True)
+        return self._require_economics_backup_capacity(
+            backup_root,
+            source_size=self.runtime.db_path.stat().st_size,
+            raw_backup_exists=False,
+        )
+
+    def publish_current_functional_economics(
+        self,
+        *,
+        verified_backup: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Publish only WB cost/Proxy target cells from the active functional state."""
 
         from packages.application.warehouse_functional_economics_backfill import (
@@ -370,13 +515,41 @@ class CalculationParametersBlock:
             build_functional_economics_backfill_plan,
         )
 
+        effective_backup = verified_backup or self.prepare_functional_economics_backup()
         plan = build_functional_economics_backfill_plan(self.runtime)
-        return apply_functional_economics_backfill_plan(
+        result = apply_functional_economics_backfill_plan(
             self.runtime,
             plan,
             confirm_fingerprint=str(plan["plan_fingerprint"]),
             backup_dir=(self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve(),
+            verified_backup=effective_backup,
         )
+        backup = dict(result.get("backup") or effective_backup or {})
+        raw_path = Path(str(backup.get("path") or "")) if backup.get("path") else None
+        if raw_path is not None and raw_path.is_file():
+            from apps.sqlite_backup_archive import apply_archive, build_plan
+
+            archive_plan = build_plan(source=raw_path)
+            expected_sha = str(backup.get("sha256") or "")
+            if expected_sha and str(archive_plan["source_sha256"]).removeprefix("sha256:") != expected_sha.removeprefix(
+                "sha256:"
+            ):
+                raise ValueError("functional economics backup changed before lossless archive")
+            archived = apply_archive(
+                source=raw_path,
+                archive=None,
+                fingerprint=str(archive_plan["fingerprint"]),
+            )
+            result["backup_archive"] = dict(archived.get("archive") or {})
+        elif backup.get("archive_path"):
+            result["backup_archive"] = {
+                "archive_path": str(backup.get("archive_path") or ""),
+                "archive_sha256": str(backup.get("archive_sha256") or ""),
+                "decompressed_sha256": str(backup.get("decompressed_sha256") or ""),
+                "zstd_test": str(backup.get("zstd_test") or ""),
+                "reused": True,
+            }
+        return result
 
     def get_payload(self) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
@@ -597,6 +770,10 @@ def _json_loads(value: Any) -> dict[str, Any]:
 def _settings_fingerprint(value: Mapping[str, Any]) -> str:
     semantic = {key: item for key, item in value.items() if key not in {"version_id", "fingerprint"}}
     return "sha256:" + hashlib.sha256(_json(semantic).encode("utf-8")).hexdigest()
+
+
+def _same_filesystem(left: Path, right: Path) -> bool:
+    return left.stat().st_dev == right.stat().st_dev
 
 
 def _connect(db_path: Any) -> sqlite3.Connection:

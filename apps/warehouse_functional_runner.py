@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -35,6 +33,7 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
     build_supplier_cost_state_replay_plan,
     rollback_supplier_cost_state_replay,
 )
+from packages.application.warehouse_sync_lock import warehouse_sync_lock  # noqa: E402
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 from packages.application.stocks_block import StocksBlock  # noqa: E402
 
@@ -142,7 +141,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "readback":
         return block.readback()
     if args.command == "backup":
-        with _warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_sync_lock(runtime.runtime_dir):
             return {
                 "status": "success",
                 "mode": "backup",
@@ -153,7 +152,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             }
     if args.command in {"hourly-sync", "manual-sync"}:
-        with _warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_sync_lock(runtime.runtime_dir):
+            if args.command == "manual-sync":
+                block.calculation_parameters.preflight_fresh_economics_backup_capacity(
+                    Path(str(args.backup_dir)),
+                )
             backup_result = (
                 _create_pre_sync_backup(
                     runtime,
@@ -164,6 +167,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             )
             try:
+                economics_backup = (
+                    backup_result
+                    if backup_result is not None
+                    else block.calculation_parameters.prepare_functional_economics_backup()
+                )
                 supply_refresh = _refresh_official_supply_state(
                     runtime,
                     record_ff_movements=False,
@@ -175,8 +183,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     plan,
                     confirm_fingerprint=str(plan["plan_fingerprint"]),
                 )
-                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations()
-                economics_publication = block.calculation_parameters.publish_current_functional_economics()
+                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations(
+                    verified_backup=economics_backup,
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
+                    )
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else block.calculation_parameters.publish_current_functional_economics(
+                        verified_backup=economics_backup,
+                    )
+                )
                 return {
                     "status": "success",
                     "mode": args.command,
@@ -194,6 +215,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "plan_fingerprint": economics_publication.get("plan_fingerprint"),
                         "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
                         "database_written": economics_publication.get("database_written"),
+                        "backup_archive": economics_publication.get("backup_archive"),
                     },
                 }
             except Exception as exc:
@@ -316,18 +338,6 @@ def _fresh_stocks_block() -> StocksBlock:
     """Return an official source whose cutover/hourly fetch cannot reuse a prior capture."""
 
     return StocksBlock(HttpBackedStocksSource(reuse_ttl_seconds=0.0))
-
-
-@contextmanager
-def _warehouse_sync_lock(runtime_dir: Path):
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = runtime_dir / ".warehouse-functional-sync.lock"
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _create_pre_sync_backup(
