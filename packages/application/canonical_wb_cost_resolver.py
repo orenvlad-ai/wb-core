@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -11,6 +12,7 @@ from typing import Any, Mapping
 
 from packages.application.warehouse_archival_estimate import (
     QUALITY as BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
+    active_archival_estimates,
     archival_estimate_for_nm_id,
 )
 
@@ -22,6 +24,92 @@ FUNCTIONAL_DAILY_TABLE = "sheet_vitrina_v1_warehouse_wb_daily_cost"
 FORBIDDEN_QUALITIES = frozenset(
     {"fallback", "fallback_average", "zero_quantity_without_cost_basis"}
 )
+
+
+@dataclass(frozen=True)
+class CanonicalWbCostSnapshot:
+    """Coherent read-only source snapshot for high-volume cost resolution.
+
+    Finance rebuilds resolve millions of operations through a comparatively
+    small canonical daily-cost surface.  Loading that surface and the active
+    archival overlay once per SQLite connection preserves the same source
+    semantics while avoiding a fresh archival/event scan for every SKU/date.
+    A caller must never reuse this object with another connection.
+    """
+
+    table_names: frozenset[str]
+    cutover: Mapping[str, Any] | None
+    daily_rows: Mapping[tuple[str, str], Mapping[str, Any]]
+    archival_rows: Mapping[int, Mapping[str, Any]]
+    archival_first_factual_dates: Mapping[int, str]
+
+    @classmethod
+    def from_connection(cls, conn: sqlite3.Connection) -> "CanonicalWbCostSnapshot":
+        table_names = frozenset(
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        )
+        cutover: Mapping[str, Any] | None = None
+        if "sheet_vitrina_v1_warehouse_functional_cutovers" in table_names:
+            row = conn.execute(
+                """SELECT status,plan_fingerprint
+                   FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                   WHERE cutover_id=?""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ).fetchone()
+            cutover = dict(row) if row is not None else None
+
+        daily_rows: dict[tuple[str, str], Mapping[str, Any]] = {}
+        if FUNCTIONAL_DAILY_TABLE in table_names:
+            for row in conn.execute(
+                f"""SELECT cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
+                            quality,provenance_json,fingerprint,created_at
+                     FROM {FUNCTIONAL_DAILY_TABLE}
+                     WHERE cutover_id=?
+                     ORDER BY as_of_date,nm_id""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ):
+                item = dict(row)
+                daily_rows[(str(item["as_of_date"]), str(item["nm_id"]))] = item
+
+        archival_rows = active_archival_estimates(conn)
+        first_factual_dates: dict[int, str] = {}
+        if (
+            archival_rows
+            and "sheet_vitrina_v1_warehouse_functional_events" in table_names
+        ):
+            nm_ids = sorted(archival_rows)
+            placeholders = ",".join("?" for _ in nm_ids)
+            first_factual_dates = {
+                int(row["nm_id"]): str(row["first_business_date"])
+                for row in conn.execute(
+                    f"""SELECT nm_id,MIN(business_date) AS first_business_date
+                         FROM sheet_vitrina_v1_warehouse_functional_events
+                         WHERE event_type='wb_final_acceptance'
+                           AND nm_id IN ({placeholders})
+                           AND business_date IS NOT NULL AND business_date!=''
+                           AND (CAST(quantity AS REAL)!=0 OR CAST(capital_rub AS REAL)!=0)
+                         GROUP BY nm_id""",
+                    tuple(nm_ids),
+                ).fetchall()
+            }
+        return cls(
+            table_names=table_names,
+            cutover=cutover,
+            daily_rows=daily_rows,
+            archival_rows=archival_rows,
+            archival_first_factual_dates=first_factual_dates,
+        )
+
+    def archival_estimate(
+        self, *, nm_id: str, as_of_date: str
+    ) -> Mapping[str, Any] | None:
+        item = self.archival_rows.get(int(nm_id))
+        if item is None or as_of_date < str(item["effective_date"]):
+            return None
+        if as_of_date >= self.archival_first_factual_dates.get(int(nm_id), "9999-12-31"):
+            return None
+        return item
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -50,6 +138,7 @@ def resolve_finance_canonical_cost(
     *,
     nm_id: str,
     operation_date: date,
+    snapshot: CanonicalWbCostSnapshot | None = None,
 ) -> dict[str, Any]:
     """Resolve Finance cost without maintaining an independent business value.
 
@@ -80,37 +169,56 @@ def resolve_finance_canonical_cost(
     }
     if not normalized_nm or not normalized_nm.isdigit() or int(normalized_nm) <= 0:
         return {**base, "status": "missing", "reason": "canonical_nm_id_unresolved"}
-    required_tables = {
-        str(row["name"])
-        for row in conn.execute(
-            """SELECT name FROM sqlite_master
-               WHERE type='table' AND name IN (?,?)""",
-            (FUNCTIONAL_DAILY_TABLE, "sheet_vitrina_v1_warehouse_functional_cutovers"),
-        ).fetchall()
-    }
+    required_tables = (
+        snapshot.table_names
+        if snapshot is not None
+        else {
+            str(row["name"])
+            for row in conn.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table' AND name IN (?,?)""",
+                (
+                    FUNCTIONAL_DAILY_TABLE,
+                    "sheet_vitrina_v1_warehouse_functional_cutovers",
+                ),
+            ).fetchall()
+        }
+    )
     if FUNCTIONAL_DAILY_TABLE not in required_tables:
         return {**base, "status": "missing", "reason": "canonical_cost_table_missing"}
     if "sheet_vitrina_v1_warehouse_functional_cutovers" not in required_tables:
         return {**base, "status": "missing", "reason": "canonical_cost_cutover_table_missing"}
-    cutover = conn.execute(
-        """SELECT status,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_cutovers
-           WHERE cutover_id=?""",
-        (FUNCTIONAL_CUTOVER_ID,),
-    ).fetchone()
+    cutover = (
+        snapshot.cutover
+        if snapshot is not None
+        else conn.execute(
+            """SELECT status,plan_fingerprint
+               FROM sheet_vitrina_v1_warehouse_functional_cutovers
+               WHERE cutover_id=?""",
+            (FUNCTIONAL_CUTOVER_ID,),
+        ).fetchone()
+    )
     if cutover is None or str(cutover["status"] or "") != "posted":
         return {**base, "status": "missing", "reason": "canonical_cost_cutover_not_posted"}
-    row = conn.execute(
-        f"""SELECT cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
-                   quality,provenance_json,fingerprint,created_at
-            FROM {FUNCTIONAL_DAILY_TABLE}
-            WHERE cutover_id=? AND as_of_date=? AND nm_id=?""",
-        (FUNCTIONAL_CUTOVER_ID, source_date.isoformat(), normalized_nm),
-    ).fetchone()
-    estimate = archival_estimate_for_nm_id(
-        conn,
-        nm_id=normalized_nm,
-        as_of_date=source_date.isoformat(),
-    )
+    if snapshot is not None:
+        row = snapshot.daily_rows.get((source_date.isoformat(), normalized_nm))
+        estimate = snapshot.archival_estimate(
+            nm_id=normalized_nm,
+            as_of_date=source_date.isoformat(),
+        )
+    else:
+        row = conn.execute(
+            f"""SELECT cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
+                       quality,provenance_json,fingerprint,created_at
+                FROM {FUNCTIONAL_DAILY_TABLE}
+                WHERE cutover_id=? AND as_of_date=? AND nm_id=?""",
+            (FUNCTIONAL_CUTOVER_ID, source_date.isoformat(), normalized_nm),
+        ).fetchone()
+        estimate = archival_estimate_for_nm_id(
+            conn,
+            nm_id=normalized_nm,
+            as_of_date=source_date.isoformat(),
+        )
     if row is None:
         if estimate is None:
             return {**base, "status": "missing", "reason": "canonical_cost_exact_date_missing"}

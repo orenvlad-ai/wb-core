@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.canonical_wb_cost_resolver import (  # noqa: E402
     CANONICAL_COST_FORMULA_VERSION,
+    CanonicalWbCostSnapshot,
     resolve_finance_canonical_cost,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
@@ -92,16 +93,43 @@ def main() -> None:
         )
 
         with _connection(runtime.db_path) as conn:
+            snapshot = CanonicalWbCostSnapshot.from_connection(conn)
+            all_nm_ids = (
+                [int(item["nm_id"]) for item in manifest["targets"]]
+                + [int(item) for item in manifest["active_vitrina_nm_ids"]]
+            )
+            for nm_id in all_nm_ids:
+                for operation_day in (
+                    date(2026, 1, 5),
+                    date(2026, 7, 1),
+                    date(2026, 7, 19),
+                ):
+                    direct = resolve_finance_canonical_cost(
+                        conn,
+                        nm_id=str(nm_id),
+                        operation_date=operation_day,
+                    )
+                    cached = resolve_finance_canonical_cost(
+                        conn,
+                        nm_id=str(nm_id),
+                        operation_date=operation_day,
+                        snapshot=snapshot,
+                    )
+                    if direct != cached:
+                        raise AssertionError(
+                            "snapshot-bound canonical resolution changed semantics: "
+                            f"{nm_id} {operation_day}: {direct} != {cached}"
+                        )
+            snapshot_queries: list[str] = []
+            conn.set_trace_callback(snapshot_queries.append)
             resolved_51 = [
                 resolve_finance_canonical_cost(
                     conn,
                     nm_id=str(nm_id),
                     operation_date=date(2026, 7, 1),
+                    snapshot=snapshot,
                 )
-                for nm_id in (
-                    [int(item["nm_id"]) for item in manifest["targets"]]
-                    + [int(item) for item in manifest["active_vitrina_nm_ids"]]
-                )
+                for nm_id in all_nm_ids
             ]
             if len(resolved_51) != 51 or any(
                 item["status"] != "resolved" for item in resolved_51
@@ -117,6 +145,7 @@ def main() -> None:
                     conn,
                     nm_id=str(manifest["targets"][0]["nm_id"]),
                     operation_date=operation_day,
+                    snapshot=snapshot,
                 )
                 if (
                     resolved["status"] != "resolved"
@@ -126,6 +155,12 @@ def main() -> None:
                     or not resolved["canonical_source_identity"]
                 ):
                     raise AssertionError(f"approved estimate resolution failed: {resolved}")
+            conn.set_trace_callback(None)
+            if snapshot_queries:
+                raise AssertionError(
+                    "snapshot-bound canonical resolution issued repeated SQL: "
+                    f"{snapshot_queries[:3]}"
+                )
             traced_sql: list[str] = []
             conn.set_trace_callback(traced_sql.append)
             active = resolve_finance_canonical_cost(
