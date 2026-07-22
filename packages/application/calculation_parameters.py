@@ -22,6 +22,8 @@ from packages.business_time import current_business_date_iso
 PROXY_BLOCK_KEY = "proxy_profit_margin"
 INITIAL_EFFECTIVE_DATE = "2026-07-01"
 INITIAL_VERSION_ID = "calculation_parameters_proxy_v1_20260701"
+FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT = 3
+FUNCTIONAL_ECONOMICS_ARCHIVE_PRUNE_LIMIT = 2
 
 RATE_FIELDS: tuple[str, ...] = (
     "tax_rate",
@@ -294,7 +296,9 @@ class CalculationParametersBlock:
         if preview["preview_fingerprint"] != str(preview_fingerprint or ""):
             raise ValueError("calculation parameters changed after preview")
         parameters = _parameters_from_payload(payload)
-        economics_backup = self.prepare_functional_economics_backup()
+        economics_backup = self.prepare_operator_settings_backup(
+            preview_fingerprint=str(preview["preview_fingerprint"]),
+        )
         now = _now()
         with _connect(self.runtime.db_path) as conn:
             ensure_calculation_parameters_schema(conn)
@@ -364,6 +368,15 @@ class CalculationParametersBlock:
                 verified_backup=effective_backup,
             )
         except Exception as exc:
+            backup_archive: dict[str, Any] | None = None
+            archive_error = ""
+            if "effective_backup" in locals():
+                try:
+                    backup_archive = self._archive_functional_economics_backup(
+                        effective_backup,
+                    )
+                except Exception as archive_exc:  # preserve the raw restore point fail-closed
+                    archive_error = str(archive_exc)
             with _connect(self.runtime.db_path) as conn:
                 placeholders = ",".join("?" for _ in request_ids)
                 conn.execute(
@@ -372,7 +385,13 @@ class CalculationParametersBlock:
                     (str(exc), *request_ids),
                 )
                 conn.commit()
-            return {"status": "failed", "request_count": len(request_ids), "error": str(exc)}
+            return {
+                "status": "failed",
+                "request_count": len(request_ids),
+                "error": str(exc),
+                "backup_archive": backup_archive,
+                "backup_archive_error": archive_error,
+            }
         completed_at = _now()
         with _connect(self.runtime.db_path) as conn:
             placeholders = ",".join("?" for _ in request_ids)
@@ -422,12 +441,16 @@ class CalculationParametersBlock:
                 raw_backup_exists=False,
                 archive_exists=True,
             )
+            retention = self._prune_verified_functional_economics_archives(
+                backup_root,
+            )
             return {
                 **manifest,
                 "integrity_check": "ok",
                 "backup_scope": "business_day",
                 "business_date": business_date,
                 "reused": True,
+                "retention": retention,
             }
         if archive.exists() or manifest_path.exists():
             raise ValueError("daily functional economics backup archive is incomplete")
@@ -480,6 +503,34 @@ class CalculationParametersBlock:
             "reused": False,
         }
 
+    def prepare_operator_settings_backup(
+        self,
+        *,
+        preview_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Create a fresh recovery point before an operator-authored settings write."""
+
+        backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
+        backup_root.mkdir(parents=True, exist_ok=True)
+        coherent_size = self.runtime.coherent_backup_size_bytes()
+        self._require_economics_backup_capacity(
+            backup_root,
+            source_size=coherent_size,
+            raw_backup_exists=False,
+        )
+        timestamp = _now().replace(":", "").replace("-", "")
+        source = backup_root / (
+            f"operator-settings-{timestamp}-{uuid4().hex}.sqlite3"
+        )
+        backup = self.runtime.backup_database(source)
+        source.chmod(0o600)
+        return {
+            **backup,
+            "backup_scope": "fresh_operator_settings",
+            "settings_preview_fingerprint": str(preview_fingerprint),
+            "reused": False,
+        }
+
     def _require_economics_backup_capacity(
         self,
         backup_root: Path,
@@ -489,7 +540,11 @@ class CalculationParametersBlock:
         archive_exists: bool = False,
     ) -> dict[str, Any]:
         margin = max(256 * 1024 * 1024, source_size // 20)
-        pipeline_write_margin = max(4 * 1024 * 1024 * 1024, source_size // 3)
+        current_runtime_size = self.runtime.coherent_backup_size_bytes()
+        pipeline_write_margin = max(
+            4 * 1024 * 1024 * 1024,
+            current_runtime_size // 3,
+        )
         raw_bytes = 0 if raw_backup_exists or archive_exists else source_size
         archive_worst_case_bytes = 0 if archive_exists else source_size + margin
         backup_required = raw_bytes + archive_worst_case_bytes
@@ -526,6 +581,7 @@ class CalculationParametersBlock:
             "runtime_required_free_bytes": pipeline_write_margin,
             "runtime_available_free_bytes": runtime_available,
             "pipeline_write_margin_bytes": pipeline_write_margin,
+            "current_runtime_coherent_size_bytes": current_runtime_size,
             "same_filesystem": same_filesystem,
         }
 
@@ -560,31 +616,144 @@ class CalculationParametersBlock:
             verified_backup=effective_backup,
         )
         backup = dict(result.get("backup") or effective_backup or {})
+        archive_evidence = self._archive_functional_economics_backup(backup)
+        result["backup_archive"] = archive_evidence
+        result["backup"] = archive_evidence
+        return result
+
+    def _archive_functional_economics_backup(
+        self,
+        backup: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        from apps.sqlite_backup_archive import (
+            apply_archive,
+            build_plan,
+            verify_archive_manifest,
+        )
+
         raw_path = Path(str(backup.get("path") or "")) if backup.get("path") else None
         if raw_path is not None and raw_path.is_file():
-            from apps.sqlite_backup_archive import apply_archive, build_plan
-
             archive_plan = build_plan(source=raw_path)
             expected_sha = str(backup.get("sha256") or "")
-            if expected_sha and str(archive_plan["source_sha256"]).removeprefix("sha256:") != expected_sha.removeprefix(
-                "sha256:"
+            if (
+                expected_sha
+                and str(archive_plan["source_sha256"]).removeprefix("sha256:")
+                != expected_sha.removeprefix("sha256:")
             ):
-                raise ValueError("functional economics backup changed before lossless archive")
+                raise ValueError(
+                    "functional economics backup changed before lossless archive"
+                )
             archived = apply_archive(
                 source=raw_path,
                 archive=None,
                 fingerprint=str(archive_plan["fingerprint"]),
             )
-            result["backup_archive"] = dict(archived.get("archive") or {})
-        elif backup.get("archive_path"):
-            result["backup_archive"] = {
-                "archive_path": str(backup.get("archive_path") or ""),
-                "archive_sha256": str(backup.get("archive_sha256") or ""),
-                "decompressed_sha256": str(backup.get("decompressed_sha256") or ""),
-                "zstd_test": str(backup.get("zstd_test") or ""),
+            archive_evidence = dict(archived.get("archive") or {})
+            archive_evidence.update(
+                {
+                    "manifest_path": str(archived.get("manifest_path") or ""),
+                    "source_removed": bool(archived.get("source_removed")),
+                    "backup_scope": str(backup.get("backup_scope") or ""),
+                    "raw_source_path": str(raw_path),
+                    "reused": False,
+                }
+            )
+            raw_manifest = raw_path.with_name(raw_path.name + ".manifest.json")
+            if raw_manifest.is_file() and not raw_manifest.is_symlink():
+                raw_manifest.unlink()
+                _fsync_directory(raw_manifest.parent)
+            archive_evidence["retention"] = self._prune_verified_functional_economics_archives(
+                raw_path.parent,
+            )
+            return archive_evidence
+
+        archive_path_text = str(backup.get("archive_path") or "")
+        if archive_path_text:
+            archive_path = Path(archive_path_text).resolve()
+            manifest_path = Path(
+                str(backup.get("manifest_path") or "")
+                or str(archive_path.with_name(archive_path.name + ".manifest.json"))
+            )
+            verified = verify_archive_manifest(manifest_path)
+            if str(verified.get("archive_path") or "") != str(archive_path):
+                raise ValueError(
+                    "functional economics archive failed provenance validation"
+                )
+            return {
+                **verified,
+                "manifest_path": str(manifest_path),
+                "backup_scope": str(backup.get("backup_scope") or "business_day"),
                 "reused": True,
+                "retention": self._prune_verified_functional_economics_archives(
+                    archive_path.parent,
+                ),
             }
-        return result
+        raise ValueError("functional economics backup evidence is unavailable")
+
+    def _prune_verified_functional_economics_archives(
+        self,
+        backup_root: Path,
+    ) -> dict[str, Any]:
+        """Bound retained archives; remove only reverified older exact pairs."""
+
+        from apps.sqlite_backup_archive import verify_archive_manifest
+
+        backup_root = backup_root.resolve()
+        patterns = (
+            "functional-economics-daily-*.sqlite3.zst.manifest.json",
+            "operator-settings-*.sqlite3.zst.manifest.json",
+        )
+        removed: list[dict[str, Any]] = []
+        kept: list[str] = []
+        for pattern in patterns:
+            candidates = sorted(backup_root.glob(pattern), key=lambda item: item.name, reverse=True)
+            kept.extend(str(item) for item in candidates[:FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT])
+            if len(candidates) > FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT:
+                newest_manifest = candidates[0]
+                if newest_manifest.is_symlink() or newest_manifest.stat().st_mode & 0o777 != 0o600:
+                    raise ValueError("functional economics archive retention found unsafe newest manifest")
+                verify_archive_manifest(newest_manifest)
+            for manifest_path in candidates[FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT:]:
+                if len(removed) >= FUNCTIONAL_ECONOMICS_ARCHIVE_PRUNE_LIMIT:
+                    break
+                if manifest_path.is_symlink() or manifest_path.stat().st_mode & 0o777 != 0o600:
+                    raise ValueError("functional economics archive retention found unsafe manifest")
+                manifest = verify_archive_manifest(manifest_path)
+                archive_path = Path(str(manifest.get("archive_path") or "")).resolve()
+                source_path = Path(str(manifest.get("source_path") or "")).resolve()
+                if (
+                    archive_path.parent != backup_root
+                    or source_path.parent != backup_root
+                    or archive_path.with_name(archive_path.name + ".manifest.json")
+                    != manifest_path.resolve()
+                    or source_path.exists()
+                ):
+                    raise ValueError(
+                        "functional economics archive retention failed exact provenance"
+                    )
+                audit_item = {
+                    "archive_path": str(archive_path),
+                    "archive_sha256": str(manifest.get("archive_sha256") or ""),
+                    "source_sha256": str(manifest.get("source_sha256") or ""),
+                    "source_size_bytes": int(manifest.get("source_size_bytes") or 0),
+                    "removed_at": _now(),
+                }
+                archive_path.unlink()
+                manifest_path.unlink()
+                _fsync_directory(backup_root)
+                removed.append(audit_item)
+        if removed:
+            _append_retention_audit(
+                backup_root / "functional-economics-archive-retention.jsonl",
+                removed,
+            )
+        return {
+            "policy": "keep_latest_verified_per_scope",
+            "keep_count": FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT,
+            "prune_limit": FUNCTIONAL_ECONOMICS_ARCHIVE_PRUNE_LIMIT,
+            "removed": removed,
+            "kept": kept,
+        }
 
     def get_payload(self) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
@@ -809,6 +978,42 @@ def _settings_fingerprint(value: Mapping[str, Any]) -> str:
 
 def _same_filesystem(left: Path, right: Path) -> bool:
     return left.stat().st_dev == right.stat().st_dev
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _append_retention_audit(path: Path, removed: list[dict[str, Any]]) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            for item in removed:
+                handle.write(
+                    json.dumps(
+                        {
+                            "contract_name": "functional_economics_archive_retention_v1",
+                            **item,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    _fsync_directory(path.parent)
 
 
 def _write_daily_raw_backup_manifest(

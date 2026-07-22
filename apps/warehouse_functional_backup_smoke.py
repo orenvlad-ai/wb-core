@@ -267,6 +267,14 @@ def main() -> int:
         archive_path = Path(str((publication.get("backup_archive") or {}).get("archive_path") or ""))
         if daily_path.exists() or not archive_path.is_file():
             raise AssertionError("successful daily economics publication was not losslessly archived")
+        if daily_manifest_path.exists():
+            raise AssertionError("archived daily restore point retained a stale raw manifest")
+        if (
+            (publication.get("backup") or {}).get("archive_path") != str(archive_path)
+            or not (publication.get("backup") or {}).get("source_removed")
+            or (publication.get("backup") or {}).get("path")
+        ):
+            raise AssertionError("successful publication exposed deleted raw backup metadata")
         reused = parameters.prepare_functional_economics_backup()
         if not reused.get("reused") or reused.get("archive_path") != str(archive_path):
             raise AssertionError("hourly economics did not reuse the daily archived restore point")
@@ -279,6 +287,60 @@ def main() -> int:
                 raise AssertionError("corrupt archive failed for the wrong reason") from exc
         else:
             raise AssertionError("corrupt daily archive was reused")
+
+        operator_runtime_dir = root / "operator-settings-runtime"
+        operator_runtime_dir.mkdir()
+        with sqlite3.connect(operator_runtime_dir / "registry_upload_runtime.sqlite3") as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+            conn.execute("INSERT INTO evidence(value) VALUES('operator-settings')")
+            conn.commit()
+        operator_parameters = CalculationParametersBlock(
+            runtime=RegistryUploadDbBackedRuntime(runtime_dir=operator_runtime_dir)
+        )
+        operator_backup_one = operator_parameters.prepare_operator_settings_backup(
+            preview_fingerprint="sha256:operator-one",
+        )
+        operator_backup_two = operator_parameters.prepare_operator_settings_backup(
+            preview_fingerprint="sha256:operator-two",
+        )
+        if (
+            operator_backup_one.get("path") == operator_backup_two.get("path")
+            or operator_backup_one.get("backup_scope") != "fresh_operator_settings"
+            or operator_backup_two.get("backup_scope") != "fresh_operator_settings"
+        ):
+            raise AssertionError("operator settings did not receive fresh per-save restore points")
+
+        from apps.sqlite_backup_archive import apply_archive, build_plan
+
+        retention_runtime_dir = root / "retention-runtime"
+        retention_runtime_dir.mkdir()
+        retention_runtime = RegistryUploadDbBackedRuntime(runtime_dir=retention_runtime_dir)
+        with sqlite3.connect(retention_runtime.db_path) as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+            conn.execute("INSERT INTO evidence(value) VALUES('retention')")
+            conn.commit()
+        retention_parameters = CalculationParametersBlock(runtime=retention_runtime)
+        retention_root = retention_runtime_dir / "backups" / "calculation-parameters"
+        retention_root.mkdir(parents=True)
+        for day in ("20260718", "20260719", "20260720", "20260721"):
+            source = retention_root / f"functional-economics-daily-{day}.sqlite3"
+            retention_runtime.backup_database(source)
+            source.chmod(0o600)
+            archive_plan = build_plan(source=source)
+            apply_archive(
+                source=source,
+                archive=None,
+                fingerprint=str(archive_plan["fingerprint"]),
+            )
+        retention = retention_parameters._prune_verified_functional_economics_archives(
+            retention_root,
+        )
+        retained_archives = sorted(retention_root.glob("functional-economics-daily-*.sqlite3.zst"))
+        if len(retained_archives) != 3 or len(retention.get("removed") or []) != 1:
+            raise AssertionError(f"verified archive retention is not bounded: {retention}")
+        retention_audit = retention_root / "functional-economics-archive-retention.jsonl"
+        if not retention_audit.is_file() or retention_audit.stat().st_mode & 0o777 != 0o600:
+            raise AssertionError("verified archive retention lacks a private durable audit")
 
         capacity_runtime_dir = root / "capacity-runtime"
         capacity_runtime_dir.mkdir()
@@ -379,6 +441,34 @@ def main() -> int:
             raise AssertionError("verified archive reuse reserved a second backup on its mount")
         if archived_capacity["runtime_required_free_bytes"] < 4 * 1024 * 1024 * 1024:
             raise AssertionError("verified archive reuse skipped the live-runtime margin")
+
+        with (
+            mock.patch.object(
+                capacity_parameters.runtime,
+                "coherent_backup_size_bytes",
+                return_value=30 * 1024 * 1024 * 1024,
+            ),
+            mock.patch(
+                "packages.application.calculation_parameters.shutil.disk_usage",
+                side_effect=archived_disk_usage,
+            ),
+            mock.patch(
+                "packages.application.calculation_parameters._same_filesystem",
+                return_value=False,
+            ),
+        ):
+            try:
+                capacity_parameters._require_economics_backup_capacity(
+                    separate_backup_root,
+                    source_size=1 * 1024 * 1024 * 1024,
+                    raw_backup_exists=False,
+                    archive_exists=True,
+                )
+            except ValueError as exc:
+                if "runtime-filesystem capacity" not in str(exc):
+                    raise AssertionError("current runtime growth failed for the wrong reason") from exc
+            else:
+                raise AssertionError("stale morning archive understated current runtime capacity")
 
         queue_runtime_dir = root / "queue-runtime"
         queue_runtime_dir.mkdir()

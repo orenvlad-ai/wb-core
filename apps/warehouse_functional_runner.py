@@ -200,10 +200,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         verified_backup=economics_backup,
                     )
                 )
+                completed_backup = (
+                    economics_publication.get("backup_archive")
+                    if backup_result is not None
+                    else backup_result
+                )
                 return {
                     "status": "success",
                     "mode": args.command,
-                    "backup": backup_result,
+                    "backup": completed_backup,
+                    "raw_backup": (
+                        {
+                            **dict(backup_result),
+                            "source_removed": bool(
+                                (economics_publication.get("backup_archive") or {}).get(
+                                    "source_removed"
+                                )
+                            ),
+                        }
+                        if backup_result is not None
+                        else None
+                    ),
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "ff_state": ff_state,
