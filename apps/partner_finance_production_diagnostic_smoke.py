@@ -158,10 +158,33 @@ def main() -> None:
         if _sha256(database) != digest_before:
             raise AssertionError("read-only diagnostic changed the runtime SQLite database")
 
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                """DELETE FROM wb_finance_weekly_sku_aggregates
+                   WHERE seller_id=? AND week_start=? AND nm_id=?""",
+                (SELLER, WEEK.isoformat(), TARGET_NM),
+            )
+            conn.commit()
+        incomplete_digest = _sha256(database)
+        incomplete = run_partner_finance_diagnostic(explicit_scope)
+        incomplete_codes = {item["code"] for item in incomplete["blockers"]}
+        if (
+            incomplete["status"] != "incomplete"
+            or "finance_sku_aggregate_missing" not in incomplete_codes
+            or incomplete["scanned_finance_raw_row_count"] != len(_finance_rows())
+            or incomplete["duplicates"]["logical_duplicate_identity_count"] != 1
+        ):
+            raise AssertionError(
+                f"missing-projection raw evidence was not preserved: {incomplete}"
+            )
+        if _sha256(database) != incomplete_digest:
+            raise AssertionError("incomplete diagnostic changed the runtime SQLite database")
+
     print(
         "partner_finance_production_diagnostic: ok -> explicit/server settings, "
         "ads/Finance marketing reconciliation, classified row groups, duplicate/storno/"
-        "unknown-name evidence, deterministic fingerprint, SQLite unchanged"
+        "unknown-name evidence, missing-projection raw preservation, deterministic "
+        "fingerprint, SQLite unchanged"
     )
 
 
