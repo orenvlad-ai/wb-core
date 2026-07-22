@@ -451,6 +451,36 @@ def main() -> None:
         or maintenance_args.action != "hold"
     ):
         raise AssertionError("hosted runner must expose warehouse maintenance hold")
+    durable_payload = {
+        "status": "held",
+        "units": {
+            "timer": {"is_active": "inactive", "is_enabled": "disabled"},
+            "service": {"is_active": "inactive", "quiescent": True},
+        },
+        "warehouse_lock": {"held": False},
+        "finance_apply_processes": [],
+    }
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(durable_payload), stderr=""
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess, "run", return_value=completed
+    ) as run_mock:
+        hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+            active_target,
+            action="hold",
+            disable_timer=True,
+        )
+    if "--disable-timer" not in " ".join(run_mock.call_args.args[0]):
+        raise AssertionError("durable warehouse hold must pass --disable-timer")
+    business_args = hosted_runtime.build_arg_parser().parse_args(
+        ["business-data-maintenance", "hold"]
+    )
+    if (
+        business_args.handler is not hosted_runtime.run_business_data_maintenance_command
+        or business_args.action != "hold"
+    ):
+        raise AssertionError("hosted runner must expose all-writer business-data hold")
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")

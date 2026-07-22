@@ -191,6 +191,43 @@ def _assert_finance_process_blocks_hold() -> None:
         assert systemd.mutations == []
 
 
+def _assert_durable_hold_disables_and_remains_restorable() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd()
+        held = maintenance_hold(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            disable_timer=True,
+        )
+        assert held["status"] == "held"
+        assert held["units"]["timer"]["is_enabled"] == "disabled"
+        assert held["units"]["timer"]["is_active"] == "inactive"
+        assert systemd.mutations == [
+            ("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT),
+            ("disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT),
+        ]
+        state = json.loads(
+            (runtime_dir / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME).read_text()
+        )
+        assert state["timer_disabled_for_hold"] is True
+        assert state["baseline"]["units"]["timer"]["is_enabled"] == "enabled"
+        again = maintenance_hold(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            disable_timer=True,
+        )
+        assert again["idempotent"] is True
+        restored = maintenance_restore(runtime_dir, client=systemd, proc_root=proc_root)
+        assert restored["units"]["timer"]["is_enabled"] == "enabled"
+        assert restored["units"]["timer"]["is_active"] == "active"
+
+
 def _assert_failed_oneshot_is_quiescent_evidence() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw) / "state"
@@ -447,6 +484,7 @@ def _assert_finance_apply_holds_shared_lock() -> None:
 def main() -> int:
     _assert_maintenance_lifecycle()
     _assert_finance_process_blocks_hold()
+    _assert_durable_hold_disables_and_remains_restorable()
     _assert_failed_oneshot_is_quiescent_evidence()
     _assert_timed_out_hold_preserves_original_baseline()
     _assert_exact_deployed_service_refresh_is_restorable()

@@ -2981,6 +2981,7 @@ def _run_remote_warehouse_functional_maintenance_action(
     target: HostedRuntimeTarget,
     *,
     action: str,
+    disable_timer: bool = False,
 ) -> dict[str, Any]:
     """Inspect, hold or restore only the warehouse functional timer boundary."""
 
@@ -3016,6 +3017,8 @@ def _run_remote_warehouse_functional_maintenance_action(
                 "2",
             ]
         )
+        if disable_timer:
+            runner_args.append("--disable-timer")
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -3048,6 +3051,7 @@ def _run_remote_warehouse_functional_maintenance_action(
     if action == "hold" and (
         str(payload.get("status") or "") != "held"
         or str(timer.get("is_active") or "") != "inactive"
+        or (disable_timer and str(timer.get("is_enabled") or "") != "disabled")
         or not warehouse_functional_service_is_quiescent(service_active)
         or service.get("quiescent") is not True
         or bool((payload.get("warehouse_lock") or {}).get("held"))
@@ -3075,6 +3079,123 @@ def run_warehouse_functional_maintenance_command(args: argparse.Namespace) -> in
             ),
             "action": f"warehouse-functional-maintenance-{args.action}",
             "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_business_data_maintenance_runner(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"business-data-maintenance-{action}"
+    )
+    if action not in {"status", "prepare", "hold"}:
+        raise ValueError(f"unsupported business-data maintenance action: {action}")
+    if action in {"prepare", "hold"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"business-data-maintenance-{action}",
+            dry_run=False,
+        )
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("business-data maintenance requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("business-data maintenance requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/business_data_maintenance.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+    ]
+    if action == "hold":
+        runner_args.extend(
+            ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=1500.0 if action == "hold" else 300.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"business-data maintenance {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("business-data maintenance returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("business-data maintenance returned a non-object JSON payload")
+    return payload
+
+
+def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.action)
+    evidence: dict[str, Any] = {}
+    if action == "hold":
+        evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
+            target, action="prepare"
+        )
+        evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="hold",
+            disable_timer=True,
+        )
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="deactivate",
+        )
+        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
+            target,
+            action="disable",
+        )
+        result = _run_remote_business_data_maintenance_runner(target, action="hold")
+        if (
+            result.get("quiet") is not True
+            or str(result.get("status") or "") != "held"
+        ):
+            raise RuntimeError("business-data maintenance hold readback is incomplete")
+    else:
+        result = _run_remote_business_data_maintenance_runner(target, action="status")
+        evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="status",
+        )
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="status",
+        )
+        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
+            target,
+            action="status",
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"business-data-maintenance-{action}",
+            "result": result,
+            "evidence": evidence,
         }
     )
     return 0
@@ -3724,6 +3845,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     functional_maintenance.set_defaults(
         handler=run_warehouse_functional_maintenance_command,
+    )
+
+    business_data_maintenance = subparsers.add_parser(
+        "business-data-maintenance",
+        help=(
+            "Inspect or establish one audited quiet window across all repo-owned "
+            "automatic business-data writers and runtime schedules."
+        ),
+    )
+    business_data_maintenance.add_argument(
+        "action",
+        choices=("status", "hold"),
+    )
+    business_data_maintenance.set_defaults(
+        handler=run_business_data_maintenance_command,
     )
 
     functional_emergency_dry_run = subparsers.add_parser(
