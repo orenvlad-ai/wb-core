@@ -118,7 +118,7 @@ class RegistryUploadDbBackedRuntime:
         if target.exists():
             raise ValueError(f"Backup destination already exists: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        source_size = self.db_path.stat().st_size
+        source_size = self.coherent_backup_size_bytes()
         safety_margin = max(256 * 1024 * 1024, source_size // 20)
         required_free_bytes = source_size + safety_margin
         available_free_bytes = shutil.disk_usage(target.parent).free
@@ -154,6 +154,17 @@ class RegistryUploadDbBackedRuntime:
             "sha256": digest.hexdigest(),
             "integrity_check": "ok",
         }
+
+    def coherent_backup_size_bytes(self) -> int:
+        """Conservatively bound a coherent backup, including committed WAL pages."""
+
+        main_size = self.db_path.stat().st_size
+        with sqlite3.connect(f"file:{self.db_path.resolve()}?mode=ro", uri=True) as conn:
+            page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        wal_path = Path(str(self.db_path) + "-wal")
+        wal_size = wal_path.stat().st_size if wal_path.is_file() else 0
+        return max(main_size, page_count * page_size, main_size + wal_size)
 
     def ingest_bundle_from_path(self, bundle_path: Path, activated_at: str) -> RegistryUploadResult:
         bundle = load_registry_upload_bundle_v1_from_path(bundle_path)

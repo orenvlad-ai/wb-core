@@ -30,8 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_plan(*, source: Path, archive: Path | None = None) -> dict[str, Any]:
-    source = source.expanduser().resolve()
-    archive = (archive or Path(str(source) + ARCHIVE_SUFFIX)).expanduser().resolve()
+    source_input = source.expanduser()
+    archive_input = (archive or Path(str(source_input) + ARCHIVE_SUFFIX)).expanduser()
+    if source_input.is_symlink() or archive_input.is_symlink():
+        raise ValueError("SQLite backup source and archive paths must not be symlinks")
+    source = source_input.resolve()
+    archive = archive_input.resolve()
     _validate_paths(source, archive)
     zstd = shutil.which("zstd")
     if not zstd:
@@ -86,7 +90,12 @@ def apply_archive(*, source: Path, archive: Path | None, fingerprint: str) -> di
     if not zstd:
         raise ValueError("zstd executable is required")
     try:
-        with temp_path.open("xb") as output:
+        temp_descriptor = os.open(
+            temp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(temp_descriptor, "wb") as output:
             completed = subprocess.run(
                 [zstd, "-1", "-T0", "-q", "-c", "--", str(source_path)],
                 stdout=output,
@@ -151,6 +160,67 @@ def apply_archive(*, source: Path, archive: Path | None, fingerprint: str) -> di
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def verify_archive_manifest(manifest_path: Path) -> dict[str, Any]:
+    """Revalidate the retained archive bytes, not only their recorded manifest."""
+
+    manifest_path = manifest_path.expanduser()
+    if manifest_path.is_symlink():
+        raise ValueError("SQLite backup archive manifest is unavailable")
+    manifest_path = manifest_path.resolve()
+    if not manifest_path.is_file():
+        raise ValueError("SQLite backup archive manifest is unavailable")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    archive = Path(str(manifest.get("archive_path") or "")).expanduser()
+    archive_is_symlink = archive.is_symlink()
+    archive = archive.resolve()
+    if (
+        str(manifest.get("contract_name") or "") != "sqlite_backup_lossless_archive_v1"
+        or not archive.is_file()
+        or archive_is_symlink
+        or archive.parent != manifest_path.parent
+        or manifest_path != archive.with_name(archive.name + ".manifest.json")
+        or archive.stat().st_mode & 0o777 != 0o600
+        or int(manifest.get("archive_size_bytes") or -1) != archive.stat().st_size
+        or str(manifest.get("source_integrity_check") or "") != "ok"
+        or str(manifest.get("zstd_test") or "") != "ok"
+        or str(manifest.get("decompressed_sha256") or "")
+        != str(manifest.get("source_sha256") or "")
+        or int(manifest.get("decompressed_size_bytes") or -1)
+        != int(manifest.get("source_size_bytes") or -2)
+    ):
+        raise ValueError("SQLite backup archive manifest failed provenance validation")
+    if _file_hash(archive) != str(manifest.get("archive_sha256") or ""):
+        raise ValueError("SQLite backup archive SHA-256 does not match its manifest")
+    zstd = shutil.which("zstd")
+    if not zstd:
+        raise ValueError("zstd executable is required")
+    tested = subprocess.run(
+        [zstd, "-q", "-t", "--", str(archive)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if tested.returncode:
+        raise ValueError(_command_error("zstd archive test failed", tested))
+    decompressed_sha256, decompressed_size = _decompressed_hash_and_size(
+        zstd=zstd,
+        archive=archive,
+    )
+    if (
+        decompressed_sha256 != str(manifest.get("source_sha256") or "")
+        or decompressed_size != int(manifest.get("source_size_bytes") or -1)
+    ):
+        raise ValueError("SQLite backup archive decompressed fingerprint does not match")
+    return {
+        **manifest,
+        "integrity_check": "ok",
+        "actual_archive_sha256": str(manifest["archive_sha256"]),
+        "actual_decompressed_sha256": decompressed_sha256,
+        "actual_decompressed_size_bytes": decompressed_size,
+        "reverified": True,
+    }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

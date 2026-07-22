@@ -179,6 +179,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("mktemp -d /opt/wb-core-runtime/node-runtimes/.install", os_dependency_command)
         self.assertIn("command -v npm", os_dependency_command)
         self.assertIn("command -v ffmpeg", os_dependency_command)
+        self.assertIn("command -v zstd", os_dependency_command)
         self.assertIn("npm ci --omit=dev --ignore-scripts", dependency_command)
         self.assertIn("Number(process.versions.node.split", dependency_command)
         self.assertIn("command -v ffmpeg", dependency_command)

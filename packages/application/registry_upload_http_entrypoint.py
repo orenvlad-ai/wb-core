@@ -154,6 +154,7 @@ from packages.application.warehouse_functional import (
     _validated_wb_goods,
     enqueue_warehouse_targeted_recalculation,
 )
+from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
@@ -3205,24 +3206,43 @@ class RegistryUploadHttpEntrypoint:
         return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
-        try:
-            supply_payload = self.wb_supplies_block.sync_functional_sources(
-                record_ff_movements=False
-            )
-            downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
-                opening_date="2026-07-01"
-            )
-            ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
-            plan = self.warehouse_functional_block.build_sync_plan()
-            result = self.warehouse_functional_block.apply_plan(
-                plan,
-                confirm_fingerprint=str(plan["plan_fingerprint"]),
-            )
-            proxy_recalculation = self.calculation_parameters_block.process_pending_targeted_recalculations()
-            economics_publication = self.calculation_parameters_block.publish_current_functional_economics()
-        except Exception as exc:
-            self.warehouse_functional_block.record_failed_sync(exc)
-            raise
+        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
+            try:
+                economics_backup = (
+                    self.calculation_parameters_block.prepare_functional_economics_backup()
+                )
+                supply_payload = self.wb_supplies_block.sync_functional_sources(
+                    record_ff_movements=False
+                )
+                downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                    opening_date="2026-07-01"
+                )
+                ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
+                plan = self.warehouse_functional_block.build_sync_plan()
+                result = self.warehouse_functional_block.apply_plan(
+                    plan,
+                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                )
+                proxy_recalculation = (
+                    self.calculation_parameters_block.process_pending_targeted_recalculations(
+                        verified_backup=economics_backup,
+                    )
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
+                    )
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else self.calculation_parameters_block.publish_current_functional_economics(
+                        verified_backup=economics_backup,
+                    )
+                )
+            except Exception as exc:
+                self.warehouse_functional_block.record_failed_sync(exc)
+                raise
         sync = dict(supply_payload.get("sync") or {})
         return {
             "status": "success",
@@ -3243,6 +3263,7 @@ class RegistryUploadHttpEntrypoint:
                 "plan_fingerprint": economics_publication.get("plan_fingerprint"),
                 "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
                 "database_written": economics_publication.get("database_written"),
+                "backup_archive": economics_publication.get("backup_archive"),
             },
         }
 

@@ -1027,7 +1027,8 @@ def _build_autoanswers_os_dependencies_command(target: HostedRuntimeTarget) -> l
         f"node -e \"if(Number(process.versions.node.split('.')[0])<{AUTOANSWERS_NODE_MAJOR}) process.exit(1)\""
     )
     complete_check = (
-        f"{major_check} && command -v npm >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1"
+        f"{major_check} && command -v npm >/dev/null 2>&1 "
+        "&& command -v ffmpeg >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1"
     )
     package_names = " ".join(shlex.quote(item) for item in AUTOANSWERS_BASE_OS_PACKAGES)
     x64_sha = shlex.quote(AUTOANSWERS_NODE_SHA256["amd64"])
