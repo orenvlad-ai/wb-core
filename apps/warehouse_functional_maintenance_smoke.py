@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from typing import Any, Sequence
@@ -20,6 +21,7 @@ from packages.application.warehouse_functional_maintenance import (
     WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME,
     WAREHOUSE_FUNCTIONAL_SERVICE_UNIT,
     WAREHOUSE_FUNCTIONAL_TIMER_UNIT,
+    SystemdClient,
     maintenance_hold,
     maintenance_restore,
     maintenance_status,
@@ -40,6 +42,8 @@ class FakeSystemd:
         self.mutations: list[tuple[str, str]] = []
         self.timer_digest = "sha256:timer"
         self.service_digest = "sha256:service"
+        self.deployed_service_matches = False
+        self.deployed_evidence_calls = 0
 
     def scalar(self, action: str, unit: str) -> str:
         if action == "is-enabled" and unit == WAREHOUSE_FUNCTIONAL_TIMER_UNIT:
@@ -71,6 +75,21 @@ class FakeSystemd:
 
     def cat_digest(self, unit: str) -> str:
         return self.timer_digest if unit == WAREHOUSE_FUNCTIONAL_TIMER_UNIT else self.service_digest
+
+    def deployed_unit_evidence(self, unit: str, artifact_path: Path) -> dict[str, Any]:
+        self.deployed_evidence_calls += 1
+        if unit != WAREHOUSE_FUNCTIONAL_SERVICE_UNIT or not self.deployed_service_matches:
+            raise RuntimeError("deployed service mismatch")
+        return {
+            "unit": unit,
+            "fragment_path": "/etc/systemd/system/" + unit,
+            "fragment_sha256": "sha256:artifact",
+            "artifact_path": str(artifact_path),
+            "artifact_sha256": "sha256:artifact",
+            "drop_in_paths": [],
+            "need_daemon_reload": "no",
+            "exact_match": True,
+        }
 
     def mutate(self, action: str, unit: str) -> None:
         self.mutations.append((action, unit))
@@ -233,6 +252,113 @@ def _assert_timed_out_hold_preserves_original_baseline() -> None:
         assert restored["units"]["timer"]["is_active"] == "active"
 
 
+def _assert_exact_deployed_service_refresh_is_restorable() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd(service_terminal_state="failed")
+        held = maintenance_hold(runtime_dir, client=systemd, proc_root=proc_root)
+        assert held["status"] == "held"
+        systemd.service_digest = "sha256:deployed-service"
+        systemd.deployed_service_matches = True
+        restored = maintenance_restore(runtime_dir, client=systemd, proc_root=proc_root)
+        assert restored["status"] == "restored"
+        state = json.loads(
+            (runtime_dir / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME).read_text()
+        )
+        refresh = state["deployed_service_refresh"]
+        assert refresh["baseline_unit_digest"] == "sha256:service"
+        assert refresh["restored_unit_digest"] == "sha256:deployed-service"
+        assert refresh["evidence"]["exact_match"] is True
+        assert systemd.deployed_evidence_calls == 2
+
+
+def _assert_unproven_service_refresh_stays_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd(service_terminal_state="failed")
+        maintenance_hold(runtime_dir, client=systemd, proc_root=proc_root)
+        mutations_before_restore = list(systemd.mutations)
+        systemd.service_digest = "sha256:unknown-service"
+        try:
+            maintenance_restore(runtime_dir, client=systemd, proc_root=proc_root)
+        except RuntimeError as exc:
+            assert "not the exact repo-deployed artifact" in str(exc)
+        else:
+            raise AssertionError("unproven service drift must block maintenance restore")
+        assert systemd.mutations == mutations_before_restore
+        state = json.loads(
+            (runtime_dir / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME).read_text()
+        )
+        assert state["phase"] == "held"
+
+
+def _assert_service_refresh_race_stays_fail_closed() -> None:
+    class RacingSystemd(FakeSystemd):
+        def mutate(self, action: str, unit: str) -> None:
+            super().mutate(action, unit)
+            if action == "enable":
+                self.service_digest = "sha256:unproven-after-check"
+                self.deployed_service_matches = False
+
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = RacingSystemd(service_terminal_state="failed")
+        maintenance_hold(runtime_dir, client=systemd, proc_root=proc_root)
+        systemd.service_digest = "sha256:proven-service"
+        systemd.deployed_service_matches = True
+        try:
+            maintenance_restore(runtime_dir, client=systemd, proc_root=proc_root)
+        except RuntimeError as exc:
+            assert "invariants changed before timer restore" in str(exc)
+        else:
+            raise AssertionError("service drift after proof must block maintenance restore")
+        assert systemd.timer_active == "inactive"
+        assert ("start", WAREHOUSE_FUNCTIONAL_TIMER_UNIT) not in systemd.mutations
+        state = json.loads(
+            (runtime_dir / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME).read_text()
+        )
+        assert state["phase"] == "held"
+
+
+def _assert_pending_daemon_reload_stays_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        fragment = root / "warehouse.service"
+        artifact = root / "artifact.service"
+        fragment.write_text("[Service]\nTimeoutStartSec=3h\n")
+        artifact.write_bytes(fragment.read_bytes())
+
+        def runner(args: Sequence[str], **_: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "LoadState=loaded\n"
+                    f"FragmentPath={fragment}\n"
+                    "DropInPaths=\n"
+                    "NeedDaemonReload=yes\n"
+                ),
+                stderr="",
+            )
+
+        client = SystemdClient(runner=runner)
+        try:
+            client.deployed_unit_evidence("warehouse.service", artifact)
+        except RuntimeError as exc:
+            assert "requires systemd daemon-reload" in str(exc)
+        else:
+            raise AssertionError("pending daemon-reload must block deployed-unit proof")
+
+
 def _load_finance_cli() -> Any:
     path = Path(__file__).resolve().with_name("wb_finance_weekly.py")
     spec = importlib.util.spec_from_file_location("wb_finance_weekly_lock_subject", path)
@@ -323,6 +449,10 @@ def main() -> int:
     _assert_finance_process_blocks_hold()
     _assert_failed_oneshot_is_quiescent_evidence()
     _assert_timed_out_hold_preserves_original_baseline()
+    _assert_exact_deployed_service_refresh_is_restorable()
+    _assert_unproven_service_refresh_stays_fail_closed()
+    _assert_service_refresh_race_stays_fail_closed()
+    _assert_pending_daemon_reload_stays_fail_closed()
     _assert_finance_apply_holds_shared_lock()
     print("warehouse functional maintenance smoke: ok")
     return 0
