@@ -181,6 +181,8 @@ def main() -> None:
                     notes: document.getElementById('partnerReportNotes').innerText,
                     otherLabel: other && other.querySelector('.partner-report-tooltip-wrap > span:first-child').innerText.trim(),
                     categoryCount: categories.length,
+                    reviewPointsCount: categories.filter((row) => row.dataset.partnerExpenseCategory === 'review_points').length,
+                    otherWithholdingsCount: categories.filter((row) => row.dataset.partnerExpenseCategory === 'other_withholdings').length,
                     categoryPercentCount: categories.filter((row) => row.innerText.includes('%')).length,
                     oldLabelCount: [...table.querySelectorAll('td')].filter((cell) => cell.innerText.trim() === 'Прочие атрибутируемые расходы').length,
                     tooltipVisible: Boolean(tooltip && getComputedStyle(tooltip).display !== 'none'),
@@ -201,6 +203,8 @@ def main() -> None:
                 or "source digest" not in facts["notes"]
                 or facts["otherLabel"] != "Прочие прямые и распределённые расходы"
                 or facts["categoryCount"] != 4
+                or facts["reviewPointsCount"] != 1
+                or facts["otherWithholdingsCount"] != 0
                 or facts["categoryPercentCount"] != 0
                 or facts["oldLabelCount"] != 0
                 or not facts["tooltipVisible"]
@@ -345,7 +349,7 @@ def _report() -> dict:
     totals = _values("676034", "49053.904", "127.5402")
     return {
         "status": "ready",
-        "formula_version": "partner_report_profitability_ui_first_v3",
+        "formula_version": "partner_report_profitability_ui_first_v4",
         "source_digest": "sha256:" + "f" * 64,
         "annualized_return_formula": "Средние недельные дивиденды × 52 / вложенный капитал × 100%. Расчётная, не гарантированная доходность.",
         "weeks": [
@@ -354,7 +358,13 @@ def _report() -> dict:
         ],
         "totals": totals,
         "other_expense_breakdown_total": _breakdown(),
-        "other_expense_tooltip": "Итог включает прямые расходы выбранного SKU и распределённую долю общих расходов кабинета. Распределённая доля рассчитывается как общие неатрибутированные расходы недели × чистая выручка SKU / общая положительная чистая выручка недели.",
+        "other_expense_category_definitions": [
+            {"key": "uncapitalized_transit_logistics", "label": "Транзитная логистика, не подтверждённая как капитализированная"},
+            {"key": "wb_jam_subscription", "label": "Подписка WB Jam"},
+            {"key": "wb_paid_services", "label": "Платные сервисы WB"},
+            {"key": "review_points", "label": "Баллы за отзывы"},
+        ],
+        "other_expense_tooltip": "Каждая Finance-категория сохраняется отдельно; маркетинг Finance исключён, потому что строка «Маркетинг WB» берётся только из ads_compact по date + nmID.",
         "blockers": [],
     }
 
@@ -394,7 +404,7 @@ def _values(net_revenue: str, dividends: str, annualized: str) -> dict:
         "acceptance": "0",
         "ads": "30904",
         "penalties_and_adjustments": "0",
-        "other_direct_and_allocated_expenses": "0",
+        "other_direct_and_allocated_expenses": "10",
         "finance_margin": "186496",
         "office": "10000",
         "estimated_tax": "28562.04",
@@ -410,6 +420,7 @@ def _breakdown() -> list[dict[str, str]]:
         {"key": "uncapitalized_transit_logistics", "label": "Транзитная логистика, не подтверждённая как капитализированная", "amount_rub": "0.00"},
         {"key": "wb_jam_subscription", "label": "Подписка WB Jam", "amount_rub": "0.00"},
         {"key": "wb_paid_services", "label": "Платные сервисы WB", "amount_rub": "0.00"},
+        {"key": "review_points", "label": "Баллы за отзывы", "amount_rub": "10.00"},
         {"key": "other_withholdings", "label": "Прочие удержания", "amount_rub": "0.00"},
     ]
 

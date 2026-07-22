@@ -13,6 +13,7 @@ source_basis:
   - "migration/108_finance_canonical_cost_partner_ui_recovery.md"
   - "migration/110_finance_partner_temporal_v3.md"
   - "migration/111_partner_marketing_diagnostic_ads_recovery.md"
+  - "migration/112_partner_marketing_single_count.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -29,7 +30,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/partner-report/preview"
   - "POST /v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 source_of_truth_level: "module_canonical"
-update_note: "V3 remains the active calculation contract; a bounded raw-operation diagnostic now proves Partner/Finance residual composition before any formula change."
+update_note: "V4 excludes Finance marketing already represented by ads_compact, preserves signed deduction refunds and routes every Finance category explicitly in UI/XLSX/provenance."
 ---
 
 # 1. Purpose and active surface
@@ -62,19 +63,19 @@ Partner preview never scans all `wb_finance_weekly_raw_rows`. It performs indexe
 
 The aggregate is rebuildable from raw Finance rows and shares module 44 classifier/profit/cost services. Preview fails stale when formula version, weekly raw `content_hash`, or canonical cost source digest changed. This includes migration-109 `business_approved_archival_estimate` lineage for its exact 18 legacy `nmId`; Partner never resolves that manifest independently. Source correction therefore requires projection rebuild and cannot silently reuse old values.
 
-Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
+Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections, review points and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
 
 Account-level rows with no resolvable `nmId` are not silently lost or assigned wholesale. The approved rule is:
 
 `selected SKU net revenue / total weekly net revenue`.
 
-The allocated amount and coefficient are disclosed in provenance. Non-positive total revenue is a blocker. A different allocation rule requires a separately approved server-owned contract.
+The allocated amount and coefficient are disclosed in provenance. Account-level agent remuneration, acquiring, logistics, storage, non-capitalized acceptance and penalties/corrections are routed to the existing Partner main rows. Non-capitalized transit, WB Jam, paid services, review points and genuinely other deductions are routed to named subrows. A catch-all difference from `profit_period_expenses` is forbidden: the explicit categories must reconcile after Finance marketing and positive adjustments are excluded, otherwise preview blocks. Non-positive total revenue is a blocker. A different allocation rule requires a separately approved server-owned contract.
 
-Marketing uses only accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. The shared resolver accepts valid root or nested `result` envelopes. `kind=empty` means confirmed zero; a missing date, invalid value/envelope or successful payload without the selected `nmId` is a blocker and never zero. Finance marketing is not deducted simultaneously with `ads_sum`.
+Marketing uses only accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. The shared resolver accepts valid root or nested `result` envelopes. `kind=empty` means confirmed zero; a missing date, invalid value/envelope or successful payload without the selected `nmId` is a blocker and never zero. Direct and account-level Finance marketing remain visible in Finance but contribute exactly zero to every Partner expense row and margin because the Partner `Маркетинг WB` row already deducts `ads_sum`.
 
 # 4. Decimal formulas
 
-Formula version is `partner_report_profitability_ui_first_v3`.
+Formula version is `partner_report_profitability_ui_first_v4` and schema version is `partner_report_v4`.
 
 For each week:
 
@@ -107,16 +108,17 @@ Weekly percentages are not summed. Zero capital is a validation error. The UI to
 
 Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, `Прочие прямые и распределённые расходы`, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return.
 
-`Прочие прямые и распределённые расходы` includes direct expenses of the selected SKU plus the approved revenue-proportional allocation of account-level expenses. Its accessible tooltip describes the formula but does not expose the numeric allocation coefficient, account revenue or source amount. The main row expands into exactly four indented business categories:
+`Прочие прямые и распределённые расходы` includes direct expenses of the selected SKU plus the approved revenue-proportional allocation of account-level subrow expenses. Its accessible tooltip describes the formula and single-count marketing boundary but does not expose the numeric allocation coefficient, account revenue or source amount. The possible indented business categories are:
 
 1. `Транзитная логистика, не подтверждённая как капитализированная`;
 2. `Подписка WB Jam`;
 3. `Платные сервисы WB`;
-4. `Прочие удержания`.
+4. `Баллы за отзывы`;
+5. `Прочие удержания`.
 
-Each category combines direct and allocated amounts of that category. Unclassified account-level rows belong to `Прочие удержания`; proven capitalized transit is excluded. Partner-facing UI/XLSX show only category amounts. Direct/allocated values, source category/rule and digests remain internal machine provenance. Decimal largest-remainder reconciliation assigns any display-cent residual deterministically, so the four displayed amounts equal the rounded main row without modifying exact profit values. The main expense is deducted exactly once.
+Each category combines its signed direct and allocated amounts. Proven capitalized transit and all Finance marketing are excluded. `Прочие удержания` contains only operations that still classify as `other_deductions`; it is not a balancing residual. A category whose exact total is zero for all selected weeks is absent from both UI and XLSX, so a marketing-only period does not render a zero `Прочие удержания` row. Direct/allocated values, source category/rule and digests remain internal machine provenance. Decimal largest-remainder reconciliation assigns any display-cent residual deterministically, so displayed categories equal the rounded main row without modifying exact profit values. The main expense is deducted exactly once.
 
-At internal Decimal working precision, independently multiplying four categories can differ from multiplying their conserved total by the allocation ratio in the final non-monetary digit. The allocator preserves the first three classified products and derives `Прочие удержания` as the allocated target minus those three values. Conservation is checked at the canonical 0.0001-ruble calculation precision; the unrounded allocated target is carried separately into the profit formula, so an inexpressible final context digit never changes profit. Display-cent reconciliation remains a separate deterministic step.
+At internal Decimal working precision, every explicit main/subrow account category is multiplied by the same revenue ratio. Their combined amount must reconcile at canonical 0.0001-ruble precision with `profit_period_expenses − positive_adjustments − marketing`; no category is derived as an opaque remainder. Display-cent reconciliation remains a separate deterministic step.
 
 # 5. UI contract and performance
 
@@ -124,15 +126,15 @@ Clicking `Сформировать` immediately shows loading and a visible canc
 
 The table has metrics in rows, weeks in columns and `Итого за период`; its first metric column is sticky. At ~390 px, settings/messages/actions remain within the viewport and horizontal scrolling belongs only to the table.
 
-The production-like regression fixture adds 295,919 unrelated raw Finance rows after projections, measures an explicit full JSON-decode baseline, and proves a two-week selected-SKU preview remains an indexed sub-two-second lookup without a synchronous raw scan. The smoke prints both timings; the current local evidence was 172 ms for the synthetic full scan versus 1 ms for indexed preview over 295,923 total raw rows (machine-specific, retained as comparative evidence rather than a production SLA).
+The production-like regression fixture adds 295,919 unrelated raw Finance rows after projections, measures an explicit full JSON-decode baseline, and proves a two-week selected-SKU preview remains an indexed sub-two-second lookup without a synchronous raw scan. The smoke prints both timings; the values are machine-specific comparative evidence rather than a production SLA.
 
-Production incident reconciliation does not add a raw scan to preview. The separate repo-owned `partner-finance-diagnostic` action resolves the current complete server-owned setting (or an explicit exact `nmId`/week scope) and reads raw Finance rows only in a bounded read-only transaction. Raw JSON is decoded as an ordered per-week stream; the diagnostic retains only aggregates, bounded examples, at most 10,000 operation groups, at most 10,000 marketing-name candidates and at most 10,000 anomalous stored/raw identity keys. Invalid raw JSON is reduced to an exact count plus bounded examples and one blocker. Exceeding any accumulator bound fails closed. A second streaming duplicate pass runs only when identity mismatches exist. Weeks lacking a projection still contribute their raw count, digest, invalid-JSON and identity evidence. This prevents production history from being materialized in process memory while preserving incomplete-source evidence. Evidence groups every material component by WB operation fields, `nmId` presence, deduction sign, Finance classifier and direct/allocated path, with signed/system/allocated sums and bounded `reportId`/`rrdId` examples. It also proves ads coverage, direct/account marketing, duplicates, classifier candidates and the expense uplift caused by negative deductions. Diagnostic output is external mode-`0600` evidence and cannot change preview, settings, Finance projections or source snapshots.
+Production incident reconciliation does not add a raw scan to preview. The separate repo-owned `partner-finance-diagnostic` action resolves the current complete server-owned setting (or an explicit exact `nmId`/week scope) and reads raw Finance rows only in a bounded read-only transaction. Raw JSON is decoded as an ordered per-week stream; the diagnostic retains only aggregates, bounded examples, at most 10,000 operation groups, at most 10,000 marketing-name candidates and at most 10,000 anomalous stored/raw identity keys. Invalid raw JSON is reduced to an exact count plus bounded examples and one blocker. Exceeding any accumulator bound fails closed. A second streaming duplicate pass runs only when identity mismatches exist. Weeks lacking a projection still contribute their raw count, digest, invalid-JSON and identity evidence. This prevents production history from being materialized in process memory while preserving incomplete-source evidence. Evidence groups every material component by WB operation fields, `nmId` presence, deduction sign, Finance classifier and direct/allocated path, with signed/system/allocated sums, exact semantic-category totals and bounded `reportId`/`rrdId` examples. It also proves ads coverage, direct/account marketing, duplicates, classifier candidates and the former `abs(negative deduction)` uplift. Diagnostic output is external mode-`0600` evidence and cannot change preview, settings, Finance projections or source snapshots.
 
 # 6. XLSX contract
 
 `POST .../preview.xlsx` receives the selected `nmId`, exact weeks and the visible preview's `expected_source_digest`. Source drift returns a conflict and requires rebuilding the UI preview.
 
-The workbook is generated from the same calculation service as UI. Sheet 1 follows the supplied desktop reference: light/white palette, Arial-like 10 pt text, thin calm gray borders, compact coefficient column, metric labels left, week columns right, total column, frozen `C2`, print area/fit, appropriate widths/heights and blue emphasis for `Дивиденды` and annualized return. The renamed other-expense row is followed by the same four indented categories as the UI, with amounts only and no category percentages/allocation coefficients. Their displayed cents reconcile to the main row. Sheet 2 contains only selected report parameters, date, formula version and source digest.
+The workbook is generated from the same calculation service as UI. Sheet 1 follows the supplied desktop reference: light/white palette, Arial-like 10 pt text, thin calm gray borders, compact coefficient column, metric labels left, week columns right, total column, frozen `C2`, print area/fit, appropriate widths/heights and blue emphasis for `Дивиденды` and annualized return. The renamed other-expense row is followed by exactly the same ordered non-zero categories as the UI, with amounts only and no category percentages/allocation coefficients. Their displayed cents reconcile to the main row. Sheet 2 contains only selected report parameters, date, formula version and source digest.
 
 The file has no macros, external workbook links, hidden sheets or other-SKU values. Its filename binds product/SKU, `nmId` and selected period. UI and XLSX values must match to Decimal rounding. Production acceptance opens and semantically verifies the workbook; file existence/non-zero size alone is never evidence.
 
