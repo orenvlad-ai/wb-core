@@ -229,6 +229,25 @@ class UnsupportedOverlapSource(FakeOfficialSource):
         }
 
 
+class MappingSingletonSource(FakeOfficialSource):
+    def fetch_fullstats(
+        self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
+    ) -> Any:
+        if len(campaign_ids) == 1:
+            return {
+                "status": "unexpected",
+                "origin": "fixture-origin",
+                "detail": "fixture-detail",
+                "request_id": "must-not-be-copied",
+            }
+        payload = super().fetch_fullstats(
+            campaign_ids=campaign_ids,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return payload[:-1]
+
+
 def _seed_database(path: Path, *, existing_date: date, non_target_date: date) -> str:
     sentinel = json.dumps(
         {
@@ -553,6 +572,22 @@ def main() -> int:
             item["code"] == "ads_unsupported_campaign_overlaps_scope"
             for item in unsupported_plan["blockers"]
         )
+
+        mapping_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=MappingSingletonSource(empty_date=empty_date),
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        mapping_detail = next(
+            item["detail"]
+            for item in mapping_plan["blockers"]
+            if item["code"] == "ads_upstream_incomplete"
+        )
+        assert '"keys"' in mapping_detail
+        assert '"origin":"fixture-origin"' in mapping_detail
+        assert '"detail":"fixture-detail"' in mapping_detail
+        assert '"digest":"sha256:' in mapping_detail
+        assert "must-not-be-copied" not in mapping_detail
 
         no_stats_body = json.dumps(
             {
