@@ -22,9 +22,13 @@ if str(ROOT) not in sys.path:
 
 from packages.application.partner_report import (  # noqa: E402
     COMMON_EXPENSE_RULE,
+    OTHER_DIRECT_ALLOCATED_KEY,
+    OTHER_DIRECT_ALLOCATED_LABEL,
+    OTHER_EXPENSE_CATEGORIES,
     REPORT_ROWS,
     PartnerReportBlock,
     PartnerReportError,
+    _display_breakdown,
 )
 
 WEEK_ONE = date(2026, 7, 6)
@@ -45,6 +49,7 @@ def main() -> None:
         _seed_finance(block)
         _seed_ads(block.db_path)
         _assert_server_owned_settings(block)
+        _assert_expense_category_math(block)
         report = _assert_preview(block)
         _assert_workbook(block, report)
         _assert_incomplete_and_stale_states(block)
@@ -89,6 +94,93 @@ def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
         raise AssertionError("settings audit/version provenance mismatch")
 
 
+def _assert_expense_category_math(block: PartnerReportBlock) -> None:
+    allocated = block._allocated_account_expense_categories(  # noqa: SLF001
+        {
+            "profit_period_expenses": "10",
+            "positive_adjustments": "1",
+            "transit_logistics": "4",
+            "capitalized_transit_logistics": "1",
+            "subscriptions": "2",
+            "paid_services": "1",
+        },
+        allocation_ratio=Decimal("0.5"),
+    )
+    if allocated != {
+        "uncapitalized_transit_logistics": Decimal("1.5"),
+        "wb_jam_subscription": Decimal("1.0"),
+        "wb_paid_services": Decimal("0.5"),
+        "other_withholdings": Decimal("1.5"),
+    }:
+        raise AssertionError(f"allocated category conservation mismatch: {allocated}")
+    offsetting = block._allocated_account_expense_categories(  # noqa: SLF001
+        {
+            "profit_period_expenses": "100",
+            "positive_adjustments": "100",
+            "transit_logistics": "100",
+            "capitalized_transit_logistics": "0",
+            "subscriptions": "0",
+            "paid_services": "0",
+        },
+        allocation_ratio=Decimal("0.5"),
+    )
+    if offsetting != {
+        "uncapitalized_transit_logistics": Decimal("50.0"),
+        "wb_jam_subscription": Decimal("0"),
+        "wb_paid_services": Decimal("0"),
+        "other_withholdings": Decimal("-50.0"),
+    }:
+        raise AssertionError(
+            f"offsetting account categories were hidden at net zero: {offsetting}"
+        )
+    exact = block._other_expense_categories(  # noqa: SLF001
+        {
+            "transit_logistics": "2",
+            "capitalized_transit_logistics": "3",
+            "subscriptions": "4",
+            "paid_services": "5",
+            "other_deductions": "6",
+        },
+        allocated,
+    )
+    if exact["uncapitalized_transit_logistics"] != Decimal("0.5"):
+        raise AssertionError("signed transit correction was clamped or double-counted")
+    if sum(exact.values(), Decimal("0")) != Decimal("18.5"):
+        raise AssertionError(f"direct + allocated categories do not conserve: {exact}")
+    rounded = _display_breakdown(
+        {key: Decimal("0.005") for key, _label in OTHER_EXPENSE_CATEGORIES}
+    )
+    rounded_values = [Decimal(item["amount_rub"]) for item in rounded]
+    if sum(rounded_values, Decimal("0")) != Decimal("0.02"):
+        raise AssertionError(f"kopeck residual is not deterministic/conserved: {rounded}")
+    serialized_edge = _display_breakdown(
+        {
+            "other_withholdings": Decimal("0.004951"),
+        }
+    )
+    if sum(
+        (Decimal(item["amount_rub"]) for item in serialized_edge), Decimal("0")
+    ) != Decimal("0.01"):
+        raise AssertionError(
+            "category cents must reconcile to the four-decimal serialized main row"
+        )
+    period_edge = _display_breakdown(
+        {
+            "uncapitalized_transit_logistics": Decimal("73.942707"),
+            "wb_jam_subscription": Decimal("44.097056"),
+            "wb_paid_services": Decimal("142.926849"),
+            "other_withholdings": Decimal("95.388299"),
+        },
+        target_total=Decimal("356.3550"),
+    )
+    if sum(
+        (Decimal(item["amount_rub"]) for item in period_edge), Decimal("0")
+    ) != Decimal("356.36"):
+        raise AssertionError(
+            "period category cents must reconcile to the sum of serialized weeks"
+        )
+
+
 def _assert_preview(block: PartnerReportBlock) -> dict:
     report = block.preview(
         {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat(), WEEK_TWO.isoformat()]}
@@ -118,8 +210,21 @@ def _assert_preview(block: PartnerReportBlock) -> dict:
         if first.get(key) != expected:
             raise AssertionError(f"control fixture {key}: {first.get(key)!r} != {expected!r}")
     second = report["weeks"][1]["values"]
-    if second["other_attributable_expenses"] != "2500.0000":
+    if second[OTHER_DIRECT_ALLOCATED_KEY] != "2500.0000":
         raise AssertionError(f"approved revenue-share allocation mismatch: {second}")
+    second_breakdown = {
+        item["key"]: Decimal(item["amount_rub"])
+        for item in report["weeks"][1]["other_expense_breakdown"]
+    }
+    if second_breakdown != {
+        "uncapitalized_transit_logistics": Decimal("0.00"),
+        "wb_jam_subscription": Decimal("0.00"),
+        "wb_paid_services": Decimal("0.00"),
+        "other_withholdings": Decimal("2500.00"),
+    }:
+        raise AssertionError(f"four-category breakdown mismatch: {second_breakdown}")
+    if sum(second_breakdown.values(), Decimal("0")) != Decimal("2500.00"):
+        raise AssertionError("displayed category amounts do not conserve the main row")
     if second["dividends"] != "4800.0000":
         raise AssertionError(f"second-week dividends mismatch: {second}")
     expected_period_annualized = (
@@ -155,10 +260,11 @@ def _assert_workbook(block: PartnerReportBlock, report: dict) -> None:
     ws = wb["Партнёрский отчёт"]
     if ws.freeze_panes != "C2" or not ws.print_area:
         raise AssertionError("reference-like freeze/print contract missing")
-    labels = {str(ws.cell(row, 2).value): row for row in range(2, 2 + len(REPORT_ROWS))}
+    labels = {str(ws.cell(row, 2).value): row for row in range(2, ws.max_row + 1)}
     for required in (
         "Агентское вознаграждение WB",
         "Эквайринг",
+        OTHER_DIRECT_ALLOCATED_LABEL,
         "Дивиденды",
         "Расчётная годовая доходность инвестора, %",
     ):
@@ -176,6 +282,21 @@ def _assert_workbook(block: PartnerReportBlock, report: dict) -> None:
         raise AssertionError("actual replenishment coefficient is absent from XLSX")
     if ws.cell(dividends_row, 1).value != 0.4:
         raise AssertionError("actual investor share is absent from XLSX")
+    category_labels = dict(OTHER_EXPENSE_CATEGORIES)
+    for category_key, category_label in OTHER_EXPENSE_CATEGORIES:
+        row_no = labels.get(category_label)
+        if row_no is None:
+            raise AssertionError(f"Partner XLSX category missing: {category_key}")
+        if ws.cell(row_no, 1).value is not None:
+            raise AssertionError(f"Partner XLSX exposed a category coefficient: {category_key}")
+    main_row = labels[OTHER_DIRECT_ALLOCATED_LABEL]
+    for column in range(3, 3 + len(report["weeks"]) + 1):
+        category_sum = sum(
+            Decimal(str(ws.cell(labels[label], column).value or 0))
+            for label in category_labels.values()
+        )
+        if category_sum != Decimal(str(ws.cell(main_row, column).value or 0)):
+            raise AssertionError(f"Partner XLSX displayed kopecks do not reconcile in column {column}")
     for key, label in REPORT_ROWS:
         ui_value = report["weeks"][0]["values"][key]
         excel_value = ws.cell(labels[label], 3).value
@@ -260,6 +381,35 @@ def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
     )
     if not any(item["code"] == "finance_sku_aggregate_cost_stale" for item in stale["blockers"]):
         raise AssertionError(f"canonical cost correction did not invalidate aggregate: {stale}")
+    block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
+    with sqlite3.connect(block.db_path) as conn:
+        row = conn.execute(
+            """SELECT coverage_json FROM wb_finance_weekly_sku_aggregates
+               WHERE nm_id=? AND week_start=?""",
+            (str(TARGET_NM), WEEK_ONE.isoformat()),
+        ).fetchone()
+        coverage = json.loads(str(row[0]))
+        coverage["detail_rows"][0]["formula_version"] = "obsolete_cost_formula"
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?
+               WHERE nm_id=? AND week_start=?""",
+            (
+                json.dumps(coverage, ensure_ascii=False, sort_keys=True),
+                str(TARGET_NM),
+                WEEK_ONE.isoformat(),
+            ),
+        )
+        conn.commit()
+    formula_stale = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if not any(
+        item["code"] == "finance_sku_aggregate_cost_stale"
+        for item in formula_stale["blockers"]
+    ):
+        raise AssertionError(
+            f"old canonical cost formula remained ready: {formula_stale}"
+        )
     block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
 
 

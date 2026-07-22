@@ -691,7 +691,7 @@ def _build_handler(
 
                 try:
                     result = entrypoint.handle_bundle_payload(payload)
-                except Exception:  # pragma: no cover - bounded fallback
+                except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,

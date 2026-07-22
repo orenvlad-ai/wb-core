@@ -162,6 +162,23 @@ def main() -> None:
             if accepted_payload["accepted_counts"]["formulas_v2"] != len(input_bundle["formulas_v2"]):
                 raise AssertionError("HTTP entrypoint must persist all formulas_v2 rows from request body")
 
+            invalid_status, invalid_payload = _post_json(
+                base_url,
+                {
+                    "bundle_version": "",
+                    "uploaded_at": "",
+                    "config_v2": [],
+                    "metrics_v2": [],
+                    "formulas_v2": [],
+                },
+            )
+            if invalid_status != 500 or "bundle_version must be a non-empty string" not in str(
+                invalid_payload.get("error", "")
+            ):
+                raise AssertionError(
+                    "invalid registry bundle must return controlled JSON instead of closing the connection"
+                )
+
             runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
             current_state = asdict(runtime.load_current_state())
             current_expected = _load_json(TARGET_DIR / "current_state__fixture.json")

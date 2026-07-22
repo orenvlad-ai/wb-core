@@ -3095,6 +3095,7 @@ def run_finance_ui_flow_command(args: argparse.Namespace) -> int:
         auth_cookie=auth_cookie,
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
+        deployed_sha=str(args.deployed_sha or ""),
     )
     _print_json(
         {
@@ -3543,6 +3544,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_ui_flow.add_argument("--evidence-dir", required=True)
     finance_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     finance_ui_flow.add_argument("--headed", action="store_true")
+    finance_ui_flow.add_argument(
+        "--deployed-sha",
+        default="",
+        help="Exact deployed commit expected for the machine-readable evidence.",
+    )
     finance_ui_flow.set_defaults(handler=run_finance_ui_flow_command)
 
     autoanswers_ui_flow = subparsers.add_parser(

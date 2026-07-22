@@ -4,12 +4,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+import zipfile
 
+from openpyxl import load_workbook
 from playwright.sync_api import expect, sync_playwright
+
+from packages.application.partner_report import (
+    OTHER_DIRECT_ALLOCATED_KEY,
+    OTHER_DIRECT_ALLOCATED_LABEL,
+    OTHER_EXPENSE_CATEGORIES,
+    REPORT_ROWS,
+)
 
 
 REPORTS_PATH = "/sheet-vitrina-v1/vitrina?tab=reports"
@@ -25,6 +37,7 @@ def run_finance_partner_ui_flow(
     auth_cookie: str,
     evidence_dir: Path,
     headless: bool = True,
+    deployed_sha: str = "",
 ) -> dict[str, Any]:
     normalized_base_url = str(base_url or "").strip().rstrip("/")
     parsed = urlparse(normalized_base_url)
@@ -33,6 +46,11 @@ def run_finance_partner_ui_flow(
     cookie_name, separator, cookie_value = str(auth_cookie or "").partition("=")
     if separator != "=" or cookie_name != "wb_core_web_session" or not cookie_value:
         raise ValueError("Finance UI flow requires a valid app-session cookie")
+    if deployed_sha and (
+        len(deployed_sha) != 40
+        or any(character not in "0123456789abcdef" for character in deployed_sha.casefold())
+    ):
+        raise ValueError("deployed_sha must be an exact 40-character Git commit")
 
     evidence_dir = evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -41,9 +59,25 @@ def run_finance_partner_ui_flow(
     page_errors: list[str] = []
     console_errors: list[str] = []
     server_errors: list[dict[str, Any]] = []
+    client_errors: list[dict[str, Any]] = []
+    failed_requests: list[dict[str, Any]] = []
     document_responses: list[dict[str, Any]] = []
     non_read_requests: list[dict[str, str]] = []
     screenshots: list[str] = []
+    preview_evidence: dict[str, Any] = {
+        "attempted": False,
+        "ready": False,
+        "status": "not_attempted",
+        "reason": "Partner preview has not been attempted",
+        "blockers": [],
+        "xlsx": {
+            "downloaded": False,
+            "path": "",
+            "sha256": "",
+            "size_bytes": 0,
+            "verification": {"passed": False, "findings": ["not_downloaded"]},
+        },
+    }
 
     try:
         with sync_playwright() as playwright:
@@ -82,8 +116,38 @@ def run_finance_partner_ui_flow(
             )
             page.on(
                 "response",
+                lambda response: client_errors.append(
+                    {
+                        "status": response.status,
+                        "url": response.url,
+                        "resource_type": response.request.resource_type,
+                    }
+                )
+                if 400 <= response.status < 500
+                else None,
+            )
+            page.on(
+                "requestfailed",
+                lambda request: failed_requests.append(
+                    {
+                        "method": request.method,
+                        "url": request.url,
+                        "failure": str(request.failure or ""),
+                    }
+                ),
+            )
+            page.on(
+                "response",
                 lambda response: document_responses.append(
-                    {"status": response.status, "url": response.url}
+                    {
+                        "status": response.status,
+                        "url": response.url,
+                        "redirected_from": (
+                            response.request.redirected_from.url
+                            if response.request.redirected_from is not None
+                            else ""
+                        ),
+                    }
                 )
                 if response.request.resource_type == "document"
                 else None,
@@ -247,67 +311,117 @@ def run_finance_partner_ui_flow(
                 None,
             )
             can_preview = bool(partner_payload.get("weeks")) and preview_card is not None
-            preview_evidence: dict[str, Any] = {
-                "attempted": False,
-                "ready": False,
-                "reason": "server-owned settings are not complete; production settings were not mutated",
-            }
+            preview_evidence["reason"] = (
+                "server-owned settings are not complete; production settings were not mutated"
+            )
             if can_preview:
                 reports.locator("#partnerReportNmId").select_option(
                     str(preview_card.get("nm_id"))
                 )
                 reports.locator("#partnerReportWeekSummary").click()
-                reports.locator("#partnerReportWeeksNone").click()
-                reports.locator(
-                    "#partnerReportWeekList input[type=checkbox]"
-                ).last.check()
+                reports.locator("#partnerReportWeeksAll").click()
+                selected_weeks = sorted(
+                    str(item.get("week_start") or "")
+                    for item in partner_payload.get("weeks") or []
+                    if str(item.get("week_start") or "")
+                )
+                selected_nm_id = str(preview_card.get("nm_id") or "")
                 reports.locator("#partnerReportGenerate").click()
                 expect(reports.locator("#partnerReportStatus")).not_to_contain_text(
                     "Формируем preview",
                     timeout=120_000,
                 )
                 preview_status = reports.locator("#partnerReportStatus").inner_text().strip()
-                preview_ready = reports.locator(
+                table_visible = reports.locator(
                     "#partnerReportTableWrap:not([hidden]) table"
                 ).count() == 1
+                preview_payload = _protected_json_post(
+                    context,
+                    normalized_base_url + PARTNER_PREVIEW_API_PATH,
+                    {"nm_id": selected_nm_id, "selected_weeks": selected_weeks},
+                    label="Partner preview API",
+                )
+                blockers = list(preview_payload.get("blockers") or [])
+                download_enabled = reports.locator(
+                    "#partnerReportDownload"
+                ).is_enabled()
+                preview_ready = (
+                    str(preview_payload.get("status") or "") == "ready"
+                    and not blockers
+                    and table_visible
+                    and download_enabled
+                )
+                ui_table = _partner_ui_table_facts(reports)
                 preview_evidence = {
                     "attempted": True,
                     "ready": preview_ready,
                     "status": preview_status,
                     "reason": (
-                        "preview rendered from existing server-owned settings"
+                        "ready preview rendered from existing server-owned settings"
                         if preview_ready
-                        else "source blockers are shown without saving or finalizing"
+                        else "Partner preview is not ready or its source blockers are non-empty"
                     ),
+                    "api_status": str(preview_payload.get("status") or ""),
+                    "blockers": blockers,
+                    "table_visible": table_visible,
+                    "download_enabled": download_enabled,
                     "notes": reports.locator("#partnerReportNotes").inner_text().strip(),
+                    "nm_id": selected_nm_id,
+                    "selected_weeks": selected_weeks,
+                    "source_digest": str(preview_payload.get("source_digest") or ""),
+                    "ui_table": ui_table,
+                    "xlsx": dict(preview_evidence["xlsx"]),
                 }
-                if preview_ready:
-                    _assert(
-                        reports.locator("#partnerReportTableWrap")
-                        .get_by_text("Дивиденды", exact=True)
-                        .count()
-                        == 1,
-                        "Partner preview renders dividend reconciliation",
-                    )
-                    _assert(
-                        reports.locator("#partnerReportDownload").is_enabled(),
-                        "Partner Excel activates only after ready preview",
-                    )
-                    with page.expect_download(timeout=120_000) as download_info:
-                        reports.locator("#partnerReportDownload").click()
-                    download = download_info.value
-                    excel_path = evidence_dir / download.suggested_filename
-                    download.save_as(str(excel_path))
-                    _assert(excel_path.is_file() and excel_path.stat().st_size > 0, "Partner preview XLSX downloaded")
-                    preview_evidence["excel_path"] = str(excel_path)
-                    preview_evidence["excel_filename"] = download.suggested_filename
-                else:
-                    _assert(
-                        "не удалось" in preview_status.casefold()
-                        or "blocker" in preview_status.casefold()
-                        or reports.locator("#partnerReportBlockers").inner_text().strip(),
-                        "Partner preview exposes a human-readable source blocker",
-                    )
+                preflight_partner = evidence_dir / "partner_report_preflight.png"
+                page.screenshot(path=str(preflight_partner), full_page=True)
+                screenshots.append(str(preflight_partner))
+                _assert(preview_ready, "Partner preview.ready=true with blockers=[]")
+                _assert(
+                    reports.locator("#partnerReportTableWrap")
+                    .get_by_text("Дивиденды", exact=True)
+                    .count()
+                    == 1,
+                    "Partner preview renders dividend reconciliation",
+                )
+                _assert(
+                    ui_table["main_label"] == OTHER_DIRECT_ALLOCATED_LABEL
+                    and ui_table["old_label_count"] == 0
+                    and len(ui_table["categories"]) == 4,
+                    "Partner preview renders the new four-row expense hierarchy",
+                )
+                _assert(
+                    bool(ui_table["tooltip_keyboard_focus_visible"]),
+                    "Partner expense explanation works on keyboard focus",
+                )
+                _assert(
+                    _negative_profit_dividends_valid(preview_payload),
+                    "negative profit never accrues negative dividends",
+                )
+                with page.expect_download(timeout=120_000) as download_info:
+                    reports.locator("#partnerReportDownload").click()
+                download = download_info.value
+                excel_path = evidence_dir / download.suggested_filename
+                download.save_as(str(excel_path))
+                _assert(
+                    excel_path.is_file() and excel_path.stat().st_size > 0,
+                    "Partner preview XLSX downloaded",
+                )
+                workbook_verification = _verify_partner_xlsx(
+                    excel_path,
+                    preview=preview_payload,
+                    ui_table=ui_table,
+                )
+                preview_evidence["xlsx"] = _xlsx_evidence(
+                    excel_path,
+                    filename=download.suggested_filename,
+                    verification=workbook_verification,
+                )
+                _assert(
+                    bool(workbook_verification.get("passed")),
+                    "Partner XLSX semantic verification",
+                )
+            else:
+                _assert(False, "Partner preview requires existing server-owned settings and weeks")
             partner_desktop = evidence_dir / "partner_report_desktop_readonly.png"
             page.screenshot(path=str(partner_desktop), full_page=True)
             screenshots.append(str(partner_desktop))
@@ -347,6 +461,12 @@ def run_finance_partner_ui_flow(
         _assert(not page_errors, f"pageerror list is empty: {page_errors}")
         _assert(not console_errors, f"console error list is empty: {console_errors}")
         _assert(not server_errors, f"5xx response list is empty: {server_errors}")
+        _assert(not client_errors, f"4xx response list is empty: {client_errors}")
+        _assert(not failed_requests, f"failed request list is empty: {failed_requests}")
+        _assert(
+            _partner_acceptance_passed(preview_evidence),
+            "Partner preview/XLSX acceptance is fail-closed",
+        )
         unexpected_non_read_requests = [
             item
             for item in non_read_requests
@@ -363,10 +483,14 @@ def run_finance_partner_ui_flow(
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "requested_url": requested_url,
             "final_url": final_url,
+            "deployed_sha": str(deployed_sha or ""),
             "document_responses": document_responses,
+            "redirects": _document_redirects(document_responses),
             "page_errors": page_errors,
             "console_errors": console_errors,
             "server_errors": server_errors,
+            "client_errors": client_errors,
+            "failed_requests": failed_requests,
             "non_read_requests": non_read_requests,
             "allowed_read_only_post_paths": [
                 PARTNER_PREVIEW_API_PATH,
@@ -397,13 +521,19 @@ def run_finance_partner_ui_flow(
         failed_report = {
             "status": "failed",
             "requested_url": requested_url,
+            "final_url": locals().get("final_url", ""),
+            "deployed_sha": str(deployed_sha or ""),
             "error_type": type(exc).__name__,
             "error": str(exc),
             "document_responses": document_responses,
+            "redirects": _document_redirects(document_responses),
             "page_errors": page_errors,
             "console_errors": console_errors,
             "server_errors": server_errors,
+            "client_errors": client_errors,
+            "failed_requests": failed_requests,
             "non_read_requests": non_read_requests,
+            "partner": {"preview": preview_evidence},
             "screenshots": screenshots,
         }
         report_path.write_text(
@@ -419,6 +549,472 @@ def _protected_json_get(context: Any, url: str, *, label: str) -> dict[str, Any]
     payload = response.json()
     _assert(isinstance(payload, dict), f"{label}: JSON object")
     return payload
+
+
+def _protected_json_post(
+    context: Any,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    response = context.request.post(
+        url,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        data=payload,
+        timeout=120_000,
+    )
+    _assert(response.status == 200, f"{label}: HTTP 200")
+    result = response.json()
+    _assert(isinstance(result, dict), f"{label}: JSON object")
+    return result
+
+
+def _partner_ui_table_facts(reports: Any) -> dict[str, Any]:
+    anchor = reports.locator(".partner-report-tooltip-anchor")
+    _assert(anchor.count() == 1, "Partner expense tooltip anchor exists once")
+    anchor.focus()
+    facts = reports.locator("body").evaluate(
+        """
+        () => {
+          const table = document.querySelector('#partnerReportTableWrap table');
+          const main = table && table.querySelector('[data-partner-row-key="other_direct_and_allocated_expenses"]');
+          const categories = table ? [...table.querySelectorAll('[data-partner-expense-category]')] : [];
+          const values = (row) => row ? [...row.cells].slice(1).map((cell) => cell.innerText.trim()) : [];
+          const tooltip = document.querySelector('.partner-report-tooltip');
+          const label = main && main.querySelector('.partner-report-tooltip-wrap > span:first-child');
+          return {
+            tableVisible: Boolean(table),
+            main_label: label ? label.innerText.trim() : '',
+            main_values: values(main),
+            rows: [...table.querySelectorAll('[data-partner-row-key]')].map((row) => ({
+              key: row.dataset.partnerRowKey || '',
+              values: values(row),
+            })),
+            old_label_count: table ? [...table.querySelectorAll('td')].filter((cell) => cell.innerText.trim() === 'Прочие атрибутируемые расходы').length : 0,
+            categories: categories.map((row) => ({
+              key: row.dataset.partnerExpenseCategory || '',
+              label: row.cells[0] ? row.cells[0].innerText.trim() : '',
+              values: values(row),
+            })),
+            tooltip_text: tooltip ? tooltip.innerText.trim() : '',
+            tooltip_keyboard_focus_visible: Boolean(tooltip && getComputedStyle(tooltip).display !== 'none'),
+          };
+        }
+        """
+    )
+    return dict(facts)
+
+
+def _verify_partner_xlsx(
+    path: Path,
+    *,
+    preview: dict[str, Any],
+    ui_table: dict[str, Any],
+) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    raw = path.read_bytes()
+    sheet_names: list[str] = []
+    hidden_sheets: list[str] = []
+    external_links: list[str] = []
+    macro_members: list[str] = []
+    try:
+        with zipfile.ZipFile(BytesIO(raw)) as archive:
+            for member in archive.namelist():
+                lowered = member.casefold()
+                if lowered.startswith("xl/externallinks/"):
+                    external_links.append(member)
+                if "vbaproject" in lowered or lowered.endswith(".bin"):
+                    macro_members.append(member)
+        workbook = load_workbook(BytesIO(raw), read_only=False, data_only=False)
+        sheet_names = list(workbook.sheetnames)
+        hidden_sheets = [
+            sheet.title for sheet in workbook.worksheets if sheet.sheet_state != "visible"
+        ]
+        if sheet_names != ["Партнёрский отчёт", "Параметры"]:
+            findings.append(
+                {"code": "unexpected_sheets", "actual": sheet_names}
+            )
+        if hidden_sheets:
+            findings.append({"code": "hidden_sheets", "actual": hidden_sheets})
+        if external_links:
+            findings.append({"code": "external_links", "actual": external_links})
+        if macro_members or getattr(workbook, "vba_archive", None) is not None:
+            findings.append({"code": "macros", "actual": macro_members})
+
+        parameters = {
+            str(row[0].value): str(row[1].value or "")
+            for row in workbook["Параметры"].iter_rows(min_col=1, max_col=2)
+            if row[0].value not in (None, "")
+        }
+        expected_nm_id = str(preview.get("nm_id") or "")
+        expected_weeks = [str(item) for item in preview.get("selected_weeks") or []]
+        if parameters.get("nmId") != expected_nm_id:
+            findings.append(
+                {
+                    "code": "wrong_nm_id",
+                    "expected": expected_nm_id,
+                    "actual": parameters.get("nmId"),
+                }
+            )
+        workbook_weeks = [
+            item.strip()
+            for item in parameters.get("Недели", "").split(",")
+            if item.strip()
+        ]
+        if workbook_weeks != expected_weeks:
+            findings.append(
+                {
+                    "code": "wrong_weeks",
+                    "expected": expected_weeks,
+                    "actual": workbook_weeks,
+                }
+            )
+        if parameters.get("Source digest") != str(preview.get("source_digest") or ""):
+            findings.append({"code": "source_digest_mismatch"})
+        if parameters.get("Formula version") != str(preview.get("formula_version") or ""):
+            findings.append({"code": "formula_version_mismatch"})
+
+        sheet = workbook["Партнёрский отчёт"]
+        rows_by_label = {
+            str(row[1].value): row
+            for row in sheet.iter_rows(min_row=2)
+            if len(row) > 1 and row[1].value not in (None, "")
+        }
+        missing_metric_rows = [
+            key for key, label in REPORT_ROWS if label not in rows_by_label
+        ]
+        if missing_metric_rows:
+            findings.append(
+                {"code": "metric_rows_missing", "keys": missing_metric_rows}
+            )
+        for key, label in REPORT_ROWS:
+            row = rows_by_label.get(label)
+            if row is None:
+                continue
+            expected_exact = [
+                _metric_exact((week.get("values") or {}).get(key))
+                for week in preview.get("weeks") or []
+            ] + [_metric_exact((preview.get("totals") or {}).get(key))]
+            actual_exact = [
+                _xlsx_metric_exact(key, cell.value)
+                for cell in row[2 : 3 + len(expected_weeks)]
+            ]
+            if actual_exact != expected_exact:
+                findings.append(
+                    {
+                        "code": "metric_values_mismatch",
+                        "metric": key,
+                        "expected": _optional_decimal_list(expected_exact),
+                        "actual": _optional_decimal_list(actual_exact),
+                    }
+                )
+        if "Прочие атрибутируемые расходы" in rows_by_label:
+            findings.append({"code": "legacy_label_present"})
+        main_row = rows_by_label.get(OTHER_DIRECT_ALLOCATED_LABEL)
+        if main_row is None:
+            findings.append({"code": "main_expense_row_missing"})
+        category_rows = {
+            key: rows_by_label.get(label)
+            for key, label in OTHER_EXPENSE_CATEGORIES
+        }
+        missing_categories = [key for key, row in category_rows.items() if row is None]
+        if missing_categories:
+            findings.append(
+                {"code": "expense_categories_missing", "keys": missing_categories}
+            )
+
+        week_breakdowns = [
+            _breakdown_values(week.get("other_expense_breakdown") or [])
+            for week in preview.get("weeks") or []
+        ]
+        week_breakdowns.append(
+            _breakdown_values(preview.get("other_expense_breakdown_total") or [])
+        )
+        expected_main = [
+            _money_cent((week.get("values") or {}).get(OTHER_DIRECT_ALLOCATED_KEY))
+            for week in preview.get("weeks") or []
+        ] + [_money_cent((preview.get("totals") or {}).get(OTHER_DIRECT_ALLOCATED_KEY))]
+
+        if main_row is not None and not missing_categories:
+            actual_main = [_money_cent(cell.value) for cell in main_row[2 : 3 + len(expected_weeks)]]
+            if actual_main != expected_main:
+                findings.append(
+                    {
+                        "code": "main_expense_values_mismatch",
+                        "expected": _decimal_list(expected_main),
+                        "actual": _decimal_list(actual_main),
+                    }
+                )
+            for position, breakdown in enumerate(week_breakdowns):
+                actual_categories = {
+                    key: _money_cent(category_rows[key][position + 2].value)  # type: ignore[index]
+                    for key, _label in OTHER_EXPENSE_CATEGORIES
+                }
+                expected_categories = {
+                    key: _money_cent(breakdown.get(key))
+                    for key, _label in OTHER_EXPENSE_CATEGORIES
+                }
+                if actual_categories != expected_categories:
+                    findings.append(
+                        {
+                            "code": "category_values_mismatch",
+                            "position": position,
+                            "expected": _decimal_mapping(expected_categories),
+                            "actual": _decimal_mapping(actual_categories),
+                        }
+                    )
+                if sum(actual_categories.values(), Decimal("0")) != actual_main[position]:
+                    findings.append(
+                        {"code": "displayed_kopeck_conservation_failed", "position": position}
+                    )
+                if any(category_rows[key][0].value is not None for key, _label in OTHER_EXPENSE_CATEGORIES):  # type: ignore[index]
+                    findings.append({"code": "category_coefficient_exposed"})
+                    break
+
+        ui_main = [_parse_ui_money(value) for value in ui_table.get("main_values") or []]
+        if ui_main != expected_main:
+            findings.append(
+                {
+                    "code": "ui_main_reconciliation_failed",
+                    "expected": _decimal_list(expected_main),
+                    "actual": _decimal_list(ui_main),
+                }
+            )
+        ui_categories = {
+            str(item.get("key") or ""): [
+                _parse_ui_money(value) for value in item.get("values") or []
+            ]
+            for item in ui_table.get("categories") or []
+        }
+        for key, _label in OTHER_EXPENSE_CATEGORIES:
+            expected = [
+                _money_cent(item.get(key)) for item in week_breakdowns
+            ]
+            if ui_categories.get(key) != expected:
+                findings.append(
+                    {
+                        "code": "ui_category_reconciliation_failed",
+                        "category": key,
+                    }
+                )
+        if any(
+            "%" in value
+            for item in ui_table.get("categories") or []
+            for value in item.get("values") or []
+        ):
+            findings.append({"code": "category_percentage_exposed"})
+
+        ui_rows = {
+            str(item.get("key") or ""): list(item.get("values") or [])
+            for item in ui_table.get("rows") or []
+        }
+        for key, _label in REPORT_ROWS:
+            expected_display = [
+                _metric_display((week.get("values") or {}).get(key))
+                for week in preview.get("weeks") or []
+            ] + [_metric_display((preview.get("totals") or {}).get(key))]
+            actual_display = [
+                _parse_ui_metric(value) for value in ui_rows.get(key, [])
+            ]
+            if actual_display != expected_display:
+                findings.append(
+                    {
+                        "code": "ui_metric_reconciliation_failed",
+                        "metric": key,
+                        "expected": _optional_decimal_list(expected_display),
+                        "actual": _optional_decimal_list(actual_display),
+                    }
+                )
+
+        dividends = [
+            _decimal_or_none((week.get("values") or {}).get("dividends"))
+            for week in preview.get("weeks") or []
+        ]
+        capital = _decimal_or_none(
+            (preview.get("parameters") or {}).get("invested_capital_rub")
+        )
+        annualized = _decimal_or_none(
+            (preview.get("totals") or {}).get("annualized_return_pct")
+        )
+        if dividends and all(value is not None for value in dividends) and capital and capital > 0:
+            expected_annualized = (
+                sum((value for value in dividends if value is not None), Decimal("0"))
+                / Decimal(len(dividends))
+                * Decimal("52")
+                / capital
+                * Decimal("100")
+            ).quantize(Decimal("0.0001"))
+            if annualized is None or annualized.quantize(Decimal("0.0001")) != expected_annualized:
+                findings.append({"code": "annualized_return_mismatch"})
+        workbook.close()
+    except Exception as exc:
+        findings.append({"code": "workbook_open_or_verify_failed", "reason": str(exc)})
+
+    return {
+        "passed": not findings,
+        "findings": findings,
+        "sheet_names": sheet_names,
+        "hidden_sheets": hidden_sheets,
+        "external_links": external_links,
+        "macro_members": macro_members,
+        "nm_id": str(preview.get("nm_id") or ""),
+        "selected_weeks": list(preview.get("selected_weeks") or []),
+        "source_digest": str(preview.get("source_digest") or ""),
+        "ui_xlsx_reconciled": not findings,
+    }
+
+
+def _breakdown_values(rows: list[dict[str, Any]]) -> dict[str, Decimal | None]:
+    return {
+        str(item.get("key") or ""): _decimal_or_none(item.get("amount_rub"))
+        for item in rows
+    }
+
+
+def _money_cent(value: Any) -> Decimal:
+    parsed = _decimal_or_none(value)
+    if parsed is None:
+        raise ValueError(f"expected a money value, got {value!r}")
+    return parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _xlsx_evidence(
+    path: Path,
+    *,
+    filename: str,
+    verification: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "downloaded": True,
+        "path": str(path),
+        "filename": str(filename),
+        "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        "size_bytes": path.stat().st_size,
+        "verification": verification,
+    }
+
+
+def _metric_exact(value: Any) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    return None if parsed is None else parsed.quantize(Decimal("0.0001"))
+
+
+def _xlsx_metric_exact(metric_key: str, value: Any) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    if parsed is None:
+        return None
+    if metric_key == "annualized_return_pct":
+        parsed *= Decimal("100")
+    return parsed.quantize(Decimal("0.0001"))
+
+
+def _metric_display(value: Any) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    return (
+        None
+        if parsed is None
+        else parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _parse_ui_money(value: Any) -> Decimal:
+    normalized = (
+        str(value or "")
+        .replace("\u00a0", "")
+        .replace("\u202f", "")
+        .replace(" ", "")
+        .replace("₽", "")
+        .replace("−", "-")
+        .replace(",", ".")
+        .strip()
+    )
+    if normalized in {"", "—"}:
+        raise ValueError(f"expected visible money, got {value!r}")
+    return _money_cent(normalized)
+
+
+def _parse_ui_metric(value: Any) -> Decimal | None:
+    normalized = (
+        str(value or "")
+        .replace("\u00a0", "")
+        .replace("\u202f", "")
+        .replace(" ", "")
+        .replace("₽", "")
+        .replace("%", "")
+        .replace("−", "-")
+        .replace(",", ".")
+        .strip()
+    )
+    if normalized in {"", "—"}:
+        return None
+    return _metric_display(normalized)
+
+
+def _decimal_list(values: list[Decimal]) -> list[str]:
+    return [format(value, "f") for value in values]
+
+
+def _optional_decimal_list(values: list[Decimal | None]) -> list[str | None]:
+    return [None if value is None else format(value, "f") for value in values]
+
+
+def _decimal_mapping(values: dict[str, Decimal]) -> dict[str, str]:
+    return {key: format(value, "f") for key, value in values.items()}
+
+
+def _document_redirects(document_responses: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {"from": str(item.get("redirected_from") or ""), "to": str(item.get("url") or "")}
+        for item in document_responses
+        if str(item.get("redirected_from") or "")
+    ]
+
+
+def _partner_acceptance_passed(preview: dict[str, Any]) -> bool:
+    xlsx = dict(preview.get("xlsx") or {})
+    verification = dict(xlsx.get("verification") or {})
+    return bool(
+        preview.get("attempted")
+        and preview.get("ready")
+        and str(preview.get("api_status") or "") == "ready"
+        and not list(preview.get("blockers") or [])
+        and preview.get("table_visible")
+        and preview.get("download_enabled")
+        and xlsx.get("downloaded")
+        and xlsx.get("path")
+        and xlsx.get("sha256")
+        and int(xlsx.get("size_bytes") or 0) > 0
+        and verification.get("passed")
+        and verification.get("ui_xlsx_reconciled")
+    )
+
+
+def _negative_profit_dividends_valid(preview: dict[str, Any]) -> bool:
+    """Validate present loss weeks without requiring production to have one."""
+
+    negative_weeks = [
+        week
+        for week in preview.get("weeks") or []
+        if _decimal_or_none((week.get("values") or {}).get("net_profit"))
+        is not None
+        and _decimal_or_none((week.get("values") or {}).get("net_profit")) < 0
+    ]
+    return all(
+        _decimal_or_none((week.get("values") or {}).get("dividends"))
+        == Decimal("0")
+        for week in negative_weeks
+    )
 
 
 def _has_complete_partner_settings(

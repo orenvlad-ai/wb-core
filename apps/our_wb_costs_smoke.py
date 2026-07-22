@@ -1157,8 +1157,10 @@ def _assert_proxy_profit_3_evaluator() -> None:
     )
     before_proxy2 = evaluator.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, 497413000, "before")
     before_proxy3 = evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413000, "before")
-    if before_proxy3 != before_proxy2:
-        raise AssertionError(f"proxy3 before opening must equal proxy2, got {before_proxy3} vs {before_proxy2}")
+    expected_before = 1000.0 * 0.91 * 0.56 - 2.0 * 0.91 * 80.0 - 10.0
+    _assert_close(float(before_proxy3 or 0.0), expected_before, "retrospective proxy3")
+    if before_proxy3 == before_proxy2:
+        raise AssertionError("proxy3 before opening must not substitute proxy2")
     after_proxy3 = evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413000, "after")
     expected_after = 1000.0 * 0.5096 - 2.0 * 0.91 * 80.0 - 10.0
     if abs(float(after_proxy3 or 0.0) - expected_after) > 0.000001:
@@ -1167,8 +1169,13 @@ def _assert_proxy_profit_3_evaluator() -> None:
     _assert_close(float(after_margin3 or 0.0), expected_after / (1000.0 * 0.91), "SKU proxy margin 3")
     before_margin2 = evaluator.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, 497413000, "before")
     before_margin3 = evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "before")
-    if before_margin3 != before_margin2:
-        raise AssertionError(f"margin3 before opening must equal margin2, got {before_margin3} vs {before_margin2}")
+    _assert_close(
+        float(before_margin3 or 0.0),
+        expected_before / (1000.0 * 0.91),
+        "retrospective proxy margin 3",
+    )
+    if before_margin3 == before_margin2:
+        raise AssertionError("margin3 before opening must not substitute margin2")
     total_after = evaluator.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, "after")
     second_after = evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413001, "after")
     _assert_close(float(total_after or 0.0), float(after_proxy3 or 0.0) + float(second_after or 0.0), "total proxy3")

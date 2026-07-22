@@ -925,6 +925,14 @@
     .partner-report-table td:first-child { position: sticky; left: 0; z-index: 2; min-width: 285px; max-width: 340px; text-align: left; white-space: normal; background: var(--control-bg); box-shadow: var(--sticky-shadow); }
     .partner-report-table th:first-child { z-index: 3; background: var(--panel-subtle); }
     .partner-report-payout-row td { color: var(--accent); font-weight: 800; }
+    .partner-report-subrow td { color: var(--muted-strong); font-size: 11px; }
+    .partner-report-subrow td:first-child { padding-left: 30px; }
+    .partner-report-tooltip-wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+    .partner-report-tooltip-anchor { width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 50%; background: var(--panel-subtle); color: var(--muted-strong); font: inherit; font-size: 11px; line-height: 16px; text-align: center; cursor: help; }
+    .partner-report-tooltip-anchor:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+    .partner-report-tooltip { display: none; position: absolute; z-index: 20; left: 0; top: calc(100% + 7px); width: min(430px, calc(100vw - 40px)); padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-size: 11px; line-height: 1.45; font-weight: 500; white-space: normal; }
+    .partner-report-tooltip-wrap:hover .partner-report-tooltip,
+    .partner-report-tooltip-wrap:focus-within .partner-report-tooltip { display: block; }
 
     @media (max-width: 760px) {
       .partner-report-settings { grid-template-columns: 1fr; }
@@ -13011,19 +13019,44 @@
           ["agent_remuneration","Агентское вознаграждение WB","money"], ["acquiring","Эквайринг","money"],
           ["logistics","Логистика WB","money"], ["storage","Хранение WB","money"],
           ["acceptance","Платная приёмка","money"], ["ads","Маркетинг WB","money"],
-          ["penalties_and_adjustments","Штрафы/корректировки","money"], ["other_attributable_expenses","Прочие атрибутируемые расходы","money"],
+          ["penalties_and_adjustments","Штрафы/корректировки","money"], ["other_direct_and_allocated_expenses","Прочие прямые и распределённые расходы","money"],
           ["finance_margin","Маржа по финотчёту","money"], ["office","Офисные расходы","money"],
           ["estimated_tax","Налог","money"], ["replenishment_reserve","На пополнение товарных остатков","money"],
           ["net_profit","Чистая прибыль","money"], ["dividends","Дивиденды","money"],
           ["annualized_return_pct","Расчётная годовая доходность инвестора, %","percent"]
         ];
+        const breakdownDefinitions = [
+          ["uncapitalized_transit_logistics","Транзитная логистика, не подтверждённая как капитализированная"],
+          ["wb_jam_subscription","Подписка WB Jam"],
+          ["wb_paid_services","Платные сервисы WB"],
+          ["other_withholdings","Прочие удержания"]
+        ];
+        const breakdownValue = (items, key) => {
+          const item = (Array.isArray(items) ? items : []).find((candidate) => String(candidate.key || "") === key);
+          return item ? item.amount_rub : null;
+        };
+        const otherTooltip = String(report.other_expense_tooltip || "Итог включает прямые расходы выбранного SKU и распределённую долю общих расходов кабинета. Распределённая доля рассчитывается как общие неатрибутированные расходы недели × чистая выручка SKU / общая положительная чистая выручка недели.");
         const head = "<thead><tr><th>Показатель</th>" + (report.weeks || []).map((week) => "<th>" + escapeHtml(week.label) + "</th>").join("") + "<th>Итого за период</th></tr></thead>";
         const body = rows.map((row) => {
           const key = row[0];
           const values = (report.weeks || []).map((week) => "<td>" + escapeHtml(formatFinanceMetric(week.values[key], row[2])) + "</td>").join("");
           const className = ["dividends","annualized_return_pct"].includes(key) ? " class=\"partner-report-payout-row\"" : "";
-          const tooltip = key === "annualized_return_pct" ? " title=\"" + escapeHtml(report.annualized_return_formula || "Средние недельные дивиденды × 52 / вложенный капитал × 100%. Расчётная, не гарантированная доходность.") + "\"" : "";
-          return "<tr" + className + "><td" + tooltip + ">" + escapeHtml(row[1]) + "</td>" + values + "<td>" + escapeHtml(formatFinanceMetric(report.totals && report.totals[key], row[2])) + "</td></tr>";
+          const annualizedTitle = key === "annualized_return_pct" ? " title=\"" + escapeHtml(report.annualized_return_formula || "Средние недельные дивиденды × 52 / вложенный капитал × 100%. Расчётная, не гарантированная доходность.") + "\"" : "";
+          const label = key === "other_direct_and_allocated_expenses"
+            ? [
+                "<span class=\"partner-report-tooltip-wrap\"><span>", escapeHtml(row[1]), "</span>",
+                "<button class=\"partner-report-tooltip-anchor\" type=\"button\" aria-label=\"", escapeHtml(otherTooltip), "\">?</button>",
+                "<span class=\"partner-report-tooltip\" role=\"tooltip\">", escapeHtml(otherTooltip), "</span></span>"
+              ].join("")
+            : escapeHtml(row[1]);
+          const main = "<tr" + className + " data-partner-row-key=\"" + escapeHtml(key) + "\"><td" + annualizedTitle + ">" + label + "</td>" + values + "<td>" + escapeHtml(formatFinanceMetric(report.totals && report.totals[key], row[2])) + "</td></tr>";
+          if (key !== "other_direct_and_allocated_expenses") return main;
+          const children = breakdownDefinitions.map((definition) => {
+            const categoryKey = definition[0];
+            const categoryValues = (report.weeks || []).map((week) => "<td>" + escapeHtml(formatFinanceMetric(breakdownValue(week.other_expense_breakdown, categoryKey), "money")) + "</td>").join("");
+            return "<tr class=\"partner-report-subrow\" data-partner-expense-category=\"" + escapeHtml(categoryKey) + "\"><td>" + escapeHtml(definition[1]) + "</td>" + categoryValues + "<td>" + escapeHtml(formatFinanceMetric(breakdownValue(report.other_expense_breakdown_total, categoryKey), "money")) + "</td></tr>";
+          }).join("");
+          return main + children;
         }).join("");
         partnerReportTableWrap.innerHTML = "<table class=\"partner-report-table\">" + head + "<tbody>" + body + "</tbody></table>";
         partnerReportTableWrap.hidden = false;

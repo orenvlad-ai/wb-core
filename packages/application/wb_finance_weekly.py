@@ -21,7 +21,7 @@ from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
     CanonicalWbCostSnapshot,
-    resolve_finance_canonical_cost,
+    resolve_canonical_wb_cost,
 )
 from packages.application.warehouse_archival_estimate import (
     archival_estimate_for_nm_id,
@@ -31,7 +31,7 @@ from packages.business_time import business_date_from_timestamp
 
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v2_agent_acquiring_split"
-SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v2"
+SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v3"
 MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.0001")
@@ -2130,7 +2130,7 @@ class WbFinanceWeeklyBlock:
         cache_key = (str(nm_id), operation_date.isoformat())
         cached = self._canonical_cost_resolution_cache.get(cache_key)
         if cached is None:
-            cached = resolve_finance_canonical_cost(
+            cached = resolve_canonical_wb_cost(
                 conn,
                 nm_id=nm_id,
                 operation_date=operation_date,

@@ -176,7 +176,7 @@ def main() -> None:
                 for statement in traced_sql
             ):
                 raise AssertionError("non-target canonical lookup scanned archival factual events")
-        if CANONICAL_COST_FORMULA_VERSION != "wb_finance_canonical_our_wb_cost_v3":
+        if CANONICAL_COST_FORMULA_VERSION != "canonical_our_wb_cost_temporal_policy_v4":
             raise AssertionError("Finance formula/source digest version was not bumped")
 
         repeated = apply_archival_estimate_plan(
