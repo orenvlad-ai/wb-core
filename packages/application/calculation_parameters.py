@@ -430,11 +430,21 @@ class CalculationParametersBlock:
         archive = Path(str(source) + ".zst")
         manifest_path = archive.with_name(archive.name + ".manifest.json")
         raw_manifest_path = source.with_name(source.name + ".manifest.json")
-        archive_pair_exists = archive.is_file() and manifest_path.is_file()
-        if archive.exists() != manifest_path.exists():
+        archive_pair_exists = archive.exists() or manifest_path.exists()
+        if archive_pair_exists and not (archive.is_file() and manifest_path.is_file()):
             raise ValueError("daily functional economics backup archive is incomplete")
-        if source.exists() != raw_manifest_path.exists():
+        raw_pair_exists = source.exists() or raw_manifest_path.exists()
+        if raw_pair_exists and not (source.is_file() and raw_manifest_path.is_file()):
             raise ValueError("daily functional economics raw backup manifest is incomplete")
+        raw_plan = (
+            _verify_daily_raw_backup_manifest(
+                source=source,
+                manifest_path=raw_manifest_path,
+                business_date=business_date,
+            )
+            if raw_pair_exists
+            else None
+        )
         retention = self._prune_verified_functional_economics_archives(
             backup_root,
             reserve_pattern=(
@@ -466,22 +476,17 @@ class CalculationParametersBlock:
                 "reused": True,
                 "retention": retention,
             }
-        if source.exists():
-            plan = _verify_daily_raw_backup_manifest(
-                source=source,
-                manifest_path=raw_manifest_path,
-                business_date=business_date,
-            )
+        if raw_plan is not None:
             self._require_economics_backup_capacity(
                 backup_root,
-                source_size=int(plan["source_size_bytes"]),
+                source_size=int(raw_plan["source_size_bytes"]),
                 raw_backup_exists=True,
             )
             return {
                 "path": str(source),
-                "size_bytes": int(plan["source_size_bytes"]),
-                "sha256": str(plan["source_sha256"]).removeprefix("sha256:"),
-                "integrity_check": str(plan["source_integrity_check"]),
+                "size_bytes": int(raw_plan["source_size_bytes"]),
+                "sha256": str(raw_plan["source_sha256"]).removeprefix("sha256:"),
+                "integrity_check": str(raw_plan["source_integrity_check"]),
                 "backup_scope": "business_day",
                 "business_date": business_date,
                 "raw_manifest_path": str(raw_manifest_path),

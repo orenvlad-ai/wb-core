@@ -553,9 +553,62 @@ def main() -> int:
                 archive=None,
                 fingerprint=str(plan["fingerprint"]),
             )
+        incoming_source = preprune_root / "functional-economics-daily-20260722.sqlite3"
+        incoming_archive = Path(str(incoming_source) + ".zst")
+        incoming_archive_manifest = incoming_archive.with_name(
+            incoming_archive.name + ".manifest.json"
+        )
+        incoming_archive.mkdir()
+        incoming_archive_manifest.mkdir()
         with mock.patch(
-            "packages.application.calculation_parameters.shutil.disk_usage",
-            return_value=SimpleNamespace(free=1),
+            "packages.application.calculation_parameters.current_business_date_iso",
+            return_value="2026-07-22",
+        ):
+            try:
+                preprune_parameters.prepare_functional_economics_backup()
+            except ValueError as exc:
+                if "archive is incomplete" not in str(exc):
+                    raise AssertionError("non-file archive pair failed for the wrong reason") from exc
+            else:
+                raise AssertionError("non-file archive pair was accepted before backup preparation")
+        if incoming_source.exists():
+            raise AssertionError("non-file archive pair allowed a new raw backup")
+        incoming_archive.rmdir()
+        incoming_archive_manifest.rmdir()
+
+        preprune_runtime.backup_database(incoming_source)
+        incoming_source.chmod(0o600)
+        incoming_raw_manifest = incoming_source.with_name(
+            incoming_source.name + ".manifest.json"
+        )
+        incoming_raw_manifest.write_text("{}\n", encoding="utf-8")
+        incoming_raw_manifest.chmod(0o600)
+        archives_before_invalid_raw = sorted(preprune_root.glob("*.sqlite3.zst"))
+        with mock.patch(
+            "packages.application.calculation_parameters.current_business_date_iso",
+            return_value="2026-07-22",
+        ):
+            try:
+                preprune_parameters.prepare_functional_economics_backup()
+            except ValueError as exc:
+                if "provenance validation" not in str(exc):
+                    raise AssertionError("invalid raw checkpoint failed for the wrong reason") from exc
+            else:
+                raise AssertionError("invalid raw checkpoint was accepted")
+        if sorted(preprune_root.glob("*.sqlite3.zst")) != archives_before_invalid_raw:
+            raise AssertionError("invalid raw checkpoint pruned a verified restore point")
+        incoming_source.unlink()
+        incoming_raw_manifest.unlink()
+
+        with (
+            mock.patch(
+                "packages.application.calculation_parameters.current_business_date_iso",
+                return_value="2026-07-22",
+            ),
+            mock.patch(
+                "packages.application.calculation_parameters.shutil.disk_usage",
+                return_value=SimpleNamespace(free=1),
+            ),
         ):
             try:
                 preprune_parameters.prepare_functional_economics_backup()
