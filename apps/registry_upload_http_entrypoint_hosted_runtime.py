@@ -2591,7 +2591,7 @@ def _run_remote_ads_historical_recovery(
         if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
             raise ValueError("ads historical plan and --fingerprint do not match")
         if (
-            str(plan.get("schema_version") or "") != "ads_historical_recovery_v1"
+            str(plan.get("schema_version") or "") != "ads_historical_recovery_v2"
             or plan.get("dry_run") is not True
             or not bool(plan.get("apply_allowed"))
             or plan.get("scope") != expected_scope

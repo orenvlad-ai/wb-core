@@ -21,11 +21,13 @@ from packages.application.ads_historical_recovery import (  # noqa: E402
     ALLOWED_CAMPAIGN_STATUSES,
     AdsHistoricalRecovery,
     AdsHistoricalRecoveryError,
+    AdsHistoricalNoStatisticsError,
     AdsHistoricalRecoveryScope,
     MAX_IDS_PER_REQUEST,
     MAX_WINDOW_DAYS,
     MIN_REQUEST_INTERVAL_SECONDS,
 )
+from apps.ads_historical_recovery import _is_confirmed_no_statistics_http_400  # noqa: E402
 
 
 class FakeOfficialSource:
@@ -49,7 +51,10 @@ class FakeOfficialSource:
                 {
                     "status": status,
                     "advert_list": [
-                        {"advertId": campaign_id}
+                        {
+                            "advertId": campaign_id,
+                            "changeTime": "2026-12-31T23:59:59+03:00",
+                        }
                         for campaign_id in range(first, last + 1)
                     ],
                 }
@@ -127,6 +132,96 @@ class IncompleteCampaignSource(FakeOfficialSource):
             date_to=date_to,
         )
         return payload[:-1]
+
+
+class RecoverableBatchOmissionSource(FakeOfficialSource):
+    def fetch_fullstats(
+        self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
+    ) -> list[dict[str, Any]]:
+        payload = super().fetch_fullstats(
+            campaign_ids=campaign_ids,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return payload[:-1] if len(campaign_ids) > 1 else payload
+
+
+class ConfirmedNoStatisticsSource(FakeOfficialSource):
+    def list_campaigns(self) -> dict[str, Any]:
+        return {
+            "adverts": [
+                {
+                    "status": 7,
+                    "advert_list": [
+                        {
+                            "advertId": 501,
+                            "changeTime": "2026-05-01T00:00:00+03:00",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def fetch_fullstats(
+        self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
+    ) -> list[dict[str, Any]]:
+        self.calls.append(
+            {
+                "campaign_ids": list(campaign_ids),
+                "date_from": date_from,
+                "date_to": date_to,
+            }
+        )
+        if len(campaign_ids) == 1:
+            raise AdsHistoricalNoStatisticsError("confirmed no statistics")
+        return []
+
+
+class CompletedBeforeScopeSource(FakeOfficialSource):
+    def list_campaigns(self) -> dict[str, Any]:
+        return {
+            "adverts": [
+                {
+                    "status": 7,
+                    "advert_list": [
+                        {
+                            "advertId": 401,
+                            "changeTime": "2025-01-01T00:00:00+03:00",
+                        },
+                        {
+                            "advertId": 402,
+                            "changeTime": "2026-05-01T00:00:00+03:00",
+                        },
+                    ],
+                }
+            ]
+        }
+
+
+class UnsupportedOverlapSource(FakeOfficialSource):
+    def list_campaigns(self) -> dict[str, Any]:
+        return {
+            "adverts": [
+                {
+                    "status": 7,
+                    "advert_list": [
+                        {
+                            "advertId": 601,
+                            "changeTime": "2026-05-01T00:00:00+03:00",
+                        }
+                    ],
+                },
+                {
+                    "status": 8,
+                    "advert_list": [
+                        {
+                            "advertId": 602,
+                            "changeTime": "2026-04-15T00:00:00+03:00",
+                        }
+                    ],
+                },
+            ]
+        }
 
 
 def _seed_database(path: Path, *, existing_date: date, non_target_date: date) -> str:
@@ -400,6 +495,74 @@ def main() -> int:
             item["code"] == "ads_upstream_incomplete"
             and "omitted requested campaigns" in item.get("detail", "")
             for item in incomplete_campaign_plan["blockers"]
+        )
+
+        recovered_omission_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=RecoverableBatchOmissionSource(empty_date=empty_date),
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        assert recovered_omission_plan["status"] == "ready", recovered_omission_plan[
+            "blockers"
+        ]
+        assert any(
+            request["mode"] == "singleton_confirmation"
+            and request["outcome"] == "success"
+            for request in recovered_omission_plan["source_manifest"]["requests"]
+        )
+
+        confirmed_no_stats_source = ConfirmedNoStatisticsSource(empty_date=empty_date)
+        confirmed_no_stats_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=confirmed_no_stats_source,
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        assert confirmed_no_stats_plan["status"] == "ready", confirmed_no_stats_plan[
+            "blockers"
+        ]
+        assert confirmed_no_stats_plan["target_manifest"][0]["payload_kind"] == "empty"
+        assert any(
+            request["outcome"] == "confirmed_no_statistics"
+            for request in confirmed_no_stats_plan["source_manifest"]["requests"]
+        )
+
+        completed_source = CompletedBeforeScopeSource(empty_date=empty_date)
+        completed_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=completed_source,
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        assert completed_plan["status"] == "ready", completed_plan["blockers"]
+        assert all(401 not in call["campaign_ids"] for call in completed_source.calls)
+        assert completed_plan["source_manifest"][
+            "excluded_completed_before_scope_count"
+        ] == 1
+
+        unsupported_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=UnsupportedOverlapSource(empty_date=empty_date),
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        assert unsupported_plan["status"] == "blocked"
+        assert any(
+            item["code"] == "ads_unsupported_campaign_overlaps_scope"
+            for item in unsupported_plan["blockers"]
+        )
+
+        no_stats_body = json.dumps(
+            {
+                "detail": "there are no statistics for this advertising period",
+                "origin": "camp-api-public-cache",
+                "status": 400,
+                "title": "invalid payload",
+            }
+        ).encode("utf-8")
+        assert _is_confirmed_no_statistics_http_400(no_stats_body) is True
+        assert (
+            _is_confirmed_no_statistics_http_400(
+                no_stats_body.replace(b"no statistics", b"temporary failure")
+            )
+            is False
         )
 
         unclosed_source = FakeOfficialSource(empty_date=empty_date)

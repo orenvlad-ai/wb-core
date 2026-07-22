@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 
 
-SCHEMA_VERSION = "ads_historical_recovery_v1"
+SCHEMA_VERSION = "ads_historical_recovery_v2"
 SOURCE_KEY = "ads_compact"
 SNAPSHOT_ROLE = "accepted_closed_day_snapshot"
 CLOSURE_SLOT = "yesterday_closed"
@@ -47,6 +47,10 @@ DEFAULT_TARGET_DATES = tuple(
 
 class AdsHistoricalRecoveryError(RuntimeError):
     """Fail-closed recovery error."""
+
+
+class AdsHistoricalNoStatisticsError(AdsHistoricalRecoveryError):
+    """Official singleton ``fullstats`` confirmed no statistics for the window."""
 
 
 class AdsHistoricalSource(Protocol):
@@ -624,14 +628,42 @@ class AdsHistoricalRecovery:
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         raw_campaigns = self.source.list_campaigns()
         campaigns = _extract_campaigns(raw_campaigns)
-        eligible = [
+        eligible_all = [
             item for item in campaigns if item["status"] in ALLOWED_CAMPAIGN_STATUSES
         ]
+        scope_start = min(target_dates)
+        eligible: list[dict[str, Any]] = []
+        excluded_completed: list[dict[str, Any]] = []
+        for item in eligible_all:
+            change_date = _optional_iso_date(item.get("change_time"))
+            if item["status"] == 7 and change_date is not None and change_date < scope_start:
+                excluded_completed.append(
+                    {**item, "source_action": "excluded_completed_before_scope"}
+                )
+            else:
+                eligible.append({**item, "source_action": "requested"})
+        unsupported_overlaps: list[dict[str, Any]] = []
+        for item in campaigns:
+            if item["status"] in ALLOWED_CAMPAIGN_STATUSES or item["status"] == 4:
+                continue
+            change_date = _optional_iso_date(item.get("change_time"))
+            if change_date is None or change_date >= scope_start:
+                unsupported_overlaps.append(item)
         campaign_ids = sorted({int(item["campaign_id"]) for item in eligible})
-        if not campaign_ids:
+        if not eligible_all and not unsupported_overlaps:
             raise AdsHistoricalRecoveryError(
                 "official campaign manifest contains no campaigns in statuses 7/9/11; "
                 "historical days cannot be confirmed empty"
+            )
+        source_blockers: list[dict[str, Any]] = []
+        if unsupported_overlaps:
+            source_blockers.append(
+                {
+                    "code": "ads_unsupported_campaign_overlaps_scope",
+                    "scope_start": scope_start.isoformat(),
+                    "campaigns": unsupported_overlaps,
+                    "reason": "fullstats supports only campaign statuses 7/9/11",
+                }
             )
         windows = _date_windows(target_dates)
         batches = [
@@ -649,26 +681,35 @@ class AdsHistoricalRecovery:
                         raise AdsHistoricalRecoveryError("fullstats window exceeds 31 days")
                     if len(batch) > MAX_IDS_PER_REQUEST:
                         raise AdsHistoricalRecoveryError("fullstats batch exceeds 50 IDs")
-                    payload = self.source.fetch_fullstats(
-                        campaign_ids=batch,
-                        date_from=start,
-                        date_to=end,
-                    )
+                    try:
+                        payload = self.source.fetch_fullstats(
+                            campaign_ids=batch,
+                            date_from=start,
+                            date_to=end,
+                        )
+                    except AdsHistoricalNoStatisticsError:
+                        payload = []
+                        batch_outcome = "confirmed_no_statistics_requires_singletons"
+                    else:
+                        batch_outcome = "success"
                     if not isinstance(payload, list):
                         raise AdsHistoricalRecoveryError(
                             "official fullstats response is not a complete JSON list"
                         )
-                    normalized = _fullstats_rows(
+                    normalized, seen_campaign_ids = _fullstats_rows(
                         payload,
                         start=start,
                         end=end,
                         allowed_campaign_ids=set(batch),
+                        require_all_campaigns=False,
                     )
                     for day_text, day_rows in normalized.items():
                         if day_text in rows_by_date:
                             rows_by_date[day_text].extend(day_rows)
                     requests.append(
                         {
+                            "mode": "batch",
+                            "outcome": batch_outcome,
                             "date_from": start.isoformat(),
                             "date_to": end.isoformat(),
                             "window_days": (end - start).days + 1,
@@ -680,14 +721,74 @@ class AdsHistoricalRecovery:
                             ),
                         }
                     )
+                    for campaign_id in sorted(set(batch) - seen_campaign_ids):
+                        try:
+                            singleton_payload = self.source.fetch_fullstats(
+                                campaign_ids=[campaign_id],
+                                date_from=start,
+                                date_to=end,
+                            )
+                        except AdsHistoricalNoStatisticsError:
+                            requests.append(
+                                {
+                                    "mode": "singleton_confirmation",
+                                    "outcome": "confirmed_no_statistics",
+                                    "date_from": start.isoformat(),
+                                    "date_to": end.isoformat(),
+                                    "window_days": (end - start).days + 1,
+                                    "campaign_ids": [campaign_id],
+                                    "campaign_id_count": 1,
+                                    "response_digest": canonical_digest(
+                                        {
+                                            "campaign_id": campaign_id,
+                                            "date_from": start.isoformat(),
+                                            "date_to": end.isoformat(),
+                                            "result": "official_no_statistics",
+                                        }
+                                    ),
+                                    "normalized_row_count": 0,
+                                }
+                            )
+                            continue
+                        if not isinstance(singleton_payload, list):
+                            raise AdsHistoricalRecoveryError(
+                                "official singleton fullstats response is not a complete JSON list"
+                            )
+                        singleton_rows, _ = _fullstats_rows(
+                            singleton_payload,
+                            start=start,
+                            end=end,
+                            allowed_campaign_ids={campaign_id},
+                            require_all_campaigns=True,
+                        )
+                        for day_text, day_rows in singleton_rows.items():
+                            if day_text in rows_by_date:
+                                rows_by_date[day_text].extend(day_rows)
+                        requests.append(
+                            {
+                                "mode": "singleton_confirmation",
+                                "outcome": "success",
+                                "date_from": start.isoformat(),
+                                "date_to": end.isoformat(),
+                                "window_days": (end - start).days + 1,
+                                "campaign_ids": [campaign_id],
+                                "campaign_id_count": 1,
+                                "response_digest": canonical_digest(singleton_payload),
+                                "normalized_row_count": sum(
+                                    len(value) for value in singleton_rows.values()
+                                ),
+                            }
+                        )
 
-        campaign_manifest = [
-            item for item in eligible if item["campaign_id"] in set(campaign_ids)
-        ]
+        campaign_manifest = sorted(
+            [*eligible, *excluded_completed], key=lambda item: int(item["campaign_id"])
+        )
         response_digest = canonical_digest(requests)
         campaign_digest = canonical_digest(campaign_manifest)
+        all_campaign_digest = canonical_digest(campaigns)
         source_digest = canonical_digest(
             {
+                "all_campaign_digest": all_campaign_digest,
                 "campaign_digest": campaign_digest,
                 "response_digest": response_digest,
             }
@@ -696,6 +797,11 @@ class AdsHistoricalRecovery:
             "status": "complete",
             "campaign_statuses": sorted(ALLOWED_CAMPAIGN_STATUSES),
             "campaign_count": len(campaign_ids),
+            "all_campaign_count": len(campaigns),
+            "all_campaign_digest": all_campaign_digest,
+            "excluded_completed_before_scope_count": len(excluded_completed),
+            "unsupported_overlap_count": len(unsupported_overlaps),
+            "unsupported_overlaps": unsupported_overlaps,
             "campaigns": campaign_manifest,
             "campaign_digest": campaign_digest,
             "request_count": len(requests),
@@ -704,7 +810,7 @@ class AdsHistoricalRecovery:
             "source_digest": source_digest,
         }
         candidates: list[dict[str, Any]] = []
-        blockers: list[dict[str, Any]] = []
+        blockers: list[dict[str, Any]] = list(source_blockers)
         required_nm_ids = {str(value) for value in scope.nm_ids}
         for target_date in target_dates:
             day_text = target_date.isoformat()
@@ -1055,12 +1161,12 @@ class AdsHistoricalRecovery:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _extract_campaigns(payload: Any) -> list[dict[str, int]]:
+def _extract_campaigns(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, Mapping) or not isinstance(payload.get("adverts"), list):
         raise AdsHistoricalRecoveryError(
             "official campaign manifest is not a complete adverts mapping"
         )
-    rows: dict[int, dict[str, int]] = {}
+    rows: dict[int, dict[str, Any]] = {}
     for group in payload["adverts"]:
         if not isinstance(group, Mapping):
             raise AdsHistoricalRecoveryError("campaign manifest contains an invalid group")
@@ -1078,13 +1184,37 @@ def _extract_campaigns(payload: Any) -> list[dict[str, int]]:
             )
             if campaign_id <= 0:
                 raise AdsHistoricalRecoveryError("campaign id must be positive")
-            existing = rows.get(campaign_id)
-            if existing is not None and existing["status"] != status:
+            change_time = str(
+                advert.get("changeTime", advert.get("change_time", "")) or ""
+            ).strip()
+            if change_time and _optional_iso_date(change_time) is None:
                 raise AdsHistoricalRecoveryError(
-                    f"campaign {campaign_id} has conflicting statuses"
+                    f"campaign {campaign_id} has invalid changeTime"
                 )
-            rows[campaign_id] = {"campaign_id": campaign_id, "status": status}
+            existing = rows.get(campaign_id)
+            if existing is not None and (
+                existing["status"] != status
+                or existing.get("change_time", "") != change_time
+            ):
+                raise AdsHistoricalRecoveryError(
+                    f"campaign {campaign_id} has conflicting manifest values"
+                )
+            rows[campaign_id] = {
+                "campaign_id": campaign_id,
+                "status": status,
+                "change_time": change_time,
+            }
     return [rows[key] for key in sorted(rows)]
+
+
+def _optional_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _date_windows(values: Sequence[date]) -> list[tuple[date, date]]:
@@ -1108,7 +1238,8 @@ def _fullstats_rows(
     start: date,
     end: date,
     allowed_campaign_ids: set[int],
-) -> dict[str, list[Mapping[str, Any]]]:
+    require_all_campaigns: bool,
+) -> tuple[dict[str, list[Mapping[str, Any]]], set[int]]:
     result: dict[str, list[Mapping[str, Any]]] = {}
     seen_advert_ids: set[int] = set()
     for advert in payload:
@@ -1176,13 +1307,13 @@ def _fullstats_rows(
                         {**dict(item), "nm_id": nm_id, "advert_id": advert_id}
                     )
     missing_campaign_ids = sorted(allowed_campaign_ids - seen_advert_ids)
-    if missing_campaign_ids:
+    if require_all_campaigns and missing_campaign_ids:
         raise AdsHistoricalRecoveryError(
             "fullstats response omitted requested campaigns: "
             + ",".join(str(value) for value in missing_campaign_ids[:20])
             + ("..." if len(missing_campaign_ids) > 20 else "")
         )
-    return result
+    return result, seen_advert_ids
 
 
 def _aggregate_day_rows(
@@ -1296,6 +1427,7 @@ __all__ = [
     "ALLOWED_CAMPAIGN_STATUSES",
     "AdsHistoricalRecovery",
     "AdsHistoricalRecoveryError",
+    "AdsHistoricalNoStatisticsError",
     "AdsHistoricalRecoveryScope",
     "DEFAULT_NM_IDS",
     "DEFAULT_TARGET_DATES",

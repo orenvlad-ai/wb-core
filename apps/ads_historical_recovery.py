@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from packages.application.ads_historical_recovery import (  # noqa: E402
     AdsHistoricalRecovery,
     AdsHistoricalRecoveryError,
+    AdsHistoricalNoStatisticsError,
     AdsHistoricalRecoveryScope,
     DEFAULT_NM_IDS,
     DEFAULT_TARGET_DATES,
@@ -109,6 +110,11 @@ class OfficialAdsHistoricalSource:
             with urllib_request.urlopen(req, timeout=self._timeout_seconds) as response:
                 body = response.read()
         except error.HTTPError as exc:
+            body = exc.read()
+            if exc.code == 400 and _is_confirmed_no_statistics_http_400(body):
+                raise AdsHistoricalNoStatisticsError(
+                    "official fullstats confirmed no statistics for this advertising period"
+                ) from exc
             raise AdsHistoricalRecoveryError(
                 f"official ads request failed with HTTP {exc.code}"
             ) from exc
@@ -122,6 +128,28 @@ class OfficialAdsHistoricalSource:
             raise AdsHistoricalRecoveryError(
                 "official ads request returned invalid JSON"
             ) from exc
+
+
+def _is_confirmed_no_statistics_http_400(body: bytes) -> bool:
+    """Recognize only WB's exact structured no-statistics response."""
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    detail = str(payload.get("detail") or "").strip().casefold()
+    origin = str(payload.get("origin") or "").strip().casefold()
+    try:
+        status = int(payload.get("status"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        status == 400
+        and origin == "camp-api-public-cache"
+        and detail == "there are no statistics for this advertising period"
+    )
 
 
 def _load_env(path: Path) -> None:
