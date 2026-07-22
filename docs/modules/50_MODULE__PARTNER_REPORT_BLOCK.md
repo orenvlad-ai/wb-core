@@ -141,4 +141,6 @@ ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scann
 - public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
 - authenticated production read-only acceptance: hosted `finance-ui-flow`; passed status requires ready preview, empty blockers, visible table, real XLSX download, workbook structure/content checks, UI/XLSX reconciliation, desktop/narrow screenshots and no fatal browser/network errors.
 
+The flow records every attempted preview POST before asserting its outcome. JSON failures retain HTTP status, application code, human-readable error and blockers. A non-JSON proxy/runtime response retains HTTP status plus the bounded `response_not_json` code without copying its HTML body into evidence. Neither failure can produce `status=passed`.
+
 The control fixture uses revenue `476034`, COGS `83837`, agent+acquiring `174797`, ads `30904`, office `10000`, tax `6%`, reserve `20%` and investor share `40%`, yielding Finance margin `186496`, net profit `110634.76` and dividends `44253.904`. Invested capital is an explicit fixture input and is not inferred from the reference screenshot.
