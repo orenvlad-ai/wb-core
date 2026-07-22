@@ -426,11 +426,23 @@ class CalculationParametersBlock:
         business_date = current_business_date_iso()
         backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
         backup_root.mkdir(parents=True, exist_ok=True)
-        retention = self._prune_verified_functional_economics_archives(backup_root)
         source = backup_root / f"functional-economics-daily-{business_date.replace('-', '')}.sqlite3"
         archive = Path(str(source) + ".zst")
         manifest_path = archive.with_name(archive.name + ".manifest.json")
         raw_manifest_path = source.with_name(source.name + ".manifest.json")
+        archive_pair_exists = archive.is_file() and manifest_path.is_file()
+        if archive.exists() != manifest_path.exists():
+            raise ValueError("daily functional economics backup archive is incomplete")
+        if source.exists() != raw_manifest_path.exists():
+            raise ValueError("daily functional economics raw backup manifest is incomplete")
+        retention = self._prune_verified_functional_economics_archives(
+            backup_root,
+            reserve_pattern=(
+                None
+                if archive_pair_exists
+                else "functional-economics-daily-*.sqlite3.zst.manifest.json"
+            ),
+        )
         if archive.is_file() and manifest_path.is_file():
             from apps.sqlite_backup_archive import verify_archive_manifest
 
@@ -454,8 +466,6 @@ class CalculationParametersBlock:
                 "reused": True,
                 "retention": retention,
             }
-        if archive.exists() or manifest_path.exists():
-            raise ValueError("daily functional economics backup archive is incomplete")
         if source.exists():
             plan = _verify_daily_raw_backup_manifest(
                 source=source,
@@ -478,8 +488,6 @@ class CalculationParametersBlock:
                 "reused": True,
                 "retention": retention,
             }
-        if raw_manifest_path.exists():
-            raise ValueError("daily functional economics raw backup manifest is incomplete")
         self._require_economics_backup_capacity(
             backup_root,
             source_size=self.runtime.coherent_backup_size_bytes(),
@@ -516,7 +524,10 @@ class CalculationParametersBlock:
 
         backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
         backup_root.mkdir(parents=True, exist_ok=True)
-        self._prune_verified_functional_economics_archives(backup_root)
+        self._prune_verified_functional_economics_archives(
+            backup_root,
+            reserve_pattern="operator-settings-*.sqlite3.zst.manifest.json",
+        )
         coherent_size = self.runtime.coherent_backup_size_bytes()
         self._require_economics_backup_capacity(
             backup_root,
@@ -607,7 +618,10 @@ class CalculationParametersBlock:
     def preflight_fresh_economics_backup_capacity(self, backup_root: Path) -> dict[str, Any]:
         backup_root = backup_root.resolve()
         backup_root.mkdir(parents=True, exist_ok=True)
-        retention = self._prune_verified_functional_economics_archives(backup_root)
+        retention = self._prune_verified_functional_economics_archives(
+            backup_root,
+            reserve_pattern="warehouse-functional-pre-sync-*.sqlite3.zst.manifest.json",
+        )
         return {
             **self._require_economics_backup_capacity(
                 backup_root,
@@ -751,31 +765,41 @@ class CalculationParametersBlock:
     def _prune_verified_functional_economics_archives(
         self,
         backup_root: Path,
+        *,
+        reserve_pattern: str | None = None,
     ) -> dict[str, Any]:
-        """Bound retained archives; remove only reverified older exact pairs."""
+        """Bound retained archives; optionally reserve one slot for an incoming pair."""
 
         from apps.sqlite_backup_archive import verify_archive_manifest
 
         backup_root = backup_root.resolve()
         recovered = _recover_retention_audit(backup_root)
-        patterns = (
+        patterns = [
             "functional-economics-daily-*.sqlite3.zst.manifest.json",
             "operator-settings-*.sqlite3.zst.manifest.json",
             "warehouse-functional-pre-sync-*.sqlite3.zst.manifest.json",
-        )
+        ]
+        if reserve_pattern is not None:
+            if reserve_pattern not in patterns:
+                raise ValueError("functional economics archive retention reserve scope is invalid")
+            patterns.remove(reserve_pattern)
+            patterns.insert(0, reserve_pattern)
         removed: list[dict[str, Any]] = []
         kept: list[str] = []
         removals: list[tuple[Path, Path, dict[str, Any]]] = []
         for pattern in patterns:
             candidates = sorted(backup_root.glob(pattern), key=lambda item: item.name, reverse=True)
-            kept.extend(str(item) for item in candidates[:FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT])
-            if len(candidates) > FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT:
-                for retained_manifest in candidates[:FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT]:
+            keep_limit = FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT - (
+                1 if pattern == reserve_pattern else 0
+            )
+            kept.extend(str(item) for item in candidates[:keep_limit])
+            if len(candidates) > keep_limit:
+                for retained_manifest in candidates[:keep_limit]:
                     if retained_manifest.is_symlink() or retained_manifest.stat().st_mode & 0o777 != 0o600:
                         raise ValueError("functional economics archive retention found unsafe retained manifest")
                     retained = verify_archive_manifest(retained_manifest)
                     _verify_functional_archive_lineage(retained)
-            for manifest_path in candidates[FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT:]:
+            for manifest_path in candidates[keep_limit:]:
                 if len(removals) >= FUNCTIONAL_ECONOMICS_ARCHIVE_PRUNE_LIMIT:
                     break
                 if manifest_path.is_symlink() or manifest_path.stat().st_mode & 0o777 != 0o600:
@@ -830,6 +854,8 @@ class CalculationParametersBlock:
         return {
             "policy": "keep_latest_verified_per_scope",
             "keep_count": FUNCTIONAL_ECONOMICS_ARCHIVE_RETENTION_COUNT,
+            "reserved_pattern": reserve_pattern,
+            "reserved_slots": 1 if reserve_pattern is not None else 0,
             "prune_limit": FUNCTIONAL_ECONOMICS_ARCHIVE_PRUNE_LIMIT,
             "removed": removed,
             "kept": kept,

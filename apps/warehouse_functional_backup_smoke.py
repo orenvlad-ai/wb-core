@@ -543,7 +543,7 @@ def main() -> int:
         preprune_parameters = CalculationParametersBlock(runtime=preprune_runtime)
         preprune_root = preprune_runtime_dir / "backups" / "calculation-parameters"
         preprune_root.mkdir(parents=True)
-        for day in ("20260717", "20260718", "20260719", "20260720"):
+        for day in ("20260718", "20260719", "20260720"):
             source = preprune_root / f"functional-economics-daily-{day}.sqlite3"
             preprune_runtime.backup_database(source)
             source.chmod(0o600)
@@ -564,12 +564,40 @@ def main() -> int:
                     raise AssertionError("post-retention capacity failed for the wrong reason") from exc
             else:
                 raise AssertionError("impossible post-retention capacity was accepted")
-        if len(list(preprune_root.glob("functional-economics-daily-*.sqlite3.zst"))) != 3:
-            raise AssertionError("excess verified archives were not pruned before capacity gate")
+        if len(list(preprune_root.glob("functional-economics-daily-*.sqlite3.zst"))) != 2:
+            raise AssertionError("daily retention slot was not reserved before capacity gate")
+
+        for ordinal in range(3):
+            source = preprune_root / (
+                f"operator-settings-20260722T0{ordinal}0000Z-checkpoint.sqlite3"
+            )
+            preprune_runtime.backup_database(source)
+            source.chmod(0o600)
+            plan = build_plan(source=source)
+            apply_archive(
+                source=source,
+                archive=None,
+                fingerprint=str(plan["fingerprint"]),
+            )
+        with mock.patch(
+            "packages.application.calculation_parameters.shutil.disk_usage",
+            return_value=SimpleNamespace(free=1),
+        ):
+            try:
+                preprune_parameters.prepare_operator_settings_backup(
+                    preview_fingerprint="sha256:retention-slot-preview",
+                )
+            except ValueError as exc:
+                if "capacity" not in str(exc):
+                    raise AssertionError("settings post-retention capacity failed incorrectly") from exc
+            else:
+                raise AssertionError("impossible settings post-retention capacity was accepted")
+        if len(list(preprune_root.glob("operator-settings-*.sqlite3.zst"))) != 2:
+            raise AssertionError("settings retention slot was not reserved before capacity gate")
 
         manual_preprune_root = root / "backups" / "manual-preprune"
         manual_preprune_root.mkdir(parents=True)
-        for ordinal in range(4):
+        for ordinal in range(3):
             source = manual_preprune_root / (
                 f"warehouse-functional-pre-sync-20260722T0{ordinal}0000Z.sqlite3"
             )
@@ -594,8 +622,8 @@ def main() -> int:
                     raise AssertionError("manual post-retention capacity failed incorrectly") from exc
             else:
                 raise AssertionError("impossible manual post-retention capacity was accepted")
-        if len(list(manual_preprune_root.glob("warehouse-functional-pre-sync-*.sqlite3.zst"))) != 3:
-            raise AssertionError("manual checkpoints were not pruned before capacity gate")
+        if len(list(manual_preprune_root.glob("warehouse-functional-pre-sync-*.sqlite3.zst"))) != 2:
+            raise AssertionError("manual checkpoint retention slot was not reserved before capacity gate")
 
         capacity_runtime_dir = root / "capacity-runtime"
         capacity_runtime_dir.mkdir()
