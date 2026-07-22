@@ -85,6 +85,8 @@ Every expense money cell shows amount plus only `%`, arrow and color. An increas
 
 Finance preflight and Partner consumers share `resolve_ads_snapshot_payload`. It accepts either a valid nested `result` or the persisted root envelope `{kind,snapshot_date,items}`. Invalid/missing data remains missing; a confirmed `kind=empty` is the only empty-source zero. Finance apply never writes ads rows and never materializes missing ads pairs as zero.
 
+The bounded read-only `partner-finance-diagnostic` hosted action reads immutable raw rows and indexed projections through SQLite `mode=ro`, `PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level Finance marketing, the revenue allocation coefficient, current Partner residual, classifier buckets, signed versus system amounts, duplicate identities and negative-deduction `abs()` effects. It is evidence only: it cannot rebuild Finance or mutate Partner/ads state.
+
 ## Production-safe all-history runner
 
 Local application runner:
