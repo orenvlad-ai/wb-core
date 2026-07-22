@@ -31,6 +31,9 @@ from packages.application.partner_report import (  # noqa: E402
 )
 
 
+VISIBLE_EXPENSE_CATEGORIES = OTHER_EXPENSE_CATEGORIES[:-1]
+
+
 def main() -> None:
     class NonJsonResponse:
         status = 502
@@ -278,14 +281,14 @@ def _preview() -> dict:
         {"key": key, "label": label, "amount_rub": amount}
         for (key, label), amount in zip(
             OTHER_EXPENSE_CATEGORIES,
-            ("3.33", "3.33", "3.33", "0.01"),
+            ("3.33", "3.33", "3.33", "0.01", "0.00"),
             strict=True,
         )
     ]
     return {
         "status": "ready",
-        "contract_version": "partner_report_v3",
-        "formula_version": "partner_report_profitability_ui_first_v3",
+        "contract_version": "partner_report_v4",
+        "formula_version": "partner_report_profitability_ui_first_v4",
         "source_digest": "sha256:" + "a" * 64,
         "nm_id": "101101",
         "product_name": "Контрольный SKU",
@@ -312,9 +315,13 @@ def _preview() -> dict:
             {"key": key, "label": label, "amount_rub": amount}
             for (key, label), amount in zip(
                 OTHER_EXPENSE_CATEGORIES,
-                ("6.66", "6.66", "6.66", "0.02"),
+                ("6.66", "6.66", "6.66", "0.02", "0.00"),
                 strict=True,
             )
+        ],
+        "other_expense_category_definitions": [
+            {"key": key, "label": label}
+            for key, label in VISIBLE_EXPENSE_CATEGORIES
         ],
         "annualized_return_formula": "average weekly dividends × 52 / invested capital × 100%",
         "generated_at": "2026-07-22T00:00:00Z",
@@ -354,12 +361,13 @@ def _ui_table(preview: dict) -> dict:
         "categories": [
             {
                 "key": key,
+                "label": label,
                 "values": [
                     money(next(item["amount_rub"] for item in week["other_expense_breakdown"] if item["key"] == key))
                     for week in weeks
                 ] + [money(next(item["amount_rub"] for item in preview["other_expense_breakdown_total"] if item["key"] == key))],
             }
-            for key, _label in OTHER_EXPENSE_CATEGORIES
+            for key, label in VISIBLE_EXPENSE_CATEGORIES
         ],
     }
 

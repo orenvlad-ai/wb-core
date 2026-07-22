@@ -21,7 +21,7 @@ The existing runtime SQLite owns:
 - indexed `wb_finance_weekly_sku_aggregates` keyed by `seller + week + nmId + formula version`;
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
-The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v3`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
+The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v4`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
 
 `wb_finance_retro_cost_map` is not created, read or written by the active schema/calculation/apply path. A table left by an earlier deployed revision may remain untouched as historical migration evidence, but its fixed `unit_cost_rub` is not business truth and cannot affect COGS.
 
@@ -47,7 +47,7 @@ Coverage counts gross sale/return units, so a symmetric sale/return pair cannot 
 
 ## Agent remuneration, acquiring and WB correction
 
-Classifier version is `wb_finance_weekly_classifier_v2_agent_acquiring_split`.
+Classifier version is `wb_finance_weekly_classifier_v3_signed_review_points`.
 
 For sale/return signed by document type:
 
@@ -60,6 +60,8 @@ agent_remuneration          = combined_commission_control − acquiring
 `agent_remuneration + acquiring` must reconcile exactly to the former combined control. The UI rows are `Агентское вознаграждение WB` and `Эквайринг`; each enters total expenses exactly once. `ppvzSalesCommission` is not used as the full agent amount.
 
 Official `additionalPayment` / XLSX `Корректировка Вознаграждения Вайлдберриз (ВВ)` is retained as an explicit disclosure. On sale/return it is already reflected by `forPay` and is not added a second time. A standalone positive/negative correction row is classified once as positive adjustment or period correction. Tests include a non-zero correction.
+
+Deduction money preserves the signed official value. A negative deduction is an expense reversal/refund and therefore reduces its bucket; it is never converted into a second positive expense with `abs()`. Exact production names containing `Баллы за отзывы` or `Списание за отзыв` use the separate `review_points` bucket and Finance UI row. The existing Finance `marketing` bucket remains separate and continues to participate in both expense-with-marketing and expense-without-marketing disclosures. Negative acceptance or transit cannot become a positive capitalization candidate.
 
 ## Expense and profit semantics
 
@@ -85,7 +87,7 @@ Every expense money cell shows amount plus only `%`, arrow and color. An increas
 
 Finance preflight and Partner consumers share `resolve_ads_snapshot_payload`. It accepts either a valid nested `result` or the persisted root envelope `{kind,snapshot_date,items}`. Invalid/missing data remains missing; a confirmed `kind=empty` is the only empty-source zero. Finance apply never writes ads rows and never materializes missing ads pairs as zero.
 
-The bounded read-only `partner-finance-diagnostic` hosted action reads immutable raw rows and indexed projections through SQLite `mode=ro`, `PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level Finance marketing, the revenue allocation coefficient, current Partner residual, classifier buckets, signed versus system amounts, duplicate identities and negative-deduction `abs()` effects. It is evidence only: it cannot rebuild Finance or mutate Partner/ads state.
+The bounded read-only `partner-finance-diagnostic` hosted action reads immutable raw rows and indexed projections through SQLite `mode=ro`, `PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level Finance marketing, the revenue allocation coefficient, the former catch-all residual, current explicitly routed Partner categories, classifier buckets, signed versus legacy-absolute amounts, duplicate identities and negative-deduction uplift. Its exact semantic-category totals cover every retained operation group even when detailed output is truncated. It is evidence only: it cannot rebuild Finance or mutate Partner/ads state.
 
 ## Production-safe all-history runner
 
@@ -124,7 +126,7 @@ Production apply is not implied by merge/deploy and remains forbidden until the 
 
 ## UI and verification
 
-The operator table has clean calculated headers, separate agent/acquiring rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons.
+The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons.
 
 Targeted checks:
 

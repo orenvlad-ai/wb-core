@@ -13025,17 +13025,15 @@
           ["net_profit","Чистая прибыль","money"], ["dividends","Дивиденды","money"],
           ["annualized_return_pct","Расчётная годовая доходность инвестора, %","percent"]
         ];
-        const breakdownDefinitions = [
-          ["uncapitalized_transit_logistics","Транзитная логистика, не подтверждённая как капитализированная"],
-          ["wb_jam_subscription","Подписка WB Jam"],
-          ["wb_paid_services","Платные сервисы WB"],
-          ["other_withholdings","Прочие удержания"]
-        ];
+        const breakdownDefinitions = (Array.isArray(report.other_expense_category_definitions)
+          ? report.other_expense_category_definitions : []).map((item) => [
+            String(item && item.key || ""), String(item && item.label || "")
+          ]).filter((item) => item[0] && item[1]);
         const breakdownValue = (items, key) => {
           const item = (Array.isArray(items) ? items : []).find((candidate) => String(candidate.key || "") === key);
           return item ? item.amount_rub : null;
         };
-        const otherTooltip = String(report.other_expense_tooltip || "Итог включает прямые расходы выбранного SKU и распределённую долю общих расходов кабинета. Распределённая доля рассчитывается как общие неатрибутированные расходы недели × чистая выручка SKU / общая положительная чистая выручка недели.");
+        const otherTooltip = String(report.other_expense_tooltip || "Finance-категории распределяются по доле чистой выручки SKU; маркетинг Finance исключён, потому что строка «Маркетинг WB» использует ads_compact.");
         const head = "<thead><tr><th>Показатель</th>" + (report.weeks || []).map((week) => "<th>" + escapeHtml(week.label) + "</th>").join("") + "<th>Итого за период</th></tr></thead>";
         const body = rows.map((row) => {
           const key = row[0];
@@ -13155,6 +13153,7 @@
           {key:"acceptance", label:"Платная приёмка", type:"money", expense:true}, {key:"marketing", label:"Маркетинг и продвижение", type:"money", expense:true},
           {key:"transit_logistics", label:"Транзитная логистика", type:"money", expense:true}, {key:"penalties", label:"Штрафы", type:"money", expense:true},
           {key:"subscriptions", label:"Подписки", type:"money", expense:true}, {key:"paid_services", label:"Платные сервисы", type:"money", expense:true},
+          {key:"review_points", label:"Баллы за отзывы", type:"money", expense:true},
           {key:"other_deductions", label:"Прочие удержания", type:"money", expense:true},
           {key:"wb_remuneration_adjustment", label:"Корректировка Вознаграждения WB · внутри агентского контроля", type:"money"},
           {key:"positive_adjustments", label:"Корректировки и дополнительные выплаты", type:"money"},

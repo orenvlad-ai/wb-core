@@ -1,5 +1,9 @@
 # Migration 110 — unified temporal WB cost and Partner V3
 
+> Historical V3 boundary. Its canonical-cost rules remain active, but its
+> four-subrow Partner residual and Finance projection version are superseded
+> by `migration/112_partner_marketing_single_count.md`.
+
 ## Scope
 
 This read-side/code migration makes the warehouse-domain `Себестоимость WB наша`

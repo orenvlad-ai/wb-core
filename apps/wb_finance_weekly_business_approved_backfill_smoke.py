@@ -18,7 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock  # noqa: E402
+from packages.application.wb_finance_weekly import (  # noqa: E402
+    SKU_AGGREGATE_FORMULA_VERSION,
+    WbFinanceWeeklyBlock,
+)
 
 REVOKED = "sha256:621323d6f03759cb8685dfffe20639fa18a16c7b5f6a5b1685205a579c6bbf2d"
 
@@ -346,7 +349,8 @@ def _assert_apply_result(
         ).fetchone()[0]
         stale_sku_projection_count = conn.execute(
             """SELECT COUNT(*) FROM wb_finance_weekly_sku_aggregates
-               WHERE formula_version<>'wb_finance_weekly_sku_aggregate_v3'"""
+               WHERE formula_version<>?""",
+            (SKU_AGGREGATE_FORMULA_VERSION,),
         ).fetchone()[0]
     if (
         retro_count

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -41,6 +42,7 @@ def main() -> None:
         finance.ensure_schema()
         _seed_supporting_schema(database)
         finance.ingest_week(WEEK, WEEK + timedelta(days=6), _finance_rows())
+        _make_direct_transit_capitalized_projection(database)
         _seed_settings_and_ads(database)
         _make_logical_duplicate_evidence(database)
 
@@ -69,10 +71,15 @@ def main() -> None:
             "direct_finance_marketing_rub": "30.0000",
             "account_finance_marketing_rub": "40.0000",
             "allocated_finance_marketing_rub": "20.0000",
-            "current_other_withholdings_rub": "58.5000",
-            "residual_without_finance_marketing_rub": "38.5000",
-            "parsed_current_other_withholdings_rub": "58.5000",
-            "parsed_reconciliation_delta_rub": "0.0000",
+            "finance_marketing_partner_other_contribution_rub": "0.0000",
+            "legacy_other_withholdings_rub": "53.5000",
+            "partner_other_expenses_main_row_rub": "30.0000",
+            "current_other_withholdings_rub": "22.0000",
+            "residual_without_finance_marketing_rub": "33.5000",
+            "parsed_partner_other_expenses_main_row_rub": "30.0000",
+            "parsed_current_other_withholdings_rub": "22.0000",
+            "parsed_partner_main_reconciliation_delta_rub": "0.0000",
+            "parsed_other_withholdings_reconciliation_delta_rub": "0.0000",
         }
         for key, value in expected.items():
             if week.get(key) != value:
@@ -84,8 +91,9 @@ def main() -> None:
         if (
             negative["row_count"] != 1
             or negative["signed_deduction_sum_rub"] != "-5.0000"
-            or negative["current_system_abs_sum_rub"] != "5.0000"
-            or negative["abs_vs_signed_expense_uplift_rub"] != "10.0000"
+            or negative["fixed_system_signed_sum_rub"] != "-5.0000"
+            or negative["legacy_system_abs_sum_rub"] != "5.0000"
+            or negative["legacy_abs_vs_signed_expense_uplift_rub"] != "10.0000"
         ):
             raise AssertionError(f"negative deduction evidence mismatch: {negative}")
         candidates = first["unknown_marketing_name_candidates"]
@@ -107,11 +115,42 @@ def main() -> None:
         if (
             marketing_group["signed_source_sum_rub"] != "40.0000"
             or marketing_group["allocated_amount_sum_rub"] != "20.0000"
-            or marketing_group["current_other_contribution_rub"] != "20.0000"
+            or marketing_group["partner_other_expenses_contribution_rub"] != "0.0000"
+            or marketing_group["other_withholdings_contribution_rub"] != "0.0000"
             or marketing_group["semantic_partner_target"]
             != "Исключить из Partner Finance; канонический источник — ads_compact"
         ):
             raise AssertionError(f"marketing group mismatch: {marketing_group}")
+        semantic_marketing = next(
+            item
+            for item in first["semantic_category_totals"]
+            if item["finance_classifier_bucket"] == "marketing"
+            and item["accounting_path"] == "allocated_account"
+        )
+        if (
+            semantic_marketing["allocated_amount_sum_rub"] != "20.0000"
+            or semantic_marketing["partner_other_expenses_contribution_rub"] != "0.0000"
+            or semantic_marketing["other_withholdings_contribution_rub"] != "0.0000"
+        ):
+            raise AssertionError(
+                f"semantic marketing exclusion mismatch: {semantic_marketing}"
+            )
+        transit_addback = next(
+            item
+            for item in first["operation_groups"]
+            if item["finance_classifier_bucket"]
+            == "finance_capitalization:transit"
+        )
+        if (
+            transit_addback["system_amount_sum_rub"] != "-2.0000"
+            or transit_addback["partner_other_expenses_contribution_rub"]
+            != "-2.0000"
+            or transit_addback["other_withholdings_contribution_rub"]
+            != "0.0000"
+        ):
+            raise AssertionError(
+                f"direct transit capitalization reconciliation mismatch: {transit_addback}"
+            )
 
         server = run_partner_finance_diagnostic(
             DiagnosticScope(
@@ -125,7 +164,7 @@ def main() -> None:
             server["selection"]["mode"] != "server_settings"
             or server["selection"]["week_selection"] != "all_finance_weeks"
             or server["nm_id"] != TARGET_NM
-            or server["weeks"][0]["current_other_withholdings_rub"] != "58.5000"
+            or server["weeks"][0]["current_other_withholdings_rub"] != "22.0000"
         ):
             raise AssertionError(f"server-settings selection mismatch: {server}")
 
@@ -295,6 +334,29 @@ def _make_logical_duplicate_evidence(database: Path) -> None:
         conn.commit()
 
 
+def _make_direct_transit_capitalized_projection(database: Path) -> None:
+    """Model the indexed net transit after a proven per-SKU addback."""
+
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            """SELECT metrics_json FROM wb_finance_weekly_sku_aggregates
+               WHERE seller_id=? AND week_start=? AND nm_id=?""",
+            (SELLER, WEEK.isoformat(), TARGET_NM),
+        ).fetchone()
+        metrics = json.loads(str(row[0]))
+        metrics["capitalized_transit_logistics"] = "2.0000"
+        metrics["profit_period_expenses"] = format(
+            Decimal(str(metrics["profit_period_expenses"])) - Decimal("2"),
+            ".4f",
+        )
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET metrics_json=?
+               WHERE seller_id=? AND week_start=? AND nm_id=?""",
+            (json.dumps(metrics, sort_keys=True), SELLER, WEEK.isoformat(), TARGET_NM),
+        )
+        conn.commit()
+
+
 def _finance_rows() -> list[dict]:
     rows = [
         _sale(1, TARGET_NM, "VC101", "BAR101", revenue="1000", for_pay="800"),
@@ -316,6 +378,7 @@ def _finance_rows() -> list[dict]:
         _deduction(10, "0", "", "", "2", "Подписка Jamm"),
         _deduction(11, "0", "", "", "3", "Платный сервис"),
         _deduction(12, "0", "", "", "5", "Услуги доставки транзитных поставок"),
+        _deduction(14, TARGET_NM, "VC101", "BAR101", "5", "Услуги доставки транзитных поставок"),
         {
             **_base(13, "0", "", ""),
             "sellerOperName": "Корректировка",

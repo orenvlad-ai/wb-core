@@ -375,6 +375,7 @@ def run_finance_partner_ui_flow(
                     and download_enabled
                 )
                 ui_table = _partner_ui_table_facts(reports)
+                category_definitions = _partner_category_definitions(preview_payload)
                 preview_evidence = {
                     "attempted": True,
                     "ready": preview_ready,
@@ -395,6 +396,10 @@ def run_finance_partner_ui_flow(
                     "selected_weeks": selected_weeks,
                     "source_digest": str(preview_payload.get("source_digest") or ""),
                     "ui_table": ui_table,
+                    "other_expense_category_definitions": [
+                        {"key": key, "label": label}
+                        for key, label in category_definitions
+                    ],
                     "xlsx": dict(preview_evidence["xlsx"]),
                 }
                 preflight_partner = evidence_dir / "partner_report_preflight.png"
@@ -411,8 +416,12 @@ def run_finance_partner_ui_flow(
                 _assert(
                     ui_table["main_label"] == OTHER_DIRECT_ALLOCATED_LABEL
                     and ui_table["old_label_count"] == 0
-                    and len(ui_table["categories"]) == 4,
-                    "Partner preview renders the new four-row expense hierarchy",
+                    and [
+                        (str(item.get("key") or ""), str(item.get("label") or ""))
+                        for item in ui_table["categories"]
+                    ]
+                    == category_definitions,
+                    "Partner preview renders exactly the non-zero classified expense rows",
                 )
                 _assert(
                     bool(ui_table["tooltip_keyboard_focus_visible"]),
@@ -692,6 +701,30 @@ def _partner_ui_table_facts(reports: Any) -> dict[str, Any]:
     return dict(facts)
 
 
+def _partner_category_definitions(preview: dict[str, Any]) -> list[tuple[str, str]]:
+    """Validate the server-owned ordered visibility contract for Partner subrows."""
+
+    canonical = dict(OTHER_EXPENSE_CATEGORIES)
+    raw = preview.get("other_expense_category_definitions") or []
+    if not isinstance(raw, list):
+        raise AssertionError("Partner expense category definitions must be a list")
+    result: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise AssertionError("Partner expense category definition must be an object")
+        key = str(item.get("key") or "")
+        label = str(item.get("label") or "")
+        if key not in canonical or canonical[key] != label:
+            raise AssertionError(f"unknown Partner expense category definition: {key!r}")
+        if key in {existing for existing, _label in result}:
+            raise AssertionError(f"duplicate Partner expense category definition: {key}")
+        result.append((key, label))
+    expected_order = [key for key, _label in OTHER_EXPENSE_CATEGORIES if key in dict(result)]
+    if [key for key, _label in result] != expected_order:
+        raise AssertionError("Partner expense category definitions are out of canonical order")
+    return result
+
+
 def _verify_partner_xlsx(
     path: Path,
     *,
@@ -705,6 +738,7 @@ def _verify_partner_xlsx(
     external_links: list[str] = []
     macro_members: list[str] = []
     try:
+        category_definitions = _partner_category_definitions(preview)
         with zipfile.ZipFile(BytesIO(raw)) as archive:
             for member in archive.namelist():
                 lowered = member.casefold()
@@ -801,13 +835,25 @@ def _verify_partner_xlsx(
         if main_row is None:
             findings.append({"code": "main_expense_row_missing"})
         category_rows = {
-            key: rows_by_label.get(label)
-            for key, label in OTHER_EXPENSE_CATEGORIES
+            key: rows_by_label.get(label) for key, label in category_definitions
         }
         missing_categories = [key for key, row in category_rows.items() if row is None]
         if missing_categories:
             findings.append(
                 {"code": "expense_categories_missing", "keys": missing_categories}
+            )
+        expected_keys = {key for key, _label in category_definitions}
+        unexpected_categories = [
+            key
+            for key, label in OTHER_EXPENSE_CATEGORIES
+            if key not in expected_keys and label in rows_by_label
+        ]
+        if unexpected_categories:
+            findings.append(
+                {
+                    "code": "zero_only_expense_categories_present",
+                    "keys": unexpected_categories,
+                }
             )
 
         week_breakdowns = [
@@ -835,11 +881,11 @@ def _verify_partner_xlsx(
             for position, breakdown in enumerate(week_breakdowns):
                 actual_categories = {
                     key: _money_cent(category_rows[key][position + 2].value)  # type: ignore[index]
-                    for key, _label in OTHER_EXPENSE_CATEGORIES
+                    for key, _label in category_definitions
                 }
                 expected_categories = {
                     key: _money_cent(breakdown.get(key))
-                    for key, _label in OTHER_EXPENSE_CATEGORIES
+                    for key, _label in category_definitions
                 }
                 if actual_categories != expected_categories:
                     findings.append(
@@ -854,7 +900,7 @@ def _verify_partner_xlsx(
                     findings.append(
                         {"code": "displayed_kopeck_conservation_failed", "position": position}
                     )
-                if any(category_rows[key][0].value is not None for key, _label in OTHER_EXPENSE_CATEGORIES):  # type: ignore[index]
+                if any(category_rows[key][0].value is not None for key, _label in category_definitions):  # type: ignore[index]
                     findings.append({"code": "category_coefficient_exposed"})
                     break
 
@@ -873,7 +919,12 @@ def _verify_partner_xlsx(
             ]
             for item in ui_table.get("categories") or []
         }
-        for key, _label in OTHER_EXPENSE_CATEGORIES:
+        if [
+            (str(item.get("key") or ""), str(item.get("label") or ""))
+            for item in ui_table.get("categories") or []
+        ] != category_definitions:
+            findings.append({"code": "ui_category_definitions_mismatch"})
+        for key, _label in category_definitions:
             expected = [
                 _money_cent(item.get(key)) for item in week_breakdowns
             ]

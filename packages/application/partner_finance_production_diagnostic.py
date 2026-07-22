@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
@@ -30,7 +31,7 @@ from packages.application.wb_finance_weekly import (
 ZERO = Decimal("0")
 MONEY = Decimal("0.0001")
 RATIO = Decimal("0.000000000001")
-DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v2"
+DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v3_signed_categories"
 ADS_SOURCE_KEY = "ads_compact"
 ADS_SOURCE_ROLE = "accepted_closed_day_snapshot"
 REQUIRED_SETTING_FIELDS = (
@@ -44,7 +45,6 @@ REQUIRED_SETTING_FIELDS = (
 MARKETING_CANDIDATE_TOKENS = (
     "advert",
     "campaign",
-    "cpm",
     "media",
     "marketing",
     "promo",
@@ -241,23 +241,39 @@ def _run_in_snapshot(
                 {"code": "common_expense_zero_revenue_base", "week_start": week}
             )
 
-        account_total = _decimal(
+        legacy_account_total = _decimal(
             account_metrics.get("profit_period_expenses")
         ) - _decimal(account_metrics.get("positive_adjustments"))
-        account_first_three = (
+        legacy_account_first_three = (
             _decimal(account_metrics.get("transit_logistics"))
             - _decimal(account_metrics.get("capitalized_transit_logistics"))
             + _decimal(account_metrics.get("subscriptions"))
             + _decimal(account_metrics.get("paid_services"))
         )
-        account_other_source = account_total - account_first_three
-        allocated_account_other = (
-            account_other_source * allocation_ratio
+        legacy_account_other_source = legacy_account_total - legacy_account_first_three
+        legacy_allocated_account_other = (
+            legacy_account_other_source * allocation_ratio
             if allocation_ratio is not None
             else ZERO
         )
-        direct_other = _decimal(sku_metrics.get("other_deductions"))
-        current_other = direct_other + allocated_account_other
+        legacy_direct_other = _decimal(sku_metrics.get("other_deductions"))
+        legacy_current_other = legacy_direct_other + legacy_allocated_account_other
+        direct_partner_other = _partner_subrow_total(sku_metrics)
+        allocated_account_partner_other = (
+            _partner_subrow_total(account_metrics) * allocation_ratio
+            if allocation_ratio is not None
+            else ZERO
+        )
+        partner_other_expenses = (
+            direct_partner_other + allocated_account_partner_other
+        )
+        current_other_withholdings = _decimal(
+            sku_metrics.get("other_deductions")
+        ) + (
+            _decimal(account_metrics.get("other_deductions")) * allocation_ratio
+            if allocation_ratio is not None
+            else ZERO
+        )
         direct_marketing = _decimal(sku_metrics.get("marketing"))
         account_marketing = _decimal(account_metrics.get("marketing"))
         allocated_marketing = (
@@ -274,7 +290,8 @@ def _run_in_snapshot(
         )
         blockers.extend(ads["blockers"])
 
-        parsed_current_other = ZERO
+        parsed_partner_other = ZERO
+        parsed_current_other_withholdings = ZERO
         selected_row_count = 0
         account_row_count = 0
         raw_cursor = conn.execute(
@@ -352,18 +369,16 @@ def _run_in_snapshot(
                 continue
             components = _expense_components(
                 raw,
-                stored_report_id=str(stored["report_id"]),
-                stored_rrd_id=str(stored["rrd_id"]),
                 path=path,
                 coefficient=coefficient,
-                # An allocated-account row is unresolved and therefore cannot
-                # match a canonical nmId/supply capitalization layer. Direct
-                # acceptance/transit components never contribute to current
-                # Partner Other; their gross raw values are provenance only.
-                capitalization={},
             )
             for component in components:
-                parsed_current_other += component["current_other_contribution"]
+                parsed_partner_other += component[
+                    "partner_other_expenses_contribution"
+                ]
+                parsed_current_other_withholdings += component[
+                    "other_withholdings_contribution"
+                ]
                 if not _add_group(
                     group_state,
                     raw=raw,
@@ -406,7 +421,62 @@ def _run_in_snapshot(
                 ):
                     candidate_bound_exceeded = True
 
-        parsing_delta = current_other - parsed_current_other
+        # Raw groups intentionally retain gross acceptance/transit amounts.
+        # The indexed projection owns the exact, globally capped addback but
+        # exposes it only as a per-SKU aggregate, so record that aggregate as
+        # a separate signed projection component instead of inventing row IDs.
+        for component_name, addback, target, partner_other in (
+            (
+                "transit",
+                _decimal(sku_metrics.get("capitalized_transit_logistics")),
+                "Транзитная логистика, не подтверждённая как капитализированная",
+                True,
+            ),
+            (
+                "acceptance",
+                _decimal(sku_metrics.get("capitalized_acceptance")),
+                "Платная приёмка",
+                False,
+            ),
+        ):
+            if addback == ZERO:
+                continue
+            capitalization_component = {
+                "component": f"capitalization_addback:{component_name}",
+                "signed_source_amount": ZERO,
+                "system_amount": -addback,
+                "allocation_coefficient": Decimal("1"),
+                "allocated_amount": -addback,
+                "partner_other_expenses_contribution": (
+                    -addback if partner_other else ZERO
+                ),
+                "other_withholdings_contribution": ZERO,
+                "classifier_bucket": f"finance_capitalization:{component_name}",
+                "semantic_target": target,
+                "path": "direct",
+            }
+            parsed_partner_other += capitalization_component[
+                "partner_other_expenses_contribution"
+            ]
+            if not _add_group(
+                group_state,
+                raw={
+                    "bonusTypeName": "Finance capitalization addback",
+                    "sellerOperName": component_name,
+                },
+                component=capitalization_component,
+                week=week,
+                report_id="<projection>",
+                rrd_id="<projection>",
+                max_examples=scope.max_examples,
+                max_accumulated_groups=MAX_ACCUMULATED_OPERATION_GROUPS,
+            ):
+                operation_group_bound_exceeded = True
+
+        partner_other_parsing_delta = partner_other_expenses - parsed_partner_other
+        other_withholdings_parsing_delta = (
+            current_other_withholdings - parsed_current_other_withholdings
+        )
         week_results.append(
             {
                 "week_start": week,
@@ -421,14 +491,29 @@ def _run_in_snapshot(
                 "direct_finance_marketing_rub": _money(direct_marketing),
                 "account_finance_marketing_rub": _money(account_marketing),
                 "allocated_finance_marketing_rub": _money(allocated_marketing),
-                "current_other_withholdings_rub": _money(current_other),
+                "finance_marketing_partner_other_contribution_rub": _money(ZERO),
+                "legacy_other_withholdings_rub": _money(legacy_current_other),
+                "partner_other_expenses_main_row_rub": _money(
+                    partner_other_expenses
+                ),
+                "current_other_withholdings_rub": _money(
+                    current_other_withholdings
+                ),
                 "residual_without_finance_marketing_rub": _money(
-                    current_other - allocated_marketing
+                    legacy_current_other - allocated_marketing
+                ),
+                "parsed_partner_other_expenses_main_row_rub": _money(
+                    parsed_partner_other
                 ),
                 "parsed_current_other_withholdings_rub": _money(
-                    parsed_current_other
+                    parsed_current_other_withholdings
                 ),
-                "parsed_reconciliation_delta_rub": _money(parsing_delta),
+                "parsed_partner_main_reconciliation_delta_rub": _money(
+                    partner_other_parsing_delta
+                ),
+                "parsed_other_withholdings_reconciliation_delta_rub": _money(
+                    other_withholdings_parsing_delta
+                ),
                 "finance_formula_version": str(
                     sku_projection["formula_version"] or ""
                 ),
@@ -474,7 +559,13 @@ def _run_in_snapshot(
     )
     finalized_groups = _finalize_groups(
         group_state,
-        current_other_by_week={
+        partner_other_by_week={
+            item["week_start"]: _decimal(
+                item["partner_other_expenses_main_row_rub"]
+            )
+            for item in week_results
+        },
+        other_withholdings_by_week={
             item["week_start"]: _decimal(item["current_other_withholdings_rub"])
             for item in week_results
         },
@@ -492,16 +583,26 @@ def _run_in_snapshot(
         "system_amount_sum_rub": _money(
             sum((_decimal(item["system_amount_sum_rub"]) for item in omitted_groups), ZERO)
         ),
-        "current_other_contribution_sum_rub": _money(
+        "partner_other_expenses_contribution_sum_rub": _money(
             sum(
                 (
-                    _decimal(item["current_other_contribution_rub"])
+                    _decimal(item["partner_other_expenses_contribution_rub"])
+                    for item in omitted_groups
+                ),
+                ZERO,
+            )
+        ),
+        "other_withholdings_contribution_sum_rub": _money(
+            sum(
+                (
+                    _decimal(item["other_withholdings_contribution_rub"])
                     for item in omitted_groups
                 ),
                 ZERO,
             )
         ),
     }
+    semantic_category_totals = _semantic_category_totals(finalized_groups)
     negative = _negative_evidence(negative_state)
     candidates = _finalize_candidates(candidate_state)
     source_digest = "sha256:" + source_hasher.hexdigest()
@@ -519,6 +620,7 @@ def _run_in_snapshot(
         "operation_groups": shown_groups,
         "operation_group_count": len(finalized_groups),
         "operation_groups_digest": groups_digest,
+        "semantic_category_totals": semantic_category_totals,
         "omitted_operation_groups": omitted_summary,
         "duplicates": {
             "logical_duplicate_identity_count": len(duplicate_rows),
@@ -843,12 +945,11 @@ def _ads_for_week(
 def _expense_components(
     raw: Mapping[str, Any],
     *,
-    stored_report_id: str,
-    stored_rrd_id: str,
     path: str,
     coefficient: Decimal,
-    capitalization: Mapping[tuple[str, str, str], Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Return signed gross raw components before indexed capitalization addbacks."""
+
     components: list[dict[str, Any]] = []
     doc = str(raw.get("docTypeName") or "").casefold()
     direction = Decimal("1") if doc == "продажа" else Decimal("-1") if doc == "возврат" else ZERO
@@ -860,12 +961,16 @@ def _expense_components(
         target: str,
         *,
         classifier_bucket: str,
-        current_other: bool,
+        partner_other: bool,
+        other_withholdings: bool = False,
     ) -> None:
         if source_amount == ZERO and system_amount == ZERO:
             return
         allocated = system_amount * coefficient
-        contribution = allocated if current_other else ZERO
+        partner_contribution = allocated if partner_other else ZERO
+        other_withholdings_contribution = (
+            allocated if other_withholdings else ZERO
+        )
         components.append(
             {
                 "component": key,
@@ -873,7 +978,8 @@ def _expense_components(
                 "system_amount": system_amount,
                 "allocation_coefficient": coefficient,
                 "allocated_amount": allocated,
-                "current_other_contribution": contribution,
+                "partner_other_expenses_contribution": partner_contribution,
+                "other_withholdings_contribution": other_withholdings_contribution,
                 "classifier_bucket": classifier_bucket,
                 "semantic_target": target,
                 "path": path,
@@ -892,7 +998,7 @@ def _expense_components(
             agent,
             "Агентское вознаграждение WB",
             classifier_bucket="finance_field:agent_remuneration",
-            current_other=path == "allocated_account",
+            partner_other=False,
         )
         add(
             "acquiring",
@@ -900,7 +1006,7 @@ def _expense_components(
             acquiring,
             "Эквайринг",
             classifier_bucket="finance_field:acquiring",
-            current_other=path == "allocated_account",
+            partner_other=False,
         )
     for key, raw_field, target in (
         ("logistics", "deliveryService", "Логистика WB"),
@@ -914,34 +1020,23 @@ def _expense_components(
             value,
             target,
             classifier_bucket=f"finance_field:{key}",
-            current_other=path == "allocated_account",
+            partner_other=False,
         )
     acceptance = _decimal(raw.get("paidAcceptance"))
-    acceptance_addback = _decimal(
-        (capitalization.get((stored_report_id, stored_rrd_id, "acceptance")) or {}).get(
-            "addback_rub"
-        )
-    )
     add(
         "acceptance",
         acceptance,
-        acceptance - acceptance_addback,
+        acceptance,
         "Платная приёмка",
         classifier_bucket="finance_field:acceptance",
-        current_other=path == "allocated_account",
+        partner_other=False,
     )
 
     deduction = _decimal(raw.get("deduction"))
     if deduction:
         bucket = classify_deduction(raw)
-        system = abs(deduction)
+        system = deduction
         if bucket == "transit_logistics":
-            transit_addback = _decimal(
-                (capitalization.get((stored_report_id, stored_rrd_id, "transit")) or {}).get(
-                    "addback_rub"
-                )
-            )
-            system -= transit_addback
             target = "Транзитная логистика, не подтверждённая как капитализированная"
         elif bucket == "subscriptions":
             target = "Подписка WB Jam"
@@ -949,6 +1044,8 @@ def _expense_components(
             target = "Платные сервисы WB"
         elif bucket == "marketing":
             target = "Исключить из Partner Finance; канонический источник — ads_compact"
+        elif bucket == "review_points":
+            target = "Баллы за отзывы"
         else:
             target = "Отдельное удержание: " + _operation_name(raw)
         add(
@@ -957,11 +1054,15 @@ def _expense_components(
             system,
             target,
             classifier_bucket=bucket,
-            current_other=(
-                bucket in {"marketing", "other_deductions"}
-                if path == "allocated_account"
-                else bucket == "other_deductions"
-            ),
+            partner_other=bucket
+            in {
+                "transit_logistics",
+                "subscriptions",
+                "paid_services",
+                "review_points",
+                "other_deductions",
+            },
+            other_withholdings=bucket == "other_deductions",
         )
 
     adjustment = _decimal(raw.get("additionalPayment"))
@@ -977,9 +1078,25 @@ def _expense_components(
                 if adjustment > ZERO
                 else "finance_field:correction"
             ),
-            current_other=path == "allocated_account",
+            partner_other=False,
         )
     return components
+
+
+def _partner_subrow_total(metrics: Mapping[str, Any]) -> Decimal:
+    """Return the exact Partner subrow source total after marketing exclusion."""
+
+    return sum(
+        (
+            _decimal(metrics.get("transit_logistics"))
+            - _decimal(metrics.get("capitalized_transit_logistics")),
+            _decimal(metrics.get("subscriptions")),
+            _decimal(metrics.get("paid_services")),
+            _decimal(metrics.get("review_points")),
+            _decimal(metrics.get("other_deductions")),
+        ),
+        ZERO,
+    )
 
 
 def _add_group(
@@ -1023,7 +1140,8 @@ def _add_group(
             "signed_source_sum": ZERO,
             "system_amount_sum": ZERO,
             "allocated_amount_sum": ZERO,
-            "current_other_contribution": ZERO,
+            "partner_other_expenses_contribution": ZERO,
+            "other_withholdings_contribution": ZERO,
             "coefficients": set(),
             "examples": [],
         },
@@ -1032,8 +1150,11 @@ def _add_group(
     state["signed_source_sum"] += _decimal(component["signed_source_amount"])
     state["system_amount_sum"] += _decimal(component["system_amount"])
     state["allocated_amount_sum"] += _decimal(component["allocated_amount"])
-    state["current_other_contribution"] += _decimal(
-        component["current_other_contribution"]
+    state["partner_other_expenses_contribution"] += _decimal(
+        component["partner_other_expenses_contribution"]
+    )
+    state["other_withholdings_contribution"] += _decimal(
+        component["other_withholdings_contribution"]
     )
     state["coefficients"].add(_ratio(_decimal(component["allocation_coefficient"])))
     if len(state["examples"]) < max_examples:
@@ -1046,14 +1167,32 @@ def _add_group(
 def _finalize_groups(
     groups: Mapping[tuple[str, ...], Mapping[str, Any]],
     *,
-    current_other_by_week: Mapping[str, Decimal],
+    partner_other_by_week: Mapping[str, Decimal],
+    other_withholdings_by_week: Mapping[str, Decimal],
 ) -> list[dict[str, Any]]:
-    current_total = sum(current_other_by_week.values(), ZERO)
+    partner_total = sum(partner_other_by_week.values(), ZERO)
+    other_withholdings_total = sum(other_withholdings_by_week.values(), ZERO)
     result: list[dict[str, Any]] = []
     for state in groups.values():
         dimensions = state["dimensions"]
-        contribution = _decimal(state["current_other_contribution"])
-        share = contribution / current_total * Decimal("100") if current_total else None
+        partner_contribution = _decimal(
+            state["partner_other_expenses_contribution"]
+        )
+        other_withholdings_contribution = _decimal(
+            state["other_withholdings_contribution"]
+        )
+        partner_share = (
+            partner_contribution / partner_total * Decimal("100")
+            if partner_total
+            else None
+        )
+        other_withholdings_share = (
+            other_withholdings_contribution
+            / other_withholdings_total
+            * Decimal("100")
+            if other_withholdings_total
+            else None
+        )
         result.append(
             {
                 "bonus_type_name": dimensions[0],
@@ -1070,21 +1209,96 @@ def _finalize_groups(
                 "system_amount_sum_rub": _money(state["system_amount_sum"]),
                 "allocation_coefficients": sorted(state["coefficients"]),
                 "allocated_amount_sum_rub": _money(state["allocated_amount_sum"]),
-                "current_other_contribution_rub": _money(contribution),
-                "share_pct_of_current_other": _optional_ratio(share),
+                "partner_other_expenses_contribution_rub": _money(
+                    partner_contribution
+                ),
+                "share_pct_of_partner_other_expenses": _optional_ratio(
+                    partner_share
+                ),
+                "other_withholdings_contribution_rub": _money(
+                    other_withholdings_contribution
+                ),
+                "share_pct_of_other_withholdings": _optional_ratio(
+                    other_withholdings_share
+                ),
                 "examples": state["examples"],
             }
         )
     return sorted(
         result,
         key=lambda item: (
-            -abs(_decimal(item["current_other_contribution_rub"])),
+            -abs(_decimal(item["partner_other_expenses_contribution_rub"])),
+            -abs(_decimal(item["other_withholdings_contribution_rub"])),
             -abs(_decimal(item["allocated_amount_sum_rub"])),
             str(item["finance_classifier_bucket"]),
             str(item["semantic_partner_target"]),
             str(item["bonus_type_name"]),
         ),
     )
+
+
+def _semantic_category_totals(groups: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse every finalized operation group into a small exact category set."""
+
+    totals: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in groups:
+        key = (
+            str(item["finance_classifier_bucket"]),
+            str(item["accounting_path"]),
+            str(item["semantic_partner_target"]),
+        )
+        state = totals.setdefault(
+            key,
+            {
+                "finance_classifier_bucket": key[0],
+                "accounting_path": key[1],
+                "semantic_partner_target": key[2],
+                "operation_group_count": 0,
+                "row_count": 0,
+                "signed_source_sum": ZERO,
+                "system_amount_sum": ZERO,
+                "allocated_amount_sum": ZERO,
+                "partner_other_expenses_contribution": ZERO,
+                "other_withholdings_contribution": ZERO,
+            },
+        )
+        state["operation_group_count"] += 1
+        state["row_count"] += int(item["row_count"])
+        state["signed_source_sum"] += _decimal(item["signed_source_sum_rub"])
+        state["system_amount_sum"] += _decimal(item["system_amount_sum_rub"])
+        state["allocated_amount_sum"] += _decimal(item["allocated_amount_sum_rub"])
+        state["partner_other_expenses_contribution"] += _decimal(
+            item["partner_other_expenses_contribution_rub"]
+        )
+        state["other_withholdings_contribution"] += _decimal(
+            item["other_withholdings_contribution_rub"]
+        )
+    return [
+        {
+            **{
+                key: value
+                for key, value in state.items()
+                if key
+                not in {
+                    "signed_source_sum",
+                    "system_amount_sum",
+                    "allocated_amount_sum",
+                    "partner_other_expenses_contribution",
+                    "other_withholdings_contribution",
+                }
+            },
+            "signed_source_sum_rub": _money(state["signed_source_sum"]),
+            "system_amount_sum_rub": _money(state["system_amount_sum"]),
+            "allocated_amount_sum_rub": _money(state["allocated_amount_sum"]),
+            "partner_other_expenses_contribution_rub": _money(
+                state["partner_other_expenses_contribution"]
+            ),
+            "other_withholdings_contribution_rub": _money(
+                state["other_withholdings_contribution"]
+            ),
+        }
+        for _key, state in sorted(totals.items())
+    ]
 
 
 def _add_candidate(
@@ -1210,8 +1424,9 @@ def _negative_evidence(state: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "row_count": int(state["row_count"]),
         "signed_deduction_sum_rub": _money(signed),
-        "current_system_abs_sum_rub": _money(system),
-        "abs_vs_signed_expense_uplift_rub": _money(system - signed),
+        "fixed_system_signed_sum_rub": _money(signed),
+        "legacy_system_abs_sum_rub": _money(system),
+        "legacy_abs_vs_signed_expense_uplift_rub": _money(system - signed),
         "examples": [
             {
                 **{key: value for key, value in item.items() if not isinstance(value, Decimal)},
@@ -1233,7 +1448,17 @@ def _marketing_candidate_tokens(raw: Mapping[str, Any]) -> list[str]:
             "docTypeName",
         )
     ).casefold()
-    return sorted({token for token in MARKETING_CANDIDATE_TOKENS if token in text})
+    matched: set[str] = set()
+    for token in MARKETING_CANDIDATE_TOKENS:
+        if token.isascii():
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+                text,
+            ):
+                matched.add(token)
+        elif token in text:
+            matched.add(token)
+    return sorted(matched)
 
 
 def _operation_name(raw: Mapping[str, Any]) -> str:
