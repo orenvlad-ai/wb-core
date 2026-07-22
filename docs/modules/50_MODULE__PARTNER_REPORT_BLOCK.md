@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "migration/108_finance_canonical_cost_partner_ui_recovery.md"
   - "migration/110_finance_partner_temporal_v3.md"
+  - "migration/111_partner_marketing_diagnostic_ads_recovery.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -28,7 +29,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/partner-report/preview"
   - "POST /v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 source_of_truth_level: "module_canonical"
-update_note: "V3 shares the warehouse temporal cost policy, exposes four reconciled business expense categories, and makes production Partner UI/XLSX acceptance fail closed."
+update_note: "V3 remains the active calculation contract; a bounded raw-operation diagnostic now proves Partner/Finance residual composition before any formula change."
 ---
 
 # 1. Purpose and active surface
@@ -125,6 +126,8 @@ The table has metrics in rows, weeks in columns and `Итого за перио�
 
 The production-like regression fixture adds 295,919 unrelated raw Finance rows after projections, measures an explicit full JSON-decode baseline, and proves a two-week selected-SKU preview remains an indexed sub-two-second lookup without a synchronous raw scan. The smoke prints both timings; the current local evidence was 172 ms for the synthetic full scan versus 1 ms for indexed preview over 295,923 total raw rows (machine-specific, retained as comparative evidence rather than a production SLA).
 
+Production incident reconciliation does not add a raw scan to preview. The separate repo-owned `partner-finance-diagnostic` action resolves the current complete server-owned setting (or an explicit exact `nmId`/week scope) and reads raw Finance rows only in a bounded read-only transaction. Evidence groups every material component by WB operation fields, `nmId` presence, deduction sign, Finance classifier and direct/allocated path, with signed/system/allocated sums and bounded `reportId`/`rrdId` examples. It also proves ads coverage, direct/account marketing, duplicates, classifier candidates and the expense uplift caused by negative deductions. Diagnostic output is external mode-`0600` evidence and cannot change preview, settings, Finance projections or source snapshots.
+
 # 6. XLSX contract
 
 `POST .../preview.xlsx` receives the selected `nmId`, exact weeks and the visible preview's `expected_source_digest`. Source drift returns a conflict and requires rebuilding the UI preview.
@@ -142,6 +145,7 @@ ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scann
 - authorization: `python3 apps/registry_upload_http_entrypoint_auth_smoke.py`;
 - public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
 - authenticated production read-only acceptance: hosted `finance-ui-flow`; passed status requires ready preview, empty blockers, visible table, real XLSX download, workbook structure/content checks, UI/XLSX reconciliation, desktop/narrow screenshots and no fatal browser/network errors.
+- production raw-operation reconciliation: hosted `partner-finance-diagnostic --output <external-0600-json>`.
 
 The flow records every attempted preview POST before asserting its outcome. JSON failures retain HTTP status, application code, human-readable error and blockers. A non-JSON proxy/runtime response retains HTTP status plus the bounded `response_not_json` code without copying its HTML body into evidence. Neither failure can produce `status=passed`.
 

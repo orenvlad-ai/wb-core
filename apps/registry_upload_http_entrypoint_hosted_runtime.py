@@ -18,7 +18,7 @@ import ssl
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -35,6 +35,8 @@ AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
+PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
+ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -2416,6 +2418,246 @@ def _run_remote_finance_canonical_action(
     return payload
 
 
+def run_partner_finance_diagnostic_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_partner_finance_diagnostic(
+        target,
+        nm_id=str(getattr(args, "nm_id", "") or "").strip(),
+        weeks=tuple(str(value).strip() for value in (args.week or []) if str(value).strip()),
+    )
+    output_path = Path(str(args.output)).resolve()
+    if output_path == ROOT or ROOT in output_path.parents:
+        raise ValueError("Partner/Finance diagnostic evidence must stay outside the Git checkout")
+    _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": "partner-finance-diagnostic",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_partner_finance_diagnostic(
+    target: HostedRuntimeTarget,
+    *,
+    nm_id: str,
+    weeks: tuple[str, ...],
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action="partner-finance-diagnostic")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Partner/Finance diagnostic requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("Partner/Finance diagnostic requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/partner_finance_production_diagnostic.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--server-settings",
+        "--max-weeks",
+        "64",
+        "--max-groups",
+        "500",
+        "--max-examples",
+        "5",
+    ]
+    if nm_id:
+        runner_args.extend(["--nm-id", nm_id])
+    for week in weeks:
+        runner_args.extend(["--week", week])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode not in {0, 3}:
+        raise RuntimeError(
+            "Partner/Finance diagnostic failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Partner/Finance diagnostic returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") not in {"ready", "incomplete"}:
+        raise RuntimeError("Partner/Finance diagnostic returned an invalid result")
+    return payload
+
+
+def run_ads_historical_recovery_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ads_historical_action)
+    nm_ids = tuple(sorted({int(value) for value in args.nm_id}))
+    target_dates = tuple(sorted({str(value).strip() for value in args.target_date}))
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("ads historical reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ads_historical_recovery(
+        target,
+        action=action,
+        nm_ids=nm_ids,
+        target_dates=target_dates,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("ads historical evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"ads-historical-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_ads_historical_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    nm_ids: tuple[int, ...],
+    target_dates: tuple[str, ...],
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"ads-historical-{action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action="ads-historical-apply", dry_run=False)
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported ads historical action: {action}")
+    if not nm_ids or any(value <= 0 for value in nm_ids):
+        raise ValueError("ads historical recovery requires exact positive --nm-id values")
+    if not target_dates:
+        raise ValueError("ads historical recovery requires exact --target-date values")
+    for value in target_dates:
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid ads historical target date: {value}") from exc
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("ads historical recovery requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("ads historical recovery requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/ads_historical_recovery.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+    ]
+    for nm_id in nm_ids:
+        runner_args.extend(["--nm-id", str(nm_id)])
+    for target_date in target_dates:
+        runner_args.extend(["--target-date", target_date])
+    if action == "readback":
+        runner_args.append("--readback")
+    elif action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("ads historical apply requires an existing --plan-file")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        expected_scope = {
+            "nm_ids": list(nm_ids),
+            "target_dates": list(target_dates),
+        }
+        if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
+            raise ValueError("ads historical plan and --fingerprint do not match")
+        if (
+            str(plan.get("schema_version") or "") != "ads_historical_recovery_v1"
+            or plan.get("dry_run") is not True
+            or not bool(plan.get("apply_allowed"))
+            or plan.get("scope") != expected_scope
+        ):
+            raise ValueError("ads historical reviewed plan is not ready for this exact scope")
+        if not approval_reference.strip():
+            raise ValueError("ads historical apply requires --approval-reference")
+        runner_args.extend(
+            [
+                "--apply",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/ads-historical",
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ads historical {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ads historical runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        raise RuntimeError("ads historical runner returned an invalid result")
+    if action == "readback" and (
+        payload.get("status") != "ready" or bool(payload.get("blockers"))
+    ):
+        raise RuntimeError("ads historical readback has blockers")
+    return payload
+
+
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def run_warehouse_archival_estimate_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -3248,6 +3490,64 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_canonical_readback.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="readback",
+    )
+
+    partner_finance_diagnostic = subparsers.add_parser(
+        "partner-finance-diagnostic",
+        help=(
+            "Run the bounded read-only Partner/Finance raw-operation reconciliation "
+            "on the active runtime."
+        ),
+    )
+    partner_finance_diagnostic.add_argument("--nm-id", default="")
+    partner_finance_diagnostic.add_argument(
+        "--week",
+        action="append",
+        default=[],
+        help="Exact selected Partner week start; repeat as needed.",
+    )
+    partner_finance_diagnostic.add_argument("--output", required=True)
+    partner_finance_diagnostic.set_defaults(
+        handler=run_partner_finance_diagnostic_command,
+    )
+
+    ads_historical_dry_run = subparsers.add_parser(
+        "ads-historical-dry-run",
+        help="Build an exact read-only official fullstats recovery plan.",
+    )
+    ads_historical_dry_run.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_dry_run.add_argument("--target-date", action="append", required=True)
+    ads_historical_dry_run.add_argument("--output", required=True)
+    ads_historical_dry_run.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="dry-run",
+    )
+
+    ads_historical_apply = subparsers.add_parser(
+        "ads-historical-apply",
+        help="Apply one exact reviewed official fullstats recovery plan.",
+    )
+    ads_historical_apply.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_apply.add_argument("--target-date", action="append", required=True)
+    ads_historical_apply.add_argument("--plan-file", required=True)
+    ads_historical_apply.add_argument("--fingerprint", required=True)
+    ads_historical_apply.add_argument("--approval-reference", required=True)
+    ads_historical_apply.add_argument("--output", default="")
+    ads_historical_apply.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="apply",
+    )
+
+    ads_historical_readback = subparsers.add_parser(
+        "ads-historical-readback",
+        help="Read back the exact recovered ads slots and accepted closure states.",
+    )
+    ads_historical_readback.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_readback.add_argument("--target-date", action="append", required=True)
+    ads_historical_readback.add_argument("--output", default="")
+    ads_historical_readback.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="readback",
     )
 
     archival_estimate_dry_run = subparsers.add_parser(

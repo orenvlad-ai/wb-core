@@ -11,17 +11,24 @@ source_basis:
   - "artifacts/ads_compact_block/evidence/initial__ads-compact__evidence.md"
   - "apps/ads_compact_block_smoke.py"
   - "apps/ads_compact_block_http_smoke.py"
+  - "apps/ads_historical_recovery_smoke.py"
 related_modules:
   - "packages/contracts/ads_compact_block.py"
   - "packages/adapters/ads_compact_block.py"
   - "packages/application/ads_compact_block.py"
-related_tables: []
+  - "packages/application/ads_historical_recovery.py"
+related_tables:
+  - "temporal_source_slot_snapshots"
+  - "temporal_source_closure_state"
+  - "ads_historical_recovery_audit"
 related_endpoints:
   - "GET /adv/v1/promotion/count"
   - "GET /adv/v3/fullstats"
 related_runners:
   - "apps/ads_compact_block_smoke.py"
   - "apps/ads_compact_block_http_smoke.py"
+  - "apps/ads_historical_recovery.py"
+  - "apps/ads_historical_recovery_smoke.py"
 related_docs:
   - "00_INDEX__MODULES.md"
   - "migration/49_ads_compact_block_contract.md"
@@ -30,7 +37,7 @@ related_docs:
   - "migration/52_ads_compact_block_legacy_sample_source.md"
   - "artifacts/ads_compact_block/evidence/initial__ads-compact__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Добавлен как канонический модульный документ по текущему состоянию `main`; фиксирует merged official-api checkpoint блока `ads_compact_block`."
+update_note: "Фиксирует official-api checkpoint и bounded plan/apply/readback recovery только для отсутствующих accepted closed-day slots."
 ---
 
 # 1. Идентификатор и статус
@@ -113,3 +120,11 @@ Persisted accepted closed-day snapshots exist in two compatible shapes:
 Every Finance/Partner manifest, coverage and calculation consumer uses the shared `resolve_ads_snapshot_payload` compatibility resolver. A valid root payload must never be reported as missing merely because `result` is absent. Invalid JSON/envelope/value remains missing; it is never silently empty.
 
 `Партнёрский отчёт` consumes exact `date + nmId`. Weekly `Маркетинг WB` is `SUM(ads_sum)` for the selected `nmId`; it never combines that value with Finance marketing deduction. Persisted `kind=empty` is confirmed zero. Missing date or successful payload without selected-SKU coverage is an explicit blocker. Finance canonical apply treats ads as non-target and cannot write snapshots or turn missing date/SKU combinations into zeros.
+
+# 10. Historical missing-slot recovery
+
+`apps/ads_historical_recovery.py` is the only repo-owned production-data path for a reviewed exact set of absent accepted closed-day `ads_compact` slots. Dry-run is default. It reads the official campaign manifest and `/adv/v3/fullstats` only for campaign statuses `7`, `9`, `11`, with at most 31 inclusive days, 50 campaign IDs and 3 requests/minute. Invalid/incomplete upstream data, a non-empty global response without the requested `nmId`, or an invalid existing target snapshot fails closed; a valid existing snapshot is skipped and never overwritten.
+
+The 3 requests/minute pacing is the current Personal/Service fullstats contract. A Base-plan token is limited by WB to 1 request/hour and therefore cannot use this bounded production recovery as configured; `429` is an upstream/token-plan blocker and is never retried as empty data.
+
+Apply requires the exact fresh plan fingerprint, exact `nmId`/date scope, fresh human approval reference, canonical warehouse-functional write lock and a coherent mode-`0600` SQLite backup with `integrity_check=ok` and SHA-256. One `BEGIN IMMEDIATE` transaction inserts only planned missing snapshots, updates their closure state, records audit evidence and proves exact readback plus the non-target digest. An unchanged retry is an audited no-op. `kind=empty` is written only when the complete official response for every eligible campaign contains no row for any `nmId` on that date; the runner never manufactures a selected-SKU zero.
