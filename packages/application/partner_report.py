@@ -1117,6 +1117,13 @@ class PartnerReportBlock:
                 metrics,
                 allocated_categories,
             )
+            direct_other_expense_total = (
+                _decimal(metrics.get("transit_logistics"))
+                - _decimal(metrics.get("capitalized_transit_logistics"))
+                + _decimal(metrics.get("subscriptions"))
+                + _decimal(metrics.get("paid_services"))
+                + _decimal(metrics.get("other_deductions"))
+            )
             for category_key, amount in other_expense_categories.items():
                 period_other_expenses[category_key] += amount
             week_values = self._week_formulas(
@@ -1128,6 +1135,9 @@ class PartnerReportBlock:
                 ),
                 ads=ads_value,
                 other_expense_categories=other_expense_categories,
+                other_direct_and_allocated_total=(
+                    direct_other_expense_total + allocated_common
+                ),
                 params=params,
             )
             week_record = {
@@ -1300,15 +1310,27 @@ class PartnerReportBlock:
         """Allocate account-only expenses once and conserve their exact total."""
 
         source = PartnerReportBlock._account_expense_category_source(account_metrics)
-        allocated = {
-            key: source[key] * allocation_ratio
-            for key, _label in OTHER_EXPENSE_CATEGORIES
-        }
         account_total = (
             _decimal(account_metrics.get("profit_period_expenses"))
             - _decimal(account_metrics.get("positive_adjustments"))
         )
-        if sum(allocated.values(), ZERO) != account_total * allocation_ratio:
+        allocated_total = account_total * allocation_ratio
+        allocated: dict[str, Decimal] = {
+            key: source[key] * allocation_ratio
+            for key, _label in OTHER_EXPENSE_CATEGORIES[:-1]
+        }
+        # Decimal multiplication is rounded at the active working precision,
+        # so sum(category * ratio) can differ from sum(category) * ratio by a
+        # final non-monetary digit. Keep the first three classified components
+        # untouched and assign that deterministic working-precision residual
+        # to the catch-all category. Display-cent reconciliation remains a
+        # separate downstream concern.
+        allocated["other_withholdings"] = allocated_total - sum(
+            allocated.values(), ZERO
+        )
+        if sum(allocated.values(), ZERO).quantize(MONEY_QUANT) != allocated_total.quantize(
+            MONEY_QUANT
+        ):
             raise PartnerReportError(
                 "allocated common-expense categories do not conserve the source total",
                 code="common_expense_conservation_failed",
@@ -1343,6 +1365,7 @@ class PartnerReportBlock:
         cogs: Decimal | None,
         ads: Decimal | None,
         other_expense_categories: Mapping[str, Decimal],
+        other_direct_and_allocated_total: Decimal | None = None,
         params: Mapping[str, str],
     ) -> dict[str, str | None]:
         net_revenue = _decimal(components.get("net_revenue"))
@@ -1360,12 +1383,16 @@ class PartnerReportBlock:
             + _decimal(components.get("corrections"))
             - _decimal(components.get("positive_adjustments"))
         )
-        other_direct_and_allocated = sum(
-            (
-                _decimal(other_expense_categories.get(key))
-                for key, _label in OTHER_EXPENSE_CATEGORIES
-            ),
-            ZERO,
+        other_direct_and_allocated = (
+            other_direct_and_allocated_total
+            if other_direct_and_allocated_total is not None
+            else sum(
+                (
+                    _decimal(other_expense_categories.get(key))
+                    for key, _label in OTHER_EXPENSE_CATEGORIES
+                ),
+                ZERO,
+            )
         )
         margin = (
             net_revenue

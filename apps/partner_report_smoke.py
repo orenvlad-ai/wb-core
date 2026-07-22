@@ -95,6 +95,59 @@ def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
 
 
 def _assert_expense_category_math(block: PartnerReportBlock) -> None:
+    for precision_source, precision_ratio in (
+        (
+            (
+                Decimal("433822.7210"),
+                Decimal("39553.8405"),
+                Decimal("-624673.1379"),
+                Decimal("-27546.8181"),
+            ),
+            Decimal("625871.8479") / Decimal("647638.6964"),
+        ),
+        (
+            (
+                Decimal("385191.8930"),
+                Decimal("834846.8975"),
+                Decimal("125245.0792"),
+                Decimal("880805.2389"),
+            ),
+            Decimal("0.4891533331747246630083937330"),
+        ),
+    ):
+        precision_total = sum(precision_source, Decimal())
+        precision_allocated = block._allocated_account_expense_categories(  # noqa: SLF001
+            {
+                "profit_period_expenses": str(precision_total),
+                "positive_adjustments": "0",
+                "transit_logistics": str(precision_source[0]),
+                "capitalized_transit_logistics": "0",
+                "subscriptions": str(precision_source[1]),
+                "paid_services": str(precision_source[2]),
+            },
+            allocation_ratio=precision_ratio,
+        )
+        precision_target = precision_total * precision_ratio
+        first_three = sum(
+            (
+                precision_allocated[key]
+                for key in (
+                    "uncapitalized_transit_logistics",
+                    "wb_jam_subscription",
+                    "wb_paid_services",
+                )
+            ),
+            Decimal(),
+        )
+        if precision_allocated["other_withholdings"] != precision_target - first_three:
+            raise AssertionError("catch-all category was not derived from the conserved target")
+        if sum(precision_allocated.values(), Decimal()).quantize(
+            Decimal("0.0001")
+        ) != precision_target.quantize(Decimal("0.0001")):
+            raise AssertionError(
+                "working-precision allocation broke documented monetary conservation"
+            )
+
     allocated = block._allocated_account_expense_categories(  # noqa: SLF001
         {
             "profit_period_expenses": "10",

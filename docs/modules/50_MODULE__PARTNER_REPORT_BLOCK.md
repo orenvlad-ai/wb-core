@@ -115,6 +115,8 @@ Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, 
 
 Each category combines direct and allocated amounts of that category. Unclassified account-level rows belong to `Прочие удержания`; proven capitalized transit is excluded. Partner-facing UI/XLSX show only category amounts. Direct/allocated values, source category/rule and digests remain internal machine provenance. Decimal largest-remainder reconciliation assigns any display-cent residual deterministically, so the four displayed amounts equal the rounded main row without modifying exact profit values. The main expense is deducted exactly once.
 
+At internal Decimal working precision, independently multiplying four categories can differ from multiplying their conserved total by the allocation ratio in the final non-monetary digit. The allocator preserves the first three classified products and derives `Прочие удержания` as the allocated target minus those three values. Conservation is checked at the canonical 0.0001-ruble calculation precision; the unrounded allocated target is carried separately into the profit formula, so an inexpressible final context digit never changes profit. Display-cent reconciliation remains a separate deterministic step.
+
 # 5. UI contract and performance
 
 Clicking `Сформировать` immediately shows loading and a visible cancel action. A 30-second AbortController timeout produces a human-readable error. The preview, blockers and source coverage appear directly below settings; blockers are above the table. Available values remain visible in an incomplete preview while missing dependent values stay absent. Excel is enabled only for `status=ready`.
