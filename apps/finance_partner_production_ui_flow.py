@@ -335,13 +335,36 @@ def run_finance_partner_ui_flow(
                 table_visible = reports.locator(
                     "#partnerReportTableWrap:not([hidden]) table"
                 ).count() == 1
-                preview_payload = _protected_json_post(
+                preview_evidence = {
+                    "attempted": True,
+                    "ready": False,
+                    "status": preview_status,
+                    "reason": "Partner preview API request has not completed",
+                    "api_status": "",
+                    "api_code": "",
+                    "api_http_status": None,
+                    "blockers": [],
+                    "table_visible": table_visible,
+                    "download_enabled": False,
+                    "nm_id": selected_nm_id,
+                    "selected_weeks": selected_weeks,
+                    "source_digest": "",
+                    "xlsx": dict(preview_evidence["xlsx"]),
+                }
+                preview_http_status, preview_payload, preview_json_object = _protected_json_post(
                     context,
                     normalized_base_url + PARTNER_PREVIEW_API_PATH,
                     {"nm_id": selected_nm_id, "selected_weeks": selected_weeks},
                     label="Partner preview API",
                 )
-                blockers = list(preview_payload.get("blockers") or [])
+                response_evidence = _partner_preview_api_evidence(
+                    preview_http_status,
+                    preview_payload,
+                )
+                preview_evidence.update(response_evidence)
+                _assert(preview_json_object, "Partner preview API: JSON object")
+                _assert(preview_http_status == 200, "Partner preview API: HTTP 200")
+                blockers = list(response_evidence["blockers"])
                 download_enabled = reports.locator(
                     "#partnerReportDownload"
                 ).is_enabled()
@@ -361,7 +384,9 @@ def run_finance_partner_ui_flow(
                         if preview_ready
                         else "Partner preview is not ready or its source blockers are non-empty"
                     ),
-                    "api_status": str(preview_payload.get("status") or ""),
+                    "api_status": str(response_evidence["api_status"]),
+                    "api_code": str(response_evidence["api_code"]),
+                    "api_http_status": preview_http_status,
                     "blockers": blockers,
                     "table_visible": table_visible,
                     "download_enabled": download_enabled,
@@ -557,17 +582,78 @@ def _protected_json_post(
     payload: dict[str, Any],
     *,
     label: str,
-) -> dict[str, Any]:
+) -> tuple[int, dict[str, Any], bool]:
     response = context.request.post(
         url,
         headers={"Accept": "application/json", "Content-Type": "application/json"},
         data=payload,
         timeout=120_000,
     )
-    _assert(response.status == 200, f"{label}: HTTP 200")
-    result = response.json()
-    _assert(isinstance(result, dict), f"{label}: JSON object")
-    return result
+    try:
+        result = response.json()
+    except Exception:
+        result = None
+    if not isinstance(result, dict):
+        status = int(response.status)
+        return (
+            status,
+            {
+                "error": f"{label} returned a non-JSON response",
+                "code": "response_not_json",
+                "blockers": [
+                    {"code": "response_not_json", "http_status": status}
+                ],
+            },
+            False,
+        )
+    return int(response.status), result, True
+
+
+def _partner_preview_api_evidence(
+    http_status: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve bounded preview failure facts before fail-closed assertions."""
+
+    detail = payload.get("detail")
+    container = detail if isinstance(detail, dict) else payload
+    raw_blockers = container.get("blockers") or payload.get("blockers") or []
+    if isinstance(raw_blockers, list):
+        blockers = list(raw_blockers)
+    else:
+        blockers = [raw_blockers]
+    if not blockers and isinstance(detail, list):
+        blockers = list(detail)
+
+    api_status = str(container.get("status") or payload.get("status") or "")
+    api_code = str(container.get("code") or payload.get("code") or "")
+    reason_value = (
+        container.get("reason")
+        or container.get("message")
+        or container.get("error")
+        or payload.get("reason")
+        or payload.get("message")
+        or payload.get("error")
+        or (detail if isinstance(detail, str) else "")
+    )
+    if isinstance(reason_value, (dict, list)):
+        reason = json.dumps(reason_value, ensure_ascii=False, sort_keys=True)
+    else:
+        reason = str(reason_value or "").strip()
+    if not reason:
+        reason = (
+            "Partner preview API returned no human-readable reason"
+            if int(http_status) == 200
+            else f"Partner preview API rejected the request with HTTP {int(http_status)}"
+        )
+    return {
+        "api_http_status": int(http_status),
+        "api_status": api_status,
+        "api_code": api_code,
+        "blockers": blockers,
+        "reason": reason,
+        "source_digest": str(container.get("source_digest") or payload.get("source_digest") or ""),
+    }
 
 
 def _partner_ui_table_facts(reports: Any) -> dict[str, Any]:

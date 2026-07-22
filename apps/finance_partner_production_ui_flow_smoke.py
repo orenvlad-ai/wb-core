@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
 from apps.finance_partner_production_ui_flow import (  # noqa: E402
     _negative_profit_dividends_valid,
     _partner_acceptance_passed,
+    _partner_preview_api_evidence,
+    _protected_json_post,
     _verify_partner_xlsx,
     _xlsx_evidence,
 )
@@ -30,6 +32,59 @@ from packages.application.partner_report import (  # noqa: E402
 
 
 def main() -> None:
+    class NonJsonResponse:
+        status = 502
+
+        @staticmethod
+        def json() -> object:
+            raise ValueError("not JSON")
+
+    class NonJsonRequest:
+        @staticmethod
+        def post(*_args: object, **_kwargs: object) -> NonJsonResponse:
+            return NonJsonResponse()
+
+    class NonJsonContext:
+        request = NonJsonRequest()
+
+    non_json_status, non_json_payload, non_json_object = _protected_json_post(
+        NonJsonContext(),
+        "https://example.invalid/preview",
+        {},
+        label="Partner preview API",
+    )
+    non_json_evidence = _partner_preview_api_evidence(
+        non_json_status,
+        non_json_payload,
+    )
+    _assert(
+        not non_json_object
+        and non_json_evidence["api_http_status"] == 502
+        and non_json_evidence["api_code"] == "response_not_json"
+        and non_json_evidence["blockers"]
+        == [{"code": "response_not_json", "http_status": 502}],
+        f"non-JSON preview evidence was not preserved: {non_json_evidence}",
+    )
+    rejected = _partner_preview_api_evidence(
+        422,
+        {
+            "error": "Derived Finance rows require canonical apply",
+            "code": "source_coverage_incomplete",
+            "blockers": [{"code": "stale_finance_projection"}],
+        },
+    )
+    _assert(
+        rejected
+        == {
+            "api_http_status": 422,
+            "api_status": "",
+            "api_code": "source_coverage_incomplete",
+            "blockers": [{"code": "stale_finance_projection"}],
+            "reason": "Derived Finance rows require canonical apply",
+            "source_digest": "",
+        },
+        f"non-200 preview evidence was not preserved: {rejected}",
+    )
     preview = _preview()
     profitable_preview = _preview()
     profitable_preview["weeks"][0]["values"]["net_profit"] = "5.0000"
@@ -209,7 +264,7 @@ def main() -> None:
 
     print(
         "finance_partner_production_ui_flow_smoke: ok -> preview ready/blockers, "
-        "mandatory XLSX, nmID/weeks, percent units, retained failure evidence, "
+        "non-200 API evidence, mandatory XLSX, nmID/weeks, percent units, retained failure evidence, "
         "hidden sheet, external link, semantic sums"
     )
 
