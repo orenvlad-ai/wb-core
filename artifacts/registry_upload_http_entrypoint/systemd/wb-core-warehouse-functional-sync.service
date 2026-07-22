@@ -7,6 +7,6 @@ Wants=network.target wb-core-registry-http.service
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
 ExecStart=/usr/bin/python3 apps/warehouse_functional_runner.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env hourly-sync
-TimeoutStartSec=900
+TimeoutStartSec=3h
 User=root
 Group=root

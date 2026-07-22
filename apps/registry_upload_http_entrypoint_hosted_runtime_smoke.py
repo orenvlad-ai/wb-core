@@ -816,6 +816,10 @@ def main() -> None:
                 or "sheet-vitrina-refresh" in functional_service
             ):
                 raise AssertionError("functional scheduler must run only the bounded warehouse runner")
+            if "TimeoutStartSec=3h" not in functional_service:
+                raise AssertionError(
+                    "functional scheduler must outlive a complete backup, publication and archive cycle"
+                )
             if "OnCalendar=*-*-* *:17:00 Europe/Moscow" not in functional_timer:
                 raise AssertionError("functional scheduler must run hourly in the explicit business timezone")
             spp_service = (
