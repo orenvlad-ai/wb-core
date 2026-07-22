@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 import apps.warehouse_functional_runner as functional_runner  # noqa: E402
 import packages.application.warehouse_functional_economics_backfill as economics_backfill  # noqa: E402
+import packages.application.calculation_parameters as calculation_parameters  # noqa: E402
 from packages.application.calculation_parameters import (  # noqa: E402
     CalculationParametersBlock,
     ensure_calculation_parameters_schema,
@@ -309,6 +311,79 @@ def main() -> int:
             or operator_backup_two.get("backup_scope") != "fresh_operator_settings"
         ):
             raise AssertionError("operator settings did not receive fresh per-save restore points")
+        operator_raw_manifest = Path(str(operator_backup_one.get("raw_manifest_path") or ""))
+        operator_raw_evidence = json.loads(operator_raw_manifest.read_text())
+        if (
+            not operator_raw_manifest.is_file()
+            or operator_raw_manifest.stat().st_mode & 0o777 != 0o600
+            or operator_raw_evidence.get("settings_preview_fingerprint")
+            != "sha256:operator-one"
+            or operator_raw_evidence.get("backup_scope") != "fresh_operator_settings"
+        ):
+            raise AssertionError("operator settings raw restore point lacks durable preview lineage")
+        operator_archive = operator_parameters._archive_functional_economics_backup(
+            operator_backup_one,
+        )
+        if (
+            operator_archive.get("settings_preview_fingerprint")
+            != "sha256:operator-one"
+            or operator_archive.get("backup_scope") != "fresh_operator_settings"
+            or not str(operator_archive.get("lineage_fingerprint") or "").startswith(
+                "sha256:"
+            )
+        ):
+            raise AssertionError("operator settings archive lost exact preview lineage")
+        if operator_raw_manifest.exists():
+            raise AssertionError("operator settings archive retained a stale raw manifest")
+
+        failed_settings_runtime_dir = root / "failed-settings-runtime"
+        failed_settings_runtime_dir.mkdir()
+        failed_settings_runtime = RegistryUploadDbBackedRuntime(
+            runtime_dir=failed_settings_runtime_dir
+        )
+        failed_settings = CalculationParametersBlock(runtime=failed_settings_runtime)
+        failed_settings.ensure_initial_version(created_at="2026-07-21T00:00:00Z")
+        with sqlite3.connect(failed_settings_runtime.db_path) as conn:
+            conn.execute(
+                """CREATE TRIGGER reject_operator_settings BEFORE INSERT
+                   ON sheet_vitrina_v1_calculation_parameter_versions
+                   WHEN NEW.source='operator_version'
+                   BEGIN SELECT RAISE(ABORT,'injected settings failure'); END"""
+            )
+            conn.commit()
+        failed_payload = {
+            "effective_date": "2026-07-21",
+            "buyout_rate": "0.9",
+            "tax_rate": "0.06",
+            "wb_agent_and_other_rate": "0.38",
+            "acquiring_rate": "0",
+            "wb_logistics_rate": "0",
+            "wb_storage_rate": "0",
+            "penalties_adjustments_rate": "0",
+            "other_expense_rate": "0",
+        }
+        failed_preview = failed_settings.preview_version(failed_payload)
+        try:
+            failed_settings.create_version(
+                failed_payload,
+                preview_fingerprint=str(failed_preview["preview_fingerprint"]),
+                created_by="smoke",
+            )
+        except sqlite3.IntegrityError as exc:
+            if "injected settings failure" not in str(exc):
+                raise AssertionError("settings abort failed for the wrong reason") from exc
+        else:
+            raise AssertionError("injected operator settings failure was accepted")
+        failed_backup_root = (
+            failed_settings_runtime_dir / "backups" / "calculation-parameters"
+        )
+        if list(failed_backup_root.glob("operator-settings-*.sqlite3")):
+            raise AssertionError("failed settings save leaked a full-size raw backup")
+        failed_archives = list(
+            failed_backup_root.glob("operator-settings-*.sqlite3.zst")
+        )
+        if len(failed_archives) != 1:
+            raise AssertionError("failed settings save did not retain one lossless archive")
 
         from apps.sqlite_backup_archive import apply_archive, build_plan
 
@@ -341,6 +416,123 @@ def main() -> int:
         retention_audit = retention_root / "functional-economics-archive-retention.jsonl"
         if not retention_audit.is_file() or retention_audit.stat().st_mode & 0o777 != 0o600:
             raise AssertionError("verified archive retention lacks a private durable audit")
+        audit_rows = [json.loads(line) for line in retention_audit.read_text().splitlines() if line]
+        if [row.get("status") for row in audit_rows] != ["intent", "completed"]:
+            raise AssertionError(f"retention audit is not intent/completion durable: {audit_rows}")
+
+        recovery_runtime_dir = root / "retention-recovery-runtime"
+        recovery_runtime_dir.mkdir()
+        recovery_runtime = RegistryUploadDbBackedRuntime(runtime_dir=recovery_runtime_dir)
+        with sqlite3.connect(recovery_runtime.db_path) as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+            conn.execute("INSERT INTO evidence(value) VALUES('retention-recovery')")
+            conn.commit()
+        recovery_root = recovery_runtime_dir / "backups" / "calculation-parameters"
+        recovery_root.mkdir(parents=True)
+        recovery_source = recovery_root / "functional-economics-daily-20260718.sqlite3"
+        recovery_runtime.backup_database(recovery_source)
+        recovery_source.chmod(0o600)
+        recovery_plan = build_plan(source=recovery_source)
+        recovery_archive_result = apply_archive(
+            source=recovery_source,
+            archive=None,
+            fingerprint=str(recovery_plan["fingerprint"]),
+        )
+        recovery_manifest_path = Path(str(recovery_archive_result["manifest_path"]))
+        recovery_manifest = json.loads(recovery_manifest_path.read_text())
+        recovery_archive_path = Path(str(recovery_manifest["archive_path"]))
+        recovery_audit_path = (
+            recovery_root / "functional-economics-archive-retention.jsonl"
+        )
+        calculation_parameters._append_retention_audit(
+            recovery_audit_path,
+            [
+                {
+                    "action_id": "interrupted-retention",
+                    "status": "intent",
+                    "archive_path": str(recovery_archive_path),
+                    "manifest_path": str(recovery_manifest_path),
+                    "archive_sha256": str(recovery_manifest["archive_sha256"]),
+                    "source_sha256": str(recovery_manifest["source_sha256"]),
+                    "source_size_bytes": int(recovery_manifest["source_size_bytes"]),
+                    "backup_scope": "",
+                    "settings_preview_fingerprint": "",
+                    "intent_at": "2026-07-22T00:00:00Z",
+                }
+            ],
+        )
+        recovered = calculation_parameters._recover_retention_audit(recovery_root.resolve())
+        if (
+            len(recovered) != 1
+            or not recovered[0].get("recovered")
+            or recovery_archive_path.exists()
+            or recovery_manifest_path.exists()
+        ):
+            raise AssertionError("interrupted archive retention was not resumed exactly")
+        recovered_rows = [
+            json.loads(line)
+            for line in recovery_audit_path.read_text().splitlines()
+            if line
+        ]
+        if [row.get("status") for row in recovered_rows] != ["intent", "completed"]:
+            raise AssertionError("retention recovery did not persist completion")
+
+        newest_source = retention_root / "functional-economics-daily-20260722.sqlite3"
+        retention_runtime.backup_database(newest_source)
+        newest_source.chmod(0o600)
+        newest_plan = build_plan(source=newest_source)
+        apply_archive(
+            source=newest_source,
+            archive=None,
+            fingerprint=str(newest_plan["fingerprint"]),
+        )
+        corrupt_retained = retention_root / "functional-economics-daily-20260720.sqlite3.zst"
+        oldest_valid = retention_root / "functional-economics-daily-20260719.sqlite3.zst"
+        corrupt_retained.write_bytes(b"corrupt retained archive")
+        try:
+            retention_parameters._prune_verified_functional_economics_archives(
+                retention_root,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("corrupt retained archive was accepted by retention")
+        if not oldest_valid.is_file():
+            raise AssertionError("retention deleted an older valid archive before verifying all kept archives")
+
+        preprune_runtime_dir = root / "preprune-runtime"
+        preprune_runtime_dir.mkdir()
+        preprune_runtime = RegistryUploadDbBackedRuntime(runtime_dir=preprune_runtime_dir)
+        with sqlite3.connect(preprune_runtime.db_path) as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+            conn.execute("INSERT INTO evidence(value) VALUES('preprune')")
+            conn.commit()
+        preprune_parameters = CalculationParametersBlock(runtime=preprune_runtime)
+        preprune_root = preprune_runtime_dir / "backups" / "calculation-parameters"
+        preprune_root.mkdir(parents=True)
+        for day in ("20260717", "20260718", "20260719", "20260720"):
+            source = preprune_root / f"functional-economics-daily-{day}.sqlite3"
+            preprune_runtime.backup_database(source)
+            source.chmod(0o600)
+            plan = build_plan(source=source)
+            apply_archive(
+                source=source,
+                archive=None,
+                fingerprint=str(plan["fingerprint"]),
+            )
+        with mock.patch(
+            "packages.application.calculation_parameters.shutil.disk_usage",
+            return_value=SimpleNamespace(free=1),
+        ):
+            try:
+                preprune_parameters.prepare_functional_economics_backup()
+            except ValueError as exc:
+                if "capacity" not in str(exc):
+                    raise AssertionError("post-retention capacity failed for the wrong reason") from exc
+            else:
+                raise AssertionError("impossible post-retention capacity was accepted")
+        if len(list(preprune_root.glob("functional-economics-daily-*.sqlite3.zst"))) != 3:
+            raise AssertionError("excess verified archives were not pruned before capacity gate")
 
         capacity_runtime_dir = root / "capacity-runtime"
         capacity_runtime_dir.mkdir()

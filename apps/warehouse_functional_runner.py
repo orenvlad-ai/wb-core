@@ -160,11 +160,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     Path(str(args.backup_dir)),
                 )
             backup_result = (
-                _create_pre_sync_backup(
-                    runtime,
-                    backup_dir=Path(str(args.backup_dir)),
-                    timestamp=block.timestamp_factory(),
-                )
+                {
+                    **_create_pre_sync_backup(
+                        runtime,
+                        backup_dir=Path(str(args.backup_dir)),
+                        timestamp=block.timestamp_factory(),
+                    ),
+                    "backup_scope": "fresh_manual_sync",
+                }
                 if args.command == "manual-sync"
                 else None
             )
