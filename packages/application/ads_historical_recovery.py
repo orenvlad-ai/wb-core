@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 
 
-SCHEMA_VERSION = "ads_historical_recovery_v3"
+SCHEMA_VERSION = "ads_historical_recovery_v4"
 SOURCE_KEY = "ads_compact"
 SNAPSHOT_ROLE = "accepted_closed_day_snapshot"
 CLOSURE_SLOT = "yesterday_closed"
@@ -50,7 +50,11 @@ class AdsHistoricalRecoveryError(RuntimeError):
 
 
 class AdsHistoricalNoStatisticsError(AdsHistoricalRecoveryError):
-    """Official singleton ``fullstats`` confirmed no statistics for the window."""
+    """Official ``fullstats`` confirmed no statistics for the exact window."""
+
+    def __init__(self, message: str, *, signal: str = "official_no_statistics") -> None:
+        super().__init__(message)
+        self.signal = signal
 
 
 class AdsHistoricalSource(Protocol):
@@ -687,11 +691,13 @@ class AdsHistoricalRecovery:
                             date_from=start,
                             date_to=end,
                         )
-                    except AdsHistoricalNoStatisticsError:
+                    except AdsHistoricalNoStatisticsError as exc:
                         payload = []
                         batch_outcome = "confirmed_no_statistics_requires_singletons"
+                        batch_confirmation_signal = exc.signal
                     else:
                         batch_outcome = "success"
+                        batch_confirmation_signal = ""
                     if not isinstance(payload, list):
                         raise AdsHistoricalRecoveryError(
                             "official fullstats response is not a complete JSON list; "
@@ -720,6 +726,11 @@ class AdsHistoricalRecovery:
                             "normalized_row_count": sum(
                                 len(value) for value in normalized.values()
                             ),
+                            **(
+                                {"confirmation_signal": batch_confirmation_signal}
+                                if batch_confirmation_signal
+                                else {}
+                            ),
                         }
                     )
                     for campaign_id in sorted(set(batch) - seen_campaign_ids):
@@ -729,7 +740,7 @@ class AdsHistoricalRecovery:
                                 date_from=start,
                                 date_to=end,
                             )
-                        except AdsHistoricalNoStatisticsError:
+                        except AdsHistoricalNoStatisticsError as exc:
                             requests.append(
                                 {
                                     "mode": "singleton_confirmation",
@@ -748,6 +759,7 @@ class AdsHistoricalRecovery:
                                         }
                                     ),
                                     "normalized_row_count": 0,
+                                    "confirmation_signal": exc.signal,
                                 }
                             )
                             continue

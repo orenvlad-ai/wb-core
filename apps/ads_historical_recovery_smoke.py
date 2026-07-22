@@ -30,6 +30,7 @@ from packages.application.ads_historical_recovery import (  # noqa: E402
 )
 from apps.ads_historical_recovery import (  # noqa: E402
     OfficialAdsHistoricalSource,
+    _is_confirmed_no_statistics_http_200_null,
     _is_confirmed_no_statistics_http_400,
     _is_confirmed_no_statistics_payload,
 )
@@ -240,6 +241,20 @@ class MappingSingletonSource(FakeOfficialSource):
                 "detail": "fixture-detail",
                 "request_id": "must-not-be-copied",
             }
+        payload = super().fetch_fullstats(
+            campaign_ids=campaign_ids,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return payload[:-1]
+
+
+class NoneSingletonSource(FakeOfficialSource):
+    def fetch_fullstats(
+        self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
+    ) -> Any:
+        if len(campaign_ids) == 1:
+            return None
         payload = super().fetch_fullstats(
             campaign_ids=campaign_ids,
             date_from=date_from,
@@ -547,6 +562,7 @@ def main() -> int:
         assert confirmed_no_stats_plan["target_manifest"][0]["payload_kind"] == "empty"
         assert any(
             request["outcome"] == "confirmed_no_statistics"
+            and request["confirmation_signal"] == "official_no_statistics"
             for request in confirmed_no_stats_plan["source_manifest"]["requests"]
         )
 
@@ -589,6 +605,18 @@ def main() -> int:
         assert '"digest":"sha256:' in mapping_detail
         assert "must-not-be-copied" not in mapping_detail
 
+        none_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=NoneSingletonSource(empty_date=empty_date),
+            now_factory=fixed_now,
+        ).plan(fresh_scope)
+        none_detail = next(
+            item["detail"]
+            for item in none_plan["blockers"]
+            if item["code"] == "ads_upstream_incomplete"
+        )
+        assert '"type":"NoneType"' in none_detail
+
         no_stats_body = json.dumps(
             {
                 "detail": "there are no statistics for this advertising period",
@@ -608,6 +636,9 @@ def main() -> int:
         )
 
         class _SuccessfulNoStatsResponse:
+            status = 200
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+
             def __enter__(self):
                 return self
 
@@ -628,6 +659,61 @@ def main() -> int:
                 raise AssertionError("HTTP-success no-statistics payload was not recognized")
             except AdsHistoricalNoStatisticsError:
                 pass
+
+        null_body = b"null"
+        assert _is_confirmed_no_statistics_http_200_null(
+            null_body,
+            status=200,
+            content_type="application/json; charset=utf-8",
+        ) is True
+        for wrong_status, wrong_content_type, wrong_body in (
+            (204, "application/json", null_body),
+            (200, "text/plain", null_body),
+            (200, "application/json", b"{}"),
+        ):
+            assert _is_confirmed_no_statistics_http_200_null(
+                wrong_body,
+                status=wrong_status,
+                content_type=wrong_content_type,
+            ) is False
+
+        class _SuccessfulNullResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return null_body
+
+        with patch(
+            "apps.ads_historical_recovery.urllib_request.urlopen",
+            return_value=_SuccessfulNullResponse(),
+        ):
+            try:
+                OfficialAdsHistoricalSource(
+                    token="fixture-token",
+                    min_request_interval_seconds=MIN_REQUEST_INTERVAL_SECONDS,
+                ).fetch_fullstats(
+                    campaign_ids=[501],
+                    date_from=date(2026, 1, 1),
+                    date_to=date(2026, 1, 31),
+                )
+                raise AssertionError("HTTP 200 JSON null sentinel was not recognized")
+            except AdsHistoricalNoStatisticsError as exc:
+                assert exc.signal == "http_200_application_json_null"
+
+        with patch(
+            "apps.ads_historical_recovery.urllib_request.urlopen",
+            return_value=_SuccessfulNullResponse(),
+        ):
+            assert OfficialAdsHistoricalSource(token="fixture-token")._get_json(
+                "https://example.invalid/adv/v1/promotion/count"
+            ) is None
 
         unclosed_source = FakeOfficialSource(empty_date=empty_date)
         unclosed_scope = AdsHistoricalRecoveryScope.build(

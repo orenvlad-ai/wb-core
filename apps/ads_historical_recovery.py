@@ -86,7 +86,10 @@ class OfficialAdsHistoricalSource:
             }
         )
         try:
-            return self._get_json(f"{self._base_url}/adv/v3/fullstats?{query}")
+            return self._get_json(
+                f"{self._base_url}/adv/v3/fullstats?{query}",
+                allow_http_200_null_no_statistics=True,
+            )
         finally:
             self._last_fullstats_request = time.monotonic()
 
@@ -98,7 +101,9 @@ class OfficialAdsHistoricalSource:
         if remaining > 0:
             time.sleep(remaining)
 
-    def _get_json(self, url: str) -> Any:
+    def _get_json(
+        self, url: str, *, allow_http_200_null_no_statistics: bool = False
+    ) -> Any:
         if not self._token:
             raise AdsHistoricalRecoveryError("WB_API_TOKEN is required")
         req = urllib_request.Request(
@@ -109,11 +114,16 @@ class OfficialAdsHistoricalSource:
         try:
             with urllib_request.urlopen(req, timeout=self._timeout_seconds) as response:
                 body = response.read()
+                response_status = int(getattr(response, "status", 0) or 0)
+                response_content_type = str(
+                    getattr(response, "headers", {}).get("Content-Type", "") or ""
+                )
         except error.HTTPError as exc:
             body = exc.read()
             if exc.code == 400 and _is_confirmed_no_statistics_http_400(body):
                 raise AdsHistoricalNoStatisticsError(
-                    "official fullstats confirmed no statistics for this advertising period"
+                    "official fullstats confirmed no statistics for this advertising period",
+                    signal="structured_no_statistics_envelope",
                 ) from exc
             raise AdsHistoricalRecoveryError(
                 f"official ads request failed with HTTP {exc.code}"
@@ -122,6 +132,16 @@ class OfficialAdsHistoricalSource:
             raise AdsHistoricalRecoveryError(
                 f"official ads request transport failed: {exc.reason}"
             ) from exc
+        if allow_http_200_null_no_statistics and _is_confirmed_no_statistics_http_200_null(
+            body,
+            status=response_status,
+            content_type=response_content_type,
+        ):
+            raise AdsHistoricalNoStatisticsError(
+                "official fullstats HTTP 200 JSON null confirmed no statistics "
+                "for this exact campaign window",
+                signal="http_200_application_json_null",
+            )
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -130,7 +150,8 @@ class OfficialAdsHistoricalSource:
             ) from exc
         if _is_confirmed_no_statistics_payload(payload):
             raise AdsHistoricalNoStatisticsError(
-                "official fullstats confirmed no statistics for this advertising period"
+                "official fullstats confirmed no statistics for this advertising period",
+                signal="structured_no_statistics_envelope",
             )
         return payload
 
@@ -143,6 +164,15 @@ def _is_confirmed_no_statistics_http_400(body: bytes) -> bool:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     return _is_confirmed_no_statistics_payload(payload)
+
+
+def _is_confirmed_no_statistics_http_200_null(
+    body: bytes, *, status: int, content_type: str
+) -> bool:
+    """Recognize the exact production-observed singleton no-statistics sentinel."""
+
+    media_type = content_type.partition(";")[0].strip().casefold()
+    return status == 200 and media_type == "application/json" and body.strip() == b"null"
 
 
 def _is_confirmed_no_statistics_payload(payload: Any) -> bool:
