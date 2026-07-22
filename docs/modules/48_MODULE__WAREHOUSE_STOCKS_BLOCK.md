@@ -152,6 +152,8 @@ Repo-owned `wb-core-warehouse-functional-sync.timer` запускает bounded 
 
 `wb-core-sheet-vitrina-refresh.timer` больше не вызывает WB supply sync или Seller Portal automation. Global vitrina refresh только читает materialized warehouse/cost state. Manual WB refresh вызывает тот же bounded pipeline.
 
+Для длительного reviewed Finance backfill используется repo-owned `warehouse-functional-maintenance status|hold|restore`. `status` фиксирует `is-enabled`/`is-active`, last/next timer trigger, service result, существование/занятость `.warehouse-functional-sync.lock` и отсутствие Finance apply. `hold` сохраняет mode-`0600` baseline/audit в canonical runtime, останавливает только functional timer (не отключая и не меняя его unit), не убивает уже запущенный service и bounded ждёт его штатного завершения и освобождения общего lock. Терминальный `failed` у oneshot-сервиса сохраняется как evidence (`Result`/`ExecMainStatus`), но считается quiescent наравне с `inactive`; running-переходы `active`/`activating`/`reloading`/`deactivating` остаются fail-closed ожиданием. `restore` разрешён только без Finance apply/warehouse writer, проверяет неизменность unit digests и возвращает timer в exact исходные enabled/active состояния. Canonical Finance apply держит тот же `.warehouse-functional-sync.lock` на всём интервале current plan → coherent backup → atomic apply → transactional readback; fingerprint/source validation не ослабляется. При drift после hold строится один новый стабильный plan и требуется новый exact human fingerprint.
+
 # 6. Guarded functional cutover
 
 `warehouse_opening_v1` и его шесть documents immutable и не меняются. Active cutover id — `warehouse_functional_cutover_v1`; timestamp берётся в production execution.
@@ -170,6 +172,9 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functio
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-economics-dry-run --output /abs/economics-plan.json
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-economics-apply --plan-file /abs/economics-plan.json --fingerprint 'sha256:...'
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-sync
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance status
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance hold
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance restore
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-enable-hourly
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archival-estimate-dry-run --output /abs/estimate-plan.json
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archival-estimate-apply --plan-file /abs/estimate-plan.json --fingerprint 'sha256:...' --approval-reference '...'

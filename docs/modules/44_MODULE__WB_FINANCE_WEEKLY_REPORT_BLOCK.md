@@ -106,7 +106,7 @@ Dry-run is default and read-only. With no date bounds it covers all loaded Finan
 - target/non-target digests, write set, blockers, backup/recovery plan and exact fingerprint;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
-The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows across certified, archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or excessive peak RSS.
+The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. Expected and persisted per-SKU readback rows use the same canonical numeric-nmID/non-numeric ordering, so mixed 9- and 10-digit catalogues cannot create a false digest mismatch from SQLite TEXT ordering. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows across certified/archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or excessive peak RSS.
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 
@@ -116,7 +116,7 @@ Hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
-Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner re-plans under `BEGIN IMMEDIATE`, rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
+Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner holds the canonical `.warehouse-functional-sync.lock` from its current-plan recheck through coherent backup, `BEGIN IMMEDIATE` apply and transactional readback, so hourly/manual warehouse sync, replay, downstream cost-layer materialization and economics publication cannot change the canonical cost inputs inside that interval. For a long production apply the separate repo-owned `warehouse-functional-maintenance status|hold|restore` lifecycle stops only the hourly timer, waits for an already-running service without killing it, persists the exact mode-`0600` timer/service baseline and later restores its enabled/active state; it does not weaken or normalize the reviewed fingerprint. The runner rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
 
 Production apply is not implied by merge/deploy and remains forbidden until the new all-history dry-run receives explicit human approval.
 
@@ -132,6 +132,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_canonical_scale_smoke.py`;
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
+- `python3 apps/warehouse_functional_maintenance_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.

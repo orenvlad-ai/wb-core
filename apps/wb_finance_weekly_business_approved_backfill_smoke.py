@@ -221,7 +221,7 @@ def _assert_plan(plan: dict) -> None:
         raise AssertionError("new plan still proposes independent retro-cost values")
     if (
         plan["source_manifests"]["cost"]["missing_nm_id_count"] != 0
-        or plan["write_set"]["expected_sku_projection_row_count"] != 6
+        or plan["write_set"]["expected_sku_projection_row_count"] != 12
         or len(plan["write_set"]["weeks"]) != 3
     ):
         raise AssertionError(f"cost/write manifests are incomplete: {plan}")
@@ -352,7 +352,7 @@ def _assert_apply_result(
         retro_count
         or raw_count != 5
         or ads_count != 196
-        or sku_projection_count != 6
+        or sku_projection_count != 12
         or stale_sku_projection_count
     ):
         raise AssertionError("apply mutated raw Finance, ads, or retro-cost storage")
@@ -367,7 +367,9 @@ def _seed_sources(db_path: Path) -> None:
                 barcodes_json TEXT,product_type TEXT
             );
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
-                (1,101,'VC101','BAR101','["BAR101"]','other');
+                (1,101,'VC101','BAR101','["BAR101"]','other'),
+                (1,210183142,'VC210183142','BAR210183142','["BAR210183142"]','other'),
+                (1,1221231049,'VC1221231049','BAR1221231049','["BAR1221231049"]','other');
             CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
                 cutover_id TEXT PRIMARY KEY,cutover_at TEXT,status TEXT,
                 plan_fingerprint TEXT,source_watermarks_json TEXT,
