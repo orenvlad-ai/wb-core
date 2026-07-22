@@ -103,6 +103,13 @@ update_note: "Добавлен как канонический модульны�
 - jobs/API bundle/deploy;
 - более широкий runtime-pipeline beyond bounded checkpoint.
 
-# 9. Historical Partner Report consumer
+# 9. Finance/Partner historical consumers and envelope compatibility
 
-`Партнёрский отчёт` consumes only persisted accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. Weekly `Реклама WB` is `SUM(ads_sum)` for the selected `nmId`; it never combines that value with Finance marketing deduction. A persisted `kind=empty` response is confirmed zero. A missing snapshot date, invalid payload or successful payload without selected-SKU coverage remains an explicit blocker and cannot become zero. Partner XLSX exposes only selected-SKU daily values/status/digests; raw campaigns or metrics of other SKU are never exported.
+Persisted accepted closed-day snapshots exist in two compatible shapes:
+
+- root payload: `{kind,snapshot_date,items}`;
+- nested payload: `{result:{kind,snapshot_date,items}}`.
+
+Every Finance/Partner manifest, coverage and calculation consumer uses the shared `resolve_ads_snapshot_payload` compatibility resolver. A valid root payload must never be reported as missing merely because `result` is absent. Invalid JSON/envelope/value remains missing; it is never silently empty.
+
+`Партнёрский отчёт` consumes exact `date + nmId`. Weekly `Маркетинг WB` is `SUM(ads_sum)` for the selected `nmId`; it never combines that value with Finance marketing deduction. Persisted `kind=empty` is confirmed zero. Missing date or successful payload without selected-SKU coverage is an explicit blocker. Finance canonical apply treats ads as non-target and cannot write snapshots or turn missing date/SKU combinations into zeros.

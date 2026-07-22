@@ -1,4 +1,4 @@
-"""Server-owned single-SKU partner profitability report and evidence package."""
+"""Server-owned, UI-first single-SKU partner profitability report."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import time
 from typing import Any, Callable, Iterable, Mapping
 import zipfile
 
@@ -21,8 +22,7 @@ from openpyxl.worksheet.page import PageMargins
 from packages.application.wb_finance_weekly import (
     COST_METHOD_VERSION,
     PROFIT_METHOD_VERSION,
-    RETRO_COST_FORMULA_VERSION,
-    RETRO_COST_PERIOD_START,
+    SKU_AGGREGATE_FORMULA_VERSION,
     WbFinanceWeeklyBlock,
     _decimal,
     _money_text,
@@ -31,10 +31,12 @@ from packages.application.wb_finance_weekly import (
     _resolve_finance_nm_id,
     classify_deduction,
 )
+from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.canonical_wb_cost_resolver import resolve_finance_canonical_cost
 
 
-PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_v1"
-PARTNER_REPORT_SCHEMA_VERSION = "partner_report_v1"
+PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v2"
+PARTNER_REPORT_SCHEMA_VERSION = "partner_report_v2"
 COMMON_EXPENSE_RULE = "net_revenue_share"
 ADS_SOURCE_ROLE = "accepted_closed_day_snapshot"
 ADS_SOURCE_KEY = "ads_compact"
@@ -66,22 +68,22 @@ FINANCE_EXPORT_COLUMNS = (
 )
 REPORT_ROWS = (
     ("net_revenue", "Чистая выручка"),
-    ("cogs", "Себестоимость продаж"),
-    ("commission", "Комиссия WB"),
+    ("cogs", "Себестоимость"),
+    ("agent_remuneration", "Агентское вознаграждение WB"),
+    ("acquiring", "Эквайринг"),
     ("logistics", "Логистика WB"),
-    ("ads", "Реклама WB"),
     ("storage", "Хранение WB"),
-    ("other_direct_expenses", "Прочие прямые расходы WB"),
-    ("allocated_common_expenses", "Общие расходы WB, распределённые по выручке"),
-    ("positive_adjustments", "Положительные корректировки"),
-    ("card_margin", "Маржа карточки"),
-    ("office", "Офис"),
-    ("estimated_tax", "Расчётный налог"),
-    ("replenishment_reserve", "Резерв на пополнение товарных остатков"),
-    ("distributable_profit", "Распределяемая прибыль"),
-    ("partner_payout", "Выплата партнёру"),
-    ("period_roi_pct", "ROI выбранного периода"),
-    ("annualized_return_pct", "Расчётная годовая доходность на вложенный капитал"),
+    ("acceptance", "Платная приёмка"),
+    ("ads", "Маркетинг WB"),
+    ("penalties_and_adjustments", "Штрафы/корректировки"),
+    ("other_attributable_expenses", "Прочие атрибутируемые расходы"),
+    ("finance_margin", "Маржа по финотчёту"),
+    ("office", "Офисные расходы"),
+    ("estimated_tax", "Налог"),
+    ("replenishment_reserve", "На пополнение товарных остатков"),
+    ("net_profit", "Чистая прибыль"),
+    ("dividends", "Дивиденды"),
+    ("annualized_return_pct", "Расчётная годовая доходность инвестора, %"),
 )
 
 
@@ -254,7 +256,7 @@ class PartnerReportBlock:
                 for item in items
             ],
             "weeks": [dict(row) for row in week_rows],
-            "retention": "generated packages are response-only and are not persisted",
+            "export_contract": "UI preview first; source-digest-bound XLSX only",
         }
 
     def save_settings(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
@@ -287,7 +289,10 @@ class PartnerReportBlock:
             if current is not None and str(current["fingerprint"]) == fingerprint:
                 return self._settings_payload(current)
             version_id = "prs_" + hashlib.sha256(
-                f"{fingerprint}|{now}|{actor}".encode("utf-8")
+                (
+                    f"{fingerprint}|{now}|{actor}|"
+                    f"{str(current['settings_version_id']) if current is not None else ''}"
+                ).encode("utf-8")
             ).hexdigest()[:24]
             conn.execute(
                 """INSERT INTO partner_report_settings_versions(
@@ -327,6 +332,7 @@ class PartnerReportBlock:
             return self._settings_payload(row)
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
         self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
@@ -334,14 +340,28 @@ class PartnerReportBlock:
         )
         with self._connect() as conn:
             settings = self._load_settings(conn, nm_id=nm_id)
-            return self._calculate_report(
+            report = self._calculate_report(
                 conn,
                 settings=settings,
                 selected_weeks=weeks,
                 finalization=False,
             )[0]
+        return {
+            **report,
+            "performance": {
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "raw_finance_full_scan": False,
+                "source": "wb_finance_weekly_sku_aggregates indexed lookup",
+            },
+        }
 
     def finalize(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        raise PartnerReportError(
+            "Partner Report finalization is outside the current UI-first Excel scope",
+            code="partner_finalization_removed",
+        )
+        # Historical finalized rows remain readable, but new writes are not
+        # exposed until a separate payout-finalization contract is approved.
         self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
@@ -475,7 +495,6 @@ class PartnerReportBlock:
                 {
                     **dict(row),
                     "selected_weeks": json.loads(row["selected_weeks_json"]),
-                    "package_path": f"/v1/sheet-vitrina-v1/partner-report/finalized/{row['report_id']}/package.zip",
                 }
                 for row in rows
             ],
@@ -494,26 +513,24 @@ class PartnerReportBlock:
         return json.loads(row["report_json"])
 
     def build_finalized_package(self, report_id: str) -> tuple[bytes, str, dict[str, Any]]:
-        self.ensure_schema()
-        with self._connect() as conn:
-            row = conn.execute(
-                """SELECT report_json,provenance_json FROM partner_report_finalized_reports
-                   WHERE seller_id=? AND report_id=?""",
-                (self.seller_id, report_id),
-            ).fetchone()
-            if row is None:
-                raise PartnerReportError("finalized report not found", code="report_not_found")
-            report = json.loads(row["report_json"])
-            provenance = json.loads(row["provenance_json"])
-            package, filename, verification = self._build_package(
-                conn,
-                report=report,
-                provenance=provenance,
-            )
-        return package, filename, verification
+        raise PartnerReportError(
+            "Partner ZIP packages and raw Finance exports were removed from this report scope",
+            code="partner_package_removed",
+        )
 
     def build_preview_package(
         self, payload: Mapping[str, Any]
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        raise PartnerReportError(
+            "Partner ZIP packages and raw Finance exports were removed from this report scope",
+            code="partner_package_removed",
+        )
+
+    def build_preview_workbook(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        expected_source_digest: str = "",
     ) -> tuple[bytes, str, dict[str, Any]]:
         self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
@@ -530,14 +547,30 @@ class PartnerReportBlock:
             )
             if report["status"] != "ready":
                 raise PartnerReportError(
-                    "preview package is blocked by source coverage",
+                    "preview Excel is blocked by source coverage",
                     code="source_coverage_incomplete",
                     blockers=report["blockers"],
                 )
-            report = {**report, "report_id": "preview", "finalized": False}
-            return self._build_package(conn, report=report, provenance=provenance)
+            if expected_source_digest and expected_source_digest != str(report["source_digest"]):
+                raise PartnerReportError(
+                    "preview inputs changed before Excel export; rebuild the on-screen report",
+                    code="preview_source_digest_changed",
+                )
+            workbook = self._build_main_workbook(report)
+            first_week = str(report["selected_weeks"][0])
+            last_week = str(report["selected_weeks"][-1])
+            filename = (
+                f"Партнёрский_отчёт_{self._safe_filename(report['product_name']) or nm_id}_"
+                f"{nm_id}_{first_week}_{last_week}.xlsx"
+            )
+            return workbook, filename, {
+                "source_digest": report["source_digest"],
+                "formula_version": report["formula_version"],
+                "nm_id": nm_id,
+                "selected_weeks": report["selected_weeks"],
+            }
 
-    def _calculate_report(
+    def _calculate_report_legacy_deprecated(
         self,
         conn: sqlite3.Connection,
         *,
@@ -808,6 +841,287 @@ class PartnerReportBlock:
         }
         return report, provenance
 
+    def _calculate_report(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        settings: Mapping[str, Any],
+        selected_weeks: list[str],
+        finalization: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build a preview from indexed Finance projections, never a raw scan."""
+
+        nm_id = str(settings["nm_id"])
+        params = settings["parameters"]
+        week_records: list[dict[str, Any]] = []
+        blockers: list[dict[str, Any]] = []
+        provenance_weeks: list[dict[str, Any]] = []
+        for week_start_text in selected_weeks:
+            sync = conn.execute(
+                """SELECT week_start,week_end,status,content_hash,raw_row_count
+                   FROM wb_finance_weekly_sync WHERE seller_id=? AND week_start=?""",
+                (self.seller_id, week_start_text),
+            ).fetchone()
+            if sync is None:
+                blockers.append({"code": "finance_week_missing", "week_start": week_start_text})
+                continue
+            week_start = date.fromisoformat(week_start_text)
+            week_end = date.fromisoformat(str(sync["week_end"]))
+            if finalization and str(sync["status"]) != "completed":
+                blockers.append(
+                    {
+                        "code": "finance_week_not_final",
+                        "week_start": week_start_text,
+                        "status": str(sync["status"]),
+                    }
+                )
+            sku_row = conn.execute(
+                """SELECT * FROM wb_finance_weekly_sku_aggregates
+                   WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id=?""",
+                (self.seller_id, week_start_text, week_end.isoformat(), nm_id),
+            ).fetchone()
+            account_row = conn.execute(
+                """SELECT * FROM wb_finance_weekly_sku_aggregates
+                   WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id='__account__'""",
+                (self.seller_id, week_start_text, week_end.isoformat()),
+            ).fetchone()
+            if sku_row is None or account_row is None:
+                blockers.append(
+                    {
+                        "code": "finance_sku_aggregate_missing",
+                        "week_start": week_start_text,
+                        "nm_id": nm_id,
+                    }
+                )
+                continue
+            if (
+                str(sku_row["formula_version"]) != SKU_AGGREGATE_FORMULA_VERSION
+                or str(account_row["formula_version"]) != SKU_AGGREGATE_FORMULA_VERSION
+            ):
+                blockers.append(
+                    {
+                        "code": "finance_sku_aggregate_formula_stale",
+                        "week_start": week_start_text,
+                        "nm_id": nm_id,
+                    }
+                )
+            sync_hash = str(sync["content_hash"] or "")
+            if (
+                not sync_hash
+                or str(sku_row["week_content_hash"]) != sync_hash
+                or str(account_row["week_content_hash"]) != sync_hash
+            ):
+                blockers.append(
+                    {
+                        "code": "finance_sku_aggregate_raw_stale",
+                        "week_start": week_start_text,
+                        "nm_id": nm_id,
+                    }
+                )
+            metrics = json.loads(str(sku_row["metrics_json"] or "{}"))
+            coverage = json.loads(str(sku_row["coverage_json"] or "{}"))
+            account_metrics = json.loads(str(account_row["metrics_json"] or "{}"))
+            account_coverage = json.loads(str(account_row["coverage_json"] or "{}"))
+            if int(coverage.get("unmatched_units") or 0):
+                blockers.append(
+                    {
+                        "code": "partner_cost_coverage_incomplete",
+                        "week_start": week_start_text,
+                        "problem_skus": coverage.get("problem_skus") or [],
+                    }
+                )
+            stale_cost_rows: list[dict[str, Any]] = []
+            checked_cost_dependencies: set[tuple[str, str]] = set()
+            for detail in coverage.get("detail_rows") or []:
+                dependency_key = (
+                    str(detail.get("operation_date") or ""),
+                    str(detail.get("source_digest") or ""),
+                )
+                if dependency_key in checked_cost_dependencies:
+                    continue
+                checked_cost_dependencies.add(dependency_key)
+                try:
+                    operation_day = date.fromisoformat(str(detail.get("operation_date") or ""))
+                except ValueError:
+                    stale_cost_rows.append({"reason": "operation_date_invalid", **dict(detail)})
+                    continue
+                current = resolve_finance_canonical_cost(
+                    conn,
+                    nm_id=nm_id,
+                    operation_date=operation_day,
+                )
+                if (
+                    current.get("status") != "resolved"
+                    or str(current.get("source_digest") or "")
+                    != str(detail.get("source_digest") or "")
+                ):
+                    stale_cost_rows.append(
+                        {
+                            "operation_date": operation_day.isoformat(),
+                            "expected_source_digest": str(detail.get("source_digest") or ""),
+                            "current_source_digest": str(current.get("source_digest") or ""),
+                            "current_reason": str(current.get("reason") or ""),
+                        }
+                    )
+            if stale_cost_rows:
+                blockers.append(
+                    {
+                        "code": "finance_sku_aggregate_cost_stale",
+                        "week_start": week_start_text,
+                        "nm_id": nm_id,
+                        "rows": stale_cost_rows,
+                    }
+                )
+            if account_coverage.get("identity_blockers"):
+                blockers.append(
+                    {
+                        "code": "finance_identity_ambiguous",
+                        "week_start": week_start_text,
+                        "rows": account_coverage["identity_blockers"],
+                    }
+                )
+            selected_revenue = _decimal(metrics.get("net_revenue"))
+            total_revenue = _decimal(account_coverage.get("global_net_revenue"))
+            account_expense = _decimal(account_metrics.get("profit_period_expenses")) - _decimal(
+                account_metrics.get("positive_adjustments")
+            )
+            allocated_common = ZERO
+            allocation_ratio: Decimal | None = None
+            if account_expense:
+                if total_revenue <= ZERO:
+                    blockers.append(
+                        {
+                            "code": "common_expense_zero_revenue_base",
+                            "week_start": week_start_text,
+                        }
+                    )
+                else:
+                    allocation_ratio = selected_revenue / total_revenue
+                    allocated_common = account_expense * allocation_ratio
+            ads_value, ads_rows, ads_blockers = self._ads_for_week(
+                conn,
+                nm_id=nm_id,
+                week_start=week_start,
+                week_end=week_end,
+            )
+            blockers.extend(ads_blockers)
+            week_values = self._week_formulas(
+                components=metrics,
+                cogs=(
+                    _decimal(metrics.get("cogs"))
+                    if metrics.get("cogs") not in (None, "")
+                    else None
+                ),
+                ads=ads_value,
+                allocated_common=allocated_common,
+                params=params,
+            )
+            week_record = {
+                "week_start": week_start_text,
+                "week_end": week_end.isoformat(),
+                "label": f"{week_start.strftime('%d.%m')}–{week_end.strftime('%d.%m')}",
+                "values": week_values,
+                "coverage": {
+                    "finance_status": str(sync["status"]),
+                    "finance_raw_row_count": int(sync["raw_row_count"] or 0),
+                    "selected_finance_row_count": int(sku_row["raw_row_count"] or 0),
+                    "cost": {
+                        key: coverage.get(key)
+                        for key in (
+                            "matched_units",
+                            "unmatched_units",
+                            "coverage_pct",
+                            "problem_skus",
+                            "cost_state_hash",
+                        )
+                    },
+                    "ads_date_count": 7,
+                    "ads_covered_date_count": 7 - len(ads_blockers),
+                },
+            }
+            week_records.append(week_record)
+            provenance_weeks.append(
+                {
+                    "week_start": week_start_text,
+                    "week_end": week_end.isoformat(),
+                    "finance_source_digest": str(sku_row["raw_source_digest"]),
+                    "finance_week_content_hash": sync_hash,
+                    "finance_formula_version": str(sku_row["formula_version"]),
+                    "ads_rows": ads_rows,
+                    "ads_source_digest": _sha256_json(ads_rows),
+                    "cost_rows": coverage.get("detail_rows") or [],
+                    "cost_source_digest": str(coverage.get("cost_state_hash") or ""),
+                    "common_expense_safe": {
+                        "allocated_amount_rub": _decimal_text(allocated_common),
+                        "rule": COMMON_EXPENSE_RULE,
+                        "allocation_coefficient": _decimal_text(
+                            allocation_ratio, Decimal("0.00000001")
+                        ),
+                        "source_digest": str(account_row["raw_source_digest"]),
+                    },
+                }
+            )
+
+        totals = self._period_totals(week_records, params=params)
+        source_manifest = {
+            "settings_fingerprint": settings["fingerprint"],
+            "formula_version": PARTNER_REPORT_FORMULA_VERSION,
+            "finance": [
+                {
+                    "week_start": item["week_start"],
+                    "digest": item["finance_source_digest"],
+                    "week_content_hash": item["finance_week_content_hash"],
+                    "formula_version": item["finance_formula_version"],
+                }
+                for item in provenance_weeks
+            ],
+            "ads": [
+                {"week_start": item["week_start"], "digest": item["ads_source_digest"]}
+                for item in provenance_weeks
+            ],
+            "cost": [
+                {"week_start": item["week_start"], "digest": item["cost_source_digest"]}
+                for item in provenance_weeks
+            ],
+        }
+        source_digest = _sha256_json(source_manifest)
+        report = {
+            "status": "incomplete" if blockers else "ready",
+            "contract_version": PARTNER_REPORT_SCHEMA_VERSION,
+            "formula_version": PARTNER_REPORT_FORMULA_VERSION,
+            "finance_cost_formula_version": COST_METHOD_VERSION,
+            "finance_profit_formula_version": PROFIT_METHOD_VERSION,
+            "finance_sku_formula_version": SKU_AGGREGATE_FORMULA_VERSION,
+            "settings_version_id": settings["settings_version_id"],
+            "settings_fingerprint": settings["fingerprint"],
+            "nm_id": nm_id,
+            "product_name": settings["product_name"],
+            "parameters": params,
+            "selected_weeks": selected_weeks,
+            "weeks": week_records,
+            "totals": totals,
+            "source_coverage": {"complete": not blockers, "blocker_count": len(blockers)},
+            "source_manifest": source_manifest,
+            "source_digest": source_digest,
+            "blockers": blockers,
+            "finalized": False,
+            "generated_at": _now_iso(self.now_factory),
+            "annualized_return_formula": (
+                "average weekly dividends × 52 / invested capital × 100%; "
+                "calculated, not guaranteed"
+            ),
+            "preview_source": "indexed_per_sku_weekly_finance_aggregate",
+        }
+        provenance = {
+            "schema_version": "partner_report_provenance_v2",
+            "seller_id": self.seller_id,
+            "nm_id": nm_id,
+            "weeks": provenance_weeks,
+            "source_manifest": source_manifest,
+            "source_digest": source_digest,
+        }
+        return report, provenance
+
     def _week_formulas(
         self,
         *,
@@ -817,53 +1131,83 @@ class PartnerReportBlock:
         allocated_common: Decimal,
         params: Mapping[str, str],
     ) -> dict[str, str | None]:
-        direct_other = components["other_direct_expenses"]
+        net_revenue = _decimal(components.get("net_revenue"))
+        agent = _decimal(components.get("agent_remuneration"))
+        acquiring = _decimal(components.get("acquiring"))
+        logistics = _decimal(components.get("logistics"))
+        storage = _decimal(components.get("storage"))
+        acceptance = max(
+            _decimal(components.get("acceptance"))
+            - _decimal(components.get("capitalized_acceptance")),
+            ZERO,
+        )
+        transit = max(
+            _decimal(components.get("transit_logistics"))
+            - _decimal(components.get("capitalized_transit_logistics")),
+            ZERO,
+        )
+        penalties_and_adjustments = (
+            _decimal(components.get("penalties"))
+            + _decimal(components.get("corrections"))
+            - _decimal(components.get("positive_adjustments"))
+        )
+        other_attributable = (
+            transit
+            + _decimal(components.get("subscriptions"))
+            + _decimal(components.get("paid_services"))
+            + _decimal(components.get("other_deductions"))
+            + allocated_common
+        )
         margin = (
-            components["net_revenue"]
+            net_revenue
             - cogs
-            - components["commission"]
-            - components["logistics"]
+            - agent
+            - acquiring
+            - logistics
             - ads
-            - components["storage"]
-            - direct_other
-            - allocated_common
-            + components["positive_adjustments"]
+            - storage
+            - acceptance
+            - penalties_and_adjustments
+            - other_attributable
             if cogs is not None and ads is not None
             else None
         )
         office = _decimal(params["weekly_office_expense_rub"])
-        tax = components["net_revenue"] * _decimal(params["tax_rate_pct"]) / HUNDRED
+        tax = net_revenue * _decimal(params["tax_rate_pct"]) / HUNDRED
         reserve = (
             max(margin, ZERO) * _decimal(params["replenishment_reserve_pct"]) / HUNDRED
             if margin is not None
             else None
         )
-        distributable = margin - office - tax - reserve if margin is not None and reserve is not None else None
-        payout = (
-            max(distributable, ZERO) * _decimal(params["partner_share_pct"]) / HUNDRED
-            if distributable is not None
+        net_profit = margin - office - tax - reserve if margin is not None and reserve is not None else None
+        dividends = (
+            max(net_profit, ZERO) * _decimal(params["partner_share_pct"]) / HUNDRED
+            if net_profit is not None
             else None
         )
         capital = _decimal(params["invested_capital_rub"])
-        roi = payout / capital * HUNDRED if payout is not None and capital > ZERO else None
-        annualized = roi * Decimal("52") if roi is not None else None
+        annualized = (
+            dividends * Decimal("52") / capital * HUNDRED
+            if dividends is not None and capital > ZERO
+            else None
+        )
         values: dict[str, Decimal | None] = {
-            "net_revenue": components["net_revenue"],
+            "net_revenue": net_revenue,
             "cogs": cogs,
-            "commission": components["commission"],
-            "logistics": components["logistics"],
+            "agent_remuneration": agent,
+            "acquiring": acquiring,
+            "logistics": logistics,
             "ads": ads,
-            "storage": components["storage"],
-            "other_direct_expenses": direct_other,
-            "allocated_common_expenses": allocated_common,
-            "positive_adjustments": components["positive_adjustments"],
-            "card_margin": margin,
+            "storage": storage,
+            "acceptance": acceptance,
+            "penalties_and_adjustments": penalties_and_adjustments,
+            "other_attributable_expenses": other_attributable,
+            "finance_margin": margin,
             "office": office,
             "estimated_tax": tax,
             "replenishment_reserve": reserve,
-            "distributable_profit": distributable,
-            "partner_payout": payout,
-            "period_roi_pct": roi,
+            "net_profit": net_profit,
+            "dividends": dividends,
             "annualized_return_pct": annualized,
         }
         return {
@@ -877,32 +1221,26 @@ class PartnerReportBlock:
         *,
         params: Mapping[str, str],
         loss_carry_in: Decimal = ZERO,
-    ) -> dict[str, str]:
-        sum_keys = [key for key, _label in REPORT_ROWS[:15] if key not in {"partner_payout"}]
-        totals = {
-            key: sum(
-                (_decimal(week["values"].get(key)) for week in weeks),
-                ZERO,
+    ) -> dict[str, str | None]:
+        del loss_carry_in
+        sum_keys = [key for key, _label in REPORT_ROWS if key != "annualized_return_pct"]
+        totals: dict[str, Decimal | None] = {}
+        for key in sum_keys:
+            source_values = [week["values"].get(key) for week in weeks]
+            totals[key] = (
+                None
+                if any(value is None for value in source_values)
+                else sum((_decimal(value) for value in source_values), ZERO)
             )
-            for key in sum_keys
-        }
-        distributable = totals.get("distributable_profit", ZERO) - loss_carry_in
-        payout = max(distributable, ZERO) * _decimal(params["partner_share_pct"]) / HUNDRED
-        loss_carry_out = max(-distributable, ZERO)
         capital = _decimal(params["invested_capital_rub"])
-        roi = payout / capital * HUNDRED if capital > ZERO else ZERO
-        annualized = roi * Decimal("52") / Decimal(len(weeks)) if weeks else ZERO
-        result = {key: _decimal_text(value) or "0.0000" for key, value in totals.items()}
-        result["distributable_profit"] = _decimal_text(distributable) or "0.0000"
-        result.update(
-            {
-                "partner_payout": _decimal_text(payout) or "0.0000",
-                "period_roi_pct": _decimal_text(roi, PERCENT_QUANT) or "0.0000",
-                "annualized_return_pct": _decimal_text(annualized, PERCENT_QUANT) or "0.0000",
-                "loss_carry_in": _decimal_text(loss_carry_in) or "0.0000",
-                "loss_carry_out": _decimal_text(loss_carry_out) or "0.0000",
-            }
+        total_dividends = totals.get("dividends")
+        annualized = (
+            total_dividends / Decimal(len(weeks)) * Decimal("52") / capital * HUNDRED
+            if total_dividends is not None and weeks and capital > ZERO
+            else None
         )
+        result = {key: _decimal_text(value) for key, value in totals.items()}
+        result["annualized_return_pct"] = _decimal_text(annualized, PERCENT_QUANT)
         return result
 
     def _loss_carry_context(
@@ -1099,8 +1437,8 @@ class PartnerReportBlock:
                 payload = json.loads(str(source["payload_json"] or ""))
             except json.JSONDecodeError:
                 payload = {}
-            result = payload.get("result") if isinstance(payload, dict) else {}
-            kind = str((result or {}).get("kind") or "missing")
+            result, envelope_origin = resolve_ads_snapshot_payload(payload)
+            kind = str((result or {}).get("kind") or "invalid")
             matched: list[dict[str, Any]] = []
             for item in (result or {}).get("items") or []:
                 if not isinstance(item, dict):
@@ -1169,6 +1507,7 @@ class PartnerReportBlock:
                             _decimal(item["ads_sum"]) if kind == "success" else ZERO
                         ),
                         "source_status": kind,
+                        "envelope_origin": envelope_origin,
                         "coverage": coverage,
                         "source_digest": source_digest,
                     }
@@ -1304,7 +1643,7 @@ class PartnerReportBlock:
                 coefficient = float(_decimal(report["parameters"]["tax_rate_pct"]) / HUNDRED)
             elif key == "replenishment_reserve":
                 coefficient = float(_decimal(report["parameters"]["replenishment_reserve_pct"]) / HUNDRED)
-            elif key == "annualized_return_pct":
+            elif key == "dividends":
                 coefficient = float(_decimal(report["parameters"]["partner_share_pct"]) / HUNDRED)
             ws.cell(row_no, 1, coefficient)
             ws.cell(row_no, 2, label)
@@ -1314,6 +1653,34 @@ class PartnerReportBlock:
             total_value = report["totals"].get(key)
             ws.cell(row_no, total_col, None if total_value is None else float(Decimal(total_value)))
         self._style_main_workbook(ws, row_by_key=row_by_key, total_col=total_col)
+        parameters = wb.create_sheet("Параметры")
+        parameter_rows = [
+            ("Отчёт", "Отчёт о доходности карточки"),
+            ("Сформирован", str(report.get("generated_at") or "")),
+            ("Карточка", str(report["product_name"])),
+            ("nmId", str(report["nm_id"])),
+            ("Доля инвестора, %", str(report["parameters"]["partner_share_pct"])),
+            ("Вложенный капитал, ₽", str(report["parameters"]["invested_capital_rub"])),
+            ("Пополнение товарных остатков, %", str(report["parameters"]["replenishment_reserve_pct"])),
+            ("Офисные расходы, ₽/нед.", str(report["parameters"]["weekly_office_expense_rub"])),
+            ("Налоговая ставка, %", str(report["parameters"]["tax_rate_pct"])),
+            ("Недели", ", ".join(str(item) for item in report["selected_weeks"])),
+            ("Formula version", str(report["formula_version"])),
+            ("Source digest", str(report["source_digest"])),
+            ("Формула доходности", str(report["annualized_return_formula"])),
+        ]
+        for row in parameter_rows:
+            parameters.append(row)
+        parameters.column_dimensions["A"].width = 38
+        parameters.column_dimensions["B"].width = 92
+        for row in parameters.iter_rows():
+            for cell in row:
+                cell.font = Font(name="Arial", size=10, color="000000")
+                cell.border = Border(
+                    bottom=Side(style="thin", color="D9D9D9")
+                )
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        parameters.freeze_panes = "A2"
         wb.properties.creator = "WB Core"
         wb.properties.title = "Отчёт о доходности карточки"
         wb.properties.subject = f"nmId {report['nm_id']}"
@@ -1352,16 +1719,19 @@ class PartnerReportBlock:
             ws.cell(row_no, 1).number_format = "0.00"
             for col in range(3, total_col + 1):
                 ws.cell(row_no, col).number_format = "#,##0;[Red](#,##0);-"
-        for key in ("period_roi_pct", "annualized_return_pct"):
+        for key in ("annualized_return_pct",):
             row_no = row_by_key[key]
             for col in range(3, total_col + 1):
                 ws.cell(row_no, col).number_format = "0.0%;[Red](0.0%);-"
                 value = ws.cell(row_no, col).value
                 if value is not None:
                     ws.cell(row_no, col).value = float(value) / 100
-        payout_row = row_by_key["partner_payout"]
+        payout_row = row_by_key["dividends"]
         for col in range(1, total_col + 1):
             ws.cell(payout_row, col).font = Font(name="Arial", size=10, bold=True, color="0070C0")
+        roi_row = row_by_key["annualized_return_pct"]
+        for col in range(1, total_col + 1):
+            ws.cell(roi_row, col).font = Font(name="Arial", size=10, bold=True, color="0070C0")
         total_fill = PatternFill("solid", fgColor="F7F7F7")
         for row_no in range(1, 2 + len(REPORT_ROWS)):
             ws.cell(row_no, total_col).fill = total_fill
@@ -1369,7 +1739,7 @@ class PartnerReportBlock:
                 name="Arial",
                 size=10,
                 bold=True,
-                color="0070C0" if row_no == payout_row else "000000",
+                color="0070C0" if row_no in {payout_row, roi_row} else "000000",
             )
         ws.column_dimensions["A"].width = 8
         ws.column_dimensions["B"].width = 36
@@ -1379,7 +1749,6 @@ class PartnerReportBlock:
         for row_no in range(2, 2 + len(REPORT_ROWS)):
             ws.row_dimensions[row_no].height = 21
         for key in (
-            "allocated_common_expenses",
             "replenishment_reserve",
             "annualized_return_pct",
         ):

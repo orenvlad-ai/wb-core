@@ -956,15 +956,14 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         return self.partner_report_block.preview(payload)
 
-    def handle_partner_report_finalize_request(
-        self, payload: Mapping[str, Any], *, actor: str
-    ) -> dict[str, Any]:
-        return self.partner_report_block.finalize(payload, actor=actor)
-
-    def handle_partner_report_finalized_list_request(
-        self, *, nm_id: str = ""
-    ) -> dict[str, Any]:
-        return self.partner_report_block.list_finalized(nm_id=nm_id)
+    def handle_partner_report_preview_workbook_request(
+        self,
+        payload: Mapping[str, Any],
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        return self.partner_report_block.build_preview_workbook(
+            payload,
+            expected_source_digest=str(payload.get("expected_source_digest") or ""),
+        )
 
     def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
         return self.runtime.ingest_cost_price_payload(

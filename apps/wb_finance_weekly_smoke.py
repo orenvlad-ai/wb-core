@@ -49,7 +49,9 @@ def main() -> None:
             "revenue_before_returns": "360.0000",
             "returns_amount": "120.0000",
             "net_revenue": "240.0000",
-            "commission": "90.0000",
+            "agent_remuneration": "81.0000",
+            "commission": "81.0000",
+            "combined_commission_control": "90.0000",
             "acquiring": "9.0000",
             "logistics": "10.0000",
             "storage": "2.0000",
@@ -62,11 +64,11 @@ def main() -> None:
             "other_deductions": "8.0000",
             "positive_adjustments": "11.0000",
             "total_wb_expenses": "155.0000",
-            "profit_period_expenses": "147.0000",
+            "profit_period_expenses": "155.0000",
             "wb_expenses_without_marketing_pct": "56.2500",
-            "before_cogs_profit": "104.0000",
+            "before_cogs_profit": "96.0000",
             "cogs": "200.0000",
-            "profit_after_cogs": "-96.0000",
+            "profit_after_cogs": "-104.0000",
         }
         for key, value in expected.items():
             if metrics.get(key) != value:
@@ -74,7 +76,7 @@ def main() -> None:
                     f"{key}: expected {value!r}, got {metrics.get(key)!r}"
                 )
         if Decimal(metrics["final_margin_pct"]).quantize(Decimal("0.01")) != Decimal(
-            "-40.00"
+            "-43.33"
         ):
             raise AssertionError(
                 f"final margin mismatch: {metrics['final_margin_pct']}"
@@ -141,12 +143,13 @@ def main() -> None:
                 "insert into registry_upload_config_v2 values('bundle',999999,1,'Recovered SKU','Group',2)"
             )
             conn.execute(
-                """INSERT INTO wb_finance_retro_cost_map VALUES(
-                   'seller-1','999999','100.0000','2026-07-01','fixture',
-                   '{"nm_id":"999999","unit_cost_rub":"100.0000"}',
-                   'sha256:fixture-row-999999','sha256:fixture-calculation-999999',
-                   'exact_2026_07_01','wb_finance_business_approved_retro_cost_v1',
-                   'business_approved_retro','2026-07-01T00:00:00Z')"""
+                "insert into sheet_vitrina_v1_nomenclature_items values(1,999999,'missing','missing','[\"missing\"]','other')"
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
+                   'warehouse_functional_cutover_v1','2026-07-01',999999,'10',
+                   '100','1000','periodic_snapshot_wac_closed','{}',
+                   'sha256:fixture-row-999999','2026-07-01T00:00:00Z')"""
             )
             conn.commit()
         recovered = block.recalculate_week(date(2026, 6, 29), date(2026, 7, 5))
@@ -230,8 +233,12 @@ def main() -> None:
         if (
             symmetric_missing["aggregate"]["cogs"] is not None
             or symmetric_coverage["unmatched_units"] != 2
-            or symmetric_coverage["problem_skus"][0]["net_units"] != 0
-            or symmetric_coverage["problem_skus"][0]["unmatched_units"] != 2
+            or len(symmetric_coverage["problem_skus"]) != 1
+            or symmetric_coverage["problem_skus"][0]["operation_count"] != 2
+            or symmetric_coverage["problem_skus"][0]["sales_qty"] != 1
+            or symmetric_coverage["problem_skus"][0]["returns_qty"] != 1
+            or sum(item["net_units"] for item in symmetric_coverage["problem_skus"]) != 0
+            or sum(item["unmatched_units"] for item in symmetric_coverage["problem_skus"]) != 2
         ):
             raise AssertionError(
                 "same-SKU sale/return symmetry must not hide missing gross cost coverage: "
@@ -449,6 +456,18 @@ def _seed_canonical_cost(db_path: Path) -> None:
             CREATE TABLE cost_price_current_state(slot INTEGER PRIMARY KEY,dataset_version TEXT,activated_at TEXT);
             CREATE TABLE cost_price_upload_rows(dataset_version TEXT,row_order INTEGER,group_name TEXT,cost_price_rub TEXT,effective_from TEXT);
             CREATE TABLE sheet_vitrina_v1_nomenclature_items(is_active INTEGER,nm_id INTEGER,vendor_code TEXT,barcode TEXT,barcodes_json TEXT,product_type TEXT);
+            CREATE TABLE sheet_vitrina_v1_warehouse_functional_cutovers(
+                cutover_id TEXT PRIMARY KEY,cutover_at TEXT NOT NULL,status TEXT NOT NULL,
+                plan_fingerprint TEXT NOT NULL UNIQUE,source_watermarks_json TEXT NOT NULL,
+                absorbed_supply_revisions_json TEXT NOT NULL,backup_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_wb_daily_cost(
+                cutover_id TEXT NOT NULL,as_of_date TEXT NOT NULL,nm_id INTEGER NOT NULL,
+                quantity TEXT NOT NULL,wac_rub TEXT NOT NULL,capital_rub TEXT NOT NULL,
+                quality TEXT NOT NULL,provenance_json TEXT NOT NULL,fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,PRIMARY KEY(cutover_id,as_of_date,nm_id)
+            );
             INSERT INTO registry_upload_current_state VALUES(1,'bundle','2026-01-01');
             INSERT INTO registry_upload_config_v2 VALUES('bundle',101,1,'SKU','Group',1);
             INSERT INTO cost_price_current_state VALUES(1,'cost','2026-01-01');
@@ -456,12 +475,18 @@ def _seed_canonical_cost(db_path: Path) -> None:
             INSERT INTO cost_price_upload_rows VALUES('cost',2,'Anti-Spy','115','2026-01-28');
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,101,'VC101','4600000000101','["4600000000101"]','other');
             INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,102,'ANTI102','4600000000102','["4600000000102"]','anti_spy');
-            INSERT INTO wb_finance_retro_cost_map VALUES(
-                'seller-1','101','100.0000','2026-07-01','fixture',
-                '{"nm_id":"101","unit_cost_rub":"100.0000"}',
-                'sha256:fixture-row-101','sha256:fixture-calculation-101',
-                'exact_2026_07_01','wb_finance_business_approved_retro_cost_v1',
-                'business_approved_retro','2026-07-01T00:00:00Z'
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers VALUES(
+                'warehouse_functional_cutover_v1','2026-07-01T00:00:00Z','posted',
+                'sha256:fixture-cutover','{}','[]','{}',
+                '2026-07-01T00:00:00Z','2026-07-01T00:00:00Z'
+            );
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
+                'warehouse_functional_cutover_v1','2026-07-01',101,'10','100','1000',
+                'periodic_snapshot_wac_closed','{}','sha256:fixture-row-101','2026-07-01T00:00:00Z'
+            );
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
+                'warehouse_functional_cutover_v1','2026-07-01',102,'10','115','1150',
+                'periodic_snapshot_wac_closed','{}','sha256:fixture-row-102','2026-07-01T00:00:00Z'
             );
             """
         )

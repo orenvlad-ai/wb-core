@@ -112,7 +112,7 @@ related_docs:
   - "49_MODULE__WB_AUTOANSWERS_SERVER.md"
   - "50_MODULE__PARTNER_REPORT_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 50: добавлены WB autoanswers server и single-SKU Partner Report с immutable XLSX/ZIP evidence."
+update_note: "Обновлён through module 50: Partner Report использует UI-first indexed preview и digest-bound XLSX; Finance использует единый canonical Our WB Cost resolver."
 ---
 
 # 1. Назначение индекса
@@ -129,7 +129,7 @@ update_note: "Обновлён through module 50: добавлены WB autoansw
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–50`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `46` добавляет operator action/read-model contour без parallel metric truth. Module `47` добавляет защищённую внутреннюю базу знаний. Module `48` владеет active six-stage warehouse/cost state, snapshot WB, targeted replay, hourly sync and guarded functional cutover. Module `49` владеет server-native WB autoanswers contour. Module `50` владеет Partner Report settings/finalization/XLSX/ZIP contract.
+Канонический индекс охватывает modules `01–50`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `44` consumes that same cost truth across all Finance history without an independent retro-cost value. Module `46` adds an operator action/read model without parallel metric truth; module `47` is the protected internal knowledge base; module `48` owns active warehouse/cost state; module `49` owns server-native WB autoanswers. Module `50` owns server-versioned Partner settings, indexed UI preview and digest-bound XLSX; finalization/ZIP/raw Finance export are outside its active V2 scope.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -264,7 +264,7 @@ update_note: "Обновлён through module 50: добавлены WB autoansw
 | `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
 | `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal engine with exact-date history, stable nomenclature identity, versioned unmatched audit, localized evidence UI, hourly bounded sync, Proxy 3 and guarded atomic cutover |
 | `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production manual contour with canonical WB sync, safe photo/HLS ingestion, frozen v1.4.2 Node pipeline, media-aware regeneration, policy-epoch mode reconciliation, durable publication/readback and compact protected UI |
-| `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/xlsx-evidence` | Single-SKU Decimal profitability report with versioned server-owned settings, continuous immutable finalized periods, accepted ads snapshots, allocated account expenses and fail-closed confidential XLSX/ZIP reconciliation |
+| `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/ui-first-xlsx` | Single-SKU Decimal profitability report with versioned server-owned settings, indexed Finance projection, root/nested accepted ads, on-screen preview and source-digest-bound light XLSX; no active finalization/ZIP/raw export |
 
 # 5. Как эта папка используется дальше
 

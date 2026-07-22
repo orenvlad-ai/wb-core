@@ -16,6 +16,7 @@ REPORTS_PATH = "/sheet-vitrina-v1/vitrina?tab=reports"
 FINANCE_API_PATH = "/v1/sheet-vitrina-v1/wb-finance-report"
 PARTNER_OPTIONS_API_PATH = "/v1/sheet-vitrina-v1/partner-report/options"
 PARTNER_PREVIEW_API_PATH = "/v1/sheet-vitrina-v1/partner-report/preview"
+PARTNER_PREVIEW_XLSX_API_PATH = "/v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 
 
 def run_finance_partner_ui_flow(
@@ -139,7 +140,13 @@ def run_finance_partner_ui_flow(
                     cogs: value('Себестоимость продаж'),
                     profit: value('Прибыль после себестоимости'),
                     margin: value('Итоговая рентабельность, %'),
-                    noMarketing: value('Расходы WB без маркетинга, % от чистой выручки'),
+                    agent: value('Агентское вознаграждение WB'),
+                    acquiring: value('Эквайринг'),
+                    withMarketing: value('Расходы WB с маркетингом'),
+                    noMarketing: value('Расходы WB без маркетинга'),
+                    hasTechnicalExpenseRow: value('Расходы периода, учитываемые в прибыли').length > 0,
+                    hasDuplicatePercentRow: value('Расходы WB, % от чистой выручки').length > 0,
+                    expenseCells: [...table.querySelectorAll('.wb-finance-expense-share')].map((cell) => cell.innerText.trim()),
                     notes: document.getElementById('wbFinanceReportNotes').innerText.trim(),
                     horizontalOverflow: Boolean(wrap && wrap.scrollWidth > wrap.clientWidth),
                     bodyBackground: bodyStyle.backgroundColor,
@@ -156,11 +163,24 @@ def run_finance_partner_ui_flow(
                 len(finance_facts["cogs"]) == len(finance_weeks)
                 and len(finance_facts["profit"]) == len(finance_weeks)
                 and len(finance_facts["margin"]) == len(finance_weeks)
+                and len(finance_facts["agent"]) == len(finance_weeks)
+                and len(finance_facts["acquiring"]) == len(finance_weeks)
+                and len(finance_facts["withMarketing"]) == len(finance_weeks)
                 and len(finance_facts["noMarketing"]) == len(finance_weeks),
                 "Finance canonical metrics align to all weeks",
             )
+            _assert(
+                not finance_facts["hasTechnicalExpenseRow"]
+                and not finance_facts["hasDuplicatePercentRow"],
+                "Finance removes technical and duplicate percentage rows",
+            )
+            _assert(
+                all("п.п." not in value for value in finance_facts["expenseCells"]),
+                "Finance expense microcells contain no numeric percentage-point delta",
+            )
             _assert("недоступен" not in finance_facts["status"].casefold(), "Finance UI is available")
-            _assert("business-approved retro" in finance_facts["notes"], "Finance temporal method is visible")
+            _assert("стоимость того же nmid на 01.07" in finance_facts["notes"].casefold(), "Finance temporal method is visible")
+            _assert("retro-map" in finance_facts["notes"], "Finance rejects an independent retro-cost source")
             _assert(bool(finance_facts["horizontalOverflow"]), "Finance table scrolls locally")
             finance_screenshot = evidence_dir / "finance_weekly_desktop.png"
             page.screenshot(path=str(finance_screenshot), full_page=True)
@@ -178,13 +198,16 @@ def run_finance_partner_ui_flow(
                 () => {
                   const controls = document.getElementById('partnerReportControls');
                   const settings = controls.querySelector('.partner-report-settings');
+                  const wrap = document.getElementById('partnerReportTableWrap');
                   return {
                     status: document.getElementById('partnerReportStatus').innerText.trim(),
                     cardOptions: document.getElementById('partnerReportNmId').options.length,
                     weekOptions: document.querySelectorAll('#partnerReportWeekList input[type=checkbox]').length,
                     saveVisible: !document.getElementById('partnerReportSaveSettings').hidden,
                     generateVisible: !document.getElementById('partnerReportGenerate').hidden,
-                    finalizeDisabled: document.getElementById('partnerReportFinalize').disabled,
+                    downloadDisabled: document.getElementById('partnerReportDownload').disabled,
+                    hasFinalize: Boolean(document.getElementById('partnerReportFinalize')),
+                    hasPackage: Boolean(document.getElementById('partnerReportPackage')),
                     settingsColumns: getComputedStyle(settings).gridTemplateColumns.split(' ').length,
                   };
                 }
@@ -202,8 +225,10 @@ def run_finance_partner_ui_flow(
             _assert(
                 bool(partner_facts["saveVisible"])
                 and bool(partner_facts["generateVisible"])
-                and bool(partner_facts["finalizeDisabled"]),
-                "Partner actions render without creating a finalized report",
+                and bool(partner_facts["downloadDisabled"])
+                and not bool(partner_facts["hasFinalize"])
+                and not bool(partner_facts["hasPackage"]),
+                "Partner actions expose UI preview and XLSX without finalization/ZIP",
             )
             preview_required_fields = (
                 "partner_share_pct",
@@ -259,15 +284,28 @@ def run_finance_partner_ui_flow(
                 if preview_ready:
                     _assert(
                         reports.locator("#partnerReportTableWrap")
-                        .get_by_text("Выплата партнёру", exact=True)
+                        .get_by_text("Дивиденды", exact=True)
                         .count()
                         == 1,
-                        "Partner preview renders payout reconciliation",
+                        "Partner preview renders dividend reconciliation",
                     )
+                    _assert(
+                        reports.locator("#partnerReportDownload").is_enabled(),
+                        "Partner Excel activates only after ready preview",
+                    )
+                    with page.expect_download(timeout=120_000) as download_info:
+                        reports.locator("#partnerReportDownload").click()
+                    download = download_info.value
+                    excel_path = evidence_dir / download.suggested_filename
+                    download.save_as(str(excel_path))
+                    _assert(excel_path.is_file() and excel_path.stat().st_size > 0, "Partner preview XLSX downloaded")
+                    preview_evidence["excel_path"] = str(excel_path)
+                    preview_evidence["excel_filename"] = download.suggested_filename
                 else:
                     _assert(
                         "не удалось" in preview_status.casefold()
-                        or "недостаточно" in preview_status.casefold(),
+                        or "blocker" in preview_status.casefold()
+                        or reports.locator("#partnerReportBlockers").inner_text().strip(),
                         "Partner preview exposes a human-readable source blocker",
                     )
             partner_desktop = evidence_dir / "partner_report_desktop_readonly.png"
@@ -280,10 +318,12 @@ def run_finance_partner_ui_flow(
                 () => {
                   const controls = document.getElementById('partnerReportControls');
                   const settings = controls.querySelector('.partner-report-settings');
+                  const wrap = document.getElementById('partnerReportTableWrap');
                   return {
                     pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
                     settingsColumns: getComputedStyle(settings).gridTemplateColumns.split(' ').length,
                     controlsWithinViewport: controls.getBoundingClientRect().right <= document.documentElement.clientWidth + 1,
+                    localTableScroll: !wrap.hidden && wrap.scrollWidth > wrap.clientWidth,
                   };
                 }
                 """
@@ -294,6 +334,7 @@ def run_finance_partner_ui_flow(
                     "pageOverflow": False,
                     "settingsColumns": 1,
                     "controlsWithinViewport": True,
+                    "localTableScroll": bool(preview_evidence.get("ready")),
                 },
                 "Partner narrow layout",
             )
@@ -309,7 +350,8 @@ def run_finance_partner_ui_flow(
         unexpected_non_read_requests = [
             item
             for item in non_read_requests
-            if urlparse(item["url"]).path != PARTNER_PREVIEW_API_PATH
+            if urlparse(item["url"]).path
+            not in {PARTNER_PREVIEW_API_PATH, PARTNER_PREVIEW_XLSX_API_PATH}
         ]
         _assert(
             not unexpected_non_read_requests,
@@ -326,7 +368,10 @@ def run_finance_partner_ui_flow(
             "console_errors": console_errors,
             "server_errors": server_errors,
             "non_read_requests": non_read_requests,
-            "allowed_read_only_post_paths": [PARTNER_PREVIEW_API_PATH],
+            "allowed_read_only_post_paths": [
+                PARTNER_PREVIEW_API_PATH,
+                PARTNER_PREVIEW_XLSX_API_PATH,
+            ],
             "finance": {
                 "week_count": len(finance_weeks),
                 "first_week": finance_weeks[0].get("week_start"),
