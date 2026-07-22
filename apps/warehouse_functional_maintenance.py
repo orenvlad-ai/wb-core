@@ -25,6 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--wait-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--disable-timer",
+        action="store_true",
+        help="Keep the audited hold restorable while making the timer disabled as well as inactive.",
+    )
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir).resolve()
     if args.action == "status":
@@ -34,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_dir,
             wait_timeout_seconds=args.wait_timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
+            disable_timer=bool(args.disable_timer),
         )
     else:
         result = maintenance_restore(runtime_dir)
