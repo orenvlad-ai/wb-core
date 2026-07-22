@@ -240,7 +240,7 @@ def main() -> None:
         ads_plan_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "ads_historical_recovery_v2",
+                    "schema_version": "ads_historical_recovery_v3",
                     "dry_run": True,
                     "apply_allowed": True,
                     "fingerprint": "sha256:ads-reviewed",
