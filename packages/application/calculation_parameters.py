@@ -607,11 +607,15 @@ class CalculationParametersBlock:
     def preflight_fresh_economics_backup_capacity(self, backup_root: Path) -> dict[str, Any]:
         backup_root = backup_root.resolve()
         backup_root.mkdir(parents=True, exist_ok=True)
-        return self._require_economics_backup_capacity(
-            backup_root,
-            source_size=self.runtime.coherent_backup_size_bytes(),
-            raw_backup_exists=False,
-        )
+        retention = self._prune_verified_functional_economics_archives(backup_root)
+        return {
+            **self._require_economics_backup_capacity(
+                backup_root,
+                source_size=self.runtime.coherent_backup_size_bytes(),
+                raw_backup_exists=False,
+            ),
+            "retention": retention,
+        }
 
     def publish_current_functional_economics(
         self,
@@ -1157,6 +1161,16 @@ def _recover_retention_audit(backup_root: Path) -> list[dict[str, Any]]:
         action_id = str(item.get("action_id") or "")
         if (
             str(item.get("contract_name") or "")
+            == "functional_economics_archive_retention_v1"
+            and not action_id
+            and str(item.get("removed_at") or "")
+        ):
+            # Before the intent/completion journal was introduced, successful
+            # removals were recorded only after deletion. They are immutable
+            # completed history and have no recovery action to resume.
+            continue
+        if (
+            str(item.get("contract_name") or "")
             != "functional_economics_archive_retention_v1"
             or not action_id
         ):
@@ -1221,31 +1235,39 @@ def _recover_retention_audit(backup_root: Path) -> list[dict[str, Any]]:
 
 
 def _append_retention_audit(path: Path, removed: list[dict[str, Any]]) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    if path.is_symlink():
+        raise ValueError("functional economics retention audit is unsafe")
+    existing = path.read_bytes() if path.exists() else b""
+    if path.exists() and path.stat().st_mode & 0o777 != 0o600:
+        raise ValueError("functional economics retention audit is unsafe")
+    appended = b"".join(
+        (
+            json.dumps(
+                {
+                    "contract_name": "functional_economics_archive_retention_v1",
+                    **item,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        for item in removed
+    )
+    temp_path = path.with_name(path.name + f".tmp-{uuid4().hex}")
+    descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-            for item in removed:
-                handle.write(
-                    json.dumps(
-                        {
-                            "contract_name": "functional_economics_archive_retention_v1",
-                            **item,
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(existing)
+            handle.write(appended)
             handle.flush()
             os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        _fsync_directory(path.parent)
     except Exception:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        temp_path.unlink(missing_ok=True)
         raise
-    _fsync_directory(path.parent)
 
 
 def _write_daily_raw_backup_manifest(

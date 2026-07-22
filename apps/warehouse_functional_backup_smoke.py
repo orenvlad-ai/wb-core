@@ -444,6 +444,19 @@ def main() -> int:
         recovery_audit_path = (
             recovery_root / "functional-economics-archive-retention.jsonl"
         )
+        legacy_row = {
+            "contract_name": "functional_economics_archive_retention_v1",
+            "archive_path": str(recovery_root / "already-removed.sqlite3.zst"),
+            "archive_sha256": "sha256:legacy-archive",
+            "source_sha256": "sha256:legacy-source",
+            "source_size_bytes": 1,
+            "removed_at": "2026-07-21T23:59:59Z",
+        }
+        recovery_audit_path.write_text(
+            json.dumps(legacy_row, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        recovery_audit_path.chmod(0o600)
         calculation_parameters._append_retention_audit(
             recovery_audit_path,
             [
@@ -474,8 +487,28 @@ def main() -> int:
             for line in recovery_audit_path.read_text().splitlines()
             if line
         ]
-        if [row.get("status") for row in recovered_rows] != ["intent", "completed"]:
-            raise AssertionError("retention recovery did not persist completion")
+        if [row.get("status") for row in recovered_rows] != [None, "intent", "completed"]:
+            raise AssertionError("retention recovery did not preserve legacy history and completion")
+
+        audit_before_failed_append = recovery_audit_path.read_bytes()
+        with mock.patch(
+            "packages.application.calculation_parameters.os.replace",
+            side_effect=OSError("injected atomic audit failure"),
+        ):
+            try:
+                calculation_parameters._append_retention_audit(
+                    recovery_audit_path,
+                    [{"action_id": "must-not-appear", "status": "intent"}],
+                )
+            except OSError as exc:
+                if "injected atomic audit failure" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("failed atomic retention audit write was accepted")
+        if recovery_audit_path.read_bytes() != audit_before_failed_append:
+            raise AssertionError("failed retention audit append poisoned durable history")
+        if list(recovery_root.glob("functional-economics-archive-retention.jsonl.tmp-*")):
+            raise AssertionError("failed retention audit append leaked a temporary journal")
 
         newest_source = retention_root / "functional-economics-daily-20260722.sqlite3"
         retention_runtime.backup_database(newest_source)
@@ -533,6 +566,36 @@ def main() -> int:
                 raise AssertionError("impossible post-retention capacity was accepted")
         if len(list(preprune_root.glob("functional-economics-daily-*.sqlite3.zst"))) != 3:
             raise AssertionError("excess verified archives were not pruned before capacity gate")
+
+        manual_preprune_root = root / "backups" / "manual-preprune"
+        manual_preprune_root.mkdir(parents=True)
+        for ordinal in range(4):
+            source = manual_preprune_root / (
+                f"warehouse-functional-pre-sync-20260722T0{ordinal}0000Z.sqlite3"
+            )
+            preprune_runtime.backup_database(source)
+            source.chmod(0o600)
+            plan = build_plan(source=source)
+            apply_archive(
+                source=source,
+                archive=None,
+                fingerprint=str(plan["fingerprint"]),
+            )
+        with mock.patch(
+            "packages.application.calculation_parameters.shutil.disk_usage",
+            return_value=SimpleNamespace(free=1),
+        ):
+            try:
+                preprune_parameters.preflight_fresh_economics_backup_capacity(
+                    manual_preprune_root,
+                )
+            except ValueError as exc:
+                if "capacity" not in str(exc):
+                    raise AssertionError("manual post-retention capacity failed incorrectly") from exc
+            else:
+                raise AssertionError("impossible manual post-retention capacity was accepted")
+        if len(list(manual_preprune_root.glob("warehouse-functional-pre-sync-*.sqlite3.zst"))) != 3:
+            raise AssertionError("manual checkpoints were not pruned before capacity gate")
 
         capacity_runtime_dir = root / "capacity-runtime"
         capacity_runtime_dir.mkdir()
