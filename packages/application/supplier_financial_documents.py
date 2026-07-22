@@ -26,6 +26,7 @@ from packages.contracts.cny_ledger import (
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
 )
 from packages.contracts.supplier_financial_documents import (
+    CUSTOMS_ANNEX_ITEMS_PARSER_VERSION,
     EXPENSE_CATEGORY_BORDER_EXPEDITION,
     EXPENSE_CATEGORY_BROKERAGE,
     EXPENSE_CATEGORY_COMPANY_COMMISSION,
@@ -6710,8 +6711,19 @@ def _extract_customs_annex_rows_from_layout_pages(page_texts: Iterable[str]) -> 
 
     rows: list[dict[str, Any]] = []
     column_labels = ("НАИМЕНОВАНИЕ", "ПРОИЗВОДИТЕЛЬ", "МАРКА", "МОДЕЛЬ", "КОЛ-ВО", "АРТИКУЛ")
-    for page_text in page_texts:
+    parent_marker = re.compile(
+        r"\bТОВАР\s*(?:№|N(?:O)?\.?|НОМЕР)\s*[:#-]?\s*(\d{1,4})(?:\b|$)",
+        flags=re.IGNORECASE,
+    )
+    current_parent_position = ""
+    for page_number, page_text in enumerate(page_texts, start=1):
         lines = str(page_text or "").splitlines()
+        markers: list[tuple[int, str]] = []
+        for line_number, line in enumerate(lines, start=1):
+            marker = parent_marker.search(line)
+            if marker:
+                markers.append((line_number, marker.group(1)))
+        page_rows: list[dict[str, Any]] = []
         for header_index, header in enumerate(lines):
             upper_header = header.upper()
             if not all(label in upper_header for label in column_labels):
@@ -6738,10 +6750,15 @@ def _extract_customs_annex_rows_from_layout_pages(page_texts: Iterable[str]) -> 
                 }
                 row.update({"quantity": _decimal_to_float_raw(quantity), "unit": unit})
                 if row.get("source_name") and quantity is not None and unit:
-                    rows.append(row)
+                    parent = current_parent_position
+                    for marker_line, marker_position in markers:
+                        if marker_line <= int(row.get("source_line_number") or 0):
+                            parent = marker_position
+                    row["parent_position_number"] = parent
+                    page_rows.append(row)
                 current = None
 
-            for line in lines[header_index + 1 :]:
+            for line_offset, line in enumerate(lines[header_index + 1 :], start=header_index + 2):
                 padded = line + " " * max(0, starts[-1] + 80 - len(line))
                 prefix = padded[: starts[0]].strip()
                 row_match = re.fullmatch(r"(\d{1,4})[.)]?", prefix)
@@ -6758,6 +6775,8 @@ def _extract_customs_annex_rows_from_layout_pages(page_texts: Iterable[str]) -> 
                         "source_model": [],
                         "quantity_parts": [],
                         "article": [],
+                        "source_page_number": page_number,
+                        "source_line_number": line_offset,
                     }
                 if current is None:
                     continue
@@ -6773,12 +6792,25 @@ def _extract_customs_annex_rows_from_layout_pages(page_texts: Iterable[str]) -> 
                     if value:
                         current[key].append(value)
             append_current()
+        if markers:
+            current_parent_position = markers[-1][1]
+        rows.extend(page_rows)
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, ...]] = set()
     for row in rows:
         identity = tuple(
             str(row.get(key) or "")
-            for key in ("annex_row_number", "source_name", "manufacturer", "brand", "source_model", "quantity", "unit", "article")
+            for key in (
+                "parent_position_number",
+                "annex_row_number",
+                "source_name",
+                "manufacturer",
+                "brand",
+                "source_model",
+                "quantity",
+                "unit",
+                "article",
+            )
         )
         if identity not in seen:
             seen.add(identity)
@@ -6812,57 +6844,21 @@ def _enrich_customs_goods_items_from_annex_rows(
     if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
         return parsed
     goods_items = [dict(item) for item in normalized.get("goods_items") or [] if isinstance(item, Mapping)]
-    if len(goods_items) != 1:
-        return parsed
     annex_rows = [dict(row) for row in annex_rows if isinstance(row, Mapping)]
     quantities = [_parse_decimal(row.get("quantity")) for row in annex_rows]
-    units = {_clean_value(row.get("unit")).casefold() for row in annex_rows if _clean_value(row.get("unit"))}
-    if not annex_rows or any(quantity is None or quantity < 0 for quantity in quantities) or len(units) != 1:
+    if not annex_rows:
         return parsed
-
-    def exact_values(key: str) -> list[str]:
-        result: list[str] = []
-        for row in annex_rows:
-            value = _clean_value(row.get(key))
-            if value and value not in result:
-                result.append(value)
-        return result
-
-    source_names = exact_values("source_name")
-    if not source_names:
-        return parsed
-    item = goods_items[0]
-    identifiers = dict(item.get("identifiers") or {})
-    for key, source_key in (
-        ("annex_manufacturers", "manufacturer"),
-        ("annex_brands", "brand"),
-        ("annex_source_models", "source_model"),
-        ("annex_articles", "article"),
-    ):
-        values = exact_values(source_key)
-        if values:
-            identifiers[key] = values
-    source_models = exact_values("source_model")
-    if len(source_models) == 1:
-        identifiers["source_model"] = source_models[0]
-    item.update(
-        {
-            "source_name": " | ".join(source_names),
-            "quantity": _decimal_to_float_raw(sum((quantity for quantity in quantities if quantity is not None), Decimal("0"))),
-            "unit": next(iter(units)),
-            "identifiers": identifiers,
-            "evidence_status": "deterministic_dt_item_fields",
-            "quantity_evidence": "dt_box_31_annex_quantity_total",
-            "source_name_evidence": "dt_box_31_annex_exact_text",
-        }
-    )
-    normalized["goods_items"] = [item]
-    normalized["goods_item_count"] = 1
-    normalized["goods_items_parser_version"] = "supplier_customs_goods_items_v2"
-    parent_position = str(item.get("position_number") or "").strip()
-    parent_identifiers = dict(item.get("identifiers") or {})
+    goods_by_position = {
+        str(item.get("position_number") or "").strip(): item
+        for item in goods_items
+        if str(item.get("position_number") or "").strip()
+    }
+    sole_parent_position = next(iter(goods_by_position), "") if len(goods_by_position) == 1 else ""
     annex_items: list[dict[str, Any]] = []
     for annex_row in annex_rows:
+        parent_position = _clean_value(annex_row.get("parent_position_number")) or sole_parent_position
+        parent_item = goods_by_position.get(parent_position) or {}
+        parent_identifiers = dict(parent_item.get("identifiers") or {})
         identifiers = {
             key: _clean_value(annex_row.get(source_key))
             for key, source_key in (
@@ -6895,9 +6891,26 @@ def _enrich_customs_goods_items_from_annex_rows(
     annex_quantity_total = sum((quantity for quantity in quantities if quantity is not None), Decimal("0"))
     normalized["annex_items"] = annex_items
     normalized["annex_item_count"] = len(annex_items)
-    normalized["annex_quantity_total"] = _decimal_to_float_raw(annex_quantity_total)
-    normalized["annex_quantity_conserved"] = _parse_decimal(item.get("quantity")) == annex_quantity_total
-    normalized["annex_items_parser_version"] = "supplier_customs_annex_items_v1"
+    normalized["annex_quantity_total"] = (
+        _decimal_to_float_raw(annex_quantity_total)
+        if all(quantity is not None for quantity in quantities)
+        else None
+    )
+    normalized["annex_quantity_conserved"] = bool(
+        annex_items
+        and all(quantity is not None for quantity in quantities)
+        and all(_clean_value(item.get("unit")) for item in annex_items)
+    )
+    normalized["annex_parent_position_count"] = len(
+        {str(item.get("parent_position_number") or "") for item in annex_items if item.get("parent_position_number")}
+    )
+    normalized["annex_parent_positions_complete"] = bool(
+        goods_items
+        and annex_items
+        and all(str(item.get("parent_position_number") or "") in goods_by_position for item in annex_items)
+        and all(position in {str(item.get("parent_position_number") or "") for item in annex_items} for position in goods_by_position)
+    )
+    normalized["annex_items_parser_version"] = CUSTOMS_ANNEX_ITEMS_PARSER_VERSION
     parsed["normalized_parse"] = normalized
     raw_parse = dict(parsed.get("raw_parse") or {})
     raw_parse["customs_annex_row_count"] = len(annex_rows)

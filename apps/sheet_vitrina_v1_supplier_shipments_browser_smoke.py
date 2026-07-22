@@ -543,12 +543,21 @@ def main() -> None:
                         f"{documents_narrow_layout}"
                     )
                 page.set_viewport_size({"width": 1440, "height": 1000})
+                observed_downloads = []
+                page.on("download", lambda download: observed_downloads.append(download.suggested_filename))
                 with page.expect_download(timeout=5000):
                     frame.get_by_role("link", name="Скачать пакет для логистов").click()
                 expect(frame.locator("#package-receipt-logistics")).to_contain_text("Пакет скачан частично:", timeout=5000)
-                with page.expect_download(timeout=5000):
-                    frame.get_by_role("link", name="Скачать пакет для бухгалтерии").click()
-                expect(frame.locator("#package-receipt-accounting")).to_contain_text("Пакет скачан частично:", timeout=5000)
+                accounting_downloads_before = len(observed_downloads)
+                frame.get_by_role("link", name="Скачать пакет для бухгалтерии").click()
+                expect(frame.locator("#package-receipt-accounting")).to_contain_text(
+                    "Пакет для бухгалтерии не сформирован:", timeout=5000
+                )
+                expect(frame.locator("#package-receipt-accounting")).to_have_class(re.compile(r"\berror\b"))
+                expect(frame.locator("#package-receipt-accounting [data-package-retry='accounting']")).to_be_visible()
+                page.wait_for_timeout(250)
+                if len(observed_downloads) != accounting_downloads_before:
+                    raise AssertionError("controlled accounting 409 must not initiate a browser download")
                 frame.get_by_role("tab", name="Состав поставки").click()
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 frame.get_by_role("button", name="Проверить цены").click()

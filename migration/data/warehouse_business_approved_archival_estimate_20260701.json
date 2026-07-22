@@ -1,0 +1,38 @@
+{
+  "schema_version": "warehouse_business_approved_archival_estimate_manifest_v2",
+  "effective_date": "2026-07-01",
+  "unit_cost_rub": "100.00",
+  "quality": "business_approved_archival_estimate",
+  "owner_approval_reference": "owner-approved LOOP recovery root #712, 2026-07-21",
+  "production_dry_run_plan_sha256": "dc4802b590a3540a9357f52a8bf04ae1a7e043573813321a61104f7604cfe6da",
+  "supersedes_quality": "fallback_average",
+  "supersedes_unit_cost_rub": "113.8716125306441197313055472",
+  "targets": [
+    {"nm_id": 259474327, "vendor_code": "smk_iPhone12_12Pro", "canonical_nomenclature_name": "smk_iPhone12_12Pro", "name": "Защитное стекло на iPhone 12 и iPhone 12 Pro автоустановка"},
+    {"nm_id": 274810794, "vendor_code": "smk_iPhone11Pro", "canonical_nomenclature_name": "smk_iPhone11Pro", "name": "Защитное стекло на iPhone 11 Pro с автоустановкой"},
+    {"nm_id": 274811358, "vendor_code": "smk_iPhone13ProMax/14Plus", "canonical_nomenclature_name": "smk_iPhone13ProMax/14Plus", "name": "Защитное стекло на iPhone 13 ProMax/14Plus с автоустановкой"},
+    {"nm_id": 274811552, "vendor_code": "smk_iPhone11ProMax", "canonical_nomenclature_name": "smk_iPhone11ProMax", "name": "Защитное стекло на iPhone 11 Pro Max с автоустановкой"},
+    {"nm_id": 274812255, "vendor_code": "smk_iPhone16Plus/15Plus", "canonical_nomenclature_name": "smk_iPhone16Plus/15Plus", "name": "Защитное стекло на iPhone 16 Plus/15 Plus с автоустановкой"},
+    {"nm_id": 428850660, "vendor_code": "(Anti-Spy) iPhone 11 / XR", "canonical_nomenclature_name": "(Anti-Spy) iPhone 11 / XR", "name": "Защитное стекло антишпион на iPhone 11 / XR"},
+    {"nm_id": 428850861, "vendor_code": "(Anti-Spy) iPhone 11 Pro", "canonical_nomenclature_name": "(Anti-Spy) iPhone 11 Pro", "name": "Защитное стекло антишпион на iPhone 11 Pro"},
+    {"nm_id": 428851074, "vendor_code": "(Anti-Spy) iPhone 13 Pro Max / 14 Plus", "canonical_nomenclature_name": "(Anti-Spy) iPhone 13 Pro Max / 14 Plus", "name": "Защитное стекло антишпион на iPhone 13 Pro Max / 14 Plus"},
+    {"nm_id": 428851675, "vendor_code": "(Anti-Spy) iPhone 11 Pro Max", "canonical_nomenclature_name": "(Anti-Spy) iPhone 11 Pro Max", "name": "Защитное стекло антишпион на iPhone 11 Pro Max"},
+    {"nm_id": 428852463, "vendor_code": "(Anti-Spy) iPhone 12 Pro Max", "canonical_nomenclature_name": "(Anti-Spy) iPhone 12 Pro Max", "name": "Защитное стекло антишпион на iPhone 12 Pro Max"},
+    {"nm_id": 428852875, "vendor_code": "(Anti-Spy) iPhone 16 Plus / 15 Plus", "canonical_nomenclature_name": "(Anti-Spy) iPhone 16 Plus / 15 Plus", "name": "Защитное стекло антишпион на iPhone 16 Plus / 15 Plus"},
+    {"nm_id": 428856194, "vendor_code": "(Matte) iPhone 12 / 12 Pro", "canonical_nomenclature_name": "(Matte) iPhone 12 / 12 Pro", "name": "Защитное стекло матовое на iPhone 12 / 12 Pro"},
+    {"nm_id": 428856665, "vendor_code": "(Matte) iPhone 11 / XR", "canonical_nomenclature_name": "(Matte) iPhone 11 / XR", "name": "Защитное стекло матовое на iPhone 11 / XR"},
+    {"nm_id": 428856851, "vendor_code": "(Matte) iPhone 11 Pro", "canonical_nomenclature_name": "(Matte) iPhone 11 Pro", "name": "Защитное стекло матовое на iPhone 11 Pro"},
+    {"nm_id": 428857112, "vendor_code": "(Matte) iPhone 13 Pro Max / 14 Plus", "canonical_nomenclature_name": "(Matte) iPhone 13 Pro Max / 14 Plus", "name": "Защитное стекло матовое на iPhone 13 Pro Max / 14 Plus"},
+    {"nm_id": 428857476, "vendor_code": "(Matte) iPhone 11 Pro Max", "canonical_nomenclature_name": "(Matte) iPhone 11 Pro Max", "name": "Защитное стекло матовое на iPhone 11 Pro Max"},
+    {"nm_id": 428857728, "vendor_code": "(Matte) iPhone 12 Pro Max", "canonical_nomenclature_name": "(Matte) iPhone 12 Pro Max", "name": "Защитное стекло матовое на iPhone 12 Pro Max"},
+    {"nm_id": 428862749, "vendor_code": "(Matte) iPhone 16 Plus / 15 Plus", "canonical_nomenclature_name": "(Matte) iPhone 16 Plus / 15 Plus", "name": "Защитное стекло матовое на iPhone 16 Plus / 15 Plus"}
+  ],
+  "active_vitrina_nm_ids": [
+    210183142, 210183919, 210184534, 245720334, 259460529, 259465495,
+    259466031, 259473237, 391659990, 391660889, 391661710, 391662410,
+    391662965, 391663632, 428849827, 428850065, 428853741, 428854140,
+    428854299, 428854502, 428855306, 428855560, 428855758, 428855978,
+    497413772, 497414010, 497414624, 497415593, 497416271, 497416559,
+    497416931, 497417163, 497417474
+  ]
+}

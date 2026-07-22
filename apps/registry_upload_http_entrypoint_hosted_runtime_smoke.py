@@ -74,12 +74,15 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
-    with TemporaryDirectory(prefix="finance-retro-hosted-smoke-") as finance_temp_dir:
+    with TemporaryDirectory(prefix="finance-canonical-hosted-smoke-") as finance_temp_dir:
         finance_plan_path = Path(finance_temp_dir) / "plan.json"
         finance_plan_path.write_text(
             json.dumps(
                 {
                     "fingerprint": "sha256:finance-reviewed",
+                    "schema_version": "wb_finance_canonical_cost_backfill_v2",
+                    "dry_run": True,
+                    "apply_allowed": True,
                     "date_from": "2026-04-27",
                     "date_to": "2026-07-19",
                 }
@@ -87,35 +90,33 @@ def main() -> None:
             encoding="utf-8",
         )
         for action, expected_timeout in (
-            ("dry-run", hosted_runtime.FINANCE_RETRO_READ_TIMEOUT_SECONDS),
-            ("readback", hosted_runtime.FINANCE_RETRO_READ_TIMEOUT_SECONDS),
-            ("apply", hosted_runtime.FINANCE_RETRO_MUTATION_TIMEOUT_SECONDS),
+            ("dry-run", hosted_runtime.FINANCE_CANONICAL_READ_TIMEOUT_SECONDS),
+            ("readback", hosted_runtime.FINANCE_CANONICAL_READ_TIMEOUT_SECONDS),
+            ("apply", hosted_runtime.FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS),
         ):
             completed = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
                 stdout=(
-                    '{"blockers":[],"target_week_count":0}'
+                    '{"blockers":[],"weeks":[]}'
                     if action == "readback"
                     else '{"status":"dry_run"}'
                 ),
                 stderr="",
             )
             with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
-                payload = hosted_runtime._run_remote_finance_retro_action(
+                payload = hosted_runtime._run_remote_finance_canonical_action(
                     active_target,
                     action=action,
-                    date_from="2026-04-27",
-                    date_to="2026-07-19",
                     plan_path=finance_plan_path if action == "apply" else None,
                     fingerprint="sha256:finance-reviewed" if action == "apply" else "",
                     approval_reference="human-gate-123" if action == "apply" else "",
                 )
             if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
-                raise AssertionError(f"Finance retro {action} lost its bounded timeout")
+                raise AssertionError(f"Finance canonical {action} lost its bounded timeout")
             remote_command = " ".join(run_mock.call_args.args[0])
-            if "business-approved-backfill" not in remote_command:
-                raise AssertionError("Finance retro command bypassed the repo-owned runner")
+            if "canonical-cost-backfill" not in remote_command:
+                raise AssertionError("Finance canonical command bypassed the repo-owned runner")
             if action == "apply" and not all(
                 token in remote_command
                 for token in (
@@ -124,20 +125,20 @@ def main() -> None:
                     "sha256:finance-reviewed",
                     "--approval-reference",
                     "human-gate-123",
-                    "/opt/wb-core-runtime/backups/wb-finance-retro",
+                    "/opt/wb-core-runtime/backups/wb-finance-canonical",
                 )
             ):
-                raise AssertionError("Finance retro apply lost fingerprint, backup, or human gate")
+                raise AssertionError("Finance canonical apply lost fingerprint, backup, or human gate")
             if action != "apply" and "--apply" in remote_command:
-                raise AssertionError("Finance retro read-only command unexpectedly enables mutation")
+                raise AssertionError("Finance canonical read-only command unexpectedly enables mutation")
             if action == "readback" and not payload.get("readback"):
-                raise AssertionError("Finance retro readback did not prove zero pending targets")
+                raise AssertionError("Finance canonical readback did not prove zero deltas")
         dry_args = hosted_runtime.build_arg_parser().parse_args(
-            ["finance-retro-dry-run", "--output", str(Path(finance_temp_dir) / "review.json")]
+            ["finance-canonical-dry-run", "--output", str(Path(finance_temp_dir) / "review.json")]
         )
         apply_args = hosted_runtime.build_arg_parser().parse_args(
             [
-                "finance-retro-apply",
+                "finance-canonical-apply",
                 "--plan-file",
                 str(finance_plan_path),
                 "--fingerprint",
@@ -147,41 +148,141 @@ def main() -> None:
             ]
         )
         if (
-            dry_args.handler is not hosted_runtime.run_finance_retro_command
-            or dry_args.finance_retro_action != "dry-run"
-            or apply_args.finance_retro_action != "apply"
+            dry_args.handler is not hosted_runtime.run_finance_canonical_command
+            or dry_args.finance_canonical_action != "dry-run"
+            or apply_args.finance_canonical_action != "apply"
         ):
-            raise AssertionError("hosted runner must expose bounded Finance retro commands")
+            raise AssertionError("hosted runner must expose bounded Finance canonical commands")
         with (
             mock.patch.object(
                 hosted_runtime,
-                "_run_remote_finance_retro_action",
+                "_run_remote_finance_canonical_action",
                 return_value={"fingerprint": "sha256:finance-reviewed", "status": "dry_run"},
             ),
             mock.patch.object(hosted_runtime, "_print_json"),
         ):
-            hosted_runtime.run_finance_retro_command(dry_args)
+            hosted_runtime.run_finance_canonical_command(dry_args)
         finance_evidence_path = Path(dry_args.output)
         if (
             not finance_evidence_path.is_file()
             or finance_evidence_path.stat().st_mode & 0o777 != 0o600
         ):
-            raise AssertionError("Finance retro reviewed evidence must be written with mode 0600")
-        try:
-            hosted_runtime._run_remote_finance_retro_action(
+            raise AssertionError("Finance canonical reviewed evidence must be written with mode 0600")
+        command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
+        if any(name.startswith("finance-retro-") for name in command_choices):
+            raise AssertionError("revoked hosted Finance retro commands remain executable")
+    for maintenance_action, expected_timeout in (
+        ("status", 300.0),
+        ("hold", 1500.0),
+        ("restore", 300.0),
+    ):
+        maintenance_payload = {
+            "status": "held" if maintenance_action == "hold" else (
+                "restored" if maintenance_action == "restore" else "ok"
+            ),
+            "units": {
+                "timer": {
+                    "is_enabled": "enabled",
+                    "is_active": "inactive" if maintenance_action == "hold" else "active",
+                },
+                "service": {"is_active": "inactive", "quiescent": True},
+            },
+            "warehouse_lock": {"held": False},
+            "finance_apply_processes": [],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(maintenance_payload), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ) as run_mock:
+            payload = hosted_runtime._run_remote_warehouse_functional_maintenance_action(
                 active_target,
-                action="dry-run",
-                date_from="2026-05-04",
-                date_to="2026-07-19",
-                plan_path=None,
-                fingerprint="",
-                approval_reference="",
+                action=maintenance_action,
             )
-        except ValueError as exc:
-            if "first affected week" not in str(exc):
-                raise
-        else:
-            raise AssertionError("hosted Finance runner accepted a partial production scope")
+        if payload["status"] != maintenance_payload["status"]:
+            raise AssertionError("hosted maintenance lost runner readback")
+        if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
+            raise AssertionError("hosted maintenance lost its bounded timeout")
+        remote_command = " ".join(run_mock.call_args.args[0])
+        if not all(
+            token in remote_command
+            for token in (
+                "apps/warehouse_functional_maintenance.py",
+                maintenance_action,
+                "/opt/wb-core-runtime/state",
+            )
+        ):
+            raise AssertionError("hosted maintenance bypassed its repo-owned runner")
+    for unsafe_service_state in (
+        "active",
+        "activating",
+        "reloading",
+        "deactivating",
+        "unknown",
+    ):
+        unsafe_payload = {
+            "status": "held",
+            "units": {
+                "timer": {"is_active": "inactive"},
+                "service": {
+                    "is_active": unsafe_service_state,
+                    "quiescent": True,
+                },
+            },
+            "warehouse_lock": {"held": False},
+            "finance_apply_processes": [],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(unsafe_payload), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ):
+            try:
+                hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+                    active_target,
+                    action="hold",
+                )
+            except RuntimeError as exc:
+                if "hold readback is incomplete" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    f"hosted maintenance accepted unsafe service state {unsafe_service_state}"
+                )
+    failed_quiescent_payload = {
+        "status": "held",
+        "units": {
+            "timer": {"is_active": "inactive"},
+            "service": {"is_active": "failed", "quiescent": True},
+        },
+        "warehouse_lock": {"held": False},
+        "finance_apply_processes": [],
+    }
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(failed_quiescent_payload), stderr=""
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess, "run", return_value=completed
+    ):
+        failed_quiescent = (
+            hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+                active_target,
+                action="hold",
+            )
+        )
+    if failed_quiescent["units"]["service"]["is_active"] != "failed":
+        raise AssertionError("hosted maintenance rejected terminal failed oneshot evidence")
+    maintenance_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-functional-maintenance", "hold"]
+    )
+    if (
+        maintenance_args.handler
+        is not hosted_runtime.run_warehouse_functional_maintenance_command
+        or maintenance_args.action != "hold"
+    ):
+        raise AssertionError("hosted runner must expose warehouse maintenance hold")
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")

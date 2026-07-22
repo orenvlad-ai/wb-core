@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -142,11 +143,24 @@ def main() -> int:
             failed_sync.assert_called_once()
 
         with warehouse_sync_lock(runtime_dir):
-            try:
-                with warehouse_sync_lock(runtime_dir, blocking=False):
-                    raise AssertionError("parallel warehouse lock unexpectedly succeeded")
-            except WarehouseSyncBusyError:
+            with warehouse_sync_lock(runtime_dir, blocking=False):
                 pass
+            concurrent_results: list[str] = []
+
+            def try_concurrent_lock() -> None:
+                try:
+                    with warehouse_sync_lock(runtime_dir, blocking=False):
+                        concurrent_results.append("acquired")
+                except WarehouseSyncBusyError:
+                    concurrent_results.append("busy")
+
+            concurrent_thread = threading.Thread(target=try_concurrent_lock)
+            concurrent_thread.start()
+            concurrent_thread.join(timeout=5)
+            if concurrent_thread.is_alive() or concurrent_results != ["busy"]:
+                raise AssertionError(
+                    f"parallel warehouse lock was not rejected: {concurrent_results}"
+                )
 
         settings_lock_runtime_dir = root / "settings-lock-runtime"
         settings_lock_runtime_dir.mkdir()
@@ -154,16 +168,27 @@ def main() -> int:
             runtime=RegistryUploadDbBackedRuntime(runtime_dir=settings_lock_runtime_dir)
         )
         with warehouse_sync_lock(settings_lock_runtime_dir):
-            try:
-                settings_parameters.create_version(
-                    {},
-                    preview_fingerprint="sha256:not-reached",
-                    created_by="smoke",
+            settings_results: list[str] = []
+
+            def try_settings_publication() -> None:
+                try:
+                    settings_parameters.create_version(
+                        {},
+                        preview_fingerprint="sha256:not-reached",
+                        created_by="smoke",
+                    )
+                except WarehouseSyncBusyError:
+                    settings_results.append("busy")
+                else:
+                    settings_results.append("created")
+
+            settings_thread = threading.Thread(target=try_settings_publication)
+            settings_thread.start()
+            settings_thread.join(timeout=5)
+            if settings_thread.is_alive() or settings_results != ["busy"]:
+                raise AssertionError(
+                    f"settings publication overlapped warehouse synchronization: {settings_results}"
                 )
-            except WarehouseSyncBusyError:
-                pass
-            else:
-                raise AssertionError("settings publication overlapped warehouse synchronization")
 
         wal_runtime_dir = root / "wal-runtime"
         wal_runtime_dir.mkdir()

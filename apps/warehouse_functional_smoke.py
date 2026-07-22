@@ -2295,6 +2295,7 @@ def _test_source_capture_exposes_calculation_timestamp() -> None:
         "fulfillment_service_uploads": [],
         "ff_operations": [],
         "ff_auto_writeoff_checkpoint": [],
+        "archival_estimate_active": [],
         "historical_wb_daily_quantities": [
             {
                 "as_of_date": "2026-07-17",
@@ -2321,6 +2322,27 @@ def _test_source_capture_exposes_calculation_timestamp() -> None:
             }
         ],
     }
+    guarded_before_activation = _guarded_local_sources(
+        _functional_local_source_view(source_rows)
+    )
+    activated_source_rows = copy.deepcopy(source_rows)
+    activated_source_rows["archival_estimate_active"] = [
+        {
+            "version_id": "wbae_fixture",
+            "plan_fingerprint": "sha256:archival-fixture",
+            "nm_id": 259474327,
+            "row_unit_cost_rub": "100.00",
+            "row_quality": "business_approved_archival_estimate",
+        }
+    ]
+    guarded_after_activation = _guarded_local_sources(
+        _functional_local_source_view(activated_source_rows)
+    )
+    _assert(
+        guarded_before_activation != guarded_after_activation
+        and guarded_after_activation["archival_estimate_active"],
+        "archival activation invalidates a previously built functional writer plan",
+    )
     with tempfile.TemporaryDirectory(prefix="warehouse-capture-") as temp_dir:
         block = WarehouseFunctionalBlock(
             runtime=RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir)),
@@ -2663,6 +2685,11 @@ def _test_guarded_publication() -> None:
         _assert(
             replay_by_date[("2026-07-19", 104)]["wac_rub"] == "17",
             "accepted capital replays daily WAC from effective date",
+        )
+        _assert(
+            replay_by_date[("2026-07-19", 104)]["quality"]
+            == "periodic_snapshot_wac_provisional",
+            "current functional day remains explicitly provisional",
         )
         sync_plan = copy.deepcopy(plan)
         sync_plan.update(

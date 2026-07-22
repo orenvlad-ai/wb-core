@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
 
 from apps.wb_finance_weekly import _create_sqlite_backup  # noqa: E402
 from apps.wb_finance_weekly_cost_cutover_smoke import (  # noqa: E402
-    _base_rows,
-    _seed_cost_sources,
+    _row,
+    _seed_sources,
 )
 from packages.application.wb_finance_weekly import (  # noqa: E402
     WbFinanceWeeklyBlock,
@@ -35,8 +35,15 @@ def main() -> None:
             now_factory=lambda: datetime(2026, 7, 27, tzinfo=timezone.utc),
         )
         block.ensure_schema()
-        _seed_cost_sources(block.db_path)
-        sale = _base_rows()[0]
+        _seed_sources(block.db_path)
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
+                   'warehouse_functional_cutover_v1','2026-07-20',101,'10','150','1500',
+                   'certified','{}','sha256:cost-101-jul20','2026-07-20T00:00:00Z')"""
+            )
+            conn.commit()
+        sale = _row(1, "2026-06-23")
         block.ingest_week(
             date(2026, 6, 22),
             date(2026, 6, 28),
@@ -57,10 +64,10 @@ def main() -> None:
         late_before = _metrics(block, "2026-07-20")
         with sqlite3.connect(block.db_path) as conn:
             conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_cost_daily_state SET our_wb_unit_cost_rub=201,inputs_hash='changed-701' WHERE as_of_date='2026-07-01' AND nm_id=101"
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='201',fingerprint='changed-701' WHERE as_of_date='2026-07-01' AND nm_id=101"
             )
             conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_cost_daily_state SET our_wb_unit_cost_rub=202,inputs_hash='changed-720' WHERE as_of_date='2026-07-20' AND nm_id=101"
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='202',fingerprint='changed-720' WHERE as_of_date='2026-07-20' AND nm_id=101"
             )
             conn.commit()
 
@@ -178,7 +185,7 @@ def main() -> None:
 
         with sqlite3.connect(block.db_path) as conn:
             conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_cost_daily_state SET our_wb_unit_cost_rub=203,inputs_hash='cli-change-701' WHERE as_of_date='2026-07-01' AND nm_id=101"
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='203',fingerprint='cli-change-701' WHERE as_of_date='2026-07-01' AND nm_id=101"
             )
             conn.commit()
         cli_base = [

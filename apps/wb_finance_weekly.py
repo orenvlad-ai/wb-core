@@ -19,6 +19,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_finance_weekly import WbFinanceApiClient, block_from_env  # noqa: E402
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
+)
 
 
 def _load_env(path: Path) -> None:
@@ -49,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             "recalculate",
             "recalculate-all",
             "recalculate-stale-cost",
+            "canonical-cost-backfill",
             "business-approved-backfill",
             "repair-derived-orphans",
             "tick",
@@ -117,54 +121,59 @@ def main(argv: list[str] | None = None) -> int:
                 apply_kwargs["date_from"] = date_from
             result = block.apply_stale_cost_weeks(**apply_kwargs)
             result["backup"] = backup
-    elif args.command == "business-approved-backfill":
-        date_from = (
-            date.fromisoformat(args.date_from)
-            if args.date_from
-            else date(2026, 4, 27)
-        )
+    elif args.command == "canonical-cost-backfill":
+        date_from = date.fromisoformat(args.date_from) if args.date_from else None
         date_to = date.fromisoformat(args.date_to) if args.date_to else None
-        plan = block.plan_business_approved_backfill(
-            date_from=date_from,
-            date_to=date_to,
-        )
         if not args.apply:
-            result = plan
-        else:
-            if not args.confirm_fingerprint:
-                parser.error("--apply requires --confirm-fingerprint from dry-run")
-            if not args.backup_dir:
-                parser.error("--apply requires an explicit --backup-dir")
-            if not args.approval_reference:
-                parser.error("--apply requires --approval-reference for the human gate")
-            scope_end = date.fromisoformat(str(plan["date_to"]))
-            already_applied = block.business_approved_fingerprint_applied(
-                fingerprint=args.confirm_fingerprint,
-                date_from=date_from,
-                date_to=scope_end,
-            )
-            if args.confirm_fingerprint != str(plan["fingerprint"]) and not already_applied:
-                parser.error("--confirm-fingerprint does not match current dry-run")
-            if not bool(plan.get("apply_allowed")) and not already_applied:
-                parser.error("dry-run contains blockers; apply is forbidden")
-            backup = (
-                _create_sqlite_backup(
-                    block.db_path,
-                    Path(args.backup_dir),
-                    fingerprint=args.confirm_fingerprint,
-                    prefix="wb-finance-business-approved",
-                )
-                if int(plan["target_week_count"]) > 0
-                or int(plan["source_manifests"]["cost"]["proposed_row_count"]) > 0
-                else None
-            )
-            result = block.apply_business_approved_backfill(
-                expected_fingerprint=args.confirm_fingerprint,
-                approval_reference=args.approval_reference,
+            result = block.plan_canonical_finance_backfill(
                 date_from=date_from,
                 date_to=date_to,
             )
-            result["backup"] = backup
+        else:
+            # The same process-wide/file lock used by hourly/manual warehouse
+            # writers covers the complete Finance plan -> backup -> apply ->
+            # transactional readback interval. The maintenance hold stops only
+            # the timer; this lock is the serialization boundary for every
+            # other warehouse writer.
+            with warehouse_functional_write_lock(Path(args.runtime_dir)):
+                plan = block.plan_canonical_finance_backfill(
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+                if not args.confirm_fingerprint:
+                    parser.error("--apply requires --confirm-fingerprint from the new dry-run")
+                if not args.backup_dir:
+                    parser.error("--apply requires an explicit --backup-dir")
+                if not args.approval_reference:
+                    parser.error("--apply requires --approval-reference for the new human gate")
+                already_applied = block.canonical_finance_fingerprint_applied(
+                    fingerprint=args.confirm_fingerprint
+                )
+                if args.confirm_fingerprint != str(plan["fingerprint"]) and not already_applied:
+                    parser.error("--confirm-fingerprint does not match the current canonical dry-run")
+                if not bool(plan.get("apply_allowed")) and not already_applied:
+                    parser.error("canonical dry-run contains blockers; apply is forbidden")
+                backup = (
+                    None
+                    if already_applied
+                    else _create_sqlite_backup(
+                        block.db_path,
+                        Path(args.backup_dir),
+                        fingerprint=args.confirm_fingerprint,
+                        prefix="wb-finance-canonical-cost-v2",
+                    )
+                )
+                result = block.apply_canonical_finance_backfill(
+                    expected_fingerprint=args.confirm_fingerprint,
+                    approval_reference=args.approval_reference,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+                result["backup"] = backup
+    elif args.command == "business-approved-backfill":
+        parser.error(
+            "business-approved-backfill is permanently revoked; use canonical-cost-backfill and a new human approval"
+        )
     elif args.command == "repair-derived-orphans":
         result = block.repair_orphan_derived_rows()
     else:

@@ -28,12 +28,14 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
 )
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
+)
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     apply_supplier_cost_state_replay_plan,
     build_supplier_cost_state_replay_plan,
     rollback_supplier_cost_state_replay,
 )
-from packages.application.warehouse_sync_lock import warehouse_sync_lock  # noqa: E402
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 from packages.application.stocks_block import StocksBlock  # noqa: E402
 
@@ -141,7 +143,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "readback":
         return block.readback()
     if args.command == "backup":
-        with warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_functional_write_lock(runtime.runtime_dir):
             return {
                 "status": "success",
                 "mode": "backup",
@@ -152,7 +154,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             }
     if args.command in {"hourly-sync", "manual-sync"}:
-        with warehouse_sync_lock(runtime.runtime_dir):
+        with warehouse_functional_write_lock(runtime.runtime_dir):
             if args.command == "manual-sync":
                 block.calculation_parameters.preflight_fresh_economics_backup_capacity(
                     Path(str(args.backup_dir)),
