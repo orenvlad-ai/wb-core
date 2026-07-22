@@ -7,7 +7,6 @@ evidence tool, not an alternative calculation source.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,7 +20,6 @@ from urllib.parse import quote
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.wb_finance_weekly import (
-    WbFinanceWeeklyBlock,
     _decimal,
     _nomenclature_identity_index,
     _resolve_finance_nm_id,
@@ -32,7 +30,7 @@ from packages.application.wb_finance_weekly import (
 ZERO = Decimal("0")
 MONEY = Decimal("0.0001")
 RATIO = Decimal("0.000000000001")
-DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v1"
+DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v2"
 ADS_SOURCE_KEY = "ads_compact"
 ADS_SOURCE_ROLE = "accepted_closed_day_snapshot"
 REQUIRED_SETTING_FIELDS = (
@@ -55,6 +53,9 @@ MARKETING_CANDIDATE_TOKENS = (
     "медиа",
     "промо",
 )
+MAX_IDENTITY_ANOMALY_KEYS = 10_000
+MAX_ACCUMULATED_OPERATION_GROUPS = 10_000
+MAX_ACCUMULATED_MARKETING_CANDIDATES = 10_000
 
 
 class PartnerFinanceDiagnosticError(ValueError):
@@ -144,88 +145,26 @@ def _run_in_snapshot(
     alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(
         conn
     )
-    finance = WbFinanceWeeklyBlock(database.parent, seller_id=scope.seller_id)
-    capitalization = finance._global_capitalization_allocations(conn)  # noqa: SLF001
     source_hasher = hashlib.sha256()
     source_hasher.update(DIAGNOSTIC_VERSION.encode("utf-8"))
-    raw_by_week: dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]] = defaultdict(list)
-    duplicate_tracker: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
     identity_mismatches: list[dict[str, str]] = []
     identity_mismatch_count = 0
-
-    if week_bounds:
-        placeholders = ",".join("?" for _ in week_bounds)
-        cursor = conn.execute(
-            f"""SELECT seller_id,week_start,week_end,report_id,rrd_id,row_hash,raw_json
-                FROM wb_finance_weekly_raw_rows
-                WHERE seller_id=? AND week_start IN ({placeholders})
-                ORDER BY week_start,report_id,rrd_id""",
-            (scope.seller_id, *sorted(week_bounds)),
-        )
-        for stored in cursor:
-            raw_text = str(stored["raw_json"] or "{}")
-            try:
-                raw = json.loads(raw_text)
-            except json.JSONDecodeError:
-                blockers.append(
-                    {
-                        "code": "finance_raw_json_invalid",
-                        "week_start": str(stored["week_start"]),
-                        "report_id": str(stored["report_id"]),
-                        "rrd_id": str(stored["rrd_id"]),
-                    }
-                )
-                continue
-            raw_by_week[str(stored["week_start"])].append((stored, raw))
-            manifest_item = [
-                str(stored["week_start"]),
-                str(stored["report_id"]),
-                str(stored["rrd_id"]),
-                str(stored["row_hash"]),
-                hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
-            ]
-            source_hasher.update(_canonical_json(manifest_item))
-            raw_report = str(raw.get("reportId") or "")
-            raw_rrd = str(raw.get("rrdId") or "")
-            logical_key = (scope.seller_id, raw_report, raw_rrd)
-            duplicate_tracker[logical_key].append(
-                {
-                    "week_start": str(stored["week_start"]),
-                    "stored_report_id": str(stored["report_id"]),
-                    "stored_rrd_id": str(stored["rrd_id"]),
-                }
-            )
-            if (
-                raw_report != str(stored["report_id"])
-                or raw_rrd != str(stored["rrd_id"])
-            ):
-                identity_mismatch_count += 1
-                if len(identity_mismatches) < scope.max_examples:
-                    identity_mismatches.append(
-                        {
-                            "week_start": str(stored["week_start"]),
-                            "stored_report_id": str(stored["report_id"]),
-                            "stored_rrd_id": str(stored["rrd_id"]),
-                            "raw_report_id": raw_report,
-                            "raw_rrd_id": raw_rrd,
-                        }
-                    )
-
-    duplicate_rows = [
-        {
-            "report_id": key[1],
-            "rrd_id": key[2],
-            "occurrences": len(items),
-            "stored_examples": items[: scope.max_examples],
-        }
-        for key, items in sorted(duplicate_tracker.items())
-        if key[1] and key[2] and len(items) > 1
-    ]
+    mismatch_keys: set[tuple[str, str]] = set()
+    mismatch_bound_exceeded = False
+    scanned_raw_row_count = 0
 
     week_results: list[dict[str, Any]] = []
     group_state: dict[tuple[str, ...], dict[str, Any]] = {}
-    negative_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    negative_state: dict[str, Any] = {
+        "row_count": 0,
+        "signed_deduction": ZERO,
+        "system_amount": ZERO,
+        "examples": [],
+    }
     candidate_state: dict[str, dict[str, Any]] = {}
+    invalid_raw_state: dict[str, Any] = {"row_count": 0, "examples": []}
+    operation_group_bound_exceeded = False
+    candidate_bound_exceeded = False
 
     for week in weeks:
         bounds = week_bounds.get(week)
@@ -252,6 +191,25 @@ def _run_in_snapshot(
                     "week_start": week,
                     "nm_id": nm_id,
                 }
+            )
+            (
+                source_only_count,
+                source_only_mismatch_count,
+                source_only_bound_exceeded,
+            ) = _scan_week_source_only(
+                conn,
+                seller_id=scope.seller_id,
+                week=week,
+                source_hasher=source_hasher,
+                mismatch_keys=mismatch_keys,
+                identity_mismatches=identity_mismatches,
+                invalid_raw_state=invalid_raw_state,
+                max_examples=scope.max_examples,
+            )
+            scanned_raw_row_count += source_only_count
+            identity_mismatch_count += source_only_mismatch_count
+            mismatch_bound_exceeded = (
+                mismatch_bound_exceeded or source_only_bound_exceeded
             )
             continue
         source_hasher.update(
@@ -319,7 +277,60 @@ def _run_in_snapshot(
         parsed_current_other = ZERO
         selected_row_count = 0
         account_row_count = 0
-        for stored, raw in raw_by_week.get(week, []):
+        raw_cursor = conn.execute(
+            """SELECT week_start,report_id,rrd_id,row_hash,raw_json
+               FROM wb_finance_weekly_raw_rows
+               WHERE seller_id=? AND week_start=?
+               ORDER BY report_id,rrd_id""",
+            (scope.seller_id, week),
+        )
+        for stored in raw_cursor:
+            scanned_raw_row_count += 1
+            raw_text = str(stored["raw_json"] or "{}")
+            source_hasher.update(
+                _canonical_json(
+                    [
+                        week,
+                        str(stored["report_id"]),
+                        str(stored["rrd_id"]),
+                        str(stored["row_hash"]),
+                        hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+                    ]
+                )
+            )
+            try:
+                raw = json.loads(raw_text)
+            except json.JSONDecodeError:
+                _record_invalid_raw(
+                    invalid_raw_state,
+                    week=week,
+                    report_id=str(stored["report_id"]),
+                    rrd_id=str(stored["rrd_id"]),
+                    max_examples=scope.max_examples,
+                )
+                continue
+            raw_report = str(raw.get("reportId") or "")
+            raw_rrd = str(raw.get("rrdId") or "")
+            if (
+                raw_report != str(stored["report_id"])
+                or raw_rrd != str(stored["rrd_id"])
+            ):
+                identity_mismatch_count += 1
+                if raw_report and raw_rrd:
+                    if len(mismatch_keys) < MAX_IDENTITY_ANOMALY_KEYS:
+                        mismatch_keys.add((raw_report, raw_rrd))
+                    elif (raw_report, raw_rrd) not in mismatch_keys:
+                        mismatch_bound_exceeded = True
+                if len(identity_mismatches) < scope.max_examples:
+                    identity_mismatches.append(
+                        {
+                            "week_start": week,
+                            "stored_report_id": str(stored["report_id"]),
+                            "stored_rrd_id": str(stored["rrd_id"]),
+                            "raw_report_id": raw_report,
+                            "raw_rrd_id": raw_rrd,
+                        }
+                    )
             resolved_nm, method, _problem = _resolve_finance_nm_id(
                 raw,
                 alias_to_nm=alias_to_nm,
@@ -345,11 +356,15 @@ def _run_in_snapshot(
                 stored_rrd_id=str(stored["rrd_id"]),
                 path=path,
                 coefficient=coefficient,
-                capitalization=capitalization,
+                # An allocated-account row is unresolved and therefore cannot
+                # match a canonical nmId/supply capitalization layer. Direct
+                # acceptance/transit components never contribute to current
+                # Partner Other; their gross raw values are provenance only.
+                capitalization={},
             )
             for component in components:
                 parsed_current_other += component["current_other_contribution"]
-                _add_group(
+                if not _add_group(
                     group_state,
                     raw=raw,
                     component=component,
@@ -357,25 +372,28 @@ def _run_in_snapshot(
                     report_id=str(stored["report_id"]),
                     rrd_id=str(stored["rrd_id"]),
                     max_examples=scope.max_examples,
-                )
+                    max_accumulated_groups=MAX_ACCUMULATED_OPERATION_GROUPS,
+                ):
+                    operation_group_bound_exceeded = True
             deduction = _decimal(raw.get("deduction"))
             if deduction < ZERO:
-                identity = (
-                    week,
-                    str(stored["report_id"]),
-                    str(stored["rrd_id"]),
-                )
-                negative_rows[identity] = {
-                    "week_start": week,
-                    "report_id": identity[1],
-                    "rrd_id": identity[2],
-                    "signed_deduction_rub": deduction,
-                    "system_abs_amount_rub": abs(deduction),
-                }
+                negative_state["row_count"] += 1
+                negative_state["signed_deduction"] += deduction
+                negative_state["system_amount"] += abs(deduction)
+                if len(negative_state["examples"]) < scope.max_examples:
+                    negative_state["examples"].append(
+                        {
+                            "week_start": week,
+                            "report_id": str(stored["report_id"]),
+                            "rrd_id": str(stored["rrd_id"]),
+                            "signed_deduction_rub": deduction,
+                            "system_abs_amount_rub": abs(deduction),
+                        }
+                    )
             bucket = classify_deduction(raw) if deduction else ""
             candidate_tokens = _marketing_candidate_tokens(raw) if bucket == "other_deductions" else []
             if candidate_tokens:
-                _add_candidate(
+                if not _add_candidate(
                     candidate_state,
                     raw=raw,
                     week=week,
@@ -384,7 +402,9 @@ def _run_in_snapshot(
                     deduction=deduction,
                     tokens=candidate_tokens,
                     max_examples=scope.max_examples,
-                )
+                    max_accumulated_candidates=MAX_ACCUMULATED_MARKETING_CANDIDATES,
+                ):
+                    candidate_bound_exceeded = True
 
         parsing_delta = current_other - parsed_current_other
         week_results.append(
@@ -415,6 +435,43 @@ def _run_in_snapshot(
             }
         )
 
+    if invalid_raw_state["row_count"]:
+        blockers.append(
+            {
+                "code": "finance_raw_json_invalid",
+                "row_count": int(invalid_raw_state["row_count"]),
+                "examples": invalid_raw_state["examples"],
+            }
+        )
+    if mismatch_bound_exceeded:
+        blockers.append(
+            {
+                "code": "finance_identity_anomaly_bound_exceeded",
+                "maximum_distinct_mismatch_keys": MAX_IDENTITY_ANOMALY_KEYS,
+                "identity_mismatch_count": identity_mismatch_count,
+            }
+        )
+    if operation_group_bound_exceeded:
+        blockers.append(
+            {
+                "code": "finance_operation_group_bound_exceeded",
+                "maximum_accumulated_groups": MAX_ACCUMULATED_OPERATION_GROUPS,
+            }
+        )
+    if candidate_bound_exceeded:
+        blockers.append(
+            {
+                "code": "finance_marketing_candidate_bound_exceeded",
+                "maximum_accumulated_candidates": MAX_ACCUMULATED_MARKETING_CANDIDATES,
+            }
+        )
+    duplicate_rows = _logical_duplicate_evidence(
+        conn,
+        seller_id=scope.seller_id,
+        weeks=weeks,
+        mismatch_keys=mismatch_keys,
+        max_examples=scope.max_examples,
+    )
     finalized_groups = _finalize_groups(
         group_state,
         current_other_by_week={
@@ -445,7 +502,7 @@ def _run_in_snapshot(
             )
         ),
     }
-    negative = _negative_evidence(negative_rows, max_examples=scope.max_examples)
+    negative = _negative_evidence(negative_state)
     candidates = _finalize_candidates(candidate_state)
     source_digest = "sha256:" + source_hasher.hexdigest()
     seller_ref = "sha256:" + hashlib.sha256(scope.seller_id.encode("utf-8")).hexdigest()[:16]
@@ -457,6 +514,7 @@ def _run_in_snapshot(
         "seller_ref": seller_ref,
         "selection": selection,
         "nm_id": nm_id,
+        "scanned_finance_raw_row_count": scanned_raw_row_count,
         "weeks": week_results,
         "operation_groups": shown_groups,
         "operation_group_count": len(finalized_groups),
@@ -468,6 +526,10 @@ def _run_in_snapshot(
             "stored_vs_raw_identity_mismatch_count": identity_mismatch_count,
             "stored_vs_raw_identity_mismatch_examples": identity_mismatches,
         },
+        "invalid_raw_json_evidence": {
+            "row_count": int(invalid_raw_state["row_count"]),
+            "examples": invalid_raw_state["examples"],
+        },
         "negative_deduction_evidence": negative,
         "unknown_marketing_name_candidates": candidates[: scope.max_groups],
         "unknown_marketing_candidate_count": len(candidates),
@@ -477,6 +539,9 @@ def _run_in_snapshot(
             "max_weeks": scope.max_weeks,
             "max_groups": scope.max_groups,
             "max_examples_per_group": scope.max_examples,
+            "max_identity_anomaly_keys": MAX_IDENTITY_ANOMALY_KEYS,
+            "max_accumulated_operation_groups": MAX_ACCUMULATED_OPERATION_GROUPS,
+            "max_accumulated_marketing_candidates": MAX_ACCUMULATED_MARKETING_CANDIDATES,
         },
     }
     fingerprint = "sha256:" + hashlib.sha256(_canonical_json(core)).hexdigest()
@@ -609,6 +674,95 @@ def _projection(
            WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id=?""",
         (seller_id, week_start, week_end, nm_id),
     ).fetchone()
+
+
+def _scan_week_source_only(
+    conn: sqlite3.Connection,
+    *,
+    seller_id: str,
+    week: str,
+    source_hasher: Any,
+    mismatch_keys: set[tuple[str, str]],
+    identity_mismatches: list[dict[str, str]],
+    invalid_raw_state: dict[str, Any],
+    max_examples: int,
+) -> tuple[int, int, bool]:
+    """Preserve raw count/digest/identity evidence when projections are absent."""
+
+    row_count = 0
+    mismatch_count = 0
+    bound_exceeded = False
+    cursor = conn.execute(
+        """SELECT report_id,rrd_id,row_hash,raw_json
+           FROM wb_finance_weekly_raw_rows
+           WHERE seller_id=? AND week_start=?
+           ORDER BY report_id,rrd_id""",
+        (seller_id, week),
+    )
+    for stored in cursor:
+        row_count += 1
+        raw_text = str(stored["raw_json"] or "{}")
+        source_hasher.update(
+            _canonical_json(
+                [
+                    week,
+                    str(stored["report_id"]),
+                    str(stored["rrd_id"]),
+                    str(stored["row_hash"]),
+                    hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+                ]
+            )
+        )
+        try:
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError:
+            _record_invalid_raw(
+                invalid_raw_state,
+                week=week,
+                report_id=str(stored["report_id"]),
+                rrd_id=str(stored["rrd_id"]),
+                max_examples=max_examples,
+            )
+            continue
+        raw_report = str(raw.get("reportId") or "")
+        raw_rrd = str(raw.get("rrdId") or "")
+        if (
+            raw_report == str(stored["report_id"])
+            and raw_rrd == str(stored["rrd_id"])
+        ):
+            continue
+        mismatch_count += 1
+        if raw_report and raw_rrd:
+            if len(mismatch_keys) < MAX_IDENTITY_ANOMALY_KEYS:
+                mismatch_keys.add((raw_report, raw_rrd))
+            elif (raw_report, raw_rrd) not in mismatch_keys:
+                bound_exceeded = True
+        if len(identity_mismatches) < max_examples:
+            identity_mismatches.append(
+                {
+                    "week_start": week,
+                    "stored_report_id": str(stored["report_id"]),
+                    "stored_rrd_id": str(stored["rrd_id"]),
+                    "raw_report_id": raw_report,
+                    "raw_rrd_id": raw_rrd,
+                }
+            )
+    return row_count, mismatch_count, bound_exceeded
+
+
+def _record_invalid_raw(
+    state: dict[str, Any],
+    *,
+    week: str,
+    report_id: str,
+    rrd_id: str,
+    max_examples: int,
+) -> None:
+    state["row_count"] += 1
+    if len(state["examples"]) < max_examples:
+        state["examples"].append(
+            {"week_start": week, "report_id": report_id, "rrd_id": rrd_id}
+        )
 
 
 def _ads_for_week(
@@ -837,7 +991,8 @@ def _add_group(
     report_id: str,
     rrd_id: str,
     max_examples: int,
-) -> None:
+    max_accumulated_groups: int,
+) -> bool:
     deduction = _decimal(raw.get("deduction"))
     deduction_sign = (
         "negative" if deduction < ZERO else "positive" if deduction > ZERO else "none"
@@ -858,11 +1013,13 @@ def _add_group(
         str(component["path"]),
         str(component["semantic_target"]),
     )
+    if dimensions not in groups and len(groups) >= max_accumulated_groups:
+        return False
     state = groups.setdefault(
         dimensions,
         {
             "dimensions": dimensions,
-            "row_ids": set(),
+            "row_count": 0,
             "signed_source_sum": ZERO,
             "system_amount_sum": ZERO,
             "allocated_amount_sum": ZERO,
@@ -871,8 +1028,7 @@ def _add_group(
             "examples": [],
         },
     )
-    identity = (week, report_id, rrd_id)
-    state["row_ids"].add(identity)
+    state["row_count"] += 1
     state["signed_source_sum"] += _decimal(component["signed_source_amount"])
     state["system_amount_sum"] += _decimal(component["system_amount"])
     state["allocated_amount_sum"] += _decimal(component["allocated_amount"])
@@ -884,6 +1040,7 @@ def _add_group(
         state["examples"].append(
             {"week_start": week, "report_id": report_id, "rrd_id": rrd_id}
         )
+    return True
 
 
 def _finalize_groups(
@@ -908,7 +1065,7 @@ def _finalize_groups(
                 "finance_classifier_bucket": dimensions[6],
                 "accounting_path": dimensions[7],
                 "semantic_partner_target": dimensions[8],
-                "row_count": len(state["row_ids"]),
+                "row_count": int(state["row_count"]),
                 "signed_source_sum_rub": _money(state["signed_source_sum"]),
                 "system_amount_sum_rub": _money(state["system_amount_sum"]),
                 "allocation_coefficients": sorted(state["coefficients"]),
@@ -940,20 +1097,23 @@ def _add_candidate(
     deduction: Decimal,
     tokens: list[str],
     max_examples: int,
-) -> None:
+    max_accumulated_candidates: int,
+) -> bool:
     name = _operation_name(raw)
+    if name not in candidates and len(candidates) >= max_accumulated_candidates:
+        return False
     state = candidates.setdefault(
         name,
         {
             "operation_name": name,
-            "row_ids": set(),
+            "row_count": 0,
             "signed_deduction": ZERO,
             "system_amount": ZERO,
             "matched_tokens": set(),
             "examples": [],
         },
     )
-    state["row_ids"].add((week, report_id, rrd_id))
+    state["row_count"] += 1
     state["signed_deduction"] += deduction
     state["system_amount"] += abs(deduction)
     state["matched_tokens"].update(tokens)
@@ -961,13 +1121,14 @@ def _add_candidate(
         state["examples"].append(
             {"week_start": week, "report_id": report_id, "rrd_id": rrd_id}
         )
+    return True
 
 
 def _finalize_candidates(candidates: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     result = [
         {
             "operation_name": state["operation_name"],
-            "row_count": len(state["row_ids"]),
+            "row_count": int(state["row_count"]),
             "signed_deduction_rub": _money(state["signed_deduction"]),
             "system_abs_amount_rub": _money(state["system_amount"]),
             "matched_candidate_tokens": sorted(state["matched_tokens"]),
@@ -984,15 +1145,70 @@ def _finalize_candidates(candidates: Mapping[str, Mapping[str, Any]]) -> list[di
     )
 
 
-def _negative_evidence(
-    rows: Mapping[tuple[str, str, str], Mapping[str, Any]],
+def _logical_duplicate_evidence(
+    conn: sqlite3.Connection,
     *,
+    seller_id: str,
+    weeks: tuple[str, ...],
+    mismatch_keys: set[tuple[str, str]],
     max_examples: int,
-) -> dict[str, Any]:
-    signed = sum((_decimal(item["signed_deduction_rub"]) for item in rows.values()), ZERO)
-    system = sum((_decimal(item["system_abs_amount_rub"]) for item in rows.values()), ZERO)
+) -> list[dict[str, Any]]:
+    """Prove logical duplicates without retaining every primary key in memory.
+
+    Stored identities are unique by primary key. Therefore a logical duplicate
+    can exist only for a raw identity involved in at least one stored/raw
+    mismatch. A second ordered streaming pass is needed only when such an
+    anomaly exists.
+    """
+
+    if not mismatch_keys or not weeks:
+        return []
+    occurrences: dict[tuple[str, str], dict[str, Any]] = {
+        key: {"count": 0, "stored_examples": []} for key in mismatch_keys
+    }
+    placeholders = ",".join("?" for _ in weeks)
+    cursor = conn.execute(
+        f"""SELECT week_start,report_id,rrd_id,raw_json
+            FROM wb_finance_weekly_raw_rows
+            WHERE seller_id=? AND week_start IN ({placeholders})
+            ORDER BY week_start,report_id,rrd_id""",
+        (seller_id, *weeks),
+    )
+    for stored in cursor:
+        try:
+            raw = json.loads(str(stored["raw_json"] or "{}"))
+        except json.JSONDecodeError:
+            continue
+        key = (str(raw.get("reportId") or ""), str(raw.get("rrdId") or ""))
+        state = occurrences.get(key)
+        if state is None:
+            continue
+        state["count"] += 1
+        if len(state["stored_examples"]) < max_examples:
+            state["stored_examples"].append(
+                {
+                    "week_start": str(stored["week_start"]),
+                    "stored_report_id": str(stored["report_id"]),
+                    "stored_rrd_id": str(stored["rrd_id"]),
+                }
+            )
+    return [
+        {
+            "report_id": key[0],
+            "rrd_id": key[1],
+            "occurrences": int(state["count"]),
+            "stored_examples": state["stored_examples"],
+        }
+        for key, state in sorted(occurrences.items())
+        if state["count"] > 1
+    ]
+
+
+def _negative_evidence(state: Mapping[str, Any]) -> dict[str, Any]:
+    signed = _decimal(state["signed_deduction"])
+    system = _decimal(state["system_amount"])
     return {
-        "row_count": len(rows),
+        "row_count": int(state["row_count"]),
         "signed_deduction_sum_rub": _money(signed),
         "current_system_abs_sum_rub": _money(system),
         "abs_vs_signed_expense_uplift_rub": _money(system - signed),
@@ -1002,7 +1218,7 @@ def _negative_evidence(
                 "signed_deduction_rub": _money(item["signed_deduction_rub"]),
                 "system_abs_amount_rub": _money(item["system_abs_amount_rub"]),
             }
-            for _identity, item in sorted(rows.items())[:max_examples]
+            for item in state["examples"]
         ],
     }
 
