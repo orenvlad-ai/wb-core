@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 from typing import Any, Sequence
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,7 +28,11 @@ from packages.application.ads_historical_recovery import (  # noqa: E402
     MAX_WINDOW_DAYS,
     MIN_REQUEST_INTERVAL_SECONDS,
 )
-from apps.ads_historical_recovery import _is_confirmed_no_statistics_http_400  # noqa: E402
+from apps.ads_historical_recovery import (  # noqa: E402
+    OfficialAdsHistoricalSource,
+    _is_confirmed_no_statistics_http_400,
+    _is_confirmed_no_statistics_payload,
+)
 
 
 class FakeOfficialSource:
@@ -558,12 +563,36 @@ def main() -> int:
             }
         ).encode("utf-8")
         assert _is_confirmed_no_statistics_http_400(no_stats_body) is True
+        no_stats_payload = json.loads(no_stats_body)
+        assert _is_confirmed_no_statistics_payload(no_stats_payload) is True
         assert (
             _is_confirmed_no_statistics_http_400(
                 no_stats_body.replace(b"no statistics", b"temporary failure")
             )
             is False
         )
+
+        class _SuccessfulNoStatsResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return no_stats_body
+
+        with patch(
+            "apps.ads_historical_recovery.urllib_request.urlopen",
+            return_value=_SuccessfulNoStatsResponse(),
+        ):
+            try:
+                OfficialAdsHistoricalSource(token="fixture-token")._get_json(
+                    "https://example.invalid/adv/v3/fullstats"
+                )
+                raise AssertionError("HTTP-success no-statistics payload was not recognized")
+            except AdsHistoricalNoStatisticsError:
+                pass
 
         unclosed_source = FakeOfficialSource(empty_date=empty_date)
         unclosed_scope = AdsHistoricalRecoveryScope.build(

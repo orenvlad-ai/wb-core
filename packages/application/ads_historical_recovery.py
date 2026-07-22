@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 
 
-SCHEMA_VERSION = "ads_historical_recovery_v2"
+SCHEMA_VERSION = "ads_historical_recovery_v3"
 SOURCE_KEY = "ads_compact"
 SNAPSHOT_ROLE = "accepted_closed_day_snapshot"
 CLOSURE_SLOT = "yesterday_closed"

@@ -123,11 +123,16 @@ class OfficialAdsHistoricalSource:
                 f"official ads request transport failed: {exc.reason}"
             ) from exc
         try:
-            return json.loads(body.decode("utf-8"))
+            payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AdsHistoricalRecoveryError(
                 "official ads request returned invalid JSON"
             ) from exc
+        if _is_confirmed_no_statistics_payload(payload):
+            raise AdsHistoricalNoStatisticsError(
+                "official fullstats confirmed no statistics for this advertising period"
+            )
+        return payload
 
 
 def _is_confirmed_no_statistics_http_400(body: bytes) -> bool:
@@ -137,6 +142,10 @@ def _is_confirmed_no_statistics_http_400(body: bytes) -> bool:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
+    return _is_confirmed_no_statistics_payload(payload)
+
+
+def _is_confirmed_no_statistics_payload(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
     detail = str(payload.get("detail") or "").strip().casefold()
