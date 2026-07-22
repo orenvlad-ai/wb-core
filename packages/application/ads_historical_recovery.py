@@ -694,7 +694,8 @@ class AdsHistoricalRecovery:
                         batch_outcome = "success"
                     if not isinstance(payload, list):
                         raise AdsHistoricalRecoveryError(
-                            "official fullstats response is not a complete JSON list"
+                            "official fullstats response is not a complete JSON list; "
+                            + _canonical_json(_safe_fullstats_payload_shape(payload))
                         )
                     normalized, seen_campaign_ids = _fullstats_rows(
                         payload,
@@ -752,7 +753,10 @@ class AdsHistoricalRecovery:
                             continue
                         if not isinstance(singleton_payload, list):
                             raise AdsHistoricalRecoveryError(
-                                "official singleton fullstats response is not a complete JSON list"
+                                "official singleton fullstats response is not a complete JSON list; "
+                                + _canonical_json(
+                                    _safe_fullstats_payload_shape(singleton_payload)
+                                )
                             )
                         singleton_rows, _ = _fullstats_rows(
                             singleton_payload,
@@ -1215,6 +1219,24 @@ def _optional_iso_date(value: Any) -> date | None:
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _safe_fullstats_payload_shape(payload: Any) -> dict[str, Any]:
+    shape: dict[str, Any] = {
+        "type": type(payload).__name__,
+        "digest": canonical_digest(payload),
+    }
+    if isinstance(payload, Mapping):
+        shape["keys"] = sorted(str(key) for key in payload)[:50]
+        for key in ("status", "origin", "detail", "title"):
+            value = payload.get(key)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                shape[key] = str(value)[:500]
+    elif isinstance(payload, Sequence) and not isinstance(
+        payload, (str, bytes, bytearray)
+    ):
+        shape["item_count"] = len(payload)
+    return shape
 
 
 def _date_windows(values: Sequence[date]) -> list[tuple[date, date]]:
