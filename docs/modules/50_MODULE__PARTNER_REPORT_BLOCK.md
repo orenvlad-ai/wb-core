@@ -14,6 +14,7 @@ source_basis:
   - "migration/110_finance_partner_temporal_v3.md"
   - "migration/111_partner_marketing_diagnostic_ads_recovery.md"
   - "migration/112_partner_marketing_single_count.md"
+  - "migration/113_ads_historical_source_completion.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -72,6 +73,8 @@ Account-level rows with no resolvable `nmId` are not silently lost or assigned w
 The allocated amount and coefficient are disclosed in provenance. Account-level agent remuneration, acquiring, logistics, storage, non-capitalized acceptance and penalties/corrections are routed to the existing Partner main rows. Non-capitalized transit, WB Jam, paid services, review points and genuinely other deductions are routed to named subrows. A catch-all difference from `profit_period_expenses` is forbidden: the explicit categories must reconcile after Finance marketing and positive adjustments are excluded, otherwise preview blocks. Non-positive total revenue is a blocker. A different allocation rule requires a separately approved server-owned contract.
 
 Marketing uses only accepted closed-day `ads_compact/fullstats` snapshots at exact `date + nmId`. The shared resolver accepts valid root or nested `result` envelopes. `kind=empty` means confirmed zero; a missing date, invalid value/envelope or successful payload without the selected `nmId` is a blocker and never zero. Direct and account-level Finance marketing remain visible in Finance but contribute exactly zero to every Partner expense row and margin because the Partner `Маркетинг WB` row already deducts `ads_sum`.
+
+Historical recovery schema `ads_historical_recovery_v2` uses the official campaign manifest plus `adv/v3/fullstats` only. A status-7 campaign whose official `changeTime` predates the exact recovery scope is recorded and excluded as completed before scope. Every other campaign supported by `fullstats` (statuses 7/9/11) is requested in bounded windows and batches. If a batch response omits an ID, recovery must confirm that campaign with an exact singleton request: only a complete singleton response or WB's exact structured `there are no statistics for this advertising period` response is accepted. Empty lists, malformed/error responses, unsupported campaigns overlapping scope and unconfirmed omissions remain blockers. This is source completion, not a synthetic-zero path; only a fully reconciled global day may be persisted as `kind=empty`.
 
 # 4. Decimal formulas
 
