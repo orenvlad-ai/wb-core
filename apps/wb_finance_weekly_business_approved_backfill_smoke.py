@@ -346,7 +346,7 @@ def _assert_apply_result(
         ).fetchone()[0]
         stale_sku_projection_count = conn.execute(
             """SELECT COUNT(*) FROM wb_finance_weekly_sku_aggregates
-               WHERE formula_version<>'wb_finance_weekly_sku_aggregate_v2'"""
+               WHERE formula_version<>'wb_finance_weekly_sku_aggregate_v3'"""
         ).fetchone()[0]
     if (
         retro_count

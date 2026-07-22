@@ -11,6 +11,7 @@ source_basis:
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "migration/108_finance_canonical_cost_partner_ui_recovery.md"
+  - "migration/110_finance_partner_temporal_v3.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -27,7 +28,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/partner-report/preview"
   - "POST /v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 source_of_truth_level: "module_canonical"
-update_note: "V2 makes the report UI-first, uses indexed canonical Finance/cost sources, supports root/nested ads envelopes, and limits export to a source-digest-bound XLSX; finalization and ZIP/raw Finance exports are outside this scope."
+update_note: "V3 shares the warehouse temporal cost policy, exposes four reconciled business expense categories, and makes production Partner UI/XLSX acceptance fail closed."
 ---
 
 # 1. Purpose and active surface
@@ -72,7 +73,7 @@ Marketing uses only accepted closed-day `ads_compact/fullstats` snapshots at exa
 
 # 4. Decimal formulas
 
-Formula version is `partner_report_profitability_ui_first_v2`.
+Formula version is `partner_report_profitability_ui_first_v3`.
 
 For each week:
 
@@ -103,7 +104,16 @@ Negative net profit remains visible; negative dividends are not accrued. For sev
 
 Weekly percentages are not summed. Zero capital is a validation error. The UI tooltip explicitly says this is a calculated, not guaranteed, return.
 
-Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, other attributable expenses, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return.
+Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, `Прочие прямые и распределённые расходы`, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return.
+
+`Прочие прямые и распределённые расходы` includes direct expenses of the selected SKU plus the approved revenue-proportional allocation of account-level expenses. Its accessible tooltip describes the formula but does not expose the numeric allocation coefficient, account revenue or source amount. The main row expands into exactly four indented business categories:
+
+1. `Транзитная логистика, не подтверждённая как капитализированная`;
+2. `Подписка WB Jam`;
+3. `Платные сервисы WB`;
+4. `Прочие удержания`.
+
+Each category combines direct and allocated amounts of that category. Unclassified account-level rows belong to `Прочие удержания`; proven capitalized transit is excluded. Partner-facing UI/XLSX show only category amounts. Direct/allocated values, source category/rule and digests remain internal machine provenance. Decimal largest-remainder reconciliation assigns any display-cent residual deterministically, so the four displayed amounts equal the rounded main row without modifying exact profit values. The main expense is deducted exactly once.
 
 # 5. UI contract and performance
 
@@ -117,9 +127,9 @@ The production-like regression fixture adds 295,919 unrelated raw Finance rows a
 
 `POST .../preview.xlsx` receives the selected `nmId`, exact weeks and the visible preview's `expected_source_digest`. Source drift returns a conflict and requires rebuilding the UI preview.
 
-The workbook is generated from the same calculation service as UI. Sheet 1 follows the supplied desktop reference: light/white palette, Arial-like 10 pt text, thin calm gray borders, compact coefficient column, metric labels left, week columns right, total column, frozen `C2`, print area/fit, appropriate widths/heights and blue emphasis for `Дивиденды` and annualized return. Sheet 2 contains only selected report parameters, date, formula version and source digest.
+The workbook is generated from the same calculation service as UI. Sheet 1 follows the supplied desktop reference: light/white palette, Arial-like 10 pt text, thin calm gray borders, compact coefficient column, metric labels left, week columns right, total column, frozen `C2`, print area/fit, appropriate widths/heights and blue emphasis for `Дивиденды` and annualized return. The renamed other-expense row is followed by the same four indented categories as the UI, with amounts only and no category percentages/allocation coefficients. Their displayed cents reconcile to the main row. Sheet 2 contains only selected report parameters, date, formula version and source digest.
 
-The file has no macros, external workbook links, hidden sheets or other-SKU values. Its filename binds product/SKU, `nmId` and selected period. UI and XLSX values must match to Decimal rounding.
+The file has no macros, external workbook links, hidden sheets or other-SKU values. Its filename binds product/SKU, `nmId` and selected period. UI and XLSX values must match to Decimal rounding. Production acceptance opens and semantically verifies the workbook; file existence/non-zero size alone is never evidence.
 
 ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scanner are not part of the active V2 output and have no HTTP routes.
 
@@ -129,6 +139,6 @@ ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scann
 - immediate loading, cancel, UI-first table, digest-bound XLSX and desktop/390 px layout: `python3 apps/partner_report_browser_smoke.py`;
 - authorization: `python3 apps/registry_upload_http_entrypoint_auth_smoke.py`;
 - public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
-- authenticated production read-only acceptance: hosted `finance-ui-flow`.
+- authenticated production read-only acceptance: hosted `finance-ui-flow`; passed status requires ready preview, empty blockers, visible table, real XLSX download, workbook structure/content checks, UI/XLSX reconciliation, desktop/narrow screenshots and no fatal browser/network errors.
 
 The control fixture uses revenue `476034`, COGS `83837`, agent+acquiring `174797`, ads `30904`, office `10000`, tax `6%`, reserve `20%` and investor share `40%`, yielding Finance margin `186496`, net profit `110634.76` and dividends `44253.904`. Invested capital is an explicit fixture input and is not inferred from the reference screenshot.

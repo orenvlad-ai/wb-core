@@ -158,6 +158,7 @@ def main() -> None:
             if "Формируем preview" not in loading:
                 raise AssertionError(f"visible loading state was not immediate: {loading}")
             page.locator("#partnerReportTableWrap table").wait_for(state="visible")
+            page.locator(".partner-report-tooltip-anchor").focus()
             facts = page.evaluate(
                 r"""
                 () => {
@@ -165,6 +166,9 @@ def main() -> None:
                   const table = wrap.querySelector('table');
                   const dividends = [...table.rows].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Дивиденды');
                   const blockers = document.getElementById('partnerReportBlockers');
+                  const other = table.querySelector('[data-partner-row-key="other_direct_and_allocated_expenses"]');
+                  const categories = [...table.querySelectorAll('[data-partner-expense-category]')];
+                  const tooltip = document.querySelector('.partner-report-tooltip');
                   return {
                     heading: document.querySelector('[data-report-section-panel="partner"] h2').innerText,
                     header: [...table.tHead.rows[0].cells].map((cell) => cell.innerText.trim()),
@@ -175,6 +179,11 @@ def main() -> None:
                     blockersAboveTable: blockers.getBoundingClientRect().top < wrap.getBoundingClientRect().top,
                     hasFinalize: Boolean(document.getElementById('partnerReportFinalize')),
                     notes: document.getElementById('partnerReportNotes').innerText,
+                    otherLabel: other && other.querySelector('.partner-report-tooltip-wrap > span:first-child').innerText.trim(),
+                    categoryCount: categories.length,
+                    categoryPercentCount: categories.filter((row) => row.innerText.includes('%')).length,
+                    oldLabelCount: [...table.querySelectorAll('td')].filter((cell) => cell.innerText.trim() === 'Прочие атрибутируемые расходы').length,
+                    tooltipVisible: Boolean(tooltip && getComputedStyle(tooltip).display !== 'none'),
                   };
                 }
                 """
@@ -190,6 +199,11 @@ def main() -> None:
                 or not facts["blockersAboveTable"]
                 or facts["hasFinalize"]
                 or "source digest" not in facts["notes"]
+                or facts["otherLabel"] != "Прочие прямые и распределённые расходы"
+                or facts["categoryCount"] != 4
+                or facts["categoryPercentCount"] != 0
+                or facts["oldLabelCount"] != 0
+                or not facts["tooltipVisible"]
             ):
                 raise AssertionError(f"desktop Partner Report contract mismatch: {facts}")
 
@@ -331,14 +345,16 @@ def _report() -> dict:
     totals = _values("676034", "49053.904", "127.5402")
     return {
         "status": "ready",
-        "formula_version": "partner_report_profitability_ui_first_v2",
+        "formula_version": "partner_report_profitability_ui_first_v3",
         "source_digest": "sha256:" + "f" * 64,
         "annualized_return_formula": "Средние недельные дивиденды × 52 / вложенный капитал × 100%. Расчётная, не гарантированная доходность.",
         "weeks": [
-            {"week_start": "2026-07-06", "week_end": "2026-07-12", "label": "06.07–12.07", "values": first},
-            {"week_start": "2026-07-13", "week_end": "2026-07-19", "label": "13.07–19.07", "values": second},
+            {"week_start": "2026-07-06", "week_end": "2026-07-12", "label": "06.07–12.07", "values": first, "other_expense_breakdown": _breakdown()},
+            {"week_start": "2026-07-13", "week_end": "2026-07-19", "label": "13.07–19.07", "values": second, "other_expense_breakdown": _breakdown()},
         ],
         "totals": totals,
+        "other_expense_breakdown_total": _breakdown(),
+        "other_expense_tooltip": "Итог включает прямые расходы выбранного SKU и распределённую долю общих расходов кабинета. Распределённая доля рассчитывается как общие неатрибутированные расходы недели × чистая выручка SKU / общая положительная чистая выручка недели.",
         "blockers": [],
     }
 
@@ -378,7 +394,7 @@ def _values(net_revenue: str, dividends: str, annualized: str) -> dict:
         "acceptance": "0",
         "ads": "30904",
         "penalties_and_adjustments": "0",
-        "other_attributable_expenses": "0",
+        "other_direct_and_allocated_expenses": "0",
         "finance_margin": "186496",
         "office": "10000",
         "estimated_tax": "28562.04",
@@ -387,6 +403,15 @@ def _values(net_revenue: str, dividends: str, annualized: str) -> dict:
         "dividends": dividends,
         "annualized_return_pct": annualized,
     }
+
+
+def _breakdown() -> list[dict[str, str]]:
+    return [
+        {"key": "uncapitalized_transit_logistics", "label": "Транзитная логистика, не подтверждённая как капитализированная", "amount_rub": "0.00"},
+        {"key": "wb_jam_subscription", "label": "Подписка WB Jam", "amount_rub": "0.00"},
+        {"key": "wb_paid_services", "label": "Платные сервисы WB", "amount_rub": "0.00"},
+        {"key": "other_withholdings", "label": "Прочие удержания", "amount_rub": "0.00"},
+    ]
 
 
 def _workbook_fixture() -> bytes:

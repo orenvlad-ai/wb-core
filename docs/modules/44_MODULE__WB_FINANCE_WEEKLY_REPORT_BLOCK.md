@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V3`
+`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V4`
 
 ## Purpose and source boundary
 
@@ -21,13 +21,13 @@ The existing runtime SQLite owns:
 - indexed `wb_finance_weekly_sku_aggregates` keyed by `seller + week + nmId + formula version`;
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
-The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, formula version or canonical cost digest.
+The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v3`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
 
 `wb_finance_retro_cost_map` is not created, read or written by the active schema/calculation/apply path. A table left by an earlier deployed revision may remain untouched as historical migration evidence, but its fixed `unit_cost_rub` is not business truth and cannot affect COGS.
 
 ## Single canonical COGS contract
 
-Formula version is `wb_finance_canonical_our_wb_cost_v3`. Finance calls the shared warehouse-domain resolver and does not reproduce warehouse cost-engine rules.
+Formula version is `canonical_our_wb_cost_temporal_policy_v4`. Finance calls the same shared warehouse-domain resolver as Vitrina, Partner and Proxy 3 and does not reproduce warehouse cost-engine rules.
 
 For each sale/return operation of the same deterministically resolved `nmId`:
 
@@ -137,4 +137,4 @@ Targeted checks:
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
-Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data.
+Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data. Acceptance is fail-closed: `preview.attempted=true`, `preview.ready=true`, empty blockers, visible table, enabled download and an actually downloaded/opened semantic XLSX that reconciles nmId, selected weeks, source/formula digest and displayed Decimal amounts are all mandatory. A non-empty but wrong workbook, hidden sheet, external link, missing download or incomplete preview fails the flow.

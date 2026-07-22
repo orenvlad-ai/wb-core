@@ -114,6 +114,7 @@ def main() -> None:
         "activity_metrics_preview": ready_result["activity_metrics_preview"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
+        "cost_policy_tooltip": ready_result["cost_policy_tooltip"],
         "operator_screen_layout": ready_result["operator_screen_layout"],
         "unified_tab_navigation": ready_result["unified_tab_navigation"],
         "load_refresh_action": ready_result["load_refresh_action"],
@@ -590,6 +591,7 @@ def run_browser_checks(
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
             sticky_section_offsets = _check_sticky_section_offsets(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
+            cost_policy_tooltip = _check_cost_policy_tooltip(page)
             load_refresh_action = (
                 _check_load_refresh_action(
                     page,
@@ -742,6 +744,7 @@ def run_browser_checks(
         "compact_widths": compact_widths,
         "sticky_section_offsets": sticky_section_offsets,
         "percent_formatting": percent_formatting,
+        "cost_policy_tooltip": cost_policy_tooltip,
         "operator_screen_layout": operator_screen_layout,
         "unified_tab_navigation": unified_tab_navigation,
         "load_refresh_action": load_refresh_action,
@@ -809,6 +812,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "sticky_section_offsets" in result:
         print("web_vitrina_browser_sticky_section: ok ->", result["sticky_section_offsets"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
+    if "cost_policy_tooltip" in result:
+        print("web_vitrina_browser_cost_policy_tooltip: ok ->", result["cost_policy_tooltip"])
     print("web_vitrina_browser_operator_screen_layout: ok ->", result["operator_screen_layout"])
     if "unified_tab_navigation" in result:
         print("web_vitrina_browser_unified_tabs: ok ->", result["unified_tab_navigation"])
@@ -3909,7 +3914,10 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
         ]).filter(item => item[0]))"""
     )
     required = {
-        "metric_label": 156,
+        # The canonical cost label is intentionally explicit and reserves room
+        # for its keyboard-accessible policy control without widening the
+        # sticky column beyond one compact 180 px slot.
+        "metric_label": 180,
         "section": 118,
     }
     for hidden_id in ("row_order", "scope_kind", "scope_key", "scope_label", "group", "nm_id", "metric_key", "row_last_updated_at"):
@@ -4041,6 +4049,78 @@ def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | N
         "first": first_value,
         "second": second_value,
     }
+
+
+def _check_cost_policy_tooltip(page: object) -> dict[str, object]:
+    policy_text = (
+        "До 01.07 используется ретроспективная управленческая проекция себестоимости того же nmID на 01.07. "
+        "Начиная с 01.07 используется каноническая себестоимость на соответствующую дату."
+    )
+    _set_metric_display_status(
+        page,
+        scope_id="total",
+        metric_key="total_our_wb_unit_cost_rub",
+        status="shown",
+    )
+    anchor = page.locator(".metric-cost-policy-anchor").first
+    anchor.scroll_into_view_if_needed()
+    anchor.focus()
+    desktop = page.evaluate(
+        """(expected) => {
+          const anchor = document.querySelector('.metric-cost-policy-anchor');
+          const tooltip = anchor && anchor.parentElement
+            ? anchor.parentElement.querySelector('.metric-cost-policy-tooltip')
+            : null;
+          return {
+            ariaLabel: anchor ? (anchor.getAttribute('aria-label') || '') : '',
+            tooltipText: tooltip ? (tooltip.textContent || '').trim() : '',
+            tooltipDisplay: tooltip ? getComputedStyle(tooltip).display : '',
+            focused: document.activeElement === anchor,
+            matchesExpected: !!tooltip && (tooltip.textContent || '').trim() === expected
+          };
+        }""",
+        policy_text,
+    )
+    if (
+        desktop["ariaLabel"] != policy_text
+        or desktop["tooltipText"] != policy_text
+        or desktop["tooltipDisplay"] == "none"
+        or not desktop["focused"]
+        or not desktop["matchesExpected"]
+    ):
+        raise AssertionError(f"cost policy tooltip must be keyboard-accessible and exact, got {desktop}")
+
+    page.set_viewport_size({"width": 390, "height": 850})
+    anchor.scroll_into_view_if_needed()
+    anchor.focus()
+    narrow = page.evaluate(
+        """() => {
+          const anchor = document.querySelector('.metric-cost-policy-anchor');
+          const tooltip = anchor && anchor.parentElement
+            ? anchor.parentElement.querySelector('.metric-cost-policy-tooltip')
+            : null;
+          const rect = tooltip ? tooltip.getBoundingClientRect() : {left: -1, right: -1, width: 0};
+          return {
+            tooltipDisplay: tooltip ? getComputedStyle(tooltip).display : '',
+            left: Math.round(rect.left),
+            right: Math.round(rect.right),
+            width: Math.round(rect.width),
+            viewportWidth: window.innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+            focused: document.activeElement === anchor
+          };
+        }"""
+    )
+    page.set_viewport_size({"width": 1100, "height": 900})
+    if (
+        narrow["tooltipDisplay"] == "none"
+        or not narrow["focused"]
+        or int(narrow["left"]) < 0
+        or int(narrow["right"]) > int(narrow["viewportWidth"])
+        or int(narrow["documentWidth"]) > int(narrow["viewportWidth"]) + 1
+    ):
+        raise AssertionError(f"cost policy tooltip must remain visible without narrow overflow, got {narrow}")
+    return {"desktop": desktop, "narrow": narrow}
 
 
 def _check_right_edge_spacer(page: object) -> dict[str, object]:
@@ -4380,7 +4460,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C17",
+                write_rect="A1:C20",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -4390,6 +4470,7 @@ def _build_plan(
                     ["Итого: Заказы", "TOTAL|total_orderCount", 12],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
                     ["Итого: В корзину", "TOTAL|total_cartCount", 18],
+                    ["Итого: WAC WB", "TOTAL|total_our_wb_unit_cost_rub", 105],
                     [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 60],
                     [f"SKU B: Показы в воронке", f"SKU:{second_nm_id}|view_count", 40],
                     [f"SKU A: Заказы", f"SKU:{first_nm_id}|orderCount", 7],
@@ -4402,8 +4483,10 @@ def _build_plan(
                     [f"SKU B: Поиск", f"SKU:{second_nm_id}|views_current", 280],
                     [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
+                    [f"SKU A: WAC WB", f"SKU:{first_nm_id}|our_wb_unit_cost_rub", 100],
+                    [f"SKU B: WAC WB", f"SKU:{second_nm_id}|our_wb_unit_cost_rub", 110],
                 ],
-                row_count=16,
+                row_count=19,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

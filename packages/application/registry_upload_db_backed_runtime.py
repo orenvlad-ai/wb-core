@@ -523,6 +523,31 @@ class RegistryUploadDbBackedRuntime:
             return {}
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            functional_cutover_table = conn.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='sheet_vitrina_v1_warehouse_functional_cutovers'"""
+            ).fetchone()
+            posted_functional_cutover = (
+                conn.execute(
+                    """SELECT 1 FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                       WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+                ).fetchone()
+                if functional_cutover_table is not None
+                else None
+            )
+            if posted_functional_cutover is not None:
+                # Every active consumer, including dates before the policy
+                # boundary, must resolve through the warehouse-domain temporal
+                # resolver.  The legacy branches below remain only for
+                # pre-cutover fixtures/migrations.
+                from packages.application.canonical_wb_cost_resolver import (
+                    load_canonical_wb_cost_lookup,
+                )
+
+                return load_canonical_wb_cost_lookup(
+                    conn,
+                    as_of_date=date.fromisoformat(date_key[:10]),
+                )
             functional_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_warehouse_functional_balances'"
             ).fetchone()
