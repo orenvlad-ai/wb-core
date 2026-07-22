@@ -4,6 +4,8 @@
 
 GitHub Release Train — repo-owned сериализованная очередь для независимо подготовленных STANDARD и LOOP change-задач. Durable state хранится только в GitHub PR, labels, checks, comments и workflow runs. Очередь владеет критической секцией `sync -> baseline -> merge -> deploy -> verify`, но не заменяет task-level targeted checks, semantic review и docs sync.
 
+Non-PR `user-artifact`, где единственная mutation — пользовательский файл вне репозитория, в Release Train не входит и не получает отдельный scope label. Если меняются Git-tracked protocol/docs/helper, это уже обычный `scope:repo-only` PR и данный Release Train contract применяется полностью.
+
 Класс задачи и execution contour независимы. PR обязан иметь ровно одну task label и ровно одну scope label:
 
 - `task:standard` или `task:loop`;

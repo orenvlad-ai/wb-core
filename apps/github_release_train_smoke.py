@@ -86,6 +86,7 @@ from apps.github_release_train_spec import (  # noqa: E402
     CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
     EXPLICIT_TASK_PROMPTS,
+    ExecutionContour,
     GoalDisposition,
     GoalCapability,
     GoalPhase,
@@ -104,6 +105,7 @@ from apps.github_release_train_spec import (  # noqa: E402
     classify_continuity,
     classify_task,
     explicit_task_class,
+    github_closure_required,
     mcp_capability_sufficient,
     order_goal_phases,
     phase_goal_decision,
@@ -2010,6 +2012,11 @@ def _assert_machine_classification_and_state_spec() -> None:
         assert explicit_task_class(line + "\nbody") == expected
         assert classify_task(TaskIntent(ambiguous=True), explicit=expected) == expected
     assert classify_task(TaskIntent(read_only=True)) == TaskClass.DIAGNOSTIC
+    assert classify_task(TaskIntent(read_only=True, user_artifact=True)) == TaskClass.STANDARD
+    assert len(tuple(ExecutionContour)) == 6
+    assert not github_closure_required(TaskClass.STANDARD, ExecutionContour.USER_ARTIFACT)
+    assert github_closure_required(TaskClass.STANDARD, ExecutionContour.REPO_ONLY)
+    assert not github_closure_required(TaskClass.DIAGNOSTIC, ExecutionContour.READ_ONLY)
     assert classify_task(TaskIntent(deploy=True, production_ui=True, iterative=True)) == TaskClass.LOOP
     assert classify_task(TaskIntent()) == TaskClass.STANDARD
     assert classify_task(TaskIntent(ambiguous=True)) == TaskClass.STANDARD

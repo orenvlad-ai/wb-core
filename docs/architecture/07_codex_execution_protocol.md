@@ -17,10 +17,10 @@ Codex ведёт задачу автономно до проверяемого �
 Task class и execution contour ортогональны:
 
 - `ДИАГНОСТИКА` задаёт строго read-only orchestration и никогда не создаёт branch/PR;
-- `СТАНДАРТ` задаёт полный применимый closure через отдельный PR и GitHub Release Train;
+- `СТАНДАРТ` задаёт полный применимый closure; для PR-backed изменений это отдельный PR и GitHub Release Train, а для чистого `user-artifact` — фактическое создание и проверка файла без GitHub closure;
 - `LOOP` задаёт итерационный live/runtime closure с pre-deploy agent handshake и обязательным production UI acceptance.
 
-Execution contour (`read-only`, `repo-only`, `live/runtime`, `production data mutation/backfill`, `archived GAS guard`) описывает техническую границу. `СТАНДАРТ` получает GitHub label `task:standard`, `LOOP` — `task:loop`; диагностическая задача не входит в Release Train. Явная строка имеет приоритет, а при её отсутствии класс определяется автоматически по правилам ниже.
+Execution contour (`read-only`, `user-artifact`, `repo-only`, `live/runtime`, `production data mutation/backfill`, `archived GAS guard`) описывает техническую границу. PR-backed `СТАНДАРТ` получает GitHub label `task:standard`, `LOOP` — `task:loop`; диагностическая задача и non-PR `user-artifact` в Release Train не входят. Явная строка имеет приоритет, а при её отсутствии класс определяется автоматически по правилам ниже.
 
 Явные строки класса:
 
@@ -30,6 +30,7 @@ Execution contour (`read-only`, `repo-only`, `live/runtime`, `production data mu
 
 Если явной строки нет, Codex до начала работы выбирает класс по contract order:
 
+- создание или изменение пользовательского файла вне репозитория — `стандарт` с contour `user-artifact`; требуемая запись файла не является `ДИАГНОСТИКОЙ`;
 - исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`;
 - deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`;
 - обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`.
@@ -92,7 +93,7 @@ WebCore Data MCP — только read-only allowlist, а не универса�
 
 Routine-шаги, уже определённые `AGENTS.md` и authoritative docs, не нужно подробно повторять в prompt.
 
-Перед изменениями:
+Перед repo-changing изменениями:
 
 - проверить `git status --short`, текущую ветку и remotes;
 - проверить GitHub auth, если задача включает GitHub state или closure;
@@ -104,11 +105,26 @@ Routine-шаги, уже определённые `AGENTS.md` и authoritative d
 
 Scope должен быть явным и bounded. Не добавляй unrelated redesign, application/business logic, production config или runtime data к docs/governance задаче.
 
-## Пять Execution-Контуров
+## Шесть Execution-Контуров
 
 ### `read-only`
 
 Анализ, диагностика или review без изменений. Финальный результат — подтверждённый анализ либо точный внешний blocker. Code, GitHub и production mutations запрещены.
+
+### `user-artifact`
+
+Создание или изменение запрошенного XLSX, CSV, DOCX, PDF, TXT либо аналогичного пользовательского файла является mutation и потому не является `ДИАГНОСТИКОЙ`. Класс задачи — `СТАНДАРТ`, но если единственная mutation — итоговый файл вне репозитория, применяется non-PR closure:
+
+- branch, worktree, commit и PR не создаются;
+- GitHub Release Train не запускается, GitHub labels/comments/state не изменяются;
+- label `scope:user-artifact` не существует и не создаётся;
+- code, docs и любые repo files не меняются;
+- production и business data не изменяются;
+- разрешены только необходимые read-only источники, временные builder/intermediate files вне repo и итоговый файл по точному пути пользователя.
+
+Изменение Git-tracked документации, кода, tests или repo-owned helper — даже если оно посвящено пользовательским artifacts — не попадает в это исключение: это обычный `СТАНДАРТ + scope:repo-only` с полным GitHub closure.
+
+User-artifact завершён только после фактического создания и проверки запрошенного файла. Подготовленные данные, только CSV вместо XLSX, свободный целевой путь, описание будущих действий или synthetic placeholder completion не являются. Итоговый файл — производный export/snapshot, а не новый canonical source of truth.
 
 ### `repo-only`
 
@@ -162,6 +178,51 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 
 Этот контур не является normal completion path для website/operator задач.
 
+## Создание Нового XLSX В `user-artifact`
+
+Этот contract применяется к новым обычным табличным XLSX. Для сложного редактирования существующей книги нельзя применять fallback, который может потерять formulas, styles, charts, relationships или workbook structure; нужен format-preserving tool либо точный capability blocker после bounded recovery.
+
+### Основной Path
+
+1. Использовать активный Spreadsheets skill и `@oai/artifact-tool`.
+2. Проверить `CODEX_PRIMARY_RUNTIME_ROOT`, `CODEX_PRIMARY_RUNTIME_NODE`, `CODEX_PRIMARY_RUNTIME_NODE_MODULES` и `CODEX_PRIMARY_RUNTIME_PYTHON`.
+3. Создать отдельную временную директорию вне репозитория.
+4. Создать в ней symlink `node_modules -> CODEX_PRIMARY_RUNTIME_NODE_MODULES`.
+5. Запускать текущий builder именно через `CODEX_PRIMARY_RUNTIME_NODE` и импортировать `@oai/artifact-tool` из этого окружения.
+6. Не подменять bundled runtime ambient Node, случайными global modules или application dependencies.
+
+`load_workspace_dependencies` можно использовать, когда capability доступна, но её наличие не является обязательным. Отсутствие `load_workspace_dependencies` само по себе не blocker и не разрешает завершить задачу без файла.
+
+### Bounded Recovery
+
+После ошибки нужно прочитать точный error, проверить фактические значения всех четырёх `CODEX_PRIMARY_RUNTIME_*`, существование `CODEX_PRIMARY_RUNTIME_NODE`/`CODEX_PRIMARY_RUNTIME_NODE_MODULES`, правильность symlink и запуск требуемым Node. Затем исправляется минимальная причина и повторяется тот же builder с уже подготовленными данными. Исходные данные не получают и не сопоставляют заново; одинаковые безрезультатные retries не повторяются бесконечно.
+
+### Разрешённый Fallback
+
+Владелец проекта постоянно разрешает для `user-artifact` после доказанно неуспешного bounded recovery создавать новый простой XLSX следующим порядком:
+
+1. уже установленный `openpyxl` через `CODEX_PRIMARY_RUNTIME_PYTHON`, если он задан и исполним, иначе через доступный system Python;
+2. уже установленный `xlsxwriter` тем же interpreter order;
+3. dependency-free валидный XLSX/`OOXML` через Python standard library (`zipfile` + XML);
+4. подходящий минимальный repo-owned helper, например dependency-free финальный fallback `apps/user_artifact_xlsx.py` для новых простых таблиц.
+
+Новые зависимости из сети только ради простого XLSX не устанавливаются. CSV нельзя сохранять с расширением `.xlsx`; fake/corrupt workbook запрещён. Identifier-поля (`nmID`, barcode, article, SKU и значения с leading zero) записываются как text. Prepared data остаётся в одном temporary/intermediate source и не теряется при переключении backend. Итог публикуется точно во внешний путь пользователя; временные builders и data не попадают в Git.
+
+### Проверка И Completion
+
+Перед завершением применимо проверить:
+
+- exact output path, существование и ненулевой размер;
+- XLSX как ZIP container и успешный `testzip`/zip integrity;
+- обязательные OOXML members и парсинг XML;
+- повторное открытие доступным независимым reader;
+- ожидаемые sheet names, row/column counts, ключевые values/formulas и отсутствие лишних пустых sheets;
+- text type/format идентификаторов без exponent conversion и потери leading zero;
+- запрошенные filter, freeze panes, widths и иное оформление;
+- визуальный render доступным способом, когда оформление существенно.
+
+Ошибка одного renderer не уничтожает уже созданный и структурно проверенный простой XLSX. Используется следующий доступный visual path без повторного получения исходных данных. Если ни один renderer недоступен, это фиксируется как ограничение только visual phase; структурная и независимая reader-проверка всё равно выполняются.
+
 ## Default Completion И Явная Граница
 
 Если пользователь явно не ограничил closure, Codex самостоятельно выполняет полный применимый контур.
@@ -170,11 +231,15 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 
 `implementation → checks → semantic review → fixes/recheck → docs sync → commit → push → PR → checks/review → merge → удаление feature-ветки → fetch/prune → подтверждение результата в актуальном origin/main`
 
+Для `user-artifact`:
+
+`read-only source acquisition → prepared data preservation → exact file creation → structural/content/format verification → applicable visual verification`
+
 Для `live/runtime` после всего `repo-only` closure обязательны canonical deploy, deploy-commit equality и live/service/public verify.
 
 Для `production data mutation/backfill` выполняются применимый GitHub/runtime closure, обязательный safety-контур и human gates.
 
-Если PR явно поставлен в repo-owned GitHub Release Train, Codex не передаёт ответственность очереди и не завершает task на метке `release:ready`. Task owner обязан:
+Если PR явно поставлен в repo-owned GitHub Release Train, Codex не передаёт ответственность очереди и не завершает task на метке `release:ready`. `user-artifact` этого раздела не достигает, потому что не создаёт PR. Task owner PR-backed задачи обязан:
 
 - использовать отдельную branch/worktree и отдельный PR для каждого независимого change;
 - добавить ровно одну task label: `task:standard` или `task:loop`;
