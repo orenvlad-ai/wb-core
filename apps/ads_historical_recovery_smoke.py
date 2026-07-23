@@ -128,6 +128,28 @@ class FakeOfficialSource:
         ]
 
 
+class PermutedOfficialSource(FakeOfficialSource):
+    def fetch_fullstats(
+        self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
+    ) -> list[dict[str, Any]]:
+        payload = super().fetch_fullstats(
+            campaign_ids=campaign_ids,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        def reverse_lists(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: reverse_lists(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [reverse_lists(item) for item in reversed(value)]
+            return value
+
+        result = reverse_lists(payload)
+        assert isinstance(result, list)
+        return result
+
+
 class IncompleteCampaignSource(FakeOfficialSource):
     def fetch_fullstats(
         self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
@@ -382,8 +404,19 @@ def main() -> int:
         )
         plan = recovery.plan(scope)
         repeated_plan = recovery.plan(scope)
+        permuted_plan = AdsHistoricalRecovery(
+            db_path=db_path,
+            source=PermutedOfficialSource(empty_date=empty_date),
+            now_factory=fixed_now,
+        ).plan(scope)
         assert plan["status"] == "ready", plan["blockers"]
         assert plan["fingerprint"] == repeated_plan["fingerprint"]
+        assert plan["fingerprint"] == permuted_plan["fingerprint"]
+        assert (
+            plan["source_manifest"]["response_digest"]
+            == permuted_plan["source_manifest"]["response_digest"]
+        )
+        assert plan["target_manifest"] == permuted_plan["target_manifest"]
         assert plan["write_set"]["insert_snapshot_count"] == 32
         assert plan["target_manifest"][0]["action"] == "skip_existing"
         assert plan["integration_contract"]["allowed_campaign_statuses"] == [7, 9, 11]
