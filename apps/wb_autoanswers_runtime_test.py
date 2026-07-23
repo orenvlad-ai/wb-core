@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -13,8 +14,14 @@ import unittest
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
+    classify_feedback_content,
     content_version_hash,
     wb_observation_hash,
+)
+from packages.contracts.wb_autoanswers import (
+    CONTENT_CLASS_CONTENT_BEARING,
+    CONTENT_CLASS_INDETERMINATE,
+    CONTENT_CLASS_RATING_ONLY,
 )
 
 
@@ -89,6 +96,98 @@ class RuntimeTest(unittest.TestCase):
             feedback(feedback_id, **kwargs), source_stream="unanswered", run_kind="steady"
         )
 
+    @staticmethod
+    def classified_feedback(
+        feedback_id: str,
+        *,
+        text: str = "",
+        pros: str = "",
+        cons: str = "",
+        tags: list[object] | None = None,
+        photo: bool = False,
+        video: bool = False,
+        rating: int = 5,
+        created_at: str = "2026-07-20T10:00:00Z",
+    ) -> dict:
+        row = feedback(feedback_id, text=text)
+        row["pros"] = pros
+        row["cons"] = cons
+        row["tags"] = list(tags or [])
+        row["photoLinks"] = (
+            [{"fullSize": "https://cdn.example/photo.jpg", "miniSize": "https://cdn.example/photo-mini.jpg"}]
+            if photo
+            else []
+        )
+        row["video"] = (
+            [{"link": "https://cdn.example/video.mp4", "previewImage": "https://cdn.example/video.jpg"}]
+            if video
+            else []
+        )
+        row["productValuation"] = rating
+        row["createdDate"] = created_at
+        return row
+
+    def test_canonical_content_classification_covers_every_content_surface(self) -> None:
+        empty = {"text": "  ", "pros": "\n", "cons": "", "tags": ["", "  "], "media": [], "rating": 5}
+        self.assertEqual(classify_feedback_content(json.dumps(empty)), CONTENT_CLASS_RATING_ONLY)
+        for field in ("text", "pros", "cons"):
+            with self.subTest(field=field):
+                value = dict(empty)
+                value[field] = "содержимое"
+                self.assertEqual(
+                    classify_feedback_content(json.dumps(value)),
+                    CONTENT_CLASS_CONTENT_BEARING,
+                )
+        for value in (["важный тег"], [{"name": "важный тег"}]):
+            with self.subTest(tags=value):
+                tagged = dict(empty)
+                tagged["tags"] = value
+                self.assertEqual(
+                    classify_feedback_content(json.dumps(tagged)),
+                    CONTENT_CLASS_CONTENT_BEARING,
+                )
+        self.assertEqual(
+            classify_feedback_content(json.dumps(empty), has_photo=True),
+            CONTENT_CLASS_CONTENT_BEARING,
+        )
+        self.assertEqual(
+            classify_feedback_content(json.dumps(empty), has_video=True),
+            CONTENT_CLASS_CONTENT_BEARING,
+        )
+        self.assertEqual(
+            classify_feedback_content(json.dumps(empty), canonical_media_present=True),
+            CONTENT_CLASS_CONTENT_BEARING,
+        )
+        contradictory = dict(empty)
+        contradictory["tags"] = "not-an-array"
+        self.assertEqual(
+            classify_feedback_content(json.dumps(contradictory)),
+            CONTENT_CLASS_INDETERMINATE,
+        )
+        self.assertEqual(classify_feedback_content("not-json"), CONTENT_CLASS_INDETERMINATE)
+
+    def test_only_true_rating_only_uses_zero_cost_processing_kind(self) -> None:
+        self.enable("manual")
+        variants = {
+            "text": self.classified_feedback("text", text="текст"),
+            "pros": self.classified_feedback("pros", pros="плюс"),
+            "cons": self.classified_feedback("cons", cons="минус"),
+            "tag": self.classified_feedback("tag", tags=["тег"]),
+            "photo": self.classified_feedback("photo", photo=True),
+            "video": self.classified_feedback("video", video=True),
+            "combined": self.classified_feedback("combined", text="текст", tags=["тег"], photo=True),
+            "empty": self.classified_feedback("empty", text="  ", tags=["", "  "]),
+        }
+        for feedback_id, row in variants.items():
+            outcome = self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
+            expected = CONTENT_CLASS_RATING_ONLY if feedback_id == "empty" else CONTENT_CLASS_CONTENT_BEARING
+            self.assertEqual(outcome["content_classification"], expected)
+            job = self.repo.enqueue_manual_processing(feedback_id, content_version=1, actor_id="reviewer")
+            self.assertEqual(
+                job["processing_kind"],
+                "rating_only_template" if feedback_id == "empty" else "frozen_ai",
+            )
+
     def test_content_and_observation_hashes_are_independent(self) -> None:
         original = feedback("f-1", photo_query="token=old")
         media_token_changed = feedback("f-1", photo_query="token=new")
@@ -110,7 +209,7 @@ class RuntimeTest(unittest.TestCase):
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
-            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v4").glob("*.sqlite3"))
+            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v5").glob("*.sqlite3"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
@@ -120,7 +219,7 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v4").glob("*.sqlite3"))),
+                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v5").glob("*.sqlite3"))),
                 1,
             )
             evidence = AutoanswersRepository(
@@ -145,7 +244,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4);
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5);
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -291,6 +390,236 @@ class RuntimeTest(unittest.TestCase):
         job1 = self.repo.enqueue_processing("f-1", trigger_source="automatic", actor_id="sync")
         job2 = self.repo.enqueue_processing("f-1", trigger_source="automatic", actor_id="sync")
         self.assertEqual(job1["processing_key"], job2["processing_key"])
+
+    def test_transition_run_claims_all_content_newest_first_before_legacy_rating_jobs(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="draft_only",
+            max_materialized_processing_jobs=1,
+            actor_id="admin",
+        )
+        old_rating = self.classified_feedback(
+            "rating-old", created_at="2026-07-19T10:00:00Z", rating=1
+        )
+        rating_outcome = self.repo.upsert_feedback(
+            old_rating, source_stream="unanswered", run_kind="steady"
+        )
+        legacy_rating_job = self.repo.enqueue_processing(
+            "rating-old", trigger_source="steady_sync", actor_id="sync"
+        )
+        self.assertEqual(legacy_rating_job["processing_kind"], "rating_only_template")
+
+        self.repo.update_settings(mode="manual", actor_id="admin")
+        for row in (
+            self.classified_feedback(
+                "content-old", text="старый содержательный", created_at="2026-07-18T10:00:00Z", rating=5
+            ),
+            self.classified_feedback(
+                "content-new", text="свежий содержательный", created_at="2026-07-21T10:00:00Z", rating=1
+            ),
+            self.classified_feedback(
+                "rating-new", created_at="2026-07-21T11:00:00Z", rating=5
+            ),
+        ):
+            self.repo.upsert_feedback(row, source_stream="archive", run_kind="backfill")
+
+        preview = self.repo.preview_mode_transition(
+            "draft_only", actor_id="admin", run_max_usd="1.00"
+        )
+        self.assertEqual(preview["counts"]["content_bearing"], 2)
+        self.assertEqual(preview["counts"]["rating_only"], 2)
+        applied = self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        run_id = applied["sweep"]["transition_run_id"]
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(first["feedback_id"], "content-new")
+        self.repo.settle_budget(first["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            first["processing_key"], result=successful_result(), worker_id="worker"
+        )
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        second = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(second["feedback_id"], "content-old")
+        self.repo.settle_budget(second["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            second["processing_key"], result=successful_result(), worker_id="worker"
+        )
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        third = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(third["feedback_id"], "rating-new")
+        self.repo.complete_rating_only_template(third["processing_key"], worker_id="worker")
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        fourth = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(fourth["feedback_id"], "rating-old")
+        self.assertEqual(fourth["processing_key"], legacy_rating_job["processing_key"])
+        self.assertEqual(fourth["transition_run_id"], run_id)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE feedback_id='rating-old'"
+                ).fetchone()[0],
+                1,
+            )
+        self.assertEqual(rating_outcome["content_classification"], CONTENT_CLASS_RATING_ONLY)
+
+    def test_budget_pause_and_human_only_content_do_not_open_or_deadlock_rating_gate(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.repo.upsert_feedback(
+            self.classified_feedback("content-blocked", text="содержимое"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        self.repo.upsert_feedback(
+            self.classified_feedback("rating-waits"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only", actor_id="admin", run_max_paid_reviews=1
+        )
+        self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        self.repo.update_settings(hourly_cap_usd="0.01", actor_id="admin")
+        status = self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        self.assertEqual(status["pause_reason"], "hourly_budget_reached")
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.assertEqual(self.repo.get_feedback("rating-waits")["ai_jobs"], [])
+
+        # A hard-gate/manual-review content result is not automatic work and
+        # therefore cannot hold the empty-review barrier forever.
+        with sqlite3.connect(self.repo.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswer_jobs(
+                    processing_key,feedback_id,content_version,content_version_hash,
+                    state,trigger_source,bundle_version,evaluation_signature,
+                    policy_version,enable_epoch,policy_epoch,processing_kind,
+                    transition_run_id,available_at,attempts,created_at,updated_at,
+                    hard_gates_passed,node_contract_valid
+                )
+                SELECT 'manual-review-evidence',f.feedback_id,f.content_version,f.content_version_hash,
+                       'needs_review','policy_reconciliation','1.4.2','wb-autoanswers-evaluation-v1',
+                       'owner-policy-2026-07-21-v3',s.enable_epoch,s.policy_epoch,'frozen_ai',
+                       r.transition_run_id,datetime('now'),0,datetime('now'),datetime('now'),0,1
+                FROM sheet_vitrina_v1_wb_feedbacks f
+                CROSS JOIN sheet_vitrina_v1_wb_autoanswers_settings s
+                JOIN sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps r
+                  ON r.policy_epoch=s.policy_epoch
+                WHERE f.feedback_id='content-blocked'
+                """
+            )
+        self.repo.update_settings(hourly_cap_usd="0.50", actor_id="admin")
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        rating = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(rating["feedback_id"], "rating-waits")
+
+    def test_reviews_seen_after_preview_remain_outside_current_run(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.repo.upsert_feedback(
+            self.classified_feedback("in-scope", text="scope"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only", actor_id="admin", run_max_usd="0.50"
+        )
+        self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        outside = self.repo.upsert_feedback(
+            self.classified_feedback("outside", text="new"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.assertFalse(outside["auto_enqueue"])
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "outside the immutable"):
+            self.repo.enqueue_processing(
+                "outside", trigger_source="steady_sync", actor_id="sync"
+            )
+        self.assertEqual(self.repo.progress_status()["outside_current_run"], 1)
+        self.repo.upsert_feedback(
+            self.classified_feedback("in-scope", text="changed after apply"),
+            source_stream="detail",
+            run_kind="reconciliation",
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        self.assertEqual(self.repo.get_feedback("in-scope")["ai_jobs"], [])
+        self.assertEqual(self.repo.progress_status()["outside_current_run"], 2)
+
+    def test_four_progress_stages_share_scope_and_exclude_rating_from_content_card(self) -> None:
+        empty_progress = self.repo.progress_status()
+        self.assertIsNone(empty_progress["all_preparation"]["percent"])
+        self.assertIsNone(empty_progress["content_bearing_preparation"]["percent"])
+
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        self.repo.upsert_feedback(
+            self.classified_feedback("content", text="содержимое"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        self.repo.upsert_feedback(
+            self.classified_feedback("rating"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only", actor_id="admin", run_max_usd="0.50"
+        )
+        self.repo.apply_mode_transition(
+            "draft_only", actor_id="admin", preview_id=preview["preview_id"]
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        content = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(content["feedback_id"], "content")
+        self.repo.settle_budget(content["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            content["processing_key"], result=successful_result(), worker_id="worker"
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        rating = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.complete_rating_only_template(rating["processing_key"], worker_id="worker")
+        self.repo.update_settings(mode="manual", actor_id="admin")
+
+        progress = self.repo.progress_status()
+        self.assertEqual(progress["all_preparation"], {
+            "done": 2,
+            "total": 2,
+            "remaining": 0,
+            "percent": 100.0,
+            "status": "paused_manual",
+            "pause_reason": "manual_pause",
+        })
+        self.assertEqual(progress["all_publication"]["done"], 0)
+        self.assertEqual(progress["all_publication"]["total"], 2)
+        self.assertEqual(progress["all_publication"]["percent"], 0.0)
+        self.assertEqual(progress["content_bearing_preparation"]["done"], 1)
+        self.assertEqual(progress["content_bearing_preparation"]["total"], 1)
+        self.assertEqual(progress["content_bearing_preparation"]["percent"], 100.0)
+        self.assertEqual(progress["content_bearing_publication"]["done"], 0)
+        self.assertEqual(progress["content_bearing_publication"]["total"], 1)
+        self.assertEqual(progress["rating_only_total"], 1)
+        self.assertEqual(progress["content_bearing_total"], 1)
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name), now_factory=self.clock, env=self.env
+        )
+        self.assertEqual(
+            restarted.progress_status()["content_bearing_preparation"],
+            progress["content_bearing_preparation"],
+        )
+        changed = self.classified_feedback("content", text="новая версия содержимого")
+        self.repo.upsert_feedback(changed, source_stream="detail", run_kind="reconciliation")
+        stale_progress = self.repo.progress_status()
+        self.assertEqual(stale_progress["all_preparation"]["total"], 2)
+        self.assertEqual(stale_progress["content_bearing_preparation"]["total"], 1)
+        self.assertEqual(stale_progress["content_bearing_preparation"]["done"], 0)
+        self.assertEqual(stale_progress["content_bearing_stale_or_regeneration"], 1)
+        self.assertEqual(stale_progress["outside_current_run"], 1)
 
     def test_observation_only_update_does_not_create_new_version(self) -> None:
         self.enable()

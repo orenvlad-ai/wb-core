@@ -38,6 +38,7 @@ def _validate_feedback_item(item: dict[str, Any]) -> None:
         "publication_status",
         "has_photo",
         "has_video",
+        "content_classification",
     ):
         _assert(name in item, f"local feedback item misses {name}")
     _assert(isinstance(item.get("productDetails"), dict), "local feedback productDetails must be an object")
@@ -196,6 +197,7 @@ def run_autoanswers_ui_flow(
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
         _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
         runtime_before = dict(settings.get("runtime") or {})
+        budget_before = dict(settings.get("budget") or {})
         _assert(
             int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
             "manual production acceptance requires zero claimable AI jobs",
@@ -203,6 +205,18 @@ def run_autoanswers_ui_flow(
         _assert(
             int(runtime_before.get("claimable_publication_writes") or 0) == 0,
             "manual production acceptance requires zero claimable publication writes",
+        )
+        _assert(
+            int((runtime_before.get("ai_jobs") or {}).get("processing") or 0) == 0,
+            "manual production acceptance requires zero active AI jobs",
+        )
+        _assert(
+            int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0) == 0,
+            "manual production acceptance requires zero active publication writes",
+        )
+        _assert(
+            float(budget_before.get("active_reserved_usd") or 0) == 0,
+            "manual production acceptance requires zero active reservations",
         )
         filter_names = (
             "unanswered",
@@ -214,6 +228,7 @@ def run_autoanswers_ui_flow(
             "date_to",
             "flag",
             "system_answer",
+            "content_classification",
         )
         for filter_name in filter_names:
             _assert(
@@ -221,13 +236,75 @@ def run_autoanswers_ui_flow(
                 f"feedback filter {filter_name} must be rendered exactly once",
             )
         _assert(
-            page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count() == 18,
+            page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count() == 21,
             "queue dashboard metrics are incomplete",
         )
         _assert(
             page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count() == 2,
             "preparation/publication progress bars are missing",
         )
+        _assert(
+            page.locator("[data-autoanswers-content-progress-bars] .autoanswers-progress-row").count() == 2,
+            "content-bearing preparation/publication progress bars are missing",
+        )
+        _assert(page.locator("[data-autoanswers-progress-card]").count() == 2, "progress cards must be separate")
+        card_styles = page.evaluate(
+            """() => {
+              const all = document.querySelector('[data-autoanswers-progress-card="all"]');
+              const content = document.querySelector('[data-autoanswers-progress-card="content-bearing"]');
+              return {
+                gap: content.getBoundingClientRect().top - all.getBoundingClientRect().bottom,
+                allBackground: getComputedStyle(all).backgroundColor,
+                contentBackground: getComputedStyle(content).backgroundColor,
+                allBorder: getComputedStyle(all).borderColor,
+                contentBorder: getComputedStyle(content).borderColor
+              };
+            }"""
+        )
+        _assert(float(card_styles["gap"]) >= 14, "progress cards need a visible vertical gap")
+        _assert(
+            card_styles["allBackground"] != card_styles["contentBackground"]
+            or card_styles["allBorder"] != card_styles["contentBorder"],
+            "progress cards need distinct visual treatment",
+        )
+        progress = dict(runtime_before.get("progress") or {})
+        stage_specs = (
+            ("all_preparation", page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").nth(0)),
+            ("all_publication", page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").nth(1)),
+            ("content_bearing_preparation", page.locator("[data-autoanswers-content-progress-bars] .autoanswers-progress-row").nth(0)),
+            ("content_bearing_publication", page.locator("[data-autoanswers-content-progress-bars] .autoanswers-progress-row").nth(1)),
+        )
+        stage_evidence: dict[str, Any] = {}
+        for stage_name, locator in stage_specs:
+            stage = dict(progress.get(stage_name) or {})
+            done = int(stage.get("done") or 0)
+            total = int(stage.get("total") or 0)
+            remaining = int(stage.get("remaining") or 0)
+            text = locator.inner_text()
+            if total == 0:
+                _assert("Нет отзывов в этой категории" in text, f"{stage_name} zero denominator label")
+                display_percent = None
+            else:
+                _assert(f"{done} из {total}" in text, f"{stage_name} exact X/Y is missing")
+                _assert(f"осталось {remaining}" in text, f"{stage_name} remaining is missing")
+                display_percent = float(stage["percent"])
+                _assert(f"{display_percent:.1f}%" in text, f"{stage_name} exact percent is missing")
+            _assert("Приостановлено вручную" in text, f"{stage_name} must show manual pause")
+            stage_evidence[stage_name] = {
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "percent": display_percent,
+            }
+        _assert(
+            int(progress.get("content_bearing_total") or 0)
+            + int(progress.get("rating_only_total") or 0)
+            + int(progress.get("indeterminate_total") or 0)
+            == int((progress.get("all_preparation") or {}).get("total") or 0),
+            "content taxonomy must reconcile to the all-reviews denominator",
+        )
+        desktop_screenshot_path = evidence_dir / "wb_autoanswers_progress_desktop.png"
+        page.screenshot(path=str(desktop_screenshot_path), full_page=True)
         _assert(
             bool(page.locator("[data-autoanswers-stop-reason]").inner_text().strip()),
             "queue stop reason must be visible",
@@ -532,6 +609,10 @@ def run_autoanswers_ui_flow(
             "document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
         )
         _assert(not narrow_overflow, "autoanswers narrow layout causes document-level horizontal overflow")
+        _assert(
+            page.locator("[data-autoanswers-progress-card]").count() == 2,
+            "both progress cards must remain rendered in narrow layout",
+        )
 
         body_text = page.locator("body").inner_text()
         for marker in ("Internal Server Error", "Traceback", "Unexpected token", "Данные отзывов не загружены"):
@@ -557,8 +638,8 @@ def run_autoanswers_ui_flow(
             "UI acceptance created publication jobs",
         )
 
-        screenshot_path = evidence_dir / "wb_autoanswers_feedbacks.png"
-        page.screenshot(path=str(screenshot_path), full_page=True)
+        narrow_screenshot_path = evidence_dir / "wb_autoanswers_progress_narrow.png"
+        page.screenshot(path=str(narrow_screenshot_path), full_page=True)
         browser.close()
 
     evidence = {
@@ -580,8 +661,9 @@ def run_autoanswers_ui_flow(
         },
         "expected_state": expected_state,
         "jobs_unchanged": True,
-        "active_ai_jobs": 0,
-        "active_publication_jobs": 0,
+        "active_ai_jobs": int((runtime_before.get("ai_jobs") or {}).get("processing") or 0),
+        "active_publication_jobs": int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0),
+        "active_reserved_usd": float(budget_before.get("active_reserved_usd") or 0),
         "list": {
             "total": int(first.get("total") or 0),
             "page_1_count": len(items),
@@ -596,7 +678,17 @@ def run_autoanswers_ui_flow(
         "table_answer": table_answer_evidence,
         "media": media_evidence,
         "narrow_layout": {"document_overflow": False},
-        "screenshot": str(screenshot_path),
+        "progress": {
+            "stages": stage_evidence,
+            "content_bearing_total": int(progress.get("content_bearing_total") or 0),
+            "rating_only_total": int(progress.get("rating_only_total") or 0),
+            "indeterminate_total": int(progress.get("indeterminate_total") or 0),
+            "rating_only_excluded_from_content_card": True,
+        },
+        "screenshots": {
+            "desktop": str(desktop_screenshot_path),
+            "narrow": str(narrow_screenshot_path),
+        },
     }
     evidence_path = evidence_dir / "wb_autoanswers_ui_evidence.json"
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")

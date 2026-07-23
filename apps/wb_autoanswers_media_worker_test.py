@@ -393,6 +393,7 @@ process.stdout.write(JSON.stringify({images: content.filter((item) => item.type 
         if not text:
             row["pros"] = ""
             row["cons"] = ""
+            row["photoLinks"] = []
         outcome = self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
         self.repo.enqueue_processing(
             feedback_id,
