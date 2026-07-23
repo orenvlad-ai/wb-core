@@ -14,6 +14,17 @@ class TaskClass(str, Enum):
     DIAGNOSTIC = "diagnostic"
 
 
+class ExecutionContour(str, Enum):
+    """Technical boundary; only PR-backed contours receive GitHub scope labels."""
+
+    READ_ONLY = "read-only"
+    USER_ARTIFACT = "user-artifact"
+    REPO_ONLY = "repo-only"
+    LIVE_RUNTIME = "live/runtime"
+    PRODUCTION_DATA_MUTATION = "production data mutation/backfill"
+    ARCHIVED_GAS_GUARD = "archived GAS guard"
+
+
 class TaskContinuity(str, Enum):
     """Identity relationship between a prompt and an already known task."""
 
@@ -670,6 +681,7 @@ EXPLICIT_NEW_TASK_PHRASES = frozenset(
 @dataclass(frozen=True)
 class TaskIntent:
     read_only: bool = False
+    user_artifact: bool = False
     deploy: bool = False
     production_ui: bool = False
     iterative: bool = False
@@ -795,6 +807,8 @@ def classify_task(
         return explicit
     if inherited is not None:
         return inherited
+    if intent.user_artifact:
+        return TaskClass.STANDARD
     if intent.read_only and not any(
         (intent.deploy, intent.production_ui, intent.iterative, intent.ambiguous)
     ):
@@ -802,6 +816,20 @@ def classify_task(
     if intent.deploy and intent.production_ui and intent.iterative and not intent.ambiguous:
         return TaskClass.LOOP
     return TaskClass.STANDARD
+
+
+def github_closure_required(task_class: TaskClass, contour: ExecutionContour) -> bool:
+    """Return whether this task must create a PR and enter the Release Train."""
+
+    if contour == ExecutionContour.USER_ARTIFACT:
+        if task_class != TaskClass.STANDARD:
+            raise ValueError("user-artifact contour requires STANDARD task class")
+        return False
+    if task_class == TaskClass.DIAGNOSTIC:
+        if contour != ExecutionContour.READ_ONLY:
+            raise ValueError("DIAGNOSTIC task class requires read-only contour")
+        return False
+    return True
 
 
 def primary_states(labels: Iterable[str]) -> frozenset[str]:
