@@ -328,20 +328,23 @@ def maintenance_hold(
     proc_root: Path = Path("/proc"),
     wait_timeout_seconds: float = 1200.0,
     poll_interval_seconds: float = 2.0,
+    disable_timer: bool = False,
 ) -> dict[str, Any]:
     systemd = client or SystemdClient()
     existing = _load_state(runtime_dir)
-    resuming = bool(existing and existing.get("phase") == "holding")
+    resuming = bool(existing and existing.get("phase") in {"holding", "held"})
     if existing and existing.get("phase") in {"holding", "held"}:
         current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
         recorded_units = (existing.get("baseline") or {}).get("units") or {}
         recorded_timer = recorded_units.get("timer") or {}
         recorded_service = recorded_units.get("service") or {}
+        timer_disabled_for_hold = bool(existing.get("timer_disabled_for_hold"))
+        expected_enabled = "disabled" if timer_disabled_for_hold else recorded_timer.get("is_enabled")
         if (
             existing.get("phase") == "held"
             and current["units"]["timer"]["is_active"] == "inactive"
             and current["units"]["timer"]["is_enabled"]
-            == recorded_timer.get("is_enabled")
+            == expected_enabled
             and current["units"]["timer"]["unit_digest"]
             == recorded_timer.get("unit_digest")
             and current["units"]["service"]["quiescent"] is True
@@ -349,10 +352,16 @@ def maintenance_hold(
             == recorded_service.get("unit_digest")
             and not current["warehouse_lock"]["held"]
             and not current["finance_apply_processes"]
+            and (not disable_timer or timer_disabled_for_hold)
         ):
             return {**current, "status": "held", "idempotent": True}
-        if existing.get("phase") == "held":
-            raise RuntimeError("existing maintenance hold no longer satisfies its invariants")
+        if (
+            current["units"]["timer"]["unit_digest"]
+            != recorded_timer.get("unit_digest")
+            or current["units"]["service"]["unit_digest"]
+            != recorded_service.get("unit_digest")
+        ):
+            raise RuntimeError("existing maintenance hold unit configuration drifted")
 
     before = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
     if before["finance_apply_processes"]:
@@ -371,6 +380,9 @@ def maintenance_hold(
         "hold_started_at": _utc_now(),
         "baseline": _bounded_readback(before),
     }
+    state["phase"] = "holding"
+    if disable_timer:
+        state["timer_disable_requested"] = True
     _save_state(runtime_dir, state)
     _append_audit(
         runtime_dir,
@@ -399,10 +411,18 @@ def maintenance_hold(
         raise RuntimeError("warehouse timer is not inactive after stop")
     if current["units"]["timer"]["is_enabled"] != enabled:
         raise RuntimeError("warehouse timer enabled state changed while stopping it")
+    if disable_timer:
+        systemd.mutate("disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
+        if current["units"]["timer"]["is_enabled"] != "disabled":
+            raise RuntimeError("warehouse timer is not disabled after durable hold")
+        if current["units"]["timer"]["is_active"] != "inactive":
+            raise RuntimeError("warehouse timer became active during durable hold")
     state.update(
         {
             "phase": "held",
             "held_at": _utc_now(),
+            "timer_disabled_for_hold": bool(disable_timer),
             "hold_readback": _bounded_readback(current),
         }
     )

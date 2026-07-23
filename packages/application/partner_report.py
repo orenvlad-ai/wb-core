@@ -35,8 +35,8 @@ from packages.application.ads_snapshot_payload import resolve_ads_snapshot_paylo
 from packages.application.canonical_wb_cost_resolver import resolve_canonical_wb_cost
 
 
-PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v3"
-PARTNER_REPORT_SCHEMA_VERSION = "partner_report_v3"
+PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v4"
+PARTNER_REPORT_SCHEMA_VERSION = "partner_report_v4"
 COMMON_EXPENSE_RULE = "net_revenue_share"
 ADS_SOURCE_ROLE = "accepted_closed_day_snapshot"
 ADS_SOURCE_KEY = "ads_compact"
@@ -48,10 +48,10 @@ DISPLAY_MONEY_QUANT = Decimal("0.01")
 OTHER_DIRECT_ALLOCATED_KEY = "other_direct_and_allocated_expenses"
 OTHER_DIRECT_ALLOCATED_LABEL = "Прочие прямые и распределённые расходы"
 OTHER_DIRECT_ALLOCATED_TOOLTIP = (
-    "Итог включает прямые расходы выбранного SKU и распределённую долю общих "
-    "расходов кабинета. Распределённая доля рассчитывается как общие "
-    "неатрибутированные расходы недели × чистая выручка SKU / общая "
-    "положительная чистая выручка недели."
+    "Итог включает только прямые и распределённые расходы, для которых нет "
+    "отдельной основной строки. Расходы кабинета распределяются по доле чистой "
+    "выручки SKU; маркетинг Finance исключён, потому что строка «Маркетинг WB» "
+    "использует accepted ads_compact."
 )
 OTHER_EXPENSE_CATEGORIES: tuple[tuple[str, str], ...] = (
     (
@@ -60,7 +60,16 @@ OTHER_EXPENSE_CATEGORIES: tuple[tuple[str, str], ...] = (
     ),
     ("wb_jam_subscription", "Подписка WB Jam"),
     ("wb_paid_services", "Платные сервисы WB"),
+    ("review_points", "Баллы за отзывы"),
     ("other_withholdings", "Прочие удержания"),
+)
+ALLOCATED_MAIN_EXPENSE_KEYS: tuple[str, ...] = (
+    "agent_remuneration",
+    "acquiring",
+    "logistics",
+    "storage",
+    "acceptance",
+    "penalties_and_adjustments",
 )
 FINANCE_EXPORT_COLUMNS = (
     ("reportId", "report_id"),
@@ -143,7 +152,7 @@ def _display_breakdown(
     *,
     target_total: Decimal | None = None,
 ) -> list[dict[str, str]]:
-    """Round four visible rows so their displayed sum equals the main row.
+    """Round visible rows so their displayed sum equals the main row.
 
     Exact values remain in calculation/provenance.  Display kopecks use a
     deterministic largest-remainder apportionment; ``Прочие удержания`` wins
@@ -948,6 +957,7 @@ class PartnerReportBlock:
         period_other_expenses = {
             key: ZERO for key, _label in OTHER_EXPENSE_CATEGORIES
         }
+        visible_other_expense_keys: set[str] = set()
         for week_start_text in selected_weeks:
             sync = conn.execute(
                 """SELECT week_start,week_end,status,content_hash,raw_row_count
@@ -1080,18 +1090,20 @@ class PartnerReportBlock:
                 )
             selected_revenue = _decimal(metrics.get("net_revenue"))
             total_revenue = _decimal(account_coverage.get("global_net_revenue"))
-            account_expense = _decimal(account_metrics.get("profit_period_expenses")) - _decimal(
-                account_metrics.get("positive_adjustments")
-            )
+            account_expense = self._account_allocatable_expense_total(account_metrics)
             allocated_common = ZERO
             allocation_ratio: Decimal | None = None
             allocated_categories = {
                 key: ZERO for key, _label in OTHER_EXPENSE_CATEGORIES
             }
-            account_category_source = self._account_expense_category_source(
-                account_metrics
-            )
-            if any(value != ZERO for value in account_category_source.values()):
+            allocated_main_expenses = {
+                key: ZERO for key in ALLOCATED_MAIN_EXPENSE_KEYS
+            }
+            account_sources = {
+                **self._account_main_expense_source(account_metrics),
+                **self._account_expense_category_source(account_metrics),
+            }
+            if any(value != ZERO for value in account_sources.values()):
                 if total_revenue <= ZERO:
                     blockers.append(
                         {
@@ -1106,6 +1118,18 @@ class PartnerReportBlock:
                         account_metrics,
                         allocation_ratio=allocation_ratio,
                     )
+                    allocated_main_expenses = self._allocated_account_main_expenses(
+                        account_metrics,
+                        allocation_ratio=allocation_ratio,
+                    )
+                    if (
+                        sum(allocated_categories.values(), ZERO)
+                        + sum(allocated_main_expenses.values(), ZERO)
+                    ).quantize(MONEY_QUANT) != allocated_common.quantize(MONEY_QUANT):
+                        raise PartnerReportError(
+                            "combined allocated Partner categories do not conserve",
+                            code="common_expense_conservation_failed",
+                        )
             ads_value, ads_rows, ads_blockers = self._ads_for_week(
                 conn,
                 nm_id=nm_id,
@@ -1117,15 +1141,10 @@ class PartnerReportBlock:
                 metrics,
                 allocated_categories,
             )
-            direct_other_expense_total = (
-                _decimal(metrics.get("transit_logistics"))
-                - _decimal(metrics.get("capitalized_transit_logistics"))
-                + _decimal(metrics.get("subscriptions"))
-                + _decimal(metrics.get("paid_services"))
-                + _decimal(metrics.get("other_deductions"))
-            )
             for category_key, amount in other_expense_categories.items():
                 period_other_expenses[category_key] += amount
+                if amount != ZERO:
+                    visible_other_expense_keys.add(category_key)
             week_values = self._week_formulas(
                 components=metrics,
                 cogs=(
@@ -1135,8 +1154,9 @@ class PartnerReportBlock:
                 ),
                 ads=ads_value,
                 other_expense_categories=other_expense_categories,
-                other_direct_and_allocated_total=(
-                    direct_other_expense_total + allocated_common
+                allocated_main_expenses=allocated_main_expenses,
+                other_direct_and_allocated_total=sum(
+                    other_expense_categories.values(), ZERO
                 ),
                 params=params,
             )
@@ -1183,6 +1203,10 @@ class PartnerReportBlock:
                     "cost_source_digest": str(coverage.get("cost_state_hash") or ""),
                     "common_expense_safe": {
                         "allocated_amount_rub": _decimal_text(allocated_common),
+                        "finance_marketing_excluded_rub": _decimal_text(
+                            _decimal(account_metrics.get("marketing"))
+                            * (allocation_ratio or ZERO)
+                        ),
                         "rule": COMMON_EXPENSE_RULE,
                         "allocation_coefficient": _decimal_text(
                             allocation_ratio, Decimal("0.00000001")
@@ -1211,6 +1235,19 @@ class PartnerReportBlock:
                             ),
                         }
                         for category_key, _label in OTHER_EXPENSE_CATEGORIES
+                    ],
+                    "allocated_main_expense_internal": [
+                        {
+                            "source_category": category_key,
+                            "allocated_amount_rub": _decimal_text(
+                                allocated_main_expenses[category_key]
+                            ),
+                            "allocation_rule": COMMON_EXPENSE_RULE,
+                            "allocated_source_digest": str(
+                                account_row["raw_source_digest"]
+                            ),
+                        }
+                        for category_key in ALLOCATED_MAIN_EXPENSE_KEYS
                     ],
                 }
             )
@@ -1257,6 +1294,11 @@ class PartnerReportBlock:
                 period_other_expenses,
                 target_total=_decimal(totals[OTHER_DIRECT_ALLOCATED_KEY]),
             ),
+            "other_expense_category_definitions": [
+                {"key": key, "label": label}
+                for key, label in OTHER_EXPENSE_CATEGORIES
+                if key in visible_other_expense_keys
+            ],
             "other_expense_tooltip": OTHER_DIRECT_ALLOCATED_TOOLTIP,
             "source_coverage": {"complete": not blockers, "blocker_count": len(blockers)},
             "source_manifest": source_manifest,
@@ -1271,7 +1313,7 @@ class PartnerReportBlock:
             "preview_source": "indexed_per_sku_weekly_finance_aggregate",
         }
         provenance = {
-            "schema_version": "partner_report_provenance_v2",
+            "schema_version": "partner_report_provenance_v3",
             "seller_id": self.seller_id,
             "nm_id": nm_id,
             "weeks": provenance_weeks,
@@ -1285,7 +1327,7 @@ class PartnerReportBlock:
         components: Mapping[str, Any],
         allocated: Mapping[str, Decimal],
     ) -> dict[str, Decimal]:
-        """Return exact direct + allocated values for the four public rows."""
+        """Return exact direct + allocated values for public subrows."""
 
         direct = {
             "uncapitalized_transit_logistics": (
@@ -1294,6 +1336,7 @@ class PartnerReportBlock:
             ),
             "wb_jam_subscription": _decimal(components.get("subscriptions")),
             "wb_paid_services": _decimal(components.get("paid_services")),
+            "review_points": _decimal(components.get("review_points")),
             "other_withholdings": _decimal(components.get("other_deductions")),
         }
         return {
@@ -1307,32 +1350,37 @@ class PartnerReportBlock:
         *,
         allocation_ratio: Decimal,
     ) -> dict[str, Decimal]:
-        """Allocate account-only expenses once and conserve their exact total."""
+        """Allocate account-only subrow expenses once without a catch-all residual."""
 
         source = PartnerReportBlock._account_expense_category_source(account_metrics)
-        account_total = (
-            _decimal(account_metrics.get("profit_period_expenses"))
-            - _decimal(account_metrics.get("positive_adjustments"))
-        )
-        allocated_total = account_total * allocation_ratio
-        allocated: dict[str, Decimal] = {
+        allocated = {
             key: source[key] * allocation_ratio
-            for key, _label in OTHER_EXPENSE_CATEGORIES[:-1]
+            for key, _label in OTHER_EXPENSE_CATEGORIES
         }
-        # Decimal multiplication is rounded at the active working precision,
-        # so sum(category * ratio) can differ from sum(category) * ratio by a
-        # final non-monetary digit. Keep the first three classified components
-        # untouched and assign that deterministic working-precision residual
-        # to the catch-all category. Display-cent reconciliation remains a
-        # separate downstream concern.
-        allocated["other_withholdings"] = allocated_total - sum(
-            allocated.values(), ZERO
-        )
-        if sum(allocated.values(), ZERO).quantize(MONEY_QUANT) != allocated_total.quantize(
-            MONEY_QUANT
-        ):
+        if sum(allocated.values(), ZERO).quantize(MONEY_QUANT) != (
+            sum(source.values(), ZERO) * allocation_ratio
+        ).quantize(MONEY_QUANT):
             raise PartnerReportError(
-                "allocated common-expense categories do not conserve the source total",
+                "allocated Partner subrow categories do not conserve their source total",
+                code="common_expense_conservation_failed",
+            )
+        return allocated
+
+    @staticmethod
+    def _allocated_account_main_expenses(
+        account_metrics: Mapping[str, Any],
+        *,
+        allocation_ratio: Decimal,
+    ) -> dict[str, Decimal]:
+        source = PartnerReportBlock._account_main_expense_source(account_metrics)
+        allocated = {
+            key: source[key] * allocation_ratio for key in ALLOCATED_MAIN_EXPENSE_KEYS
+        }
+        if sum(allocated.values(), ZERO).quantize(MONEY_QUANT) != (
+            sum(source.values(), ZERO) * allocation_ratio
+        ).quantize(MONEY_QUANT):
+            raise PartnerReportError(
+                "allocated Partner main-row expenses do not conserve their source total",
                 code="common_expense_conservation_failed",
             )
         return allocated
@@ -1341,22 +1389,71 @@ class PartnerReportBlock:
     def _account_expense_category_source(
         account_metrics: Mapping[str, Any],
     ) -> dict[str, Decimal]:
-        """Classify account expense components even when their net is zero."""
+        """Return account expenses that belong under Partner subrows."""
 
-        account_total = (
-            _decimal(account_metrics.get("profit_period_expenses"))
-            - _decimal(account_metrics.get("positive_adjustments"))
-        )
-        source = {
+        return {
             "uncapitalized_transit_logistics": (
                 _decimal(account_metrics.get("transit_logistics"))
                 - _decimal(account_metrics.get("capitalized_transit_logistics"))
             ),
             "wb_jam_subscription": _decimal(account_metrics.get("subscriptions")),
             "wb_paid_services": _decimal(account_metrics.get("paid_services")),
+            "review_points": _decimal(account_metrics.get("review_points")),
+            "other_withholdings": _decimal(account_metrics.get("other_deductions")),
         }
-        source["other_withholdings"] = account_total - sum(source.values(), ZERO)
-        return source
+
+    @staticmethod
+    def _account_main_expense_source(
+        account_metrics: Mapping[str, Any],
+    ) -> dict[str, Decimal]:
+        """Return account expenses routed to existing Partner main rows."""
+
+        return {
+            "agent_remuneration": _decimal(account_metrics.get("agent_remuneration")),
+            "acquiring": _decimal(account_metrics.get("acquiring")),
+            "logistics": _decimal(account_metrics.get("logistics")),
+            "storage": _decimal(account_metrics.get("storage")),
+            "acceptance": (
+                _decimal(account_metrics.get("acceptance"))
+                - _decimal(account_metrics.get("capitalized_acceptance"))
+            ),
+            "penalties_and_adjustments": (
+                _decimal(account_metrics.get("penalties"))
+                + _decimal(account_metrics.get("corrections"))
+                - _decimal(account_metrics.get("positive_adjustments"))
+            ),
+        }
+
+    @staticmethod
+    def _account_allocatable_expense_total(
+        account_metrics: Mapping[str, Any],
+    ) -> Decimal:
+        """Prove explicit account categories and exclude Finance marketing."""
+
+        main = PartnerReportBlock._account_main_expense_source(account_metrics)
+        subrows = PartnerReportBlock._account_expense_category_source(account_metrics)
+        classified_total = sum(main.values(), ZERO) + sum(subrows.values(), ZERO)
+        expected_total = (
+            _decimal(account_metrics.get("profit_period_expenses"))
+            - _decimal(account_metrics.get("positive_adjustments"))
+            - _decimal(account_metrics.get("marketing"))
+        )
+        if classified_total.quantize(MONEY_QUANT) != expected_total.quantize(MONEY_QUANT):
+            raise PartnerReportError(
+                "account expense categories do not reconcile after marketing exclusion",
+                code="common_expense_conservation_failed",
+                blockers=[
+                    {
+                        "code": "common_expense_category_reconciliation_failed",
+                        "classified_total_rub": _decimal_text(classified_total),
+                        "expected_without_marketing_rub": _decimal_text(expected_total),
+                        "finance_marketing_excluded_rub": _decimal_text(
+                            _decimal(account_metrics.get("marketing"))
+                        ),
+                    }
+                ],
+            )
+        return classified_total
 
     def _week_formulas(
         self,
@@ -1365,23 +1462,33 @@ class PartnerReportBlock:
         cogs: Decimal | None,
         ads: Decimal | None,
         other_expense_categories: Mapping[str, Decimal],
+        allocated_main_expenses: Mapping[str, Decimal] | None = None,
         other_direct_and_allocated_total: Decimal | None = None,
         params: Mapping[str, str],
     ) -> dict[str, str | None]:
         net_revenue = _decimal(components.get("net_revenue"))
-        agent = _decimal(components.get("agent_remuneration"))
-        acquiring = _decimal(components.get("acquiring"))
-        logistics = _decimal(components.get("logistics"))
-        storage = _decimal(components.get("storage"))
-        acceptance = max(
-            _decimal(components.get("acceptance"))
-            - _decimal(components.get("capitalized_acceptance")),
-            ZERO,
+        allocated_main = allocated_main_expenses or {}
+        agent = _decimal(components.get("agent_remuneration")) + _decimal(
+            allocated_main.get("agent_remuneration")
         )
+        acquiring = _decimal(components.get("acquiring")) + _decimal(
+            allocated_main.get("acquiring")
+        )
+        logistics = _decimal(components.get("logistics")) + _decimal(
+            allocated_main.get("logistics")
+        )
+        storage = _decimal(components.get("storage")) + _decimal(
+            allocated_main.get("storage")
+        )
+        acceptance = (
+            _decimal(components.get("acceptance"))
+            - _decimal(components.get("capitalized_acceptance"))
+        ) + _decimal(allocated_main.get("acceptance"))
         penalties_and_adjustments = (
             _decimal(components.get("penalties"))
             + _decimal(components.get("corrections"))
             - _decimal(components.get("positive_adjustments"))
+            + _decimal(allocated_main.get("penalties_and_adjustments"))
         )
         other_direct_and_allocated = (
             other_direct_and_allocated_total
@@ -1614,7 +1721,7 @@ class PartnerReportBlock:
         if operation_date < RETRO_COST_PERIOD_START:
             values["other_direct_expenses"] += _decimal(row.get("paidAcceptance"))
         values["other_direct_expenses"] += _decimal(row.get("penalty"))
-        deduction = abs(_decimal(row.get("deduction")))
+        deduction = _decimal(row.get("deduction"))
         if deduction:
             bucket = classify_deduction(row)
             if bucket == "transit_logistics" and operation_date >= RETRO_COST_PERIOD_START:
@@ -1872,12 +1979,17 @@ class PartnerReportBlock:
             ws.cell(1, index, str(week["label"]))
         ws.cell(1, total_col, "Итого за период")
         workbook_rows: list[tuple[str, str, bool]] = []
+        visible_other_categories = [
+            (str(item.get("key") or ""), str(item.get("label") or ""))
+            for item in report.get("other_expense_category_definitions") or []
+            if str(item.get("key") or "") and str(item.get("label") or "")
+        ]
         for key, label in REPORT_ROWS:
             workbook_rows.append((key, label, False))
             if key == OTHER_DIRECT_ALLOCATED_KEY:
                 workbook_rows.extend(
                     (f"other_expense:{category_key}", category_label, True)
-                    for category_key, category_label in OTHER_EXPENSE_CATEGORIES
+                    for category_key, category_label in visible_other_categories
                 )
         row_by_key: dict[str, int] = {}
         subordinate_rows: set[int] = set()

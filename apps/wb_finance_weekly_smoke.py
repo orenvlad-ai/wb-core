@@ -36,6 +36,7 @@ def main() -> None:
         )
         block.ensure_schema()
         _seed_canonical_cost(block.db_path)
+        _assert_signed_deduction_contract(block)
         waiting = block.sync_week(date(2026, 6, 15), date(2026, 6, 21), _EmptyClient())
         if waiting["status"] != "waiting":
             raise AssertionError(f"HTTP 204/no rows must keep week waiting: {waiting}")
@@ -386,6 +387,101 @@ def _assert_schedule_contract() -> None:
         != "transit_logistics"
     ):
         raise AssertionError("transit classifier mismatch")
+    if (
+        classify_deduction(
+            {"bonusTypeName": 'Аванс за услугу "Баллы за отзывы" cpm-12345'}
+        )
+        != "review_points"
+    ):
+        raise AssertionError("review-points classifier must win over opaque ids")
+    if (
+        classify_deduction(
+            {
+                "bonusTypeName": (
+                    'Возврат неиспользованного остатка аванса за услугу '
+                    '"Баллы за отзывы"'
+                )
+            }
+        )
+        != "review_points"
+    ):
+        raise AssertionError("review-points refund classifier mismatch")
+
+
+def _assert_signed_deduction_contract(block: WbFinanceWeeklyBlock) -> None:
+    base = {
+        "dateFrom": "2026-05-04",
+        "dateTo": "2026-05-10",
+        "reportType": 1,
+        "nmId": "",
+        "vendorCode": "",
+        "sku": "",
+        "saleDt": "2026-05-05",
+        "docTypeName": "",
+        "sellerOperName": "Удержание",
+        "quantity": 0,
+    }
+    rows = [
+        {
+            **base,
+            "reportId": 501,
+            "rrdId": 5010,
+            "deduction": "7",
+            "bonusTypeName": "Оказание услуг WB Продвижение",
+        },
+        {
+            **base,
+            "reportId": 502,
+            "rrdId": 5020,
+            "deduction": "15",
+            "bonusTypeName": 'Аванс за услугу "Баллы за отзывы" cpm-12345',
+        },
+        {
+            **base,
+            "reportId": 503,
+            "rrdId": 5030,
+            "deduction": "-5",
+            "bonusTypeName": (
+                'Возврат неиспользованного остатка аванса за услугу '
+                '"Баллы за отзывы"'
+            ),
+        },
+        {
+            **base,
+            "reportId": 504,
+            "rrdId": 5040,
+            "deduction": "-4",
+            "bonusTypeName": "Услуги доставки транзитных поставок",
+        },
+        {
+            **base,
+            "reportId": 505,
+            "rrdId": 5050,
+            "deduction": "0",
+            "paidAcceptance": "-3",
+            "bonusTypeName": "Сторно приёмки",
+        },
+    ]
+    result = block.ingest_week(date(2026, 5, 4), date(2026, 5, 10), rows)
+    metrics = result["aggregate"]
+    expected = {
+        "marketing": "7.0000",
+        "review_points": "10.0000",
+        "transit_logistics": "-4.0000",
+        "acceptance": "-3.0000",
+        "total_wb_expenses": "10.0000",
+        "wb_expenses_without_marketing": "3.0000",
+        "profit_period_expenses": "10.0000",
+        "capitalized_acceptance": "0.0000",
+        "capitalized_transit_logistics": "0.0000",
+    }
+    for key, value in expected.items():
+        if metrics.get(key) != value:
+            raise AssertionError(
+                f"signed deduction {key}: expected {value!r}, got {metrics.get(key)!r}"
+            )
+    if metrics.get("before_cogs_profit") != "-10.0000":
+        raise AssertionError("signed deductions must affect Finance profit exactly once")
 
 
 def _assert_functional_daily_cost_requires_exact_date() -> None:

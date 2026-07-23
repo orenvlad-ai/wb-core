@@ -52,6 +52,7 @@ def main() -> None:
         _assert_expense_category_math(block)
         report = _assert_preview(block)
         _assert_workbook(block, report)
+        _assert_only_marketing_workbook(block)
         _assert_incomplete_and_stale_states(block)
         _assert_negative_profit_and_validation(block)
         performance = _assert_indexed_performance(block)
@@ -95,97 +96,102 @@ def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
 
 
 def _assert_expense_category_math(block: PartnerReportBlock) -> None:
-    for precision_source, precision_ratio in (
-        (
-            (
-                Decimal("433822.7210"),
-                Decimal("39553.8405"),
-                Decimal("-624673.1379"),
-                Decimal("-27546.8181"),
-            ),
-            Decimal("625871.8479") / Decimal("647638.6964"),
-        ),
-        (
-            (
-                Decimal("385191.8930"),
-                Decimal("834846.8975"),
-                Decimal("125245.0792"),
-                Decimal("880805.2389"),
-            ),
-            Decimal("0.4891533331747246630083937330"),
-        ),
-    ):
-        precision_total = sum(precision_source, Decimal())
-        precision_allocated = block._allocated_account_expense_categories(  # noqa: SLF001
-            {
-                "profit_period_expenses": str(precision_total),
-                "positive_adjustments": "0",
-                "transit_logistics": str(precision_source[0]),
-                "capitalized_transit_logistics": "0",
-                "subscriptions": str(precision_source[1]),
-                "paid_services": str(precision_source[2]),
-            },
-            allocation_ratio=precision_ratio,
-        )
-        precision_target = precision_total * precision_ratio
-        first_three = sum(
-            (
-                precision_allocated[key]
-                for key in (
-                    "uncapitalized_transit_logistics",
-                    "wb_jam_subscription",
-                    "wb_paid_services",
-                )
-            ),
-            Decimal(),
-        )
-        if precision_allocated["other_withholdings"] != precision_target - first_three:
-            raise AssertionError("catch-all category was not derived from the conserved target")
-        if sum(precision_allocated.values(), Decimal()).quantize(
-            Decimal("0.0001")
-        ) != precision_target.quantize(Decimal("0.0001")):
-            raise AssertionError(
-                "working-precision allocation broke documented monetary conservation"
-            )
-
+    account_metrics = {
+        "profit_period_expenses": "42",
+        "positive_adjustments": "1",
+        "marketing": "10",
+        "agent_remuneration": "2",
+        "acquiring": "1",
+        "logistics": "3",
+        "storage": "4",
+        "acceptance": "5",
+        "capitalized_acceptance": "1",
+        "penalties": "2",
+        "corrections": "1",
+        "transit_logistics": "4",
+        "capitalized_transit_logistics": "1",
+        "subscriptions": "2",
+        "paid_services": "1",
+        "review_points": "6",
+        "other_deductions": "3",
+    }
+    if block._account_allocatable_expense_total(account_metrics) != Decimal("31"):  # noqa: SLF001
+        raise AssertionError("Finance marketing was not excluded from account allocation")
     allocated = block._allocated_account_expense_categories(  # noqa: SLF001
-        {
-            "profit_period_expenses": "10",
-            "positive_adjustments": "1",
-            "transit_logistics": "4",
-            "capitalized_transit_logistics": "1",
-            "subscriptions": "2",
-            "paid_services": "1",
-        },
+        account_metrics,
         allocation_ratio=Decimal("0.5"),
     )
     if allocated != {
         "uncapitalized_transit_logistics": Decimal("1.5"),
         "wb_jam_subscription": Decimal("1.0"),
         "wb_paid_services": Decimal("0.5"),
+        "review_points": Decimal("3.0"),
         "other_withholdings": Decimal("1.5"),
     }:
-        raise AssertionError(f"allocated category conservation mismatch: {allocated}")
-    offsetting = block._allocated_account_expense_categories(  # noqa: SLF001
-        {
-            "profit_period_expenses": "100",
-            "positive_adjustments": "100",
-            "transit_logistics": "100",
-            "capitalized_transit_logistics": "0",
-            "subscriptions": "0",
-            "paid_services": "0",
-        },
+        raise AssertionError(f"allocated subrow category mismatch: {allocated}")
+    allocated_main = block._allocated_account_main_expenses(  # noqa: SLF001
+        account_metrics,
         allocation_ratio=Decimal("0.5"),
     )
-    if offsetting != {
-        "uncapitalized_transit_logistics": Decimal("50.0"),
-        "wb_jam_subscription": Decimal("0"),
-        "wb_paid_services": Decimal("0"),
-        "other_withholdings": Decimal("-50.0"),
+    if allocated_main != {
+        "agent_remuneration": Decimal("1.0"),
+        "acquiring": Decimal("0.5"),
+        "logistics": Decimal("1.5"),
+        "storage": Decimal("2.0"),
+        "acceptance": Decimal("2.0"),
+        "penalties_and_adjustments": Decimal("1.0"),
     }:
-        raise AssertionError(
-            f"offsetting account categories were hidden at net zero: {offsetting}"
-        )
+        raise AssertionError(f"allocated main-row category mismatch: {allocated_main}")
+    if sum(allocated.values(), Decimal()) + sum(
+        allocated_main.values(), Decimal()
+    ) != Decimal("15.5"):
+        raise AssertionError("allocated account categories do not conserve without marketing")
+    formula = block._week_formulas(  # noqa: SLF001
+        components={
+            "net_revenue": "100",
+            "agent_remuneration": "1",
+            "acquiring": "2",
+            "logistics": "3",
+            "storage": "4",
+            "acceptance": "5",
+            "capitalized_acceptance": "1",
+            "penalties": "6",
+            "corrections": "2",
+            "positive_adjustments": "1",
+            "marketing": "999",
+        },
+        cogs=Decimal("10"),
+        ads=Decimal("11"),
+        other_expense_categories={
+            key: Decimal("0") for key, _label in OTHER_EXPENSE_CATEGORIES
+        },
+        allocated_main_expenses=allocated_main,
+        other_direct_and_allocated_total=Decimal("12"),
+        params={
+            "partner_share_pct": "40",
+            "invested_capital_rub": "1000",
+            "replenishment_reserve_pct": "0",
+            "weekly_office_expense_rub": "0",
+            "tax_rate_pct": "0",
+        },
+    )
+    expected_formula = {
+        "agent_remuneration": "2.0000",
+        "acquiring": "2.5000",
+        "logistics": "4.5000",
+        "storage": "6.0000",
+        "acceptance": "6.0000",
+        "penalties_and_adjustments": "8.0000",
+        OTHER_DIRECT_ALLOCATED_KEY: "12.0000",
+        "finance_margin": "38.0000",
+        "net_profit": "38.0000",
+        "dividends": "15.2000",
+    }
+    for key, expected_value in expected_formula.items():
+        if formula.get(key) != expected_value:
+            raise AssertionError(
+                f"allocated main-row/margin {key}: {formula.get(key)!r} != {expected_value!r}"
+            )
     exact = block._other_expense_categories(  # noqa: SLF001
         {
             "transit_logistics": "2",
@@ -198,13 +204,13 @@ def _assert_expense_category_math(block: PartnerReportBlock) -> None:
     )
     if exact["uncapitalized_transit_logistics"] != Decimal("0.5"):
         raise AssertionError("signed transit correction was clamped or double-counted")
-    if sum(exact.values(), Decimal("0")) != Decimal("18.5"):
+    if sum(exact.values(), Decimal("0")) != Decimal("21.5"):
         raise AssertionError(f"direct + allocated categories do not conserve: {exact}")
     rounded = _display_breakdown(
         {key: Decimal("0.005") for key, _label in OTHER_EXPENSE_CATEGORIES}
     )
     rounded_values = [Decimal(item["amount_rub"]) for item in rounded]
-    if sum(rounded_values, Decimal("0")) != Decimal("0.02"):
+    if sum(rounded_values, Decimal("0")) != Decimal("0.03"):
         raise AssertionError(f"kopeck residual is not deterministic/conserved: {rounded}")
     serialized_edge = _display_breakdown(
         {
@@ -222,6 +228,7 @@ def _assert_expense_category_math(block: PartnerReportBlock) -> None:
             "uncapitalized_transit_logistics": Decimal("73.942707"),
             "wb_jam_subscription": Decimal("44.097056"),
             "wb_paid_services": Decimal("142.926849"),
+            "review_points": Decimal("0"),
             "other_withholdings": Decimal("95.388299"),
         },
         target_total=Decimal("356.3550"),
@@ -273,11 +280,34 @@ def _assert_preview(block: PartnerReportBlock) -> dict:
         "uncapitalized_transit_logistics": Decimal("0.00"),
         "wb_jam_subscription": Decimal("0.00"),
         "wb_paid_services": Decimal("0.00"),
+        "review_points": Decimal("0.00"),
         "other_withholdings": Decimal("2500.00"),
     }:
-        raise AssertionError(f"four-category breakdown mismatch: {second_breakdown}")
+        raise AssertionError(f"expense breakdown mismatch: {second_breakdown}")
     if sum(second_breakdown.values(), Decimal("0")) != Decimal("2500.00"):
         raise AssertionError("displayed category amounts do not conserve the main row")
+    if report["other_expense_category_definitions"] != [
+        {"key": "other_withholdings", "label": "Прочие удержания"}
+    ]:
+        raise AssertionError("zero-only Partner subrows were not omitted deterministically")
+    with sqlite3.connect(block.db_path) as conn:
+        rows = conn.execute(
+            """SELECT nm_id,metrics_json FROM wb_finance_weekly_sku_aggregates
+               WHERE seller_id=? AND week_start=? AND nm_id IN (?, '__account__')""",
+            (block.seller_id, WEEK_TWO.isoformat(), str(TARGET_NM)),
+        ).fetchall()
+    metrics = {str(nm_id): json.loads(payload) for nm_id, payload in rows}
+    if (
+        metrics[str(TARGET_NM)]["marketing"] != "3000.0000"
+        or metrics["__account__"]["marketing"] != "7000.0000"
+        or metrics["__account__"]["review_points"] != "0.0000"
+        or metrics["__account__"]["other_deductions"] != "5000.0000"
+        or second["ads"] != "10000.0000"
+        or second[OTHER_DIRECT_ALLOCATED_KEY] != "2500.0000"
+    ):
+        raise AssertionError(
+            "Finance marketing/review storno was not separated from Partner ads/other"
+        )
     if second["dividends"] != "4800.0000":
         raise AssertionError(f"second-week dividends mismatch: {second}")
     expected_period_annualized = (
@@ -335,13 +365,22 @@ def _assert_workbook(block: PartnerReportBlock, report: dict) -> None:
         raise AssertionError("actual replenishment coefficient is absent from XLSX")
     if ws.cell(dividends_row, 1).value != 0.4:
         raise AssertionError("actual investor share is absent from XLSX")
-    category_labels = dict(OTHER_EXPENSE_CATEGORIES)
-    for category_key, category_label in OTHER_EXPENSE_CATEGORIES:
+    visible_categories = [
+        (item["key"], item["label"])
+        for item in report["other_expense_category_definitions"]
+    ]
+    category_labels = dict(visible_categories)
+    for category_key, category_label in visible_categories:
         row_no = labels.get(category_label)
         if row_no is None:
             raise AssertionError(f"Partner XLSX category missing: {category_key}")
         if ws.cell(row_no, 1).value is not None:
             raise AssertionError(f"Partner XLSX exposed a category coefficient: {category_key}")
+    hidden_labels = {
+        label for key, label in OTHER_EXPENSE_CATEGORIES if key not in category_labels
+    }
+    if hidden_labels.intersection(labels):
+        raise AssertionError("Partner XLSX rendered a zero-only expense subrow")
     main_row = labels[OTHER_DIRECT_ALLOCATED_LABEL]
     for column in range(3, 3 + len(report["weeks"]) + 1):
         category_sum = sum(
@@ -383,6 +422,30 @@ def _assert_workbook(block: PartnerReportBlock, report: dict) -> None:
             raise
     else:
         raise AssertionError("Excel export ignored UI/source digest drift")
+
+
+def _assert_only_marketing_workbook(block: PartnerReportBlock) -> None:
+    preview = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if preview["other_expense_category_definitions"]:
+        raise AssertionError("marketing-only Partner week exposed a zero subcategory")
+    if preview["weeks"][0]["values"][OTHER_DIRECT_ALLOCATED_KEY] != "0.0000":
+        raise AssertionError("Finance marketing leaked into Partner other expenses")
+    body, _filename, _evidence = block.build_preview_workbook(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]},
+        expected_source_digest=preview["source_digest"],
+    )
+    workbook = load_workbook(BytesIO(body), data_only=False)
+    labels = {
+        str(row[1].value)
+        for row in workbook["Партнёрский отчёт"].iter_rows(min_row=2)
+        if len(row) > 1 and row[1].value not in (None, "")
+    }
+    forbidden = {label for _key, label in OTHER_EXPENSE_CATEGORIES}
+    workbook.close()
+    if labels.intersection(forbidden):
+        raise AssertionError("marketing-only Partner XLSX rendered a zero expense subrow")
 
 
 def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
@@ -607,7 +670,9 @@ def _seed_finance(block: PartnerReportBlock) -> None:
                 revenue="476034",
                 for_pay="301237",
                 acquiring="14797",
-            )
+            ),
+            _deduction(101, WEEK_ONE + timedelta(days=2), TARGET_NM, "500", "WB Продвижение"),
+            _deduction(102, WEEK_ONE + timedelta(days=2), 0, "700", "Оказание услуг «WB Продвижение»"),
         ],
     )
     block.finance.ingest_week(
@@ -627,6 +692,10 @@ def _seed_finance(block: PartnerReportBlock) -> None:
                 "deduction": "5000",
                 "bonusTypeName": "Общее удержание продавца",
             },
+            _deduction(5, WEEK_TWO + timedelta(days=2), TARGET_NM, "3000", "WB Продвижение"),
+            _deduction(6, WEEK_TWO + timedelta(days=2), 0, "7000", "Оказание услуг «WB Продвижение»"),
+            _deduction(7, WEEK_TWO + timedelta(days=2), 0, "1000", "Аванс за услугу \"Баллы за отзывы\""),
+            _deduction(8, WEEK_TWO + timedelta(days=2), 0, "-1000", "Возврат неиспользованного остатка аванса за услугу \"Баллы за отзывы\""),
         ],
     )
 
@@ -682,6 +751,30 @@ def _sale(
         "retailPriceWithDisc": revenue,
         "forPay": for_pay,
         "acquiringFee": acquiring,
+    }
+
+
+def _deduction(
+    rrd_id: int,
+    operation_date: date,
+    nm_id: int,
+    amount: str,
+    name: str,
+) -> dict:
+    return {
+        **_sale(
+            rrd_id,
+            operation_date,
+            nm_id,
+            revenue="0",
+            for_pay="0",
+            acquiring="0",
+        ),
+        "docTypeName": "",
+        "sellerOperName": "Удержание",
+        "quantity": 0,
+        "deduction": amount,
+        "bonusTypeName": name,
     }
 
 
