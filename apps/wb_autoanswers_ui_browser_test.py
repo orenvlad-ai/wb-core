@@ -7,13 +7,84 @@ import base64
 from pathlib import Path
 import unittest
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
+from apps.wb_autoanswers_production_ui_flow import _json_get
 from apps.wb_autoanswers_runtime_test import feedback, successful_result
 
 
+class _FakeJsonResponse:
+    def __init__(self, *, status: int, payload: object) -> None:
+        self.status = status
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _FakeRequest:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def get(self, *_args: object, **_kwargs: object) -> object:
+        outcome = self.outcomes[self.calls]
+        self.calls += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _FakeContext:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.request = _FakeRequest(outcomes)
+
+
 class AutoanswersUiBrowserTest(unittest.TestCase):
+    def test_production_json_get_retries_only_transient_connection_reset(self) -> None:
+        context = _FakeContext(
+            [
+                PlaywrightError("read ECONNRESET"),
+                _FakeJsonResponse(status=200, payload={"ok": True}),
+            ]
+        )
+        self.assertEqual(
+            _json_get(context, "https://example.invalid/read-only", label="fixture", retry_delay_seconds=0),
+            {"ok": True},
+        )
+        self.assertEqual(context.request.calls, 2)
+
+        http_failure = _FakeContext([_FakeJsonResponse(status=500, payload={"error": "failed"})])
+        with self.assertRaisesRegex(AssertionError, "expected HTTP 200"):
+            _json_get(
+                http_failure,
+                "https://example.invalid/read-only",
+                label="fixture",
+                retry_delay_seconds=0,
+            )
+        self.assertEqual(http_failure.request.calls, 1)
+
+        non_transient = _FakeContext([PlaywrightError("certificate rejected")])
+        with self.assertRaisesRegex(PlaywrightError, "certificate rejected"):
+            _json_get(
+                non_transient,
+                "https://example.invalid/read-only",
+                label="fixture",
+                retry_delay_seconds=0,
+            )
+        self.assertEqual(non_transient.request.calls, 1)
+
+        exhausted = _FakeContext([PlaywrightError("read ECONNRESET")] * 3)
+        with self.assertRaisesRegex(PlaywrightError, "ECONNRESET"):
+            _json_get(
+                exhausted,
+                "https://example.invalid/read-only",
+                label="fixture",
+                retry_delay_seconds=0,
+            )
+        self.assertEqual(exhausted.request.calls, 3)
+
     def test_technical_spoiler_names_not_run_checks_before_generation(self) -> None:
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
         with fixture as base_url:

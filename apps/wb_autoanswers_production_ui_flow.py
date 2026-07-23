@@ -6,13 +6,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
-from playwright.sync_api import BrowserContext, Page, sync_playwright
+from playwright.sync_api import BrowserContext, Error as PlaywrightError, Page, sync_playwright
 
 
 UI_PATH = "/sheet-vitrina-v1/vitrina?tab=feedbacks"
+TRANSIENT_GET_ERROR_MARKERS = ("econnreset", "socket hang up")
+TRANSIENT_GET_MAX_ATTEMPTS = 3
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -20,8 +23,24 @@ def _assert(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def _json_get(context: BrowserContext, url: str, *, label: str) -> dict[str, Any]:
-    response = context.request.get(url, headers={"Accept": "application/json"}, timeout=120_000)
+def _json_get(
+    context: BrowserContext,
+    url: str,
+    *,
+    label: str,
+    retry_delay_seconds: float = 1.0,
+) -> dict[str, Any]:
+    response = None
+    for attempt in range(TRANSIENT_GET_MAX_ATTEMPTS):
+        try:
+            response = context.request.get(url, headers={"Accept": "application/json"}, timeout=120_000)
+            break
+        except PlaywrightError as exc:
+            transient = any(marker in str(exc).lower() for marker in TRANSIENT_GET_ERROR_MARKERS)
+            if not transient or attempt + 1 >= TRANSIENT_GET_MAX_ATTEMPTS:
+                raise
+            time.sleep(max(0.0, float(retry_delay_seconds)) * (attempt + 1))
+    _assert(response is not None, f"{label}: GET returned no response")
     _assert(response.status == 200, f"{label}: expected HTTP 200, got {response.status}")
     payload = response.json()
     _assert(isinstance(payload, dict), f"{label}: expected JSON object")
