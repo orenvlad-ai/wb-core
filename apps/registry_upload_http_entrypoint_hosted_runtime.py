@@ -2837,6 +2837,9 @@ def _run_remote_warehouse_functional_action(
         raise ValueError("warehouse functional runner requires the canonical active runtime dir")
     if not target.environment_file:
         raise ValueError("warehouse functional runner requires the hosted environment file")
+    warehouse_sync_backup_dir = str(
+        Path(runtime_dir) / "backups" / "warehouse-functional-sync"
+    )
 
     if action == "enable-hourly":
         readback = _run_remote_warehouse_functional_action(target, action="readback")
@@ -2906,7 +2909,7 @@ def _run_remote_warehouse_functional_action(
             runner_args.extend(
                 [
                     "--backup-dir",
-                    "/opt/wb-core-runtime/backups/warehouse-functional-sync",
+                    warehouse_sync_backup_dir,
                 ]
             )
         elif action == "emergency-apply":
@@ -2951,14 +2954,14 @@ def _run_remote_warehouse_functional_action(
         runner_args.extend(
             [
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-functional-sync",
+                warehouse_sync_backup_dir,
             ]
         )
     elif action == "manual-sync":
         runner_args.extend(
             [
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-functional-sync",
+                warehouse_sync_backup_dir,
             ]
         )
 

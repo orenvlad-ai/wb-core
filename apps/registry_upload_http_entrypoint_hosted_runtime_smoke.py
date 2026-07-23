@@ -533,6 +533,7 @@ def main() -> None:
             ("economics-backfill-dry-run", 1800.0),
             ("supplier-certification-dry-run", 1800.0),
             ("cutover-apply", 1800.0),
+            ("sync-apply", 1800.0),
             ("supplier-certification-apply", 1800.0),
             ("supplier-certification-rollback", 1800.0),
         ):
@@ -548,13 +549,19 @@ def main() -> None:
                     action=action,
                     plan_path=(
                         plan_path
-                        if action in {"cutover-apply", "supplier-certification-apply"}
+                        if action
+                        in {
+                            "cutover-apply",
+                            "sync-apply",
+                            "supplier-certification-apply",
+                        }
                         else None
                     ),
                     fingerprint=(
                         "sha256:timeout-smoke"
                         if action in {
                             "cutover-apply",
+                            "sync-apply",
                             "supplier-certification-apply",
                             "supplier-certification-rollback",
                         }
@@ -572,13 +579,18 @@ def main() -> None:
                     f"warehouse functional {action} subprocess timeout must be "
                     f"{expected_timeout}, got {actual_timeout}"
                 )
-            if action == "backup":
+            if action in {"backup", "sync-apply"}:
                 remote_command = " ".join(run_mock.call_args.args[0])
                 if (
-                    "warehouse-functional-sync" not in remote_command
+                    "/opt/wb-core-runtime/state/backups/warehouse-functional-sync"
+                    not in remote_command
                     or "--backup-dir" not in remote_command
+                    or "/opt/wb-core-runtime/backups/warehouse-functional-sync"
+                    in remote_command
                 ):
-                    raise AssertionError("functional backup must use the canonical pre-sync directory")
+                    raise AssertionError(
+                        "functional sync backup must use the mounted canonical runtime backup directory"
+                    )
         failed_backup_source = (
             "/opt/wb-core-runtime/backups/warehouse-functional/"
             "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
