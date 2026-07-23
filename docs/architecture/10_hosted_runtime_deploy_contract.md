@@ -84,6 +84,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip`
+- `GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync`
@@ -211,6 +212,12 @@ Canonical repo-owned systemd artifacts for this contour:
 
 Canonical repo-owned public route allowlist:
 - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
+
+Every browser-fetched protected API used by the public operator surface must be
+listed explicitly. In particular, the shared WB warehouse exclusion selector
+depends on the exact read-only
+`GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options` route; a
+loopback-only implementation is not a deploy-complete contract.
 
 The managed nginx block renders `client_max_body_size 32m` for the public WebCore routes so real supplier invoice XLSX uploads reach the app instead of failing at nginx with an HTML `413 Request Entity Too Large` page.
 

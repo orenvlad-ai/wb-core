@@ -949,6 +949,13 @@ def main() -> None:
                 raise AssertionError("print-plan must expose nginx public route allowlist")
             if "/v1/sheet-vitrina-v1/feedbacks" not in {item["path"] for item in nginx_routes.get("routes", [])}:
                 raise AssertionError("nginx public route allowlist must include feedbacks route")
+            if (
+                "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options"
+                not in {item["path"] for item in nginx_routes.get("routes", [])}
+            ):
+                raise AssertionError(
+                    "nginx public route allowlist must include WB warehouse exclusion options"
+                )
 
             deploy_dry_run = _run_json(
                 [
@@ -1259,6 +1266,10 @@ def main() -> None:
                 raise AssertionError("recommendation route without calculation must stay truthful 422")
             if route_map["wb_regional_status"]["http_status"] != 200:
                 raise AssertionError("wb-regional status route must be publicly readable")
+            if "wb_warehouse_exclusion_options" in route_map:
+                raise AssertionError(
+                    "local probe must not require the production WB-token-backed exclusion payload"
+                )
             if route_map["wb_regional_district_central"]["http_status"] != 422:
                 raise AssertionError("district route without calculation must stay truthful 422")
             loopback_probe = _run_json(
