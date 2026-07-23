@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
@@ -814,46 +815,34 @@ def _run_warehouse_ui_flow(
         stock_report_screenshot = evidence_dir / "stock_report_navigation.png"
         page.screenshot(path=str(stock_report_screenshot), full_page=False)
         screenshots.append(str(stock_report_screenshot))
-        page.locator('[data-unified-tab-button="sku-management"]').click()
+        with page.expect_response(
+            lambda candidate: (
+                candidate.request.method == "GET"
+                and urlparse(candidate.url).path == "/v1/sheet-vitrina-v1/sku-management"
+            ),
+            timeout=120_000,
+        ) as sku_management_response_info:
+            page.locator('[data-unified-tab-button="sku-management"]').click()
+        sku_management_response = sku_management_response_info.value
+        _assert(
+            sku_management_response.status == 200,
+            f"SKU management page request: HTTP {sku_management_response.status}",
+        )
+        sku_management_payload = sku_management_response.json()
+        _assert(isinstance(sku_management_payload, dict), "SKU management page response: JSON object")
         page.locator('[data-unified-tab-panel="sku-management"]:not([hidden])').wait_for(timeout=60_000)
         _assert(bool(page.locator('[data-unified-tab-panel="sku-management"]').inner_text().strip()), "SKU management visible render")
-        sku_payload = _protected_json_get(
-            context,
-            normalized_base_url + "/v1/sheet-vitrina-v1/sku-management",
-            label="SKU management protected API",
-            timeout_ms=120_000,
-        )
-        sku_rows_with_proxy_3 = [
-            item
-            for item in sku_payload.get("rows") or []
-            if item.get("profit_rub") is not None and item.get("margin_pct") is not None
-        ]
-        _assert(sku_rows_with_proxy_3, "SKU management consumes populated Proxy 3")
-        sku_rows = page.locator("[data-sku-row-nm-id]")
-        expect(sku_rows).to_have_count(len(sku_payload.get("rows") or []), timeout=120_000)
-        _assert(
-            page.locator("[data-sku-management-status]").inner_text().strip().startswith("SKU:"),
-            "SKU management loaded status",
+        page.wait_for_function(
+            "() => ((document.querySelector('[data-sku-management-status]') || {}).textContent || '').trim().startsWith('SKU:')",
+            timeout=120_000,
         )
         _assert(
             not page.locator("[data-sku-management-error]").inner_text().strip(),
             "SKU management visible error state",
         )
-        visible_proxy_3_rows = 0
-        for item in sku_rows_with_proxy_3:
-            row = page.locator(f'[data-sku-row-nm-id="{int(item["nm_id"])}"]')
-            profit_cell = row.locator('[data-sku-cell="profit_rub"]')
-            margin_cell = row.locator('[data-sku-cell="margin_pct"]')
-            if (
-                profit_cell.count() == 1
-                and margin_cell.count() == 1
-                and profit_cell.inner_text().strip() not in {"", "—", "-"}
-                and margin_cell.inner_text().strip() not in {"", "—", "-"}
-            ):
-                visible_proxy_3_rows += 1
-        _assert(
-            visible_proxy_3_rows == len(sku_rows_with_proxy_3),
-            "SKU management visible Proxy 3 consumer cells",
+        sku_dom_summary = _sku_management_dom_summary(
+            page,
+            source_rows=list(sku_management_payload.get("rows") or []),
         )
         page.locator('[data-sku-sort="profit_rub"]').scroll_into_view_if_needed(timeout=60_000)
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
@@ -1026,8 +1015,9 @@ def _run_warehouse_ui_flow(
         consumer_evidence = {
             "stock_report_navigation": True,
             "sku_management_visible": True,
-            "sku_management_proxy_3_row_count": len(sku_rows_with_proxy_3),
-            "sku_management_visible_proxy_3_row_count": visible_proxy_3_rows,
+            "sku_management_row_count": sku_dom_summary["row_count"],
+            "sku_management_proxy_3_row_count": sku_dom_summary["proxy_3_row_count"],
+            "sku_management_visible_proxy_3_row_count": sku_dom_summary["proxy_3_row_count"],
             "proxy_profit_3_visible": True,
             "proxy_margin_3_visible": True,
             "filled_metric_cells_from_2026_07_01": filled_metrics,
@@ -1902,6 +1892,81 @@ def _protected_json_get(
                 ) from None
         time.sleep(0.4 * attempt)
     raise AssertionError(f"{label}: unavailable for {path}")
+
+
+def _sku_management_dom_summary(
+    page: Any,
+    *,
+    source_rows: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Reconcile rendered Proxy 3 cells with the page's original protected response."""
+
+    status_text = page.locator("[data-sku-management-status]").inner_text().strip()
+    match = re.match(r"^SKU:\s*(\d+)(?:\s*·|$)", status_text)
+    _assert(match is not None, "SKU management loaded status")
+    expected_row_count = int(match.group(1))
+    source_nm_ids: list[str] = []
+    source_proxy_3_nm_ids: set[str] = set()
+    for item in source_rows:
+        nm_id = str(int(item.get("nm_id") or 0))
+        _assert(nm_id != "0", "SKU management source nmID")
+        source_nm_ids.append(nm_id)
+        profit_filled = item.get("profit_rub") is not None
+        margin_filled = item.get("margin_pct") is not None
+        _assert(
+            profit_filled == margin_filled,
+            "SKU management source Proxy 3 profit/margin applicability is aligned",
+        )
+        if profit_filled:
+            source_proxy_3_nm_ids.add(nm_id)
+    _assert(
+        len(source_nm_ids) == len(set(source_nm_ids)),
+        "SKU management source nmID uniqueness",
+    )
+    _assert(
+        expected_row_count == len(source_nm_ids) and expected_row_count > 0,
+        "SKU management status/source row count",
+    )
+    rows = page.locator("[data-sku-row-nm-id]")
+    row_count = rows.count()
+    _assert(row_count == expected_row_count and row_count > 0, "SKU management rendered row count")
+    rendered_nm_ids: set[str] = set()
+    visible_proxy_3_nm_ids: set[str] = set()
+    for index in range(row_count):
+        row = rows.nth(index)
+        nm_id = str(row.get_attribute("data-sku-row-nm-id") or "").strip()
+        _assert(nm_id and nm_id not in rendered_nm_ids, "SKU management rendered nmID uniqueness")
+        rendered_nm_ids.add(nm_id)
+        profit_cell = row.locator('[data-sku-cell="profit_rub"]')
+        margin_cell = row.locator('[data-sku-cell="margin_pct"]')
+        _assert(
+            profit_cell.count() == 1 and margin_cell.count() == 1,
+            "SKU management Proxy 3 consumer cell cardinality",
+        )
+        profit_text = profit_cell.inner_text().strip()
+        margin_text = margin_cell.inner_text().strip()
+        profit_filled = profit_text not in {"", "—", "-"}
+        margin_filled = margin_text not in {"", "—", "-"}
+        _assert(
+            profit_filled == margin_filled,
+            "SKU management Proxy 3 profit/margin applicability is aligned",
+        )
+        if profit_filled:
+            visible_proxy_3_nm_ids.add(nm_id)
+    _assert(
+        rendered_nm_ids == set(source_nm_ids),
+        "SKU management source/rendered nmID completeness",
+    )
+    _assert(
+        visible_proxy_3_nm_ids == source_proxy_3_nm_ids,
+        "SKU management source/rendered Proxy 3 completeness",
+    )
+    _assert(visible_proxy_3_nm_ids, "SKU management consumes populated Proxy 3")
+    return {
+        "status": status_text,
+        "row_count": row_count,
+        "proxy_3_row_count": len(visible_proxy_3_nm_ids),
+    }
 
 
 def _assert(condition: bool, label: str) -> None:
