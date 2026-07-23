@@ -94,6 +94,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
+    DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
     DEFAULT_WAREHOUSES_PATH,
 )
 from packages.application.warehouse_functional_maintenance import (
@@ -504,6 +505,7 @@ def collect_public_surface(
     route_paths: dict[str, str],
     as_of_date: str | None,
     include_refresh: bool,
+    include_wb_warehouse_exclusion_options: bool = True,
     include_feedbacks: bool = False,
     feedbacks_date_from: str | None = None,
     feedbacks_date_to: str | None = None,
@@ -754,6 +756,16 @@ def collect_public_surface(
             auth_cookie=auth_cookie,
         ),
     ]
+    if include_wb_warehouse_exclusion_options:
+        results.append(
+            _collect_http_probe(
+                name="wb_warehouse_exclusion_options",
+                method="GET",
+                url=f"{base_url}{DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH}",
+                timeout_seconds=timeout_seconds,
+                auth_cookie=auth_cookie,
+            )
+        )
     if include_feedbacks:
         date_from, date_to = _default_feedbacks_probe_window(
             date_from=feedbacks_date_from,
@@ -828,6 +840,7 @@ def collect_loopback_surface(
             route_paths=target.route_paths,
             as_of_date=as_of_date,
             include_refresh=include_refresh,
+            include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
             include_feedbacks=include_feedbacks,
             feedbacks_date_from=feedbacks_date_from,
             feedbacks_date_to=feedbacks_date_to,
@@ -1750,6 +1763,7 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
         route_paths=target.route_paths,
         as_of_date=args.as_of_date,
         include_refresh=include_refresh,
+        include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
         include_feedbacks=args.include_feedbacks,
         feedbacks_date_from=args.feedbacks_date_from,
         feedbacks_date_to=args.feedbacks_date_to,
@@ -1881,6 +1895,7 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
             route_paths=target.route_paths,
             as_of_date=args.as_of_date,
             include_refresh=include_refresh,
+            include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
             include_feedbacks=args.include_feedbacks,
             feedbacks_date_from=args.feedbacks_date_from,
             feedbacks_date_to=args.feedbacks_date_to,
@@ -4109,6 +4124,13 @@ def _probe_include_refresh(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "include_refresh", False)) and not bool(getattr(args, "skip_refresh", False))
 
 
+def _probe_include_wb_warehouse_exclusion_options(target: HostedRuntimeTarget) -> bool:
+    # The endpoint is intentionally backed by a fresh official WB read. Local
+    # contract smokes have no production WB token; active and rollback targets
+    # must still prove the complete payload.
+    return str(target.target_status or "").strip().lower() != "local_test"
+
+
 def _probe_auth_summary(auth_cookie: str | None) -> dict[str, Any]:
     return {
         "mode": "app_session_cookie" if auth_cookie else "none",
@@ -4853,6 +4875,20 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "wb_warehouse_exclusion_options":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "snapshot_date",
+                "fetched_at",
+                "pagination_complete",
+                "raw_rows_digest",
+                "options",
+            ],
+        )
+        return evaluation
+
     if route == "wb_supplies_list":
         evaluation["ok"], evaluation["detail"] = _validate_json_result(
             status,
@@ -5385,6 +5421,7 @@ results = [
     _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
+    _collect("wb_warehouse_exclusion_options", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH!r}),
     _collect("wb_supplies_list", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_SUPPLIES_PATH!r}),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
     _collect("wb_regional_recommendations_zip", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH!r}),
