@@ -25,6 +25,11 @@ The API contract identity becomes `wb_autoanswers_server_v3`, and policy identit
 5. Run authenticated desktop and 390px production UI acceptance without generation, publication or automated-mode confirmation.
 6. Reconfirm manual state, preserved queue totals, zero post-containment AI/WB writes and terminal `release:production`.
 
+The read-only production UI evidence runner retries a GET at most three times
+only when Playwright reports a transient connection reset. HTTP failures,
+authentication errors, assertions and all mutation paths remain non-retryable
+and fail closed.
+
 ## Rollback
 
 Emergency force-off remains canonical. Code rollback leaves additive v5 columns/indexes inert. Restore the verified pre-v5 backup only for demonstrated corruption and only after GET reconciliation of any ambiguous started write. Never delete queues, results, revisions, reservations, publications or audit.
