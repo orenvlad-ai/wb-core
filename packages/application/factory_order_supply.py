@@ -23,7 +23,11 @@ from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
-from packages.application.stocks_block import StocksBlock
+from packages.application.stocks_block import (
+    StocksBlock,
+    build_wb_warehouse_exclusion,
+    parse_excluded_wb_warehouse_ids,
+)
 from packages.application.stock_ff_onec_source import (
     ONEC_FF_STOCK_QTY_METRIC_KEY,
     build_onec_stock_ff_state,
@@ -215,6 +219,39 @@ class FactoryOrderSupplyBlock:
             onec_stock_ff_summary=onec_stock_ff_state,
             supplier_registry_inbound_summary=supplier_registry_state,
             last_result=last_result,
+        )
+
+    def build_wb_warehouse_exclusion_options(
+        self,
+        *,
+        excluded_warehouse_ids: tuple[int, ...] = (),
+    ) -> dict[str, Any]:
+        """Fetch one complete official snapshot for the shared calculation selector."""
+
+        active_skus = self._load_active_skus()
+        if not active_skus:
+            raise ValueError("current registry config_v2 does not contain enabled rows")
+        snapshot_date = current_business_date_iso(self.now_factory())
+        stock_response = self.stocks_block.execute(
+            StocksRequest(
+                snapshot_type="stocks",
+                snapshot_date=snapshot_date,
+                nm_ids=[nm_id for nm_id, _ in active_skus],
+            )
+        ).result
+        if getattr(stock_response, "kind", "") != "success":
+            raise ValueError(
+                "Нельзя загрузить склады для исключения: официальный снимок WB неполный"
+            )
+        return build_wb_warehouse_exclusion(
+            items=list(getattr(stock_response, "items", []) or []),
+            warehouse_rows=list(getattr(stock_response, "warehouse_rows", []) or []),
+            excluded_warehouse_ids=excluded_warehouse_ids,
+            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
+            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
+            require_complete=True,
         )
 
     def build_template(self, dataset_type: str) -> tuple[bytes, str]:
@@ -415,7 +452,19 @@ class FactoryOrderSupplyBlock:
                 "authoritative stock_total coverage incomplete for requested nmIds: "
                 + ", ".join(str(item) for item in missing)
             )
-        stock_total_by_nm = {item.nm_id: float(item.stock_total) for item in getattr(stock_response, "items", [])}
+        wb_warehouse_exclusion = build_wb_warehouse_exclusion(
+            items=list(getattr(stock_response, "items", []) or []),
+            warehouse_rows=list(getattr(stock_response, "warehouse_rows", []) or []),
+            excluded_warehouse_ids=settings.excluded_wb_warehouse_ids,
+            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
+            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
+        )
+        stock_total_by_nm = {
+            int(key): float(value.get("effective_stock_total_mp") or 0.0)
+            for key, value in dict(wb_warehouse_exclusion["by_nm_id"]).items()
+        }
         if set(stock_total_by_nm) != set(nm_ids):
             missing = sorted(set(nm_ids) - set(stock_total_by_nm))
             raise ValueError(
@@ -580,6 +629,7 @@ class FactoryOrderSupplyBlock:
             summary=summary,
             rows=result_rows,
             wb_supply_overlay=wb_supply_overlay_payload,
+            wb_warehouse_exclusion=wb_warehouse_exclusion,
             warnings=result_warnings,
         )
         self.runtime.save_factory_order_result_state(
@@ -924,6 +974,10 @@ class FactoryOrderSupplyBlock:
                 ),
                 stock_ff_source=stock_ff_source,
                 selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
+                excluded_wb_warehouse_ids=parse_excluded_wb_warehouse_ids(
+                    settings_payload,
+                    allow_legacy_elektrostal=True,
+                ),
             ),
             factory_inbound_source=_normalize_factory_inbound_source(payload.get("factory_inbound_source")),
             stock_ff_source=stock_ff_source,
@@ -973,6 +1027,11 @@ class FactoryOrderSupplyBlock:
             wb_supply_overlay=(
                 dict(payload.get("wb_supply_overlay"))
                 if isinstance(payload.get("wb_supply_overlay"), Mapping)
+                else None
+            ),
+            wb_warehouse_exclusion=(
+                dict(payload.get("wb_warehouse_exclusion"))
+                if isinstance(payload.get("wb_warehouse_exclusion"), Mapping)
                 else None
             ),
             warnings=tuple(str(item) for item in payload.get("warnings", []) if str(item or "").strip()),
@@ -1120,6 +1179,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         factory_inbound_source=_parse_factory_inbound_source(payload.get("factory_inbound_source")),
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
         selected_wb_supply_ids=parse_selected_wb_supply_ids(payload),
+        excluded_wb_warehouse_ids=parse_excluded_wb_warehouse_ids(payload),
     )
 
 

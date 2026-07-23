@@ -32,6 +32,7 @@ class FactoryOrderSettings:
     factory_inbound_source: str = FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
     stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
     selected_wb_supply_ids: tuple[str, ...] = ()
+    excluded_wb_warehouse_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,7 @@ class FactoryOrderCalculationResult:
     summary: FactoryOrderSummary
     rows: list[FactoryOrderRecommendationRow]
     wb_supply_overlay: dict[str, Any] | None = None
+    wb_warehouse_exclusion: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
 
 

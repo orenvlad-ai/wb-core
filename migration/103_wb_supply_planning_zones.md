@@ -129,10 +129,20 @@ barcode lists and other secrets are never logged.
 `central`, затем распределяется только между выбранными Севером, Востоком и
 Югом. При cold-start доли равны, а переход к направленной истории идёт по
 confidence достоверных наблюдений; отсутствие наблюдений не является нулевым
-спросом. В параметрах расчёта доступен read-only incident override
-`Не учитывать остатки Электростали`: он исключает только warehouseID `120762`
-из текущего effective stock и сохраняет причину и фактические значения в
-diagnostics/result.
+спросом.
+
+Historical boolean `exclude_elektrostal_stock=true` читается только как
+compatibility evidence для `warehouseID=120762`. Current payload использует
+общий multi-select `excluded_wb_warehouse_ids` с stable numeric identity и
+применяет его одинаково в factory-order и WB regional calculations. Selector
+показывает только склады с ненулевым physical/in-way contour в свежем complete
+official snapshot, но исключает из формул только physical stock, уже входивший
+в соответствующую действующую формулу. Selected ID сохраняется, если склад
+стал нулевым или временно исчез; удалить его может только пользователь.
+Result pins IDs, snapshot date/fingerprint and actual/excluded/effective
+reconciliation by `warehouseID + nmID`. WB regional exclusion happens before
+planning-zone aggregation and never removes demand history or changes the
+destination registry.
 
 If WB, catalog or coefficient evidence is unavailable, the picker fails closed
 with controlled blockers and does not alter the calculation.  If a release

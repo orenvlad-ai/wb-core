@@ -316,6 +316,9 @@ DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
+DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH = (
+    "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options"
+)
 DEFAULT_OUR_WB_COST_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/wb-cost/recalculate"
 DEFAULT_OUR_WB_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/wb-cost/status"
 DEFAULT_OWN_PRODUCT_CAPITAL_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/product-capital/recalculate"
@@ -331,6 +334,7 @@ DEFAULT_FF_STOCKS_OPERATIONS_PATH = f"{DEFAULT_FF_STOCKS_PATH}/operations"
 DEFAULT_WAREHOUSES_PATH = "/v1/sheet-vitrina-v1/warehouses"
 DEFAULT_WAREHOUSES_PREFIX = f"{DEFAULT_WAREHOUSES_PATH}/"
 DEFAULT_WAREHOUSES_SYNC_PATH = f"{DEFAULT_WAREHOUSES_PATH}/sync"
+DEFAULT_WAREHOUSES_SYNC_STATUS_PATH = f"{DEFAULT_WAREHOUSES_SYNC_PATH}/status"
 DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/preview"
 DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
@@ -357,6 +361,7 @@ DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
+DEFAULT_AUTO_UPDATES_PATH = "/v1/sheet-vitrina-v1/settings/auto-updates"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -512,6 +517,34 @@ def _build_handler(
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
+            if parsed.path == DEFAULT_AUTO_UPDATES_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    body = _load_request_payload(self)
+                    payload = entrypoint.handle_auto_updates_update_request(
+                        body,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    text = str(exc)
+                    _write_json_response(
+                        self,
+                        HTTPStatus.CONFLICT
+                        if "stale" in text.lower() or "block" in text.lower()
+                        else HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": text},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"auto-updates update failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
             if parsed.path in {
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_GENERATE_PATH,
@@ -658,7 +691,7 @@ def _build_handler(
                 try:
                     body = _load_optional_request_payload(self)
                     if parsed.path == DEFAULT_WAREHOUSES_SYNC_PATH:
-                        payload = entrypoint.handle_warehouse_manual_sync_request()
+                        payload = entrypoint.handle_warehouse_manual_sync_start_request()
                     elif parsed.path == DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH:
                         payload = entrypoint.handle_warehouse_emergency_preview_request()
                     else:
@@ -676,7 +709,14 @@ def _build_handler(
                         {"error": f"warehouse operation failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED
+                    if parsed.path == DEFAULT_WAREHOUSES_SYNC_PATH
+                    and str(payload.get("status") or "") != "busy"
+                    else HTTPStatus.OK,
+                    payload,
+                )
                 return
             if parsed.path == upload_path:
                 try:
@@ -2522,6 +2562,21 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_AUTO_UPDATES_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_auto_updates_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"auto-updates status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == sheet_operator_ui_path:
                 try:
                     embedded_tab = _resolve_operator_embedded_tab_from_query(parsed.query)
@@ -3623,6 +3678,28 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_wb_warehouse_exclusion_options_request()
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB warehouse exclusion options failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH:
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -3655,6 +3732,31 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"Fulfillment uploads list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WAREHOUSES_SYNC_STATUS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    payload = entrypoint.handle_warehouse_manual_sync_status_request(
+                        run_id or None
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.NOT_FOUND,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"warehouse sync status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -7135,6 +7237,7 @@ def _required_section_for_path(path: str) -> str:
         or normalized.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/")
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PATH
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH
+        or normalized == DEFAULT_AUTO_UPDATES_PATH
     ):
         return WEB_AUTH_SECTION_SETTINGS
     if (
@@ -7570,6 +7673,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
+        "wb_warehouse_exclusion_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
         "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
         "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
         "ff_stock_status_path": DEFAULT_FF_STOCKS_PATH,
@@ -7688,6 +7792,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
+        "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
         "calculation_parameters_preview_path": DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,

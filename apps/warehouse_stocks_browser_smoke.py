@@ -277,14 +277,14 @@ def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
                 wait_until="domcontentloaded",
             )
             page.locator("[data-warehouse-balances] tr").first.wait_for()
-            with page.expect_request(
-                lambda request: detail_fragment in request.url and request.method == "GET",
-                timeout=5000,
-            ):
-                page.locator("[data-warehouse-sync]").click()
+            page.locator('[data-warehouse-key="update"]').click()
+            page.locator("[data-warehouse-update-view]:not([hidden])").wait_for()
+            page.locator("[data-warehouse-update-start]").click()
             page.wait_for_function(
-                "() => ((document.querySelector('[data-warehouse-status]') || {}).textContent || '').trim() !== 'Загрузка…'"
+                "() => ((document.querySelector('[data-warehouse-update-status]') || {}).textContent || '').includes('Не завершено:')"
             )
+            page.locator('[data-warehouse-key="production"]').click()
+            page.locator("[data-warehouse-balances] tr").first.wait_for()
             _assert(
                 page.locator("[data-warehouse-status]").inner_text().strip() != "Ошибка загрузки",
                 "failed manual sync reloads last-good detail",
@@ -301,13 +301,84 @@ def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
 def _assert_route_explicit_settings_frame(base_url: str) -> None:
     from playwright.sync_api import sync_playwright
 
+    process_specs = [
+        ("vitrina_refresh", "Обновление Витрины", True),
+        ("vitrina_closure_retry", "Закрытие и повтор закрытия данных Витрины", True),
+        ("warehouse_functional", "Склады и себестоимость", True),
+        ("wb_finance_weekly", "Финансовый отчёт WB", True),
+        ("feedback_complaints", "Авто-жалобы", True),
+        ("spp_test", "Автоматический тест СПП", False),
+        ("autoanswers_readonly", "Autoanswers read-only sync", False),
+        ("autoanswers_worker", "Autoanswers worker", False),
+    ]
+    auto_payload = {
+        "schema_version": "auto_updates_owner_policy_v1",
+        "master_desired": False,
+        "revision": 1,
+        "policy_fingerprint": "sha256:browser-fixture",
+        "changed_at": "2026-07-23T12:00:00Z",
+        "actor": "initial_migration",
+        "reason": "browser fixture",
+        "overall_status": "Общая пауза включена",
+        "unknown_processes": [],
+        "drift_processes": [key for key, _, desired in process_specs if desired],
+        "processes": [
+            {
+                "process_key": key,
+                "display_name": label,
+                "desired": desired,
+                "actual": False,
+                "drift_status": "drift" if desired else "matched",
+                "last_run": "2026-07-23T10:00:00Z",
+                "last_success": "2026-07-23T10:00:00Z",
+                "next_run": "",
+                "last_error": "",
+                "runtime_schedule": {},
+                "timer": {"properties": {}},
+                "provenance": "proven",
+            }
+            for key, label, desired in process_specs
+        ],
+    }
+    auto_posts: list[dict[str, object]] = []
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
-            page = browser.new_page()
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
             page.locator('[data-unified-tab-button="warehouses"]').click()
             page.locator('[data-unified-tab-panel="warehouses"]:not([hidden])').wait_for()
+
+            def handle_auto_updates(route: object) -> None:
+                request = route.request
+                if request.method == "POST":
+                    body = request.post_data_json
+                    auto_posts.append(body)
+                    changed = json.loads(json.dumps(auto_payload))
+                    changed["revision"] = 2
+                    for process in changed["processes"]:
+                        if process["process_key"] == body.get("process_key"):
+                            process["desired"] = body.get("desired")
+                            process["drift_status"] = (
+                                "drift" if body.get("desired") else "matched"
+                            )
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(changed, ensure_ascii=False),
+                    )
+                    return
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(auto_payload, ensure_ascii=False),
+                )
+
+            page.route(
+                "**/v1/sheet-vitrina-v1/settings/auto-updates",
+                handle_auto_updates,
+            )
             page.route(
                 "**/v1/sheet-vitrina-v1/settings/calculation-parameters",
                 lambda route: route.fulfill(
@@ -363,6 +434,75 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             _assert(
                 rendered_values.all_inner_texts() == ["33,96%", "0%", "—", "2,77%"],
                 "settings reference percentages are rounded for display",
+            )
+            group_labels = surface.locator("[data-settings-group-button]").all_inner_texts()
+            _assert(
+                group_labels
+                == [
+                    "Справочники",
+                    "Расчётные параметры",
+                    "Автообновления",
+                    "Пользователи",
+                ],
+                f"settings top-level navigation changed: {group_labels}",
+            )
+            _assert(
+                surface.get_by_role(
+                    "heading",
+                    name="Расчётные параметры",
+                    exact=True,
+                ).count()
+                == 0,
+                "calculation parameters panel must not repeat its top-level title",
+            )
+            surface.locator('[data-settings-group-button="auto-updates"]').click()
+            surface.locator('[data-auto-update-process="warehouse_functional"]').wait_for()
+            _assert(
+                surface.locator("[data-auto-update-process]").count() == 8,
+                "auto-updates page must show only eight real allowlisted processes",
+            )
+            _assert(not auto_posts, "opening Auto-updates must be read-only")
+            _assert(
+                surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
+                == "Общая пауза включена",
+                "master hold status must be visible",
+            )
+            _assert(
+                "Будет включено после снятия общей паузы"
+                in surface.locator(
+                    '[data-auto-update-process="warehouse_functional"]'
+                ).inner_text(),
+                "individual desired ON must remain visible while master is OFF",
+            )
+            surface.locator(
+                '[data-auto-update-toggle="autoanswers_readonly"]'
+            ).click()
+            surface.locator("#autoUpdatesMessage").get_by_text(
+                "Owner policy сохранена; actual state прочитан повторно.",
+                exact=True,
+            ).wait_for()
+            _assert(
+                auto_posts
+                and auto_posts[-1]["action"] == "set_process"
+                and auto_posts[-1]["process_key"] == "autoanswers_readonly"
+                and auto_posts[-1]["desired"] is True
+                and auto_posts[-1]["expected_revision"] == 1,
+                f"individual toggle must use optimistic audited policy payload: {auto_posts}",
+            )
+            page.set_viewport_size({"width": 560, "height": 900})
+            _assert(
+                surface.locator("#autoUpdatesGroupPanel").evaluate(
+                    "element => element.scrollWidth <= element.clientWidth + 1"
+                ),
+                "Auto-updates cards must not be clipped at narrow width",
+            )
+            dark_background = surface.locator(
+                '[data-auto-update-process="warehouse_functional"]'
+            ).evaluate("element => getComputedStyle(element).backgroundColor")
+            _assert(
+                dark_background
+                not in {"rgb(255, 255, 255)", "rgba(0, 0, 0, 0)"},
+                "Auto-updates cards must preserve dark-theme surface",
             )
         finally:
             browser.close()

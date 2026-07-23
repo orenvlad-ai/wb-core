@@ -40,6 +40,7 @@ ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
+        "sync-dry-run",
         "emergency-dry-run",
         "economics-backfill-dry-run",
         "supplier-certification-dry-run",
@@ -2237,6 +2238,7 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     action = str(args.warehouse_functional_action)
     plan_path = Path(str(args.plan_file)).resolve() if action in {
         "cutover-apply",
+        "sync-apply",
         "emergency-apply",
         "economics-backfill-apply",
         "supplier-certification-apply",
@@ -2251,6 +2253,7 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     output = str(getattr(args, "output", "") or "").strip()
     if action in {
         "cutover-dry-run",
+        "sync-dry-run",
         "emergency-dry-run",
         "economics-backfill-dry-run",
         "supplier-certification-dry-run",
@@ -2816,6 +2819,7 @@ def _run_remote_warehouse_functional_action(
     _ensure_active_hosted_runtime_target(target, action=f"warehouse-functional-{action}")
     mutation_actions = {
         "cutover-apply",
+        "sync-apply",
         "emergency-apply",
         "economics-backfill-apply",
         "supplier-certification-apply",
@@ -2884,6 +2888,7 @@ def _run_remote_warehouse_functional_action(
     stdin_text: str | None = None
     if action in {
         "cutover-apply",
+        "sync-apply",
         "emergency-apply",
         "economics-backfill-apply",
         "supplier-certification-apply",
@@ -2897,6 +2902,13 @@ def _run_remote_warehouse_functional_action(
         runner_args.extend(["--plan-file", "/dev/stdin", "--fingerprint", fingerprint])
         if action == "cutover-apply":
             runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional"])
+        elif action == "sync-apply":
+            runner_args.extend(
+                [
+                    "--backup-dir",
+                    "/opt/wb-core-runtime/backups/warehouse-functional-sync",
+                ]
+            )
         elif action == "emergency-apply":
             runner_args.extend(
                 [
@@ -3092,13 +3104,14 @@ def _run_remote_business_data_maintenance_runner(
     target: HostedRuntimeTarget,
     *,
     action: str,
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
     )
-    if action not in {"status", "prepare", "hold"}:
+    if action not in {"status", "prepare", "hold", "restore"}:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
-    if action in {"prepare", "hold"}:
+    if action in {"prepare", "hold", "restore"}:
         _ensure_target_allows_mutation(
             target,
             action=f"business-data-maintenance-{action}",
@@ -3122,6 +3135,12 @@ def _run_remote_business_data_maintenance_runner(
         runner_args.extend(
             ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
         )
+    if action == "restore":
+        if expected_revision is None:
+            raise ValueError(
+                "business-data maintenance restore requires --expected-revision"
+            )
+        runner_args.extend(["--expected-revision", str(int(expected_revision))])
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -3133,7 +3152,7 @@ def _run_remote_business_data_maintenance_runner(
         text=True,
         capture_output=True,
         cwd=ROOT,
-        timeout=1500.0 if action == "hold" else 300.0,
+        timeout=1500.0 if action in {"hold", "restore"} else 300.0,
         check=False,
     )
     if result.returncode != 0:
@@ -3178,6 +3197,30 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             or str(result.get("status") or "") != "held"
         ):
             raise RuntimeError("business-data maintenance hold readback is incomplete")
+    elif action == "restore":
+        if args.expected_revision is None:
+            raise ValueError(
+                "business-data-maintenance restore requires --expected-revision"
+            )
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action="restore",
+            expected_revision=int(args.expected_revision),
+        )
+        if str(result.get("status") or "") != "restored":
+            raise RuntimeError("business-data maintenance restore readback is incomplete")
+        evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="status",
+        )
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="status",
+        )
+        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
+            target,
+            action="status",
+        )
     else:
         result = _run_remote_business_data_maintenance_runner(target, action="status")
         evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
@@ -3836,6 +3879,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         warehouse_functional_action="manual-sync",
     )
 
+    functional_sync_dry_run = subparsers.add_parser(
+        "warehouse-functional-sync-dry-run",
+        help="Build a fresh mutation-free reviewed bounded warehouse recovery plan.",
+    )
+    functional_sync_dry_run.add_argument("--output", default="")
+    functional_sync_dry_run.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="sync-dry-run",
+    )
+
+    functional_sync_apply = subparsers.add_parser(
+        "warehouse-functional-sync-apply",
+        help="Apply one exact reviewed bounded warehouse recovery plan.",
+    )
+    functional_sync_apply.add_argument("--plan-file", required=True)
+    functional_sync_apply.add_argument("--fingerprint", required=True)
+    functional_sync_apply.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="sync-apply",
+    )
+
     functional_maintenance = subparsers.add_parser(
         "warehouse-functional-maintenance",
         help=(
@@ -3860,7 +3924,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     business_data_maintenance.add_argument(
         "action",
-        choices=("status", "hold"),
+        choices=("status", "hold", "restore"),
+    )
+    business_data_maintenance.add_argument(
+        "--expected-revision",
+        type=int,
+        help="Exact owner-policy revision required for restore.",
     )
     business_data_maintenance.set_defaults(
         handler=run_business_data_maintenance_command,

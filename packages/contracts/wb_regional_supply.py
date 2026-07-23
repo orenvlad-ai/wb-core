@@ -59,7 +59,7 @@ class WbRegionalSupplySettings:
     stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
     included_district_keys: tuple[str, ...] = DISTRICT_KEYS
     selected_wb_supply_ids: tuple[str, ...] = ()
-    exclude_elektrostal_stock: bool = False
+    excluded_wb_warehouse_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,6 +128,7 @@ class WbRegionalSupplyCalculationResult:
     districts: list[WbRegionalSupplyDistrictResult]
     diagnostics: dict[str, Any] | None = None
     wb_supply_overlay: dict[str, Any] | None = None
+    wb_warehouse_exclusion: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
     payload_version: str = "v2_planning_zones"
 

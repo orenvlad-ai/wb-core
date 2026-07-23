@@ -4343,6 +4343,21 @@
                   <ul id="wbSupplyOverlayWarningList"></ul>
                 </details>
               </div>
+              <details class="wb-supply-overlay-selector" id="wbWarehouseExclusionSelector">
+                <summary id="wbWarehouseExclusionSummary">Не учитывать при расчёте · Учитываются все склады</summary>
+                <div class="wb-supply-overlay-head">
+                  <div>
+                    <h3>Не учитывать при расчёте</h3>
+                    <p id="wbWarehouseExclusionEvidence" class="field-note">Читаем полный официальный снимок WB...</p>
+                  </div>
+                  <div class="district-selector-actions">
+                    <button id="wbWarehouseExclusionRefreshButton" class="district-selector-button" type="button">Обновить</button>
+                    <button id="wbWarehouseExclusionClearButton" class="district-selector-button" type="button">Сброс</button>
+                  </div>
+                </div>
+                <div id="wbWarehouseExclusionOptions" class="wb-supply-overlay-options"></div>
+                <p id="wbWarehouseExclusionMessage" class="section-message"></p>
+              </details>
               <p id="sharedStockMessage" class="section-message"></p>
             </article>
           </div>
@@ -4591,13 +4606,6 @@
                 <div class="field">
                   <label for="regionalReportDateOverride">Ручная дата расчёта</label>
                   <input id="regionalReportDateOverride" type="date">
-                </div>
-                <div class="field field-span-full">
-                  <label class="checkbox-field" for="excludeElektrostalStock">
-                    <input id="excludeElektrostalStock" type="checkbox">
-                    <span>Не учитывать остатки Электростали</span>
-                  </label>
-                  <p class="field-note">Остатки склада Электросталь исключаются только из текущего расчёта. История продаж и данные других складов не изменяются.</p>
                 </div>
               </div>
               <p class="field-note" id="regionalMethodologyNote">
@@ -5405,6 +5413,12 @@
       const wbSupplyOverlayWarningDetails = document.getElementById("wbSupplyOverlayWarningDetails");
       const wbSupplyOverlayWarningSummary = document.getElementById("wbSupplyOverlayWarningSummary");
       const wbSupplyOverlayWarningList = document.getElementById("wbSupplyOverlayWarningList");
+      const wbWarehouseExclusionSummary = document.getElementById("wbWarehouseExclusionSummary");
+      const wbWarehouseExclusionEvidence = document.getElementById("wbWarehouseExclusionEvidence");
+      const wbWarehouseExclusionRefreshButton = document.getElementById("wbWarehouseExclusionRefreshButton");
+      const wbWarehouseExclusionClearButton = document.getElementById("wbWarehouseExclusionClearButton");
+      const wbWarehouseExclusionOptions = document.getElementById("wbWarehouseExclusionOptions");
+      const wbWarehouseExclusionMessage = document.getElementById("wbWarehouseExclusionMessage");
       const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
       const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
       const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
@@ -5416,8 +5430,7 @@
         cycle_supply_days: document.getElementById("cycleSupplyDays"),
         safety_days: document.getElementById("regionalSafetyDays"),
         order_batch_qty: document.getElementById("regionalOrderBatchQty"),
-        report_date_override: document.getElementById("regionalReportDateOverride"),
-        exclude_elektrostal_stock: document.getElementById("excludeElektrostalStock")
+        report_date_override: document.getElementById("regionalReportDateOverride")
       };
       const regionalMethodologyNote = document.getElementById("regionalMethodologyNote");
       const regionalDistrictSelectorList = document.getElementById("regionalDistrictSelectorList");
@@ -5773,6 +5786,11 @@
       let wbSupplyOverlayLoading = false;
       let wbSupplyOverlayOptionsPayload = null;
       let selectedWbSupplyIds = normalizeWbSupplyOverlayIds(persistedOperatorUiState.selected_wb_supply_ids);
+      let wbWarehouseExclusionLoading = false;
+      let wbWarehouseExclusionPayload = null;
+      let excludedWbWarehouseIds = normalizeWbWarehouseIds(
+        persistedOperatorUiState.excluded_wb_warehouse_ids
+      );
       const wbSuppliesState = {
         search: String(persistedOperatorUiState.wb_supplies_search || "").trim(),
         warehouse_id: String(persistedOperatorUiState.wb_supplies_warehouse_id || "").trim(),
@@ -5858,6 +5876,18 @@
         }, []);
       }
 
+      function normalizeWbWarehouseIds(value) {
+        const rawValues = Array.isArray(value) ? value : String(value || "").split(",");
+        const result = [];
+        rawValues.forEach((item) => {
+          const value = Number(String(item ?? "").trim());
+          if (Number.isInteger(value) && value >= 0 && !result.includes(value)) {
+            result.push(value);
+          }
+        });
+        return result.sort((left, right) => left - right);
+      }
+
       function normalizeWbSuppliesSizeFilter(value) {
         const normalized = String(value || "").trim();
         return ["main_250", "all", "small_lt_250"].includes(normalized) ? normalized : WB_SUPPLIES_DEFAULT_SIZE_FILTER;
@@ -5900,6 +5930,12 @@
       function persistWbSupplyOverlaySelection() {
         writePersistedOperatorUiState({
           selected_wb_supply_ids: selectedWbSupplyIds.slice()
+        });
+      }
+
+      function persistWbWarehouseExclusionSelection() {
+        writePersistedOperatorUiState({
+          excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
         });
       }
 
@@ -8292,7 +8328,7 @@
         payload.factory_inbound_source = factoryInboundSource;
         payload.stock_ff_source = stockFfSource;
         payload.selected_wb_supply_ids = selectedWbSupplyIds.slice();
-        payload.exclude_elektrostal_stock = Boolean(regionalFields.exclude_elektrostal_stock && regionalFields.exclude_elektrostal_stock.checked);
+        payload.excluded_wb_warehouse_ids = excludedWbWarehouseIds.slice();
         return payload;
       }
 
@@ -8307,6 +8343,7 @@
         payload.stock_ff_source = stockFfSource;
         payload.included_district_keys = regionalIncludedDistrictKeys.slice();
         payload.selected_wb_supply_ids = selectedWbSupplyIds.slice();
+        payload.excluded_wb_warehouse_ids = excludedWbWarehouseIds.slice();
         return payload;
       }
 
@@ -8718,6 +8755,153 @@
         updateWbSupplyOverlayButtons();
         if (!options || options.persist !== false) {
           persistWbSupplyOverlaySelection();
+        }
+      }
+
+      function setWbWarehouseExclusionMessage(text, stateClass) {
+        if (!wbWarehouseExclusionMessage) {
+          return;
+        }
+        wbWarehouseExclusionMessage.textContent = text || "";
+        wbWarehouseExclusionMessage.className = "section-message" + (
+          stateClass ? " is-" + stateClass : ""
+        );
+      }
+
+      function setExcludedWbWarehouseIds(value, options) {
+        excludedWbWarehouseIds = normalizeWbWarehouseIds(value);
+        if (!options || options.persist !== false) {
+          persistWbWarehouseExclusionSelection();
+        }
+        renderWbWarehouseExclusionOptions(wbWarehouseExclusionPayload);
+      }
+
+      function renderWbWarehouseExclusionOptions(payload) {
+        if (!wbWarehouseExclusionOptions) {
+          return;
+        }
+        const selected = new Set(excludedWbWarehouseIds);
+        const rawOptions = Array.isArray(payload && payload.options) ? payload.options : [];
+        const optionsById = new Map();
+        rawOptions.forEach((item) => {
+          const warehouseId = Number(item && item.warehouse_id);
+          if (Number.isInteger(warehouseId) && warehouseId >= 0) {
+            optionsById.set(warehouseId, {...item, warehouse_id: warehouseId});
+          }
+        });
+        excludedWbWarehouseIds.forEach((warehouseId) => {
+          if (!optionsById.has(warehouseId)) {
+            optionsById.set(warehouseId, {
+              warehouse_id: warehouseId,
+              warehouse_name: "warehouseId " + warehouseId,
+              stock_quantity: 0,
+              in_way_to_client: 0,
+              in_way_from_client: 0,
+              total_contour: 0,
+              temporarily_missing: true,
+              message: "Склад временно отсутствует в текущем снимке"
+            });
+          }
+        });
+        const options = Array.from(optionsById.values()).sort((left, right) => {
+          const byName = String(left.warehouse_name || "").localeCompare(
+            String(right.warehouse_name || ""),
+            "ru"
+          );
+          return byName || Number(left.warehouse_id) - Number(right.warehouse_id);
+        });
+        wbWarehouseExclusionOptions.innerHTML = options.length
+          ? options.map((item) => {
+              const warehouseId = Number(item.warehouse_id);
+              const temporarilyMissing = Boolean(item.temporarily_missing);
+              const main = String(item.warehouse_name || "Склад") + " · warehouseID " + warehouseId;
+              const sub = temporarilyMissing
+                ? "Склад временно отсутствует в текущем снимке"
+                : [
+                    "Остаток: " + formatWbNumber(item.stock_quantity),
+                    "К клиенту: " + formatWbNumber(item.in_way_to_client),
+                    "От клиента: " + formatWbNumber(item.in_way_from_client),
+                    "Итого: " + formatWbNumber(item.total_contour)
+                  ].join(" · ");
+              return [
+                "<label class=\"wb-supply-overlay-option" + (temporarilyMissing ? " is-warning" : "") + "\">",
+                "<input type=\"checkbox\" value=\"" + warehouseId + "\" data-wb-warehouse-exclusion-checkbox" +
+                  (selected.has(warehouseId) ? " checked" : "") + ">",
+                "<span>",
+                "<span class=\"wb-supply-overlay-main\">" + escapeHtml(main) + "</span>",
+                "<span class=\"wb-supply-overlay-sub\">" + escapeHtml(sub) + "</span>",
+                "</span>",
+                "</label>"
+              ].join("");
+            }).join("")
+          : "<p class=\"field-note\">В полном снимке нет складов с ненулевым контуром.</p>";
+        if (wbWarehouseExclusionSummary) {
+          wbWarehouseExclusionSummary.textContent = excludedWbWarehouseIds.length
+            ? "Не учитывать при расчёте · Не учитываются: " + excludedWbWarehouseIds.length
+            : "Не учитывать при расчёте · Учитываются все склады";
+        }
+        if (wbWarehouseExclusionClearButton) {
+          wbWarehouseExclusionClearButton.disabled = (
+            wbWarehouseExclusionLoading || !excludedWbWarehouseIds.length
+          );
+        }
+        const snapshotDate = String(payload && payload.snapshot_date || "").trim();
+        const fetchedAt = String(payload && payload.fetched_at || "").trim();
+        const digest = String(payload && payload.raw_rows_digest || "").trim();
+        if (wbWarehouseExclusionEvidence) {
+          wbWarehouseExclusionEvidence.textContent = payload
+            ? "Источник: официальный полный WB snapshot · дата " + valueOrDash(snapshotDate) +
+              " · fetched_at " + formatTimestamp(fetchedAt, "—") +
+              " · completeness: complete · fingerprint " + (digest ? digest.slice(0, 19) + "…" : "—")
+            : "Официальный снимок WB пока не подтверждён.";
+        }
+      }
+
+      async function loadWbWarehouseExclusionOptions() {
+        if (!config.wb_warehouse_exclusion_options_path || wbWarehouseExclusionLoading) {
+          return;
+        }
+        wbWarehouseExclusionLoading = true;
+        if (wbWarehouseExclusionRefreshButton) {
+          wbWarehouseExclusionRefreshButton.disabled = true;
+          wbWarehouseExclusionRefreshButton.textContent = "Обновляем...";
+        }
+        setWbWarehouseExclusionMessage("Получаем полный официальный снимок WB...", "");
+        try {
+          const response = await fetch(config.wb_warehouse_exclusion_options_path, {
+            method: "GET",
+            headers: {"Accept": "application/json"},
+            cache: "no-store"
+          });
+          const payload = await readJson(response);
+          if (!response.ok || !payload.pagination_complete) {
+            throw new Error(valueOrDash(payload.error || "официальный снимок неполный") +
+              " (HTTP " + response.status + ")");
+          }
+          wbWarehouseExclusionPayload = payload;
+          renderWbWarehouseExclusionOptions(payload);
+          setWbWarehouseExclusionMessage(
+            "Список подтверждён. Исключение меняет только текущий stockCount в обоих расчётах; WB snapshot и история не изменяются.",
+            "success"
+          );
+        } catch (error) {
+          wbWarehouseExclusionPayload = null;
+          renderWbWarehouseExclusionOptions(null);
+          setWbWarehouseExclusionMessage(
+            "Не удалось подтвердить свежий полный снимок: " +
+              (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          wbWarehouseExclusionLoading = false;
+          if (wbWarehouseExclusionRefreshButton) {
+            wbWarehouseExclusionRefreshButton.disabled = false;
+            wbWarehouseExclusionRefreshButton.textContent = "Обновить";
+          }
+          if (wbWarehouseExclusionClearButton) {
+            wbWarehouseExclusionClearButton.disabled = !excludedWbWarehouseIds.length;
+          }
+          scheduleEmbeddedHeightPost();
         }
       }
 
@@ -9422,15 +9606,14 @@
         if (diagnostics.calculation_mode) {
           parts.push("Режим: " + String(diagnostics.calculation_mode) + ".");
         }
-        const incident = diagnostics.elektrostal_stock_override && typeof diagnostics.elektrostal_stock_override === "object"
-          ? diagnostics.elektrostal_stock_override
+        const incident = diagnostics.wb_warehouse_exclusion && typeof diagnostics.wb_warehouse_exclusion === "object"
+          ? diagnostics.wb_warehouse_exclusion
           : null;
         if (incident) {
           parts.push(
-            "Электросталь: фактически " + valueOrDash(incident.actual_central_stock) +
-            ", исключено " + valueOrDash(incident.excluded_elektrostal_stock) +
-            ", эффективно " + valueOrDash(incident.effective_central_stock) +
-            (incident.enabled ? " (override включён)." : " (override выключен).")
+            "Склады WB: фактически " + valueOrDash(incident.actual_stock_total_mp) +
+            ", исключено " + valueOrDash(incident.excluded_stock_total_mp) +
+            ", эффективно " + valueOrDash(incident.effective_stock_total_mp) + "."
           );
         }
         if (diagnostics.requested_valid_day_count) {
@@ -9482,8 +9665,8 @@
           : {};
         const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
         const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
-        const incident = diagnostics.elektrostal_stock_override && typeof diagnostics.elektrostal_stock_override === "object"
-          ? diagnostics.elektrostal_stock_override
+        const incident = diagnostics.wb_warehouse_exclusion && typeof diagnostics.wb_warehouse_exclusion === "object"
+          ? diagnostics.wb_warehouse_exclusion
           : null;
         const qualityRows = [
           "Fallback на старую формулу: " + valueOrDash(diagnostics.fallback_sku_count || 0) + " SKU",
@@ -9511,10 +9694,12 @@
         }
         if (incident) {
           qualityRows.push(
-            "Электросталь: WB " + valueOrDash(incident.actual_central_stock) +
-            ", исключено " + valueOrDash(incident.excluded_elektrostal_stock) +
-            ", effective " + valueOrDash(incident.effective_central_stock) +
-            "; " + String(incident.reason || "")
+            "Исключение складов WB: actual " + valueOrDash(incident.actual_stock_total_mp) +
+            ", excluded " + valueOrDash(incident.excluded_stock_total_mp) +
+            ", effective " + valueOrDash(incident.effective_stock_total_mp) +
+            "; IDs " + (Array.isArray(incident.excluded_wb_warehouse_ids)
+              ? incident.excluded_wb_warehouse_ids.join(", ")
+              : "—")
           );
         }
         const htmlParts = [
@@ -13844,6 +14029,10 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           recommendationDownloadPath = payload.recommendation_download_path || config.factory_order_recommendation_path;
+          if (payload.wb_warehouse_exclusion && typeof payload.wb_warehouse_exclusion === "object") {
+            wbWarehouseExclusionPayload = payload.wb_warehouse_exclusion;
+            renderWbWarehouseExclusionOptions(wbWarehouseExclusionPayload);
+          }
           renderFactoryResult(payload);
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
           setFactoryMessage(
@@ -13892,6 +14081,10 @@
           const payload = await readJson(response);
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (payload.wb_warehouse_exclusion && typeof payload.wb_warehouse_exclusion === "object") {
+            wbWarehouseExclusionPayload = payload.wb_warehouse_exclusion;
+            renderWbWarehouseExclusionOptions(wbWarehouseExclusionPayload);
           }
           renderRegionalResult(payload, payload.active_sku_count, { source: "calculate" });
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
@@ -14070,6 +14263,23 @@
             .filter((input) => !input.disabled)
             .map((input) => input.value);
           setSelectedWbSupplyIds(selected);
+        });
+      }
+      if (wbWarehouseExclusionRefreshButton) {
+        wbWarehouseExclusionRefreshButton.addEventListener("click", loadWbWarehouseExclusionOptions);
+      }
+      if (wbWarehouseExclusionClearButton) {
+        wbWarehouseExclusionClearButton.addEventListener("click", () => setExcludedWbWarehouseIds([]));
+      }
+      if (wbWarehouseExclusionOptions) {
+        wbWarehouseExclusionOptions.addEventListener("change", () => {
+          setExcludedWbWarehouseIds(
+            Array.from(
+              wbWarehouseExclusionOptions.querySelectorAll(
+                "[data-wb-warehouse-exclusion-checkbox]:checked"
+              )
+            ).map((input) => Number(input.value))
+          );
         });
       }
       regionalDistrictSelectAllButton.addEventListener("click", () => {
@@ -14415,6 +14625,7 @@
       loadFactoryStatus();
       loadRegionalStatus();
       loadWbSupplyOverlayOptions({ silent: true });
+      loadWbWarehouseExclusionOptions();
     })();
   </script>
 </body>

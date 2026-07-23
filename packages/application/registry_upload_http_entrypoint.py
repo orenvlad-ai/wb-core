@@ -711,6 +711,108 @@ class SellerPortalRecoveryController:
         )
 
 
+class _EntrypointMaintenanceSchedules:
+    """In-process adapter for the audited control plane; avoids self-HTTP deadlocks."""
+
+    def __init__(self, entrypoint: "RegistryUploadHttpEntrypoint") -> None:
+        self.entrypoint = entrypoint
+
+    def read_all(self) -> dict[str, dict[str, Any]]:
+        return {
+            "web_vitrina": self.entrypoint.handle_sheet_web_vitrina_auto_schedules_request(),
+            "feedback_complaints": (
+                self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_request()
+            ),
+            "spp": self.entrypoint.handle_sheet_prices_spp_test_schedule_request(),
+            "spp_status": self.entrypoint.handle_sheet_prices_spp_test_status_request(),
+        }
+
+    def disable_all(
+        self,
+        current: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        web = dict(current.get("web_vitrina") or {})
+        web_policy = dict(web.get("schedule_policy") or {})
+        web_policy.update({"mode": "manual", "interval_hours": None})
+        self.entrypoint.handle_sheet_web_vitrina_auto_schedules_save_request(
+            {
+                "schedule_policy": web_policy,
+                "schedules": [
+                    {**dict(item), "enabled": False}
+                    for item in (
+                        web.get("schedules") or web.get("effective_schedules") or []
+                    )
+                    if isinstance(item, Mapping)
+                ],
+            }
+        )
+        feedback = dict(current.get("feedback_complaints") or {})
+        self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(
+            {
+                "schedules": [
+                    {**dict(item), "enabled": False}
+                    for item in feedback.get("schedules", [])
+                    if isinstance(item, Mapping)
+                ]
+            }
+        )
+        spp = dict(current.get("spp") or {})
+        spp_schedule = dict(spp.get("schedule") or {})
+        spp_schedule["enabled"] = False
+        self.entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
+            {"schedule": spp_schedule},
+            actor="auto_updates_control_plane",
+        )
+        return self.read_all()
+
+    def restore_selected(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+        *,
+        desired: Mapping[str, bool],
+    ) -> dict[str, dict[str, Any]]:
+        web = dict(baseline.get("web_vitrina") or {})
+        web_policy = dict(web.get("schedule_policy") or {})
+        web_schedules = [
+            {
+                **dict(item),
+                "enabled": bool(item.get("enabled"))
+                and bool(desired.get("vitrina_refresh")),
+            }
+            for item in (web.get("schedules") or web.get("effective_schedules") or [])
+            if isinstance(item, Mapping)
+        ]
+        if not bool(desired.get("vitrina_refresh")):
+            web_policy.update({"mode": "manual", "interval_hours": None})
+        self.entrypoint.handle_sheet_web_vitrina_auto_schedules_save_request(
+            {"schedule_policy": web_policy, "schedules": web_schedules}
+        )
+        feedback = dict(baseline.get("feedback_complaints") or {})
+        self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(
+            {
+                "schedules": [
+                    {
+                        **dict(item),
+                        "enabled": bool(item.get("enabled"))
+                        and bool(desired.get("feedback_complaints")),
+                    }
+                    for item in feedback.get("schedules", [])
+                    if isinstance(item, Mapping)
+                ]
+            }
+        )
+        spp = dict(baseline.get("spp") or {})
+        spp_schedule = dict(spp.get("schedule") or {})
+        spp_schedule["enabled"] = bool(spp_schedule.get("enabled")) and bool(
+            desired.get("spp_test")
+        )
+        self.entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
+            {"schedule": spp_schedule},
+            actor="auto_updates_control_plane",
+        )
+        return self.read_all()
+
+
 class RegistryUploadHttpEntrypoint:
     """Тонкий entrypoint: ingest/update current truth, heavy refresh и cheap read готового snapshot."""
 
@@ -1723,6 +1825,135 @@ class RegistryUploadHttpEntrypoint:
             },
         )
 
+    def _business_maintenance_schedules(self) -> Any:
+        return _EntrypointMaintenanceSchedules(self)
+
+    def handle_auto_updates_status_request(self) -> dict[str, Any]:
+        from apps.business_data_maintenance import (
+            SystemdClient,
+            maintenance_status,
+        )
+
+        status = maintenance_status(
+            self.runtime.runtime_dir,
+            systemd=SystemdClient(),
+            schedules=self._business_maintenance_schedules(),
+        )
+        return dict(status.get("auto_updates") or {})
+
+    def handle_auto_updates_update_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        from apps.business_data_maintenance import (
+            FORCE_OFF_TIMER_UNITS,
+            SystemdClient,
+            maintenance_hold,
+            maintenance_restore,
+            maintenance_status,
+            update_process_desired_state,
+        )
+
+        action = str(payload.get("action") or "").strip()
+        if isinstance(payload.get("expected_revision"), bool):
+            raise ValueError("expected_revision must be an integer")
+        try:
+            expected_revision = int(payload.get("expected_revision"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_revision must be an integer") from exc
+        reason = str(payload.get("reason") or "owner Settings action").strip()
+        systemd = SystemdClient()
+        schedules = self._business_maintenance_schedules()
+        if action == "set_process":
+            process_key = str(payload.get("process_key") or "").strip()
+            desired = payload.get("desired")
+            if not isinstance(desired, bool):
+                raise ValueError("desired must be boolean")
+            current = maintenance_status(
+                self.runtime.runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+            )
+            master_desired = bool((current.get("auto_updates") or {}).get("master_desired"))
+            policy = update_process_desired_state(
+                self.runtime.runtime_dir,
+                process_key=process_key,
+                desired=desired,
+                expected_revision=expected_revision,
+                actor=actor,
+                reason=reason,
+            )
+            if master_desired:
+                from packages.application.warehouse_functional_maintenance import (
+                    maintenance_hold as hold_warehouse_timer,
+                )
+
+                hold_warehouse_timer(
+                    self.runtime.runtime_dir,
+                    disable_timer=True,
+                )
+                for unit in FORCE_OFF_TIMER_UNITS:
+                    systemd.disable_now(unit)
+                held = maintenance_hold(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    actor=actor,
+                    reason=reason,
+                    expected_revision=int(policy["revision"]),
+                )
+                return maintenance_restore(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    actor=actor,
+                    reason=reason,
+                    expected_revision=int(
+                        (held.get("auto_updates") or {}).get("revision")
+                    ),
+                ).get("auto_updates") or {}
+        elif action == "set_master":
+            desired = payload.get("desired")
+            if not isinstance(desired, bool):
+                raise ValueError("desired must be boolean")
+            if desired:
+                return maintenance_restore(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    actor=actor,
+                    reason=reason,
+                    expected_revision=expected_revision,
+                ).get("auto_updates") or {}
+            from packages.application.warehouse_functional_maintenance import (
+                maintenance_hold as hold_warehouse_timer,
+            )
+
+            hold_warehouse_timer(
+                self.runtime.runtime_dir,
+                disable_timer=True,
+            )
+            for unit in FORCE_OFF_TIMER_UNITS:
+                systemd.disable_now(unit)
+            maintenance_hold(
+                self.runtime.runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                actor=actor,
+                reason=reason,
+                expected_revision=expected_revision,
+            )
+        else:
+            raise ValueError("unsupported auto-updates action")
+        status = maintenance_status(
+            self.runtime.runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+        )
+        return dict(status.get("auto_updates") or {})
+
     def handle_sheet_web_vitrina_auto_schedules_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         schedule_id = str(payload.get("schedule_id") or "").strip()
         if not schedule_id:
@@ -2395,6 +2626,9 @@ class RegistryUploadHttpEntrypoint:
         payload = asdict(self.factory_order_supply_block.build_status())
         payload["recommendation_download_path"] = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
         return payload
+
+    def handle_wb_warehouse_exclusion_options_request(self) -> dict[str, Any]:
+        return self.factory_order_supply_block.build_wb_warehouse_exclusion_options()
 
     def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
         return self.factory_order_supply_block.build_template(dataset_type)
@@ -3265,6 +3499,139 @@ class RegistryUploadHttpEntrypoint:
                 "database_written": economics_publication.get("database_written"),
                 "backup_archive": economics_publication.get("backup_archive"),
             },
+        }
+
+    def handle_warehouse_manual_sync_start_request(self) -> dict[str, Any]:
+        operation = "warehouse_current_source_sync"
+        active = self.operator_jobs.active_job(operations=(operation,))
+        if active:
+            return self._warehouse_manual_sync_status_payload(
+                active,
+                busy=True,
+            )
+        job = self.operator_jobs.start(
+            operation=operation,
+            runner=self._run_warehouse_manual_sync_job,
+        )
+        return self._warehouse_manual_sync_status_payload(job)
+
+    def handle_warehouse_manual_sync_status_request(
+        self,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        operation = "warehouse_current_source_sync"
+        requested = str(run_id or "").strip()
+        if requested:
+            return self._warehouse_manual_sync_status_payload(
+                self.operator_jobs.get(requested)
+            )
+        job = self.operator_jobs.active_job(operations=(operation,))
+        if job is None:
+            job = self.operator_jobs.latest_relevant_job(operations=(operation,))
+        if job is None:
+            return {
+                "contract_name": "warehouse_current_source_sync_status",
+                "status": "never",
+                "run_id": "",
+                "user_status": "Обновление ещё не запускалось",
+                "short_log": [],
+                "last_attempt_at": "",
+                "last_success_at": "",
+                "changed_warehouses": 0,
+                "changed_skus": 0,
+                "functional_version_id": "",
+                "business_date": "",
+            }
+        return self._warehouse_manual_sync_status_payload(job)
+
+    def _run_warehouse_manual_sync_job(
+        self,
+        emit: OperatorLogEmitter,
+    ) -> dict[str, Any]:
+        emit("Проверяем общий warehouse lock и предусмотренный restore point.")
+        emit("Получаем текущие WB supplies, official stock snapshot и canonical cost layers.")
+        result = self.handle_warehouse_manual_sync_request()
+        diff = dict(result.get("diff") or {})
+        lines = [
+            dict(item)
+            for item in diff.get("lines", [])
+            if isinstance(item, Mapping)
+        ]
+        active_version = dict(result.get("active_version") or {})
+        changed_warehouses = len(
+            {str(item.get("warehouse_key") or "") for item in lines}
+        )
+        changed_skus = len(
+            {int(item.get("nm_id") or 0) for item in lines if item.get("nm_id")}
+        )
+        emit(
+            "Functional publication завершена: "
+            f"{changed_warehouses} складов, {changed_skus} SKU изменено."
+        )
+        emit("Выполняем readback active functional version и зависимой экономики.")
+        return {
+            "status": "no_change" if not lines else "changed",
+            "changed_warehouses": changed_warehouses,
+            "changed_skus": changed_skus,
+            "changed_line_count": int(diff.get("changed_line_count") or 0),
+            "functional_version_id": str(
+                active_version.get("version_id")
+                or active_version.get("functional_version_id")
+                or ""
+            ),
+            "business_date": str(
+                active_version.get("business_date")
+                or active_version.get("effective_at")
+                or ""
+            ),
+            "plan_fingerprint": str(result.get("plan_fingerprint") or ""),
+            "official_supply_sync": dict(result.get("official_supply_sync") or {}),
+            "functional_economics_publication": dict(
+                result.get("functional_economics_publication") or {}
+            ),
+        }
+
+    def _warehouse_manual_sync_status_payload(
+        self,
+        job: Mapping[str, Any],
+        *,
+        busy: bool = False,
+    ) -> dict[str, Any]:
+        status = str(job.get("status") or "running")
+        result = dict(job.get("result") or {})
+        if busy:
+            user_status = "Уже выполняется другой пересчёт"
+        elif status == "running":
+            user_status = "Выполняется обновление всех складов и себестоимостей"
+        elif status == "success" and result.get("status") == "no_change":
+            user_status = "Без изменений: данные уже актуальны"
+        elif status == "success":
+            user_status = "Готово: все 6 складов и себестоимости обновлены"
+        else:
+            user_status = "Не завершено: " + str(
+                job.get("error") or "неизвестная причина"
+            )
+        successful = self.operator_jobs.latest_successful_job(
+            operations=("warehouse_current_source_sync",),
+        )
+        return {
+            "contract_name": "warehouse_current_source_sync_status",
+            "status": "busy" if busy else status,
+            "run_id": str(job.get("job_id") or ""),
+            "user_status": user_status,
+            "short_log": list(job.get("log_lines") or [])[-8:],
+            "last_attempt_at": str(job.get("started_at") or ""),
+            "last_success_at": str(
+                (successful or {}).get("finished_at")
+                or (job.get("finished_at") if status == "success" else "")
+                or ""
+            ),
+            "finished_at": str(job.get("finished_at") or ""),
+            "changed_warehouses": int(result.get("changed_warehouses") or 0),
+            "changed_skus": int(result.get("changed_skus") or 0),
+            "functional_version_id": str(result.get("functional_version_id") or ""),
+            "business_date": str(result.get("business_date") or ""),
+            "technical_details": result,
         }
 
     def handle_warehouse_emergency_preview_request(self) -> dict[str, Any]:
@@ -6086,6 +6453,34 @@ class SheetVitrinaV1OperatorJobStore:
                 candidates = preferred
             elif strict_preferred_as_of_date:
                 return None
+        selected = max(
+            enumerate(candidates),
+            key=lambda item: (
+                str(item[1].finished_at or ""),
+                str(item[1].started_at or ""),
+                item[0],
+            ),
+        )[1]
+        return selected.snapshot()
+
+    def latest_successful_job(
+        self,
+        *,
+        operations: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        normalized_operations = {
+            str(value).strip() for value in operations if str(value).strip()
+        }
+        with self._lock:
+            jobs = list(self._jobs.values())
+        candidates = [
+            job
+            for job in jobs
+            if job.status == "success"
+            and (not normalized_operations or job.operation in normalized_operations)
+        ]
+        if not candidates:
+            return None
         selected = max(
             enumerate(candidates),
             key=lambda item: (

@@ -418,23 +418,48 @@ def main() -> None:
         balance_after_first = _balance(runtime, nm_id)
         if (
             checkpoint.get("baseline_record_count") != 1
-            or first_debits.get("created_count") != 1
+            or first_debits.get("created_count") != 0
             or first_debits.get("skipped_reasons", {}).get("wb_supply_before_auto_writeoff_checkpoint") != 1
-            or balance_after_first != 16.0
+            or first_debits.get("skipped_reasons", {}).get(
+                "wb_supply_reserved_waiting_for_validated_downstream_costs"
+            ) != 1
+            or float(
+                (first_debits.get("reservation_summary") or {}).get(
+                    "reserved_quantity"
+                )
+                or 0.0
+            )
+            != 4.0
+            or balance_after_first != 20.0
         ):
             raise AssertionError(
-                f"sync must skip baseline-known WB supply and debit one post-checkpoint supply, "
+                f"sync must skip baseline-known supply and reserve the post-checkpoint "
+                f"supply while validated downstream cost is missing, "
                 f"got checkpoint={checkpoint} debits={first_debits} balance={balance_after_first}"
             )
         operations = runtime.list_ff_stock_operations(limit=20)
         wb_ops = [item for item in operations if item.get("source_type") == "wb_supply"]
-        if len(wb_ops) != 1 or wb_ops[0].get("source_object_id") != "9102":
-            raise AssertionError(f"only post-checkpoint supply 9102 must create WB debit, got {wb_ops}")
+        if wb_ops:
+            raise AssertionError(
+                f"missing validated cost must not create a physical WB debit, got {wb_ops}"
+            )
 
         second = block.sync_supplies({"limit": 1000})
         second_debits = (second.get("sync") or {}).get("ff_stock_debits") or {}
-        if second_debits.get("created_count") != 0 or _balance(runtime, nm_id) != 16.0:
-            raise AssertionError(f"repeated sync must not duplicate WB debit, got {second_debits}")
+        if (
+            second_debits.get("created_count") != 0
+            or float(
+                (second_debits.get("reservation_summary") or {}).get(
+                    "reserved_quantity"
+                )
+                or 0.0
+            )
+            != 4.0
+            or _balance(runtime, nm_id) != 20.0
+        ):
+            raise AssertionError(
+                f"repeated sync must keep one exact reservation without a debit, got {second_debits}"
+            )
 
     print("wb_supplies_incremental_sync_smoke: OK")
 
