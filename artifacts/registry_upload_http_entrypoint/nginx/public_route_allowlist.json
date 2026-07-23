@@ -655,6 +655,12 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_settings_auto_updates",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/auto-updates",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_settings_user_items",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/settings/users/",
