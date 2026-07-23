@@ -56,6 +56,7 @@ PROBE_SYSTEM_CA_FILE_CANDIDATES = (
 )
 
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_AUTO_UPDATES_PATH,
     DEFAULT_COST_PRICE_UPLOAD_PATH,
     DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
@@ -505,6 +506,7 @@ def collect_public_surface(
     route_paths: dict[str, str],
     as_of_date: str | None,
     include_refresh: bool,
+    include_auto_updates_status: bool = True,
     include_wb_warehouse_exclusion_options: bool = True,
     include_feedbacks: bool = False,
     feedbacks_date_from: str | None = None,
@@ -766,6 +768,16 @@ def collect_public_surface(
                 auth_cookie=auth_cookie,
             )
         )
+    if include_auto_updates_status:
+        results.append(
+            _collect_http_probe(
+                name="auto_updates_status",
+                method="GET",
+                url=f"{base_url}{DEFAULT_AUTO_UPDATES_PATH}",
+                timeout_seconds=timeout_seconds,
+                auth_cookie=auth_cookie,
+            )
+        )
     if include_feedbacks:
         date_from, date_to = _default_feedbacks_probe_window(
             date_from=feedbacks_date_from,
@@ -840,6 +852,7 @@ def collect_loopback_surface(
             route_paths=target.route_paths,
             as_of_date=as_of_date,
             include_refresh=include_refresh,
+            include_auto_updates_status=_probe_include_auto_updates_status(target),
             include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
             include_feedbacks=include_feedbacks,
             feedbacks_date_from=feedbacks_date_from,
@@ -1763,6 +1776,7 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
         route_paths=target.route_paths,
         as_of_date=args.as_of_date,
         include_refresh=include_refresh,
+        include_auto_updates_status=_probe_include_auto_updates_status(target),
         include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
         include_feedbacks=args.include_feedbacks,
         feedbacks_date_from=args.feedbacks_date_from,
@@ -1895,6 +1909,7 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
             route_paths=target.route_paths,
             as_of_date=args.as_of_date,
             include_refresh=include_refresh,
+            include_auto_updates_status=_probe_include_auto_updates_status(target),
             include_wb_warehouse_exclusion_options=_probe_include_wb_warehouse_exclusion_options(target),
             include_feedbacks=args.include_feedbacks,
             feedbacks_date_from=args.feedbacks_date_from,
@@ -4131,6 +4146,12 @@ def _probe_include_wb_warehouse_exclusion_options(target: HostedRuntimeTarget) -
     return str(target.target_status or "").strip().lower() != "local_test"
 
 
+def _probe_include_auto_updates_status(target: HostedRuntimeTarget) -> bool:
+    # The status readback inspects the real systemd/schedule control plane.
+    # Tokenless local contract smokes prove route publication separately.
+    return str(target.target_status or "").strip().lower() != "local_test"
+
+
 def _probe_auth_summary(auth_cookie: str | None) -> dict[str, Any]:
     return {
         "mode": "app_session_cookie" if auth_cookie else "none",
@@ -4889,6 +4910,22 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "auto_updates_status":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "schema_version",
+                "revision",
+                "master_desired",
+                "overall_status",
+                "processes",
+                "drift_processes",
+                "unknown_processes",
+            ],
+        )
+        return evaluation
+
     if route == "wb_supplies_list":
         evaluation["ok"], evaluation["detail"] = _validate_json_result(
             status,
@@ -5422,6 +5459,7 @@ results = [
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_warehouse_exclusion_options", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH!r}),
+    _collect("auto_updates_status", "GET", PAYLOAD["base_url"] + {DEFAULT_AUTO_UPDATES_PATH!r}),
     _collect("wb_supplies_list", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_SUPPLIES_PATH!r}),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
     _collect("wb_regional_recommendations_zip", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH!r}),
