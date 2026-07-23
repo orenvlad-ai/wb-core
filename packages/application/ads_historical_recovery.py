@@ -409,6 +409,7 @@ class AdsHistoricalRecovery:
         self,
         scope: AdsHistoricalRecoveryScope,
         *,
+        reviewed_plan: Mapping[str, Any],
         expected_fingerprint: str,
         approval_reference: str,
         backup_dir: Path,
@@ -442,15 +443,11 @@ class AdsHistoricalRecovery:
                 "backup_created_this_attempt": False,
             }
 
-        plan = self.plan(scope)
-        if plan["fingerprint"] != expected_fingerprint:
-            raise AdsHistoricalRecoveryError(
-                "ads historical recovery fingerprint drifted before apply"
-            )
-        if not plan["apply_allowed"]:
-            raise AdsHistoricalRecoveryError(
-                "ads historical recovery dry-run contains blockers"
-            )
+        plan = self._validate_reviewed_plan(
+            scope,
+            reviewed_plan=reviewed_plan,
+            expected_fingerprint=expected_fingerprint,
+        )
         if plan["write_set"]["insert_snapshot_count"] == 0:
             return {
                 "status": "no_op_no_missing_slots",
@@ -618,6 +615,109 @@ class AdsHistoricalRecovery:
         if final_readback["snapshot_digest"] != result["snapshot_digest"]:
             raise AdsHistoricalRecoveryError("post-commit ads readback drifted")
         return {**result, "readback": final_readback}
+
+    @staticmethod
+    def _validate_reviewed_plan(
+        scope: AdsHistoricalRecoveryScope,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        if not isinstance(reviewed_plan, Mapping):
+            raise AdsHistoricalRecoveryError("reviewed ads plan must be a JSON object")
+        plan = dict(reviewed_plan)
+        scope_dict = scope.as_dict()
+        if (
+            plan.get("schema_version") != SCHEMA_VERSION
+            or plan.get("status") != "ready"
+            or plan.get("dry_run") is not True
+            or plan.get("apply_allowed") is not True
+            or plan.get("blockers") != []
+            or plan.get("scope") != scope_dict
+            or plan.get("scope_digest") != canonical_digest(scope_dict)
+            or plan.get("fingerprint") != expected_fingerprint
+        ):
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan metadata does not match the exact approved scope"
+            )
+
+        core_fields = (
+            "schema_version",
+            "scope",
+            "scope_digest",
+            "integration_contract",
+            "source_manifest",
+            "target_before_digest",
+            "target_manifest",
+            "non_target_manifest",
+            "non_target_digest",
+            "write_set",
+            "blockers",
+        )
+        if any(field not in plan for field in core_fields):
+            raise AdsHistoricalRecoveryError("reviewed ads plan is incomplete")
+        plan_core = {field: plan[field] for field in core_fields}
+        if canonical_digest(plan_core) != expected_fingerprint:
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan content differs from its exact fingerprint"
+            )
+        if canonical_digest(plan["non_target_manifest"]) != plan["non_target_digest"]:
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan non-target manifest digest is invalid"
+            )
+
+        target_manifest = plan["target_manifest"]
+        if not isinstance(target_manifest, list) or not all(
+            isinstance(row, Mapping) for row in target_manifest
+        ):
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan target manifest is invalid"
+            )
+        manifest_dates = [str(row.get("snapshot_date") or "") for row in target_manifest]
+        if manifest_dates != scope_dict["target_dates"]:
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan target manifest differs from the exact scope"
+            )
+        allowed_actions = {"insert", "skip_existing"}
+        if any(str(row.get("action") or "") not in allowed_actions for row in target_manifest):
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan contains a non-applicable target action"
+            )
+        insert_rows = [row for row in target_manifest if row["action"] == "insert"]
+        for row in insert_rows:
+            payload_json = str(row.get("payload_json") or "")
+            if (
+                not payload_json
+                or row.get("payload_digest") != _text_digest(payload_json)
+            ):
+                raise AdsHistoricalRecoveryError(
+                    "reviewed ads plan contains an invalid target payload digest"
+                )
+        expected_write_set = {
+            "tables": [
+                "temporal_source_slot_snapshots",
+                "temporal_source_closure_state",
+                "ads_historical_recovery_audit",
+            ],
+            "source_key": SOURCE_KEY,
+            "snapshot_role": SNAPSHOT_ROLE,
+            "slot_kind": CLOSURE_SLOT,
+            "insert_snapshot_count": len(insert_rows),
+            "target_dates": [str(row["snapshot_date"]) for row in insert_rows],
+            "existing_slots_never_overwritten": True,
+        }
+        if plan["write_set"] != expected_write_set:
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan write set differs from its target manifest"
+            )
+        if insert_rows and (
+            not isinstance(plan["source_manifest"], Mapping)
+            or plan["source_manifest"].get("status") != "complete"
+        ):
+            raise AdsHistoricalRecoveryError(
+                "reviewed ads plan source manifest is not complete"
+            )
+        return plan
 
     def readback(self, scope: AdsHistoricalRecoveryScope) -> dict[str, Any]:
         with self._connect(read_only=True) as conn:

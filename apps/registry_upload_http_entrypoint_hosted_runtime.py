@@ -2574,6 +2574,7 @@ def _run_remote_ads_historical_recovery(
         "--env-file",
         target.environment_file,
     ]
+    reviewed_plan_json = ""
     for nm_id in nm_ids:
         runner_args.extend(["--nm-id", str(nm_id)])
     for target_date in target_dates:
@@ -2583,7 +2584,8 @@ def _run_remote_ads_historical_recovery(
     elif action == "apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError("ads historical apply requires an existing --plan-file")
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
         expected_scope = {
             "nm_ids": list(nm_ids),
             "target_dates": list(target_dates),
@@ -2608,6 +2610,7 @@ def _run_remote_ads_historical_recovery(
                 "/opt/wb-core-runtime/backups/ads-historical",
                 "--approval-reference",
                 approval_reference.strip(),
+                "--reviewed-plan-stdin",
             ]
         )
     shell_command = " && ".join(
@@ -2620,6 +2623,7 @@ def _run_remote_ads_historical_recovery(
         _remote_shell_command(target, shell_command),
         text=True,
         capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
         cwd=ROOT,
         timeout=ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS,
         check=False,
