@@ -829,6 +829,43 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertEqual({item["createdDate"][:10] for item in same_day["items"]}, {"2026-07-20"})
 
+    def test_local_list_filters_use_only_latest_job_per_feedback(self) -> None:
+        self.enable("manual")
+        self.insert_new("current-published")
+        current = self.repo.enqueue_manual_processing(
+            "current-published",
+            content_version=1,
+            actor_id="reviewer",
+        )
+
+        self.insert_new("superseded-published")
+        superseded = self.repo.enqueue_manual_processing(
+            "superseded-published",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        changed = feedback("superseded-published", text="Новая версия отзыва")
+        self.repo.upsert_feedback(changed, source_stream="steady", run_kind="steady")
+        latest = self.repo.enqueue_manual_processing(
+            "superseded-published",
+            content_version=2,
+            actor_id="reviewer",
+        )
+        with self.repo.transaction() as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state='published' WHERE processing_key IN (?,?)",
+                (current["processing_key"], superseded["processing_key"]),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state='needs_review' WHERE processing_key=?",
+                (latest["processing_key"],),
+            )
+
+        published = self.repo.list_feedbacks(filters={"published": True})
+        needs_review = self.repo.list_feedbacks(filters={"needs_review": True})
+        self.assertEqual([item["id"] for item in published["items"]], ["current-published"])
+        self.assertEqual([item["id"] for item in needs_review["items"]], ["superseded-published"])
+
     def test_transition_preview_policy_epoch_and_resumable_sweep(self) -> None:
         self.enable("manual")
         for feedback_id in ("ready", "media-failed", "untouched"):
