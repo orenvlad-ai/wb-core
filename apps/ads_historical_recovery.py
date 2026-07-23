@@ -242,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm-fingerprint", default="")
     parser.add_argument("--approval-reference", default="")
     parser.add_argument("--backup-dir", default="")
+    parser.add_argument("--reviewed-plan-stdin", action="store_true")
     parser.add_argument(
         "--base-url",
         default=os.environ.get(
@@ -263,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--apply requires a fresh --approval-reference")
         if not args.backup_dir:
             parser.error("--apply requires an explicit --backup-dir")
+        if not args.reviewed_plan_stdin:
+            parser.error("--apply requires --reviewed-plan-stdin")
 
     try:
         _load_env(Path(args.env_file))
@@ -281,11 +284,13 @@ def main(argv: list[str] | None = None) -> int:
         elif not args.apply:
             result = recovery.plan(scope)
         else:
-            # Serialize the complete current-plan -> coherent-backup ->
-            # transaction -> readback interval with all warehouse writers.
+            reviewed_plan = json.load(sys.stdin)
+            # Serialize exact reviewed-plan validation -> coherent backup ->
+            # transaction -> readback with every warehouse writer.
             with warehouse_functional_write_lock(runtime_dir):
                 result = recovery.apply(
                     scope,
+                    reviewed_plan=reviewed_plan,
                     expected_fingerprint=args.confirm_fingerprint,
                     approval_reference=args.approval_reference,
                     backup_dir=Path(args.backup_dir),

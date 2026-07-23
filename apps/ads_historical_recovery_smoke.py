@@ -435,11 +435,28 @@ def main() -> int:
         assert any(
             row.get("payload_kind") == "empty" for row in plan["target_manifest"]
         )
+        source.fail = True
 
         before_wrong_fingerprint = _snapshot_count(db_path)
+        tampered_plan = json.loads(json.dumps(plan))
+        tampered_plan["source_manifest"]["response_digest"] = "sha256:" + "f" * 64
         try:
             recovery.apply(
                 scope,
+                reviewed_plan=tampered_plan,
+                expected_fingerprint=plan["fingerprint"],
+                approval_reference="smoke-approval",
+                backup_dir=backup_dir,
+            )
+            raise AssertionError("tampered reviewed plan unexpectedly applied")
+        except AdsHistoricalRecoveryError as exc:
+            assert "content differs" in str(exc)
+        assert _snapshot_count(db_path) == before_wrong_fingerprint
+
+        try:
+            recovery.apply(
+                scope,
+                reviewed_plan=plan,
                 expected_fingerprint="sha256:" + "0" * 64,
                 approval_reference="smoke-approval",
                 backup_dir=backup_dir,
@@ -462,6 +479,7 @@ def main() -> int:
         try:
             atomic_recovery.apply(
                 scope,
+                reviewed_plan=plan,
                 expected_fingerprint=plan["fingerprint"],
                 approval_reference="smoke-approval",
                 backup_dir=backup_dir,
@@ -473,6 +491,7 @@ def main() -> int:
 
         applied = recovery.apply(
             scope,
+            reviewed_plan=plan,
             expected_fingerprint=plan["fingerprint"],
             approval_reference="smoke-approval",
             backup_dir=backup_dir,
@@ -505,6 +524,7 @@ def main() -> int:
 
         repeated_apply = recovery.apply(
             scope,
+            reviewed_plan=plan,
             expected_fingerprint=plan["fingerprint"],
             approval_reference="unused-second-reference",
             backup_dir=backup_dir,

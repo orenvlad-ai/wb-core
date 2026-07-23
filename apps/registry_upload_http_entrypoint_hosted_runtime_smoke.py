@@ -292,9 +292,16 @@ def main() -> None:
                     "--approval-reference",
                     "human-gate-ads",
                     "/opt/wb-core-runtime/backups/ads-historical",
+                    "--reviewed-plan-stdin",
                 )
             ):
                 raise AssertionError("ads historical apply lost fingerprint, backup, or approval")
+            if action == "apply" and run_mock.call_args.kwargs.get(
+                "input"
+            ) != ads_plan_path.read_text(encoding="utf-8"):
+                raise AssertionError("ads historical apply lost the exact reviewed plan")
+            if action != "apply" and run_mock.call_args.kwargs.get("input") is not None:
+                raise AssertionError("ads historical read-only command received mutation input")
             if action != "apply" and "--apply" in remote_command:
                 raise AssertionError("ads historical read-only command unexpectedly enables mutation")
 
