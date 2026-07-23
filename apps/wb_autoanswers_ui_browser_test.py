@@ -162,6 +162,12 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
             row["pros"] = ""
             row["cons"] = ""
             row["bables"] = []
+            row["photoLinks"].append(
+                {
+                    "fullSize": "https://cdn.example/photo-2.jpg",
+                    "miniSize": "https://cdn.example/photo-2-mini.jpg",
+                }
+            )
             row["video"] = {"link": "https://videofeedback01.wbbasket.ru/master.m3u8"}
             outcome = repository.upsert_feedback(row, source_stream="steady", run_kind="steady")
             media_root = Path(fixture.runtime_dir) / "wb_autoanswers_media" / "browser" / "1"
@@ -183,6 +189,17 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 fetch_status="downloaded",
                 local_path=str(photo_path),
                 sha256="a" * 64,
+                mime_type="image/png",
+                byte_size=photo_path.stat().st_size,
+            )
+            repository.update_media_result(
+                feedback_id=row["id"],
+                content_version=outcome["content_version"],
+                kind="photo",
+                ordinal=1,
+                fetch_status="downloaded",
+                local_path=str(photo_path),
+                sha256="e" * 64,
                 mime_type="image/png",
                 byte_size=photo_path.stat().st_size,
             )
@@ -300,7 +317,8 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                     self.assertIn(marker, visible)
                 for omitted in ("Плюсы:", "Минусы:", "Теги:", "Route:", "JSON contract", "Audit trail"):
                     self.assertNotIn(omitted, visible)
-                self.assertEqual(dialog.locator(".autoanswers-media-item").count(), 2)
+                self.assertEqual(dialog.locator('.autoanswers-media-item[alt="Фото покупателя"]').count(), 2)
+                self.assertEqual(dialog.locator(".autoanswers-media-item").count(), 3)
                 media_items = dialog.locator(".autoanswers-media-item")
                 media_items.first.wait_for(state="visible")
                 page.wait_for_function(

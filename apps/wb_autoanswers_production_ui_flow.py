@@ -597,7 +597,7 @@ def run_autoanswers_ui_flow(
                 '.autoanswers-media-item[alt="Фото покупателя"]'
                 if kind == "photo"
                 else '.autoanswers-media-item[alt="Превью видео покупателя"]'
-            )
+            ).first
             image.wait_for(timeout=60_000)
             asset_url_sha256 = hashlib.sha256(str(image.get_attribute("src") or "").encode("utf-8")).hexdigest()
             page.wait_for_function(
