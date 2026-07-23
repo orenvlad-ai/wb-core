@@ -169,6 +169,7 @@ def _run_warehouse_ui_flow(
     console_errors: list[str] = []
     server_errors: list[dict[str, Any]] = []
     navigation_chain: list[dict[str, Any]] = []
+    sku_management_page_responses: list[Any] = []
     fatal_surface_matches: list[dict[str, str]] = []
     screenshots: list[str] = []
     warehouse_evidence: list[dict[str, Any]] = []
@@ -218,6 +219,15 @@ def _run_warehouse_ui_flow(
                 {"status": navigation_response.status, "url": navigation_response.url}
             )
             if navigation_response.request.resource_type == "document"
+            else None,
+        )
+        page.on(
+            "response",
+            lambda candidate: sku_management_page_responses.append(candidate)
+            if (
+                candidate.request.method == "GET"
+                and urlparse(candidate.url).path == "/v1/sheet-vitrina-v1/sku-management"
+            )
             else None,
         )
         response = page.goto(requested_url, wait_until="domcontentloaded", timeout=120_000)
@@ -815,27 +825,24 @@ def _run_warehouse_ui_flow(
         stock_report_screenshot = evidence_dir / "stock_report_navigation.png"
         page.screenshot(path=str(stock_report_screenshot), full_page=False)
         screenshots.append(str(stock_report_screenshot))
-        with page.expect_response(
-            lambda candidate: (
-                candidate.request.method == "GET"
-                and urlparse(candidate.url).path == "/v1/sheet-vitrina-v1/sku-management"
-            ),
-            timeout=120_000,
-        ) as sku_management_response_info:
-            page.locator('[data-unified-tab-button="sku-management"]').click()
-        sku_management_response = sku_management_response_info.value
-        _assert(
-            sku_management_response.status == 200,
-            f"SKU management page request: HTTP {sku_management_response.status}",
-        )
-        sku_management_payload = sku_management_response.json()
-        _assert(isinstance(sku_management_payload, dict), "SKU management page response: JSON object")
+        page.locator('[data-unified-tab-button="sku-management"]').click()
         page.locator('[data-unified-tab-panel="sku-management"]:not([hidden])').wait_for(timeout=60_000)
         _assert(bool(page.locator('[data-unified-tab-panel="sku-management"]').inner_text().strip()), "SKU management visible render")
         page.wait_for_function(
             "() => ((document.querySelector('[data-sku-management-status]') || {}).textContent || '').trim().startsWith('SKU:')",
             timeout=120_000,
         )
+        _assert(
+            len(sku_management_page_responses) == 1,
+            "SKU management page issued exactly one protected source request",
+        )
+        sku_management_response = sku_management_page_responses[0]
+        _assert(
+            sku_management_response.status == 200,
+            f"SKU management page request: HTTP {sku_management_response.status}",
+        )
+        sku_management_payload = sku_management_response.json()
+        _assert(isinstance(sku_management_payload, dict), "SKU management page response: JSON object")
         _assert(
             not page.locator("[data-sku-management-error]").inner_text().strip(),
             "SKU management visible error state",
