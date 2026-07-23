@@ -5964,24 +5964,42 @@ class AutoanswersRepository:
             clauses.append("substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)<=?")
             params.append(_clean_text(source["date_to"]))
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        latest_rows = """
+            WITH latest_jobs AS (
+                SELECT * FROM (
+                    SELECT j2.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY j2.feedback_id
+                               ORDER BY j2.content_version DESC, j2.created_at DESC, j2.processing_key DESC
+                           ) AS latest_rank
+                    FROM sheet_vitrina_v1_wb_autoanswer_jobs j2
+                ) WHERE latest_rank=1
+            ),
+            latest_publications AS (
+                SELECT * FROM (
+                    SELECT p2.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY p2.feedback_id
+                               ORDER BY p2.created_at DESC, p2.publication_key DESC
+                           ) AS latest_rank
+                    FROM sheet_vitrina_v1_wb_publication_jobs p2
+                ) WHERE latest_rank=1
+            )
+        """
         join = """
-            LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
-              ON j.processing_key=(
-                SELECT j2.processing_key FROM sheet_vitrina_v1_wb_autoanswer_jobs j2
-                WHERE j2.feedback_id=f.feedback_id
-                ORDER BY j2.content_version DESC, j2.created_at DESC LIMIT 1
-              )
-            LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
-              ON p.publication_key=(
-                SELECT p2.publication_key FROM sheet_vitrina_v1_wb_publication_jobs p2
-                WHERE p2.feedback_id=f.feedback_id
-                ORDER BY p2.created_at DESC LIMIT 1
-              )
+            LEFT JOIN latest_jobs j ON j.feedback_id=f.feedback_id
+            LEFT JOIN latest_publications p ON p.feedback_id=f.feedback_id
         """
         with closing(self._connect()) as conn:
-            total = int(conn.execute(f"SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks f {join} {where}", params).fetchone()[0])
+            total = int(
+                conn.execute(
+                    f"{latest_rows} SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks f {join} {where}",
+                    params,
+                ).fetchone()[0]
+            )
             rows = conn.execute(
                 f"""
+                {latest_rows}
                 SELECT f.*, j.processing_key, j.state AS processing_state,
                        j.final_route, j.final_reply, j.actual_cost_usd,
                        j.attempts AS processing_attempts, j.last_error_code,

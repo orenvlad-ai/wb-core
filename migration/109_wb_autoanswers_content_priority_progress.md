@@ -30,6 +30,11 @@ only when Playwright reports a transient connection reset. HTTP failures,
 authentication errors, assertions and all mutation paths remain non-retryable
 and fail closed.
 
+Local feedback filters resolve the latest processing and publication rows in
+set-based windowed projections. They do not execute correlated latest-row
+subqueries once per feedback, so bounded production pages remain responsive
+when the archive contains tens of thousands of reviews.
+
 ## Rollback
 
 Emergency force-off remains canonical. Code rollback leaves additive v5 columns/indexes inert. Restore the verified pre-v5 backup only for demonstrated corruption and only after GET reconciliation of any ambiguous started write. Never delete queues, results, revisions, reservations, publications or audit.
