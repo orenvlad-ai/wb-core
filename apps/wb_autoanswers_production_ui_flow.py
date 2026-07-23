@@ -487,15 +487,26 @@ def run_autoanswers_ui_flow(
             expanded_text = detail_body.inner_text()
             for technical_marker in ("Route:", "JSON contract", "Hard gates", "Audit trail"):
                 _assert(technical_marker in expanded_text, f"technical spoiler misses {technical_marker}")
+            current_content_jobs = [
+                dict(job)
+                for job in detail_row["ai_jobs"]
+                if int(job.get("content_version") or 0) == int(detail_row.get("content_version") or 0)
+            ]
             if expected_state == "manual" and not str((first_item.get("answer") or {}).get("text") or "").strip():
-                _assert(
-                    page.locator("[data-autoanswers-generate]").count() == 1,
-                    "eligible manual review must expose exactly one generate button",
-                )
-                _assert(
-                    page.locator("[data-autoanswers-publish]").count() == 0,
-                    "publication must not be offered before a guarded generated result",
-                )
+                if not current_content_jobs:
+                    _assert(
+                        page.locator("[data-autoanswers-generate]").count() == 1,
+                        "eligible manual review must expose exactly one generate button",
+                    )
+                    _assert(
+                        page.locator("[data-autoanswers-publish]").count() == 0,
+                        "publication must not be offered before a guarded generated result",
+                    )
+                else:
+                    _assert(
+                        page.locator("[data-autoanswers-generate]").count() == 0,
+                        "an existing current job must suppress duplicate generation",
+                    )
             if expected_state != "manual":
                 _assert(page.locator("[data-autoanswers-generate]").count() == 0, "OFF must hide manual generation")
             detail_evidence = {
@@ -506,6 +517,7 @@ def run_autoanswers_ui_flow(
                 "has_existing_answer": bool((first_item.get("answer") or {}).get("text")),
                 "processing_status": first_item.get("processing_status"),
                 "publication_status": first_item.get("publication_status"),
+                "current_content_job_count": len(current_content_jobs),
                 "technical_closed_by_default": True,
                 "technical_expands": True,
                 "textarea_auto_grow": not editor.count() or dimensions["client"] + 2 >= dimensions["scroll"],

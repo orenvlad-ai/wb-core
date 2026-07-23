@@ -121,6 +121,38 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 self.assertEqual(dialog.locator("[data-autoanswers-publish]").count(), 0)
                 browser.close()
 
+    def test_current_queued_job_suppresses_duplicate_manual_generation(self) -> None:
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            repository = fixture.entrypoint.autoanswers_repository
+            repository.update_settings(master_enabled=True, mode="manual", actor_id="local_operator")
+            outcome = repository.upsert_feedback(
+                feedback("browser-current-queued", text="Отзыв уже поставлен в очередь"),
+                source_stream="steady",
+                run_kind="steady",
+            )
+            repository.enqueue_manual_processing(
+                "browser-current-queued",
+                content_version=outcome["content_version"],
+                actor_id="local_operator",
+            )
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 1280, "height": 800})
+                page.goto(
+                    base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks",
+                    wait_until="domcontentloaded",
+                )
+                page.locator('[data-feedbacks-subpanel="server-reviews"]:not([hidden])').wait_for()
+                page.wait_for_function("document.querySelectorAll('[data-autoanswers-open]').length === 1")
+                page.locator("[data-autoanswers-open]").click()
+                dialog = page.locator("[data-autoanswers-detail-dialog][open]")
+                dialog.wait_for()
+                self.assertIn("В очереди", dialog.locator("[data-autoanswers-detail-body]").inner_text())
+                self.assertEqual(dialog.locator("[data-autoanswers-generate]").count(), 0)
+                self.assertEqual(dialog.locator("[data-autoanswers-publish]").count(), 0)
+                browser.close()
+
     def test_compact_detail_autogrow_fixed_answer_copy_media_and_narrow_layout(self) -> None:
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
         with fixture as base_url:
