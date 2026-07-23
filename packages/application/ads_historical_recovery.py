@@ -722,7 +722,9 @@ class AdsHistoricalRecovery:
                             "window_days": (end - start).days + 1,
                             "campaign_ids": list(batch),
                             "campaign_id_count": len(batch),
-                            "response_digest": canonical_digest(payload),
+                            "response_digest": _canonical_fullstats_response_digest(
+                                payload
+                            ),
                             "normalized_row_count": sum(
                                 len(value) for value in normalized.values()
                             ),
@@ -789,7 +791,9 @@ class AdsHistoricalRecovery:
                                 "window_days": (end - start).days + 1,
                                 "campaign_ids": [campaign_id],
                                 "campaign_id_count": 1,
-                                "response_digest": canonical_digest(singleton_payload),
+                                "response_digest": _canonical_fullstats_response_digest(
+                                    singleton_payload
+                                ),
                                 "normalized_row_count": sum(
                                     len(value) for value in singleton_rows.values()
                                 ),
@@ -1264,6 +1268,22 @@ def _date_windows(values: Sequence[date]) -> list[tuple[date, date]]:
             index += 1
         windows.append((start, last))
     return windows
+
+
+def _canonical_fullstats_response_digest(payload: Sequence[Any]) -> str:
+    """Hash complete fullstats JSON without treating API array order as semantic."""
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            normalized = [normalize(item) for item in value]
+            return sorted(normalized, key=_canonical_json)
+        return value
+
+    return canonical_digest(normalize(payload))
 
 
 def _fullstats_rows(
