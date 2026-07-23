@@ -171,6 +171,181 @@ def main() -> None:
         command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
         if any(name.startswith("finance-retro-") for name in command_choices):
             raise AssertionError("revoked hosted Finance retro commands remain executable")
+    with TemporaryDirectory(prefix="partner-ads-hosted-smoke-") as partner_temp_dir:
+        partner_output = Path(partner_temp_dir) / "partner-diagnostic.json"
+        partner_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "partner-finance-diagnostic",
+                "--nm-id",
+                "245720334",
+                "--week",
+                "2026-07-13",
+                "--output",
+                str(partner_output),
+            ]
+        )
+        if partner_args.handler is not hosted_runtime.run_partner_finance_diagnostic_command:
+            raise AssertionError("hosted runner must expose Partner/Finance diagnostic")
+        partner_payload = {
+            "status": "incomplete",
+            "nm_id": "245720334",
+            "weeks": [],
+            "blockers": [{"code": "ads_date_missing"}],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=3, stdout=json.dumps(partner_payload), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ) as run_mock:
+            assert hosted_runtime._run_remote_partner_finance_diagnostic(
+                active_target,
+                nm_id="245720334",
+                weeks=("2026-07-13",),
+            ) == partner_payload
+        remote_command = " ".join(run_mock.call_args.args[0])
+        if not all(
+            token in remote_command
+            for token in (
+                "partner_finance_production_diagnostic.py",
+                "--server-settings",
+                "--env-file",
+                "/opt/wb-ai/.env",
+                "--nm-id",
+                "245720334",
+                "--week",
+                "2026-07-13",
+            )
+        ):
+            raise AssertionError("Partner/Finance diagnostic lost exact scope")
+        if run_mock.call_args.kwargs.get("timeout") != hosted_runtime.PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS:
+            raise AssertionError("Partner/Finance diagnostic lost bounded timeout")
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_partner_finance_diagnostic",
+                return_value=partner_payload,
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_partner_finance_diagnostic_command(partner_args)
+        if (
+            not partner_output.is_file()
+            or partner_output.stat().st_mode & 0o777 != 0o600
+        ):
+            raise AssertionError("Partner/Finance evidence must be written with mode 0600")
+
+        ads_dates = ("2025-12-29", "2025-12-30")
+        ads_plan_path = Path(partner_temp_dir) / "ads-plan.json"
+        ads_plan_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "ads_historical_recovery_v4",
+                    "dry_run": True,
+                    "apply_allowed": True,
+                    "fingerprint": "sha256:ads-reviewed",
+                    "scope": {
+                        "nm_ids": [245720334],
+                        "target_dates": list(ads_dates),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        for action in ("dry-run", "readback", "apply"):
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"status":"ready"}', stderr=""
+            )
+            with mock.patch.object(
+                hosted_runtime.subprocess, "run", return_value=completed
+            ) as run_mock:
+                hosted_runtime._run_remote_ads_historical_recovery(
+                    active_target,
+                    action=action,
+                    nm_ids=(245720334,),
+                    target_dates=ads_dates,
+                    plan_path=ads_plan_path if action == "apply" else None,
+                    fingerprint="sha256:ads-reviewed" if action == "apply" else "",
+                    approval_reference="human-gate-ads" if action == "apply" else "",
+                )
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if not all(
+                token in remote_command
+                for token in (
+                    "ads_historical_recovery.py",
+                    "--nm-id",
+                    "245720334",
+                    "--target-date",
+                    "2025-12-29",
+                    "2025-12-30",
+                )
+            ):
+                raise AssertionError("ads historical runner lost exact scope")
+            if run_mock.call_args.kwargs.get("timeout") != hosted_runtime.ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS:
+                raise AssertionError("ads historical runner lost bounded timeout")
+            if action == "apply" and not all(
+                token in remote_command
+                for token in (
+                    "--apply",
+                    "--confirm-fingerprint",
+                    "sha256:ads-reviewed",
+                    "--approval-reference",
+                    "human-gate-ads",
+                    "/opt/wb-core-runtime/backups/ads-historical",
+                    "--reviewed-plan-stdin",
+                )
+            ):
+                raise AssertionError("ads historical apply lost fingerprint, backup, or approval")
+            if action == "apply" and run_mock.call_args.kwargs.get(
+                "input"
+            ) != ads_plan_path.read_text(encoding="utf-8"):
+                raise AssertionError("ads historical apply lost the exact reviewed plan")
+            if action != "apply" and run_mock.call_args.kwargs.get("input") is not None:
+                raise AssertionError("ads historical read-only command received mutation input")
+            if action != "apply" and "--apply" in remote_command:
+                raise AssertionError("ads historical read-only command unexpectedly enables mutation")
+
+        blocked_readback = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"status":"blocked","blockers":[{"code":"ads_date_missing"}]}',
+            stderr="",
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=blocked_readback
+        ):
+            try:
+                hosted_runtime._run_remote_ads_historical_recovery(
+                    active_target,
+                    action="readback",
+                    nm_ids=(245720334,),
+                    target_dates=ads_dates,
+                    plan_path=None,
+                    fingerprint="",
+                    approval_reference="",
+                )
+            except RuntimeError as exc:
+                if "readback has blockers" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("blocked ads readback was accepted")
+
+        ads_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ads-historical-dry-run",
+                "--nm-id",
+                "245720334",
+                "--target-date",
+                "2025-12-29",
+                "--output",
+                str(Path(partner_temp_dir) / "ads-dry-run.json"),
+            ]
+        )
+        if (
+            ads_args.handler is not hosted_runtime.run_ads_historical_recovery_command
+            or ads_args.ads_historical_action != "dry-run"
+        ):
+            raise AssertionError("hosted runner must expose ads historical commands")
     for maintenance_action, expected_timeout in (
         ("status", 300.0),
         ("hold", 1500.0),
@@ -283,6 +458,36 @@ def main() -> None:
         or maintenance_args.action != "hold"
     ):
         raise AssertionError("hosted runner must expose warehouse maintenance hold")
+    durable_payload = {
+        "status": "held",
+        "units": {
+            "timer": {"is_active": "inactive", "is_enabled": "disabled"},
+            "service": {"is_active": "inactive", "quiescent": True},
+        },
+        "warehouse_lock": {"held": False},
+        "finance_apply_processes": [],
+    }
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(durable_payload), stderr=""
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess, "run", return_value=completed
+    ) as run_mock:
+        hosted_runtime._run_remote_warehouse_functional_maintenance_action(
+            active_target,
+            action="hold",
+            disable_timer=True,
+        )
+    if "--disable-timer" not in " ".join(run_mock.call_args.args[0]):
+        raise AssertionError("durable warehouse hold must pass --disable-timer")
+    business_args = hosted_runtime.build_arg_parser().parse_args(
+        ["business-data-maintenance", "hold"]
+    )
+    if (
+        business_args.handler is not hosted_runtime.run_business_data_maintenance_command
+        or business_args.action != "hold"
+    ):
+        raise AssertionError("hosted runner must expose all-writer business-data hold")
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")
@@ -816,6 +1021,10 @@ def main() -> None:
                 or "sheet-vitrina-refresh" in functional_service
             ):
                 raise AssertionError("functional scheduler must run only the bounded warehouse runner")
+            if "TimeoutStartSec=3h" not in functional_service:
+                raise AssertionError(
+                    "functional scheduler must outlive a complete backup, publication and archive cycle"
+                )
             if "OnCalendar=*-*-* *:17:00 Europe/Moscow" not in functional_timer:
                 raise AssertionError("functional scheduler must run hourly in the explicit business timezone")
             spp_service = (

@@ -19,6 +19,13 @@ from packages.application.warehouse_functional_lock import (
 
 WAREHOUSE_FUNCTIONAL_TIMER_UNIT = "wb-core-warehouse-functional-sync.timer"
 WAREHOUSE_FUNCTIONAL_SERVICE_UNIT = "wb-core-warehouse-functional-sync.service"
+WAREHOUSE_FUNCTIONAL_SERVICE_ARTIFACT = (
+    Path(__file__).resolve().parents[2]
+    / "artifacts"
+    / "registry_upload_http_entrypoint"
+    / "systemd"
+    / WAREHOUSE_FUNCTIONAL_SERVICE_UNIT
+)
 WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME = (
     ".warehouse-functional-maintenance.json"
 )
@@ -85,6 +92,46 @@ class SystemdClient:
                 + (result.stderr.strip() or f"exit {result.returncode}")
             )
         return "sha256:" + hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+
+    def deployed_unit_evidence(self, unit: str, artifact_path: Path) -> dict[str, Any]:
+        """Prove that the loaded fragment is the exact repo-deployed artifact."""
+
+        properties = self.properties(
+            unit,
+            ("LoadState", "FragmentPath", "DropInPaths", "NeedDaemonReload"),
+        )
+        fragment_value = str(properties.get("FragmentPath") or "").strip()
+        drop_in_paths = str(properties.get("DropInPaths") or "").strip()
+        if properties.get("LoadState") != "loaded":
+            raise RuntimeError(f"{unit} is not loaded")
+        if properties.get("NeedDaemonReload") != "no":
+            raise RuntimeError(f"{unit} still requires systemd daemon-reload")
+        if not fragment_value:
+            raise RuntimeError(f"{unit} has no fragment path")
+        fragment_path = Path(fragment_value).resolve()
+        if not fragment_path.is_file():
+            raise RuntimeError(f"{unit} fragment path is not a file")
+        if drop_in_paths:
+            raise RuntimeError(f"{unit} has systemd drop-ins")
+        deployed_artifact = artifact_path.resolve()
+        if not deployed_artifact.is_file():
+            raise RuntimeError(f"repo artifact for {unit} does not exist")
+        fragment_bytes = fragment_path.read_bytes()
+        artifact_bytes = deployed_artifact.read_bytes()
+        fragment_sha256 = "sha256:" + hashlib.sha256(fragment_bytes).hexdigest()
+        artifact_sha256 = "sha256:" + hashlib.sha256(artifact_bytes).hexdigest()
+        if fragment_bytes != artifact_bytes:
+            raise RuntimeError(f"{unit} fragment differs from the repo-deployed artifact")
+        return {
+            "unit": unit,
+            "fragment_path": str(fragment_path),
+            "fragment_sha256": fragment_sha256,
+            "artifact_path": str(deployed_artifact),
+            "artifact_sha256": artifact_sha256,
+            "drop_in_paths": [],
+            "need_daemon_reload": "no",
+            "exact_match": True,
+        }
 
     def mutate(self, action: str, unit: str) -> None:
         result = self._run([action, unit])
@@ -281,20 +328,23 @@ def maintenance_hold(
     proc_root: Path = Path("/proc"),
     wait_timeout_seconds: float = 1200.0,
     poll_interval_seconds: float = 2.0,
+    disable_timer: bool = False,
 ) -> dict[str, Any]:
     systemd = client or SystemdClient()
     existing = _load_state(runtime_dir)
-    resuming = bool(existing and existing.get("phase") == "holding")
+    resuming = bool(existing and existing.get("phase") in {"holding", "held"})
     if existing and existing.get("phase") in {"holding", "held"}:
         current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
         recorded_units = (existing.get("baseline") or {}).get("units") or {}
         recorded_timer = recorded_units.get("timer") or {}
         recorded_service = recorded_units.get("service") or {}
+        timer_disabled_for_hold = bool(existing.get("timer_disabled_for_hold"))
+        expected_enabled = "disabled" if timer_disabled_for_hold else recorded_timer.get("is_enabled")
         if (
             existing.get("phase") == "held"
             and current["units"]["timer"]["is_active"] == "inactive"
             and current["units"]["timer"]["is_enabled"]
-            == recorded_timer.get("is_enabled")
+            == expected_enabled
             and current["units"]["timer"]["unit_digest"]
             == recorded_timer.get("unit_digest")
             and current["units"]["service"]["quiescent"] is True
@@ -302,10 +352,16 @@ def maintenance_hold(
             == recorded_service.get("unit_digest")
             and not current["warehouse_lock"]["held"]
             and not current["finance_apply_processes"]
+            and (not disable_timer or timer_disabled_for_hold)
         ):
             return {**current, "status": "held", "idempotent": True}
-        if existing.get("phase") == "held":
-            raise RuntimeError("existing maintenance hold no longer satisfies its invariants")
+        if (
+            current["units"]["timer"]["unit_digest"]
+            != recorded_timer.get("unit_digest")
+            or current["units"]["service"]["unit_digest"]
+            != recorded_service.get("unit_digest")
+        ):
+            raise RuntimeError("existing maintenance hold unit configuration drifted")
 
     before = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
     if before["finance_apply_processes"]:
@@ -324,6 +380,9 @@ def maintenance_hold(
         "hold_started_at": _utc_now(),
         "baseline": _bounded_readback(before),
     }
+    state["phase"] = "holding"
+    if disable_timer:
+        state["timer_disable_requested"] = True
     _save_state(runtime_dir, state)
     _append_audit(
         runtime_dir,
@@ -352,10 +411,18 @@ def maintenance_hold(
         raise RuntimeError("warehouse timer is not inactive after stop")
     if current["units"]["timer"]["is_enabled"] != enabled:
         raise RuntimeError("warehouse timer enabled state changed while stopping it")
+    if disable_timer:
+        systemd.mutate("disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
+        if current["units"]["timer"]["is_enabled"] != "disabled":
+            raise RuntimeError("warehouse timer is not disabled after durable hold")
+        if current["units"]["timer"]["is_active"] != "inactive":
+            raise RuntimeError("warehouse timer became active during durable hold")
     state.update(
         {
             "phase": "held",
             "held_at": _utc_now(),
+            "timer_disabled_for_hold": bool(disable_timer),
             "hold_readback": _bounded_readback(current),
         }
     )
@@ -380,6 +447,10 @@ def maintenance_restore(
         baseline_timer = (
             ((state.get("baseline") or {}).get("units") or {}).get("timer") or {}
         )
+        restored_service = (
+            (((state.get("restore_readback") or {}).get("units") or {}).get("service"))
+            or {}
+        )
         if (
             current["units"]["timer"]["is_enabled"]
             != baseline_timer.get("is_enabled")
@@ -387,8 +458,10 @@ def maintenance_restore(
             != baseline_timer.get("is_active")
             or current["units"]["timer"]["unit_digest"]
             != baseline_timer.get("unit_digest")
+            or current["units"]["service"]["unit_digest"]
+            != restored_service.get("unit_digest")
         ):
-            raise RuntimeError("restored warehouse timer drifted from its recorded baseline")
+            raise RuntimeError("restored warehouse units drifted from their recorded state")
         return {**current, "status": "restored", "idempotent": True}
     if state.get("phase") != "held":
         raise RuntimeError(f"warehouse maintenance phase is {state.get('phase')!r}, not held")
@@ -409,22 +482,76 @@ def maintenance_restore(
         raise RuntimeError("stored timer baseline is not restorable")
     if current["units"]["timer"]["unit_digest"] != baseline_timer.get("unit_digest"):
         raise RuntimeError("warehouse timer unit configuration changed during hold")
+    deployed_service_refresh: dict[str, Any] | None = None
     if current["units"]["service"]["unit_digest"] != baseline_service.get("unit_digest"):
-        raise RuntimeError("warehouse service unit configuration changed during hold")
+        try:
+            evidence = systemd.deployed_unit_evidence(
+                WAREHOUSE_FUNCTIONAL_SERVICE_UNIT,
+                WAREHOUSE_FUNCTIONAL_SERVICE_ARTIFACT,
+            )
+        except (AttributeError, OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                "warehouse service unit configuration changed during hold and is not "
+                "the exact repo-deployed artifact"
+            ) from exc
+        deployed_service_refresh = {
+            "baseline_unit_digest": baseline_service.get("unit_digest"),
+            "restored_unit_digest": current["units"]["service"]["unit_digest"],
+            "evidence": evidence,
+        }
 
-    systemd.mutate("enable" if enabled == "enabled" else "disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+    expected_service_digest = current["units"]["service"]["unit_digest"]
+    systemd.mutate(
+        "enable" if enabled == "enabled" else "disable",
+        WAREHOUSE_FUNCTIONAL_TIMER_UNIT,
+    )
+    pre_start = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
+    if (
+        pre_start["units"]["timer"]["unit_digest"]
+        != baseline_timer.get("unit_digest")
+        or pre_start["units"]["service"]["unit_digest"]
+        != expected_service_digest
+        or pre_start["units"]["timer"]["is_active"] != "inactive"
+        or pre_start["units"]["service"]["quiescent"] is not True
+        or pre_start["warehouse_lock"]["held"]
+        or pre_start["finance_apply_processes"]
+    ):
+        systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        raise RuntimeError("warehouse maintenance invariants changed before timer restore")
     systemd.mutate("start" if active == "active" else "stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
     restored = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)
     if (
         restored["units"]["timer"]["is_enabled"] != enabled
         or restored["units"]["timer"]["is_active"] != active
+        or restored["units"]["timer"]["unit_digest"]
+        != baseline_timer.get("unit_digest")
+        or restored["units"]["service"]["unit_digest"]
+        != expected_service_digest
     ):
+        systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
         raise RuntimeError("warehouse timer did not return to its exact baseline state")
+    if deployed_service_refresh is not None:
+        try:
+            final_evidence = systemd.deployed_unit_evidence(
+                WAREHOUSE_FUNCTIONAL_SERVICE_UNIT,
+                WAREHOUSE_FUNCTIONAL_SERVICE_ARTIFACT,
+            )
+        except (AttributeError, OSError, RuntimeError) as exc:
+            systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+            raise RuntimeError(
+                "warehouse service unit lost deployed-artifact proof during restore"
+            ) from exc
+        if final_evidence != deployed_service_refresh["evidence"]:
+            systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+            raise RuntimeError(
+                "warehouse service deployed-artifact evidence changed during restore"
+            )
     state.update(
         {
             "phase": "restored",
             "restored_at": _utc_now(),
             "restore_readback": _bounded_readback(restored),
+            "deployed_service_refresh": deployed_service_refresh,
         }
     )
     _save_state(runtime_dir, state)

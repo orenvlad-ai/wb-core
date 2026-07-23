@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from packages.application.supplier_invoice_parser import extract_iphone_model_keys
 
 
-DT_ANNEX_MATCHING_POLICY_VERSION = "supplier_customs_dt_annex_series_model_v1"
+DT_ANNEX_MATCHING_POLICY_VERSION = "supplier_customs_dt_annex_strict_reconciliation_v2"
 
 _ANTI_SPY_PATTERNS = (
     r"\banti[\s-]*spy\b",

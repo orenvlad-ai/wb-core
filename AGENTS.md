@@ -38,10 +38,11 @@ Production gates являются phase-local. Разделяй `REPOSITORY_PREF
 - `КЛАСС ЗАДАЧИ: LOOP`
 - `КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`
 
-Класс управляет orchestration/closure, а execution-контур определяет техническую область и риск. `СТАНДАРТ` может иметь `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`; `LOOP` всегда имеет `scope:live-runtime`.
+Класс управляет orchestration/closure, а execution-контур определяет техническую область и риск. PR-backed `СТАНДАРТ` может иметь `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`; `LOOP` всегда имеет `scope:live-runtime`. `user-artifact` — отдельный non-PR контур класса `СТАНДАРТ`, поэтому label `scope:user-artifact` не создаётся.
 
 Если явная строка отсутствует, Codex самостоятельно классифицирует задачу до начала работы:
 
+- создание или изменение запрошенного пользовательского файла вне репозитория — `стандарт` с execution-контуром `user-artifact`; запись файла не является `ДИАГНОСТИКОЙ`;
 - исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`;
 - deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`;
 - обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`.
@@ -63,7 +64,7 @@ Task class и task continuity — два разных решения. Class вы
 
 ### `СТАНДАРТ`
 
-Полный применимый closure в отдельной branch/worktree и PR. Codex добавляет `task:standard`, ровно одну `scope:*` label и после pre-release proof — `release:ready`. Release Train владеет `sync/checks/merge/deploy/verify`; Codex наблюдает очередь и не завершает сессию на открытом PR. `repo-only` завершается только на `release:done`, `live-runtime` — на `release:production`. Чужой exclusive gate — нормальное ожидание, а не blocker; `release:blocked` или `release:halted` требуют bounded диагностики/исправления либо точного внешнего blocker. Handoff содержит PR, merge SHA и проверки.
+Для repo-changing и runtime-задач — полный применимый closure в отдельной branch/worktree и PR. Codex добавляет `task:standard`, ровно одну `scope:*` label и после pre-release proof — `release:ready`. Release Train владеет `sync/checks/merge/deploy/verify`; Codex наблюдает очередь и не завершает сессию на открытом PR. `repo-only` завершается только на `release:done`, `live-runtime` — на `release:production`. Чужой exclusive gate — нормальное ожидание, а не blocker; `release:blocked` или `release:halted` требуют bounded диагностики/исправления либо точного внешнего blocker. Handoff содержит PR, merge SHA и проверки. Единственное исключение — `user-artifact`, описанный ниже: он остаётся `СТАНДАРТ`, но не создаёт GitHub-задачу.
 
 ### `LOOP`
 
@@ -94,6 +95,7 @@ Change-задачу формулируй через проверяемый ко�
 ## Execution-контуры
 
 - `read-only`: анализ, диагностика или review без code, GitHub и production mutations. Итог — подтверждённый анализ либо точный внешний blocker.
+- `user-artifact`: единственная mutation — новый или изменённый пользовательский XLSX/CSV/DOCX/PDF/TXT либо аналогичный файл вне репозитория. Разрешены чтение источников, временные файлы вне repo и точный итоговый файл; branch, worktree, commit, PR, labels/comments, Release Train, repo files, production и business data не меняются. Фактическое изменение Git-tracked инструкций или helper про artifacts остаётся обычным `repo-only`, а не этим исключением.
 - `repo-only`: code/docs change без live/runtime эффекта. По умолчанию включает implementation, targeted checks, semantic review, fixes/recheck, docs sync и полный GitHub closure. Deploy не применяется.
 - `live/runtime`: изменение public route, service/process, operator UI, runtime behavior, deploy wiring или другого live-контура. Включает полный GitHub closure, canonical repo-owned deploy и live/service/public verify.
 - `production data mutation/backfill`: только с explicit bounded scope, read-only preflight, dry-run/plan, verified backup или доказанной reversibility, idempotency/resumability, audit, необходимыми human gates, canonical repo-owned runner, post-run reconciliation и non-target invariants. Ad-hoc SQL, произвольные SSH-команды, server-only scripts и обход safety gates запрещены.
@@ -101,10 +103,13 @@ Change-задачу формулируй через проверяемый ко�
 
 Production changes доставляются только repo-owned deploy/runbook path. Запрещены server-only drift, секреты в Git/docs/logs/PR и production mutations вне safety-контура.
 
+Для нового XLSX основной путь — активный Spreadsheets skill и `@oai/artifact-tool`: builder запускается через `CODEX_PRIMARY_RUNTIME_NODE` во временной директории вне repo с `node_modules -> CODEX_PRIMARY_RUNTIME_NODE_MODULES`. Отсутствие `load_workspace_dependencies` само по себе не blocker. После bounded recovery допустимы уже установленные `openpyxl`, затем `xlsxwriter`, затем dependency-free ZIP/XML `OOXML`; данные между попытками не собираются заново, новые зависимости из сети не устанавливаются. Подробный recovery/verification contract: [execution protocol](docs/architecture/07_codex_execution_protocol.md).
+
 ## Выполнение и closure
 
 Если пользователь явно не ограничил closure, Codex самостоятельно ведёт задачу до полного применимого результата:
 
+- `user-artifact`: фактическое создание файла по точному пути → структурная/содержательная проверка → применимая визуальная проверка; подготовленные данные, свободный путь, CSV вместо запрошенного XLSX или описание будущих действий completion не являются;
 - `repo-only`: implementation → checks → semantic review → fixes/recheck → docs sync → commit → push → PR → checks/review → merge → удаление feature-ветки → подтверждение результата в актуальном `origin/main`;
 - `live/runtime`: весь `repo-only` closure → canonical deploy → live/service/public verify;
 - `production data mutation/backfill`: применимый GitHub/runtime closure плюс весь обязательный safety-контур и human gates.

@@ -1,4 +1,9 @@
-"""Shared Finance consumer for canonical ``Our WB Cost`` history."""
+"""Shared temporal consumer for canonical ``Our WB Cost`` history.
+
+Finance, Partner Report, the Vitrina and Proxy 3 all resolve the same nmID and
+business date through this module.  No consumer is allowed to maintain a
+parallel retrospective map or substitute another SKU/average/legacy value.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from packages.application.warehouse_archival_estimate import (
 
 
 CANONICAL_COST_POLICY_DATE = date(2026, 7, 1)
-CANONICAL_COST_FORMULA_VERSION = "wb_finance_canonical_our_wb_cost_v3"
+CANONICAL_COST_FORMULA_VERSION = "canonical_our_wb_cost_temporal_policy_v4"
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 FUNCTIONAL_DAILY_TABLE = "sheet_vitrina_v1_warehouse_wb_daily_cost"
 FORBIDDEN_QUALITIES = frozenset(
@@ -133,14 +138,24 @@ def _digest(payload: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
-def resolve_finance_canonical_cost(
+def canonical_cost_source_date(operation_date: date) -> date:
+    """Return the only source date permitted by the canonical temporal policy."""
+
+    return (
+        CANONICAL_COST_POLICY_DATE
+        if operation_date < CANONICAL_COST_POLICY_DATE
+        else operation_date
+    )
+
+
+def resolve_canonical_wb_cost(
     conn: sqlite3.Connection,
     *,
     nm_id: str,
     operation_date: date,
     snapshot: CanonicalWbCostSnapshot | None = None,
 ) -> dict[str, Any]:
-    """Resolve Finance cost without maintaining an independent business value.
+    """Resolve canonical WB cost without an independent consumer value.
 
     Operations before 2026-07-01 project the exact canonical value from
     2026-07-01 backwards.  Operations on/after the boundary use the exact
@@ -149,11 +164,7 @@ def resolve_finance_canonical_cost(
     """
 
     normalized_nm = str(nm_id or "").strip()
-    source_date = (
-        CANONICAL_COST_POLICY_DATE
-        if operation_date < CANONICAL_COST_POLICY_DATE
-        else operation_date
-    )
+    source_date = canonical_cost_source_date(operation_date)
     method = (
         "canonical_2026_07_01_projected_backwards"
         if operation_date < CANONICAL_COST_POLICY_DATE
@@ -288,6 +299,8 @@ def resolve_finance_canonical_cost(
                 f"{source_payload['fingerprint']}"
             ),
             "source_digest": source_digest,
+            "canonical_source_version": source_payload["fingerprint"],
+            "source_row": source_payload,
         }
     if quality == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY and estimate is not None:
         source_payload["business_approved_lineage"] = {
@@ -316,6 +329,8 @@ def resolve_finance_canonical_cost(
             "quality": quality,
             "canonical_source_identity": source_identity,
             "source_digest": source_digest,
+            "canonical_source_version": source_payload["fingerprint"],
+            "source_row": source_payload,
         }
     if unit_cost is None or unit_cost <= 0:
         return {
@@ -325,6 +340,8 @@ def resolve_finance_canonical_cost(
             "quality": quality,
             "canonical_source_identity": source_identity,
             "source_digest": source_digest,
+            "canonical_source_version": source_payload["fingerprint"],
+            "source_row": source_payload,
         }
     return {
         **base,
@@ -342,3 +359,104 @@ def resolve_finance_canonical_cost(
             else "canonical_exact"
         ),
     }
+
+
+def resolve_finance_canonical_cost(
+    conn: sqlite3.Connection,
+    *,
+    nm_id: str,
+    operation_date: date,
+    snapshot: CanonicalWbCostSnapshot | None = None,
+) -> dict[str, Any]:
+    """Compatibility name for the shared resolver used by Finance callers."""
+
+    return resolve_canonical_wb_cost(
+        conn,
+        nm_id=nm_id,
+        operation_date=operation_date,
+        snapshot=snapshot,
+    )
+
+
+def load_canonical_wb_cost_lookup(
+    conn: sqlite3.Connection,
+    *,
+    as_of_date: date,
+) -> dict[int, dict[str, Any]]:
+    """Load a Vitrina-ready lookup through the shared resolver.
+
+    Before the policy boundary the unit value and its lineage come from the
+    exact same-nmID row on 2026-07-01.  The source row quantity is exposed only
+    as weighting evidence; this function never creates inventory or capital.
+    Missing/forbidden/non-positive values stay ``None`` with an explicit reason.
+    """
+
+    snapshot = CanonicalWbCostSnapshot.from_connection(conn)
+    source_date = canonical_cost_source_date(as_of_date).isoformat()
+    candidates = {
+        str(nm_id)
+        for day, nm_id in snapshot.daily_rows
+        if day == source_date
+    }
+    candidates.update(str(nm_id) for nm_id in snapshot.archival_rows)
+    result: dict[int, dict[str, Any]] = {}
+    for nm_id in sorted(candidates, key=lambda value: int(value)):
+        resolved = resolve_canonical_wb_cost(
+            conn,
+            nm_id=nm_id,
+            operation_date=as_of_date,
+            snapshot=snapshot,
+        )
+        source_row = dict(resolved.get("source_row") or {})
+        quantity = _decimal_or_none(source_row.get("quantity")) or Decimal("0")
+        unit_cost = _decimal_or_none(resolved.get("unit_cost_rub"))
+        quality = str(resolved.get("quality") or "missing")
+        is_resolved = str(resolved.get("status") or "") == "resolved"
+        certified = quality.casefold() in {"certified", "confirmed"}
+        result[int(nm_id)] = {
+            "as_of_date": as_of_date.isoformat(),
+            "canonical_source_date": str(resolved["canonical_source_date"]),
+            "nm_id": int(nm_id),
+            "stock_qty": float(quantity),
+            "cost_covered_qty": float(quantity) if is_resolved else 0.0,
+            "our_wb_unit_cost_rub": float(unit_cost) if unit_cost is not None else None,
+            "confirmed_qty": float(quantity) if certified and is_resolved else 0.0,
+            "estimated_qty": float(quantity) if is_resolved and not certified else 0.0,
+            "fallback_qty": 0.0,
+            "confirmed_share_pct": (
+                1.0 if certified and is_resolved and quantity > 0 else 0.0
+            ),
+            "source_status": quality,
+            "source_reason": str(resolved.get("reason") or ""),
+            "selection_method": str(resolved.get("selection_method") or ""),
+            "projection_quality": str(resolved.get("projection_quality") or ""),
+            "source_digest": str(resolved.get("source_digest") or ""),
+            "canonical_source_identity": str(
+                resolved.get("canonical_source_identity") or ""
+            ),
+            "component_status_json": json.dumps(
+                {
+                    "status": resolved.get("status"),
+                    "reason": resolved.get("reason"),
+                    "quality": resolved.get("quality"),
+                    "projection_quality": resolved.get("projection_quality"),
+                    "selection_method": resolved.get("selection_method"),
+                    "canonical_source_date": resolved.get("canonical_source_date"),
+                    "canonical_source_identity": resolved.get(
+                        "canonical_source_identity"
+                    ),
+                    "source_digest": resolved.get("source_digest"),
+                    "formula_version": resolved.get("formula_version"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "calculated_at": str(source_row.get("created_at") or ""),
+            "inputs_hash": str(
+                resolved.get("canonical_source_version")
+                or resolved.get("source_digest")
+                or ""
+            ),
+        }
+    return result

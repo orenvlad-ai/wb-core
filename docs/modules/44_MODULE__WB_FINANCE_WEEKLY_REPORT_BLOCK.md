@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V3`
+`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V4`
 
 ## Purpose and source boundary
 
@@ -21,13 +21,13 @@ The existing runtime SQLite owns:
 - indexed `wb_finance_weekly_sku_aggregates` keyed by `seller + week + nmId + formula version`;
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
-The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, formula version or canonical cost digest.
+The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v4`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
 
 `wb_finance_retro_cost_map` is not created, read or written by the active schema/calculation/apply path. A table left by an earlier deployed revision may remain untouched as historical migration evidence, but its fixed `unit_cost_rub` is not business truth and cannot affect COGS.
 
 ## Single canonical COGS contract
 
-Formula version is `wb_finance_canonical_our_wb_cost_v3`. Finance calls the shared warehouse-domain resolver and does not reproduce warehouse cost-engine rules.
+Formula version is `canonical_our_wb_cost_temporal_policy_v4`. Finance calls the same shared warehouse-domain resolver as Vitrina, Partner and Proxy 3 and does not reproduce warehouse cost-engine rules.
 
 For each sale/return operation of the same deterministically resolved `nmId`:
 
@@ -47,7 +47,7 @@ Coverage counts gross sale/return units, so a symmetric sale/return pair cannot 
 
 ## Agent remuneration, acquiring and WB correction
 
-Classifier version is `wb_finance_weekly_classifier_v2_agent_acquiring_split`.
+Classifier version is `wb_finance_weekly_classifier_v3_signed_review_points`.
 
 For sale/return signed by document type:
 
@@ -60,6 +60,8 @@ agent_remuneration          = combined_commission_control − acquiring
 `agent_remuneration + acquiring` must reconcile exactly to the former combined control. The UI rows are `Агентское вознаграждение WB` and `Эквайринг`; each enters total expenses exactly once. `ppvzSalesCommission` is not used as the full agent amount.
 
 Official `additionalPayment` / XLSX `Корректировка Вознаграждения Вайлдберриз (ВВ)` is retained as an explicit disclosure. On sale/return it is already reflected by `forPay` and is not added a second time. A standalone positive/negative correction row is classified once as positive adjustment or period correction. Tests include a non-zero correction.
+
+Deduction money preserves the signed official value. A negative deduction is an expense reversal/refund and therefore reduces its bucket; it is never converted into a second positive expense with `abs()`. Exact production names containing `Баллы за отзывы` or `Списание за отзыв` use the separate `review_points` bucket and Finance UI row. The existing Finance `marketing` bucket remains separate and continues to participate in both expense-with-marketing and expense-without-marketing disclosures. Negative acceptance or transit cannot become a positive capitalization candidate.
 
 ## Expense and profit semantics
 
@@ -84,6 +86,8 @@ Every expense money cell shows amount plus only `%`, arrow and color. An increas
 ## Ads compatibility
 
 Finance preflight and Partner consumers share `resolve_ads_snapshot_payload`. It accepts either a valid nested `result` or the persisted root envelope `{kind,snapshot_date,items}`. Invalid/missing data remains missing; a confirmed `kind=empty` is the only empty-source zero. Finance apply never writes ads rows and never materializes missing ads pairs as zero.
+
+The bounded read-only `partner-finance-diagnostic` hosted action reads immutable raw rows and indexed projections through SQLite `mode=ro`, `PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level Finance marketing, the revenue allocation coefficient, the former catch-all residual, current explicitly routed Partner categories, classifier buckets, signed versus legacy-absolute amounts, duplicate identities and negative-deduction uplift. Its exact semantic-category totals cover every retained operation group even when detailed output is truncated. It is evidence only: it cannot rebuild Finance or mutate Partner/ads state.
 
 ## Production-safe all-history runner
 
@@ -116,13 +120,13 @@ Hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
-Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner holds the canonical `.warehouse-functional-sync.lock` from its current-plan recheck through coherent backup, `BEGIN IMMEDIATE` apply and transactional readback, so hourly/manual warehouse sync, replay, downstream cost-layer materialization and economics publication cannot change the canonical cost inputs inside that interval. For a long production apply the separate repo-owned `warehouse-functional-maintenance status|hold|restore` lifecycle stops only the hourly timer, waits for an already-running service without killing it, persists the exact mode-`0600` timer/service baseline and later restores its enabled/active state; it does not weaken or normalize the reviewed fingerprint. The runner rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
+Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner holds the canonical `.warehouse-functional-sync.lock` from its current-plan recheck through coherent backup, `BEGIN IMMEDIATE` apply and transactional readback, so hourly/manual warehouse sync, replay, downstream cost-layer materialization and economics publication cannot change the canonical cost inputs inside that interval. For a long production apply the separate repo-owned `warehouse-functional-maintenance status|hold|restore` lifecycle stops only the hourly timer, waits for an already-running service without killing it, persists the exact mode-`0600` timer/service baseline and later restores its enabled/active state; an explicitly authorized broader quiet window uses `business-data-maintenance hold`, whose durable warehouse sub-mode retains that restorable baseline while leaving the timer disabled and inactive. Neither path weakens or normalizes the reviewed fingerprint. The runner rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
 
 Production apply is not implied by merge/deploy and remains forbidden until the new all-history dry-run receives explicit human approval.
 
 ## UI and verification
 
-The operator table has clean calculated headers, separate agent/acquiring rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons.
+The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons.
 
 Targeted checks:
 
@@ -137,4 +141,4 @@ Targeted checks:
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
-Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data.
+Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data. Acceptance is fail-closed: `preview.attempted=true`, `preview.ready=true`, empty blockers, visible table, enabled download and an actually downloaded/opened semantic XLSX that reconciles nmId, selected weeks, source/formula digest and displayed Decimal amounts are all mandatory. A non-empty but wrong workbook, hidden sheet, external link, missing download or incomplete preview fails the flow.

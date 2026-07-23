@@ -21,7 +21,7 @@ from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
     CanonicalWbCostSnapshot,
-    resolve_finance_canonical_cost,
+    resolve_canonical_wb_cost,
 )
 from packages.application.warehouse_archival_estimate import (
     archival_estimate_for_nm_id,
@@ -30,8 +30,8 @@ from packages.business_time import business_date_from_timestamp
 
 
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
-CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v2_agent_acquiring_split"
-SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v2"
+CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v3_signed_review_points"
+SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v4"
 MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.0001")
@@ -46,7 +46,7 @@ RETRO_COST_PERIOD_END = date(2026, 6, 30)
 RETRO_COST_REFERENCE_DATE = date(2026, 7, 1)
 RETRO_COST_FIRST_WEEK_START = date(2026, 4, 27)
 RETRO_COST_FORMULA_VERSION = CANONICAL_COST_FORMULA_VERSION
-PROFIT_METHOD_VERSION = "wb_finance_profit_attributed_capitalization_v2"
+PROFIT_METHOD_VERSION = "wb_finance_profit_attributed_capitalization_v3_signed_deductions"
 COST_METHOD_VERSION = CANONICAL_COST_FORMULA_VERSION
 
 
@@ -479,6 +479,8 @@ def classify_deduction(row: Mapping[str, Any]) -> str:
         token in name for token in ("wb продвиж", "продвижен", "реклам", "маркетинг")
     ):
         return "marketing"
+    if any(token in name for token in ("баллы за отзывы", "списание за отзыв")):
+        return "review_points"
     if "транзит" in name and any(token in name for token in ("логист", "достав")):
         return "transit_logistics"
     if any(token in name for token in ("подписк", "джем", "jamm")):
@@ -1137,6 +1139,7 @@ class WbFinanceWeeklyBlock:
                 "penalties",
                 "subscriptions",
                 "paid_services",
+                "review_points",
                 "other_deductions",
                 "positive_adjustments",
                 "corrections",
@@ -1175,7 +1178,10 @@ class WbFinanceWeeklyBlock:
             deduction = _decimal(row.get("deduction"))
             if deduction:
                 bucket = classify_deduction(row)
-                values[bucket] += abs(deduction)
+                # WB represents an expense reversal/refund as a negative
+                # deduction. Preserve that sign so a storno cannot become a
+                # second positive expense.
+                values[bucket] += deduction
                 if bucket == "other_deductions":
                     unknown.add(
                         str(
@@ -1215,6 +1221,7 @@ class WbFinanceWeeklyBlock:
                     "penalties",
                     "subscriptions",
                     "paid_services",
+                    "review_points",
                     "other_deductions",
                     "corrections",
                 )
@@ -1262,6 +1269,7 @@ class WbFinanceWeeklyBlock:
             "penalties": _money_text(values["penalties"]),
             "subscriptions": _money_text(values["subscriptions"]),
             "paid_services": _money_text(values["paid_services"]),
+            "review_points": _money_text(values["review_points"]),
             "other_deductions": _money_text(values["other_deductions"]),
             "positive_adjustments": _money_text(values["positive_adjustments"]),
             "corrections": _money_text(values["corrections"]),
@@ -1322,10 +1330,10 @@ class WbFinanceWeeklyBlock:
                 or ""
             ).strip()
             amounts = (
-                ("acceptance", abs(_decimal(row.get("paidAcceptance")))),
+                ("acceptance", max(_decimal(row.get("paidAcceptance")), ZERO)),
                 (
                     "transit",
-                    abs(_decimal(row.get("deduction")))
+                    max(_decimal(row.get("deduction")), ZERO)
                     if classify_deduction(row) == "transit_logistics"
                     else ZERO,
                 ),
@@ -1592,10 +1600,10 @@ class WbFinanceWeeklyBlock:
                 raw, date.fromisoformat(str(stored["week_start"]))
             )
             amounts = (
-                ("acceptance", abs(_decimal(raw.get("paidAcceptance")))),
+                ("acceptance", max(_decimal(raw.get("paidAcceptance")), ZERO)),
                 (
                     "transit",
-                    abs(_decimal(raw.get("deduction")))
+                    max(_decimal(raw.get("deduction")), ZERO)
                     if classify_deduction(raw) == "transit_logistics"
                     else ZERO,
                 ),
@@ -2130,7 +2138,7 @@ class WbFinanceWeeklyBlock:
         cache_key = (str(nm_id), operation_date.isoformat())
         cached = self._canonical_cost_resolution_cache.get(cache_key)
         if cached is None:
-            cached = resolve_finance_canonical_cost(
+            cached = resolve_canonical_wb_cost(
                 conn,
                 nm_id=nm_id,
                 operation_date=operation_date,
@@ -3440,6 +3448,7 @@ class WbFinanceWeeklyBlock:
                 "penalties",
                 "subscriptions",
                 "paid_services",
+                "review_points",
                 "other_deductions",
                 "corrections",
                 "capitalized_acceptance",

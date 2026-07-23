@@ -80,6 +80,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     validate_cutover_ff_debit_coverage,
 )
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
+    WAREHOUSE_TARGET_KEYS,
     _exact_functional_snapshot_dates,
     _transform_snapshot,
     _warehouse_input_manifest_digest,
@@ -3599,6 +3600,57 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         and scoped_total_rows["TOTAL|total_own_capital_WB_capital_rub"][2] == 20.0,
         "warehouse TOTAL rows equal the snapshot's published SKU scope and exclude hidden SKU state",
     )
+    missing_cost_scope_probe = _transform_snapshot(
+        snapshot={
+            "bundle_version": "economics-missing-cost-scope",
+            "as_of_date": "2026-06-30",
+            "refreshed_at": NOW,
+            "plan_json": json.dumps(
+                {
+                    "date_columns": ["2026-06-30"],
+                    "sheets": [
+                        {
+                            "sheet_name": "DATA_VITRINA",
+                            "write_start_cell": "A1",
+                            "header": ["Показатель", "row_id", "2026-06-30"],
+                            "rows": [
+                                ["SKU 104", "SKU:104|orderSum", 100],
+                                ["SKU 104", "SKU:104|orderCount", 2],
+                                ["SKU 104", "SKU:104|ads_sum", 10],
+                                ["SKU 105", "SKU:105|orderSum", 100],
+                                ["SKU 105", "SKU:105|orderCount", 2],
+                                ["SKU 105", "SKU:105|ads_sum", 10],
+                            ],
+                        }
+                    ],
+                }
+            ),
+        },
+        costs={
+            "2026-06-30": {
+                104: {"our_wb_unit_cost_rub": 14, "stock_qty": 10}
+            }
+        },
+        warehouse_metrics={},
+        warehouse_exact_dates=set(),
+        warehouse_covered_nm_ids={},
+        warehouse_version_ids={},
+        parameters={
+            "2026-06-30": CalculationParametersBlock(
+                runtime=runtime
+            ).parameters_for_date("2026-07-01")
+        },
+        source_fingerprint="sha256:missing-cost-scope",
+        cutover_business_date="2026-07-18",
+    )
+    missing_cost_scope_rows = {
+        row[1]: row
+        for row in json.loads(missing_cost_scope_probe["after_plan_json"])["sheets"][0]["rows"]
+    }
+    _assert(
+        missing_cost_scope_rows["TOTAL|total_our_wb_unit_cost_rub"][2] == "",
+        "pre-boundary TOTAL cost fails closed when any configured SKU lacks its 01.07 row",
+    )
     plan = {
         "date_columns": ["2026-07-01"],
         "sheets": [
@@ -3629,6 +3681,9 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                 "write_start_cell": "A1",
                 "header": ["Показатель", "row_id", "2026-06-30"],
                 "rows": [
+                    ["SKU", "SKU:104|orderSum", 100],
+                    ["SKU", "SKU:104|orderCount", 2],
+                    ["SKU", "SKU:104|ads_sum", 10],
                     ["Legacy", "SKU:104|non_target", 555],
                     ["Archived proxy 2", "SKU:104|proxy_profit_2_rub", 11],
                 ],
@@ -3701,7 +3756,10 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         )
         conn.commit()
     dry_run = build_functional_economics_backfill_plan(runtime)
-    _assert(dry_run["changed_snapshot_count"] == 2, "functional economics backfill finds target and archive-only snapshots")
+    _assert(
+        dry_run["changed_snapshot_count"] == 3,
+        "functional economics backfill publishes canonical temporal rows on both sides of 01.07",
+    )
     _assert(dry_run["archived_row_count"] == 4, "functional economics dry-run inventories archived rows")
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute(
@@ -3860,10 +3918,10 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
                WHERE bundle_version='economics-smoke' AND as_of_date='2026-06-30'"""
         ).fetchone()[0])
-        untouched_pre_boundary_stored = conn.execute(
+        untouched_pre_boundary_stored = json.loads(conn.execute(
             """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
                WHERE bundle_version='economics-smoke' AND as_of_date='2026-06-29'"""
-        ).fetchone()[0]
+        ).fetchone()[0])
     rows = {row[1]: row for row in stored["sheets"][0]["rows"]}
     profit = Decimal(str(rows["SKU:104|proxy_profit_3_rub"][2]))
     margin = Decimal(str(rows["SKU:104|proxy_margin_3_pct"][2]))
@@ -3881,9 +3939,17 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         ]["reason_ru"],
         "pre-cutover warehouse gap retains the immutable-opening explanation",
     )
+    untouched_pre_rows = {
+        row[1]: row for row in untouched_pre_boundary_stored["sheets"][0]["rows"]
+    }
     _assert(
-        untouched_pre_boundary_stored == untouched_pre_boundary_plan_json,
-        "economics backfill byte-preserves snapshots with no target date or archived metric",
+        Decimal(str(untouched_pre_rows["SKU:104|our_wb_unit_cost_rub"][2]))
+        == Decimal("14"),
+        "pre-boundary Vitrina cost projects exact same-nmID 01.07 value",
+    )
+    _assert(
+        untouched_pre_rows["SKU:104|proxy_profit_3_rub"][2] == "",
+        "missing pre-boundary Proxy operand remains blank instead of zero",
     )
     for archived_key in (
         "SKU:104|our_wb_cost_confirmed_share_pct",
@@ -3903,10 +3969,50 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert("SKU:104|proxy_profit_2_rub" not in pre_boundary_rows, "pre-boundary archived row is removed")
     _assert(pre_boundary_rows["SKU:104|non_target"][2] == 555, "pre-boundary non-target row is preserved")
     _assert(
+        Decimal(str(pre_boundary_rows["SKU:104|our_wb_unit_cost_rub"][2]))
+        == Decimal("14"),
+        "30.06 uses exact same-nmID 01.07 canonical cost",
+    )
+    _assert(
+        Decimal(str(pre_boundary_rows["SKU:104|proxy_profit_3_rub"][2]))
+        == Decimal("15.48"),
+        "30.06 computes true Proxy 3 instead of Proxy 2 substitution",
+    )
+    _assert(
         "SKU:104|proxy_profit_2_rub"
         not in pre_boundary_stored["metadata"].get("row_last_updated_at_by_row_id", {}),
         "pre-boundary archived timestamp is removed",
     )
+    for payload, label in (
+        (pre_boundary_stored, "30.06"),
+        (untouched_pre_boundary_stored, "29.06"),
+    ):
+        payload_rows = {
+            row[1]: row for row in payload["sheets"][0]["rows"]
+        }
+        inserted_warehouse_rows = [
+            row_id
+            for row_id in payload_rows
+            if "|" in row_id
+            and row_id.split("|", 1)[1] in WAREHOUSE_TARGET_KEYS
+        ]
+        if inserted_warehouse_rows:
+            raise AssertionError(
+                f"pre-boundary {label} gained blank six-stage warehouse rows: "
+                f"{inserted_warehouse_rows}"
+            )
+        timestamped_warehouse_rows = [
+            row_id
+            for row_id in payload.get("metadata", {})
+            .get("row_last_updated_at_by_row_id", {})
+            if "|" in row_id
+            and row_id.split("|", 1)[1] in WAREHOUSE_TARGET_KEYS
+        ]
+        if timestamped_warehouse_rows:
+            raise AssertionError(
+                f"pre-boundary {label} stamped warehouse rows: "
+                f"{timestamped_warehouse_rows}"
+            )
     parameters = CalculationParametersBlock(runtime=runtime)
     changed_payload = {
         "effective_date": "2026-07-01",

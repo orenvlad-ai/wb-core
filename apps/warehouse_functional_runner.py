@@ -155,16 +155,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             }
     if args.command in {"hourly-sync", "manual-sync"}:
         with warehouse_functional_write_lock(runtime.runtime_dir):
-            backup_result = (
-                _create_pre_sync_backup(
-                    runtime,
-                    backup_dir=Path(str(args.backup_dir)),
-                    timestamp=block.timestamp_factory(),
+            if args.command == "manual-sync":
+                block.calculation_parameters.preflight_fresh_economics_backup_capacity(
+                    Path(str(args.backup_dir)),
                 )
+            backup_result = (
+                {
+                    **_create_pre_sync_backup(
+                        runtime,
+                        backup_dir=Path(str(args.backup_dir)),
+                        timestamp=block.timestamp_factory(),
+                    ),
+                    "backup_scope": "fresh_manual_sync",
+                }
                 if args.command == "manual-sync"
                 else None
             )
             try:
+                economics_backup = (
+                    backup_result
+                    if backup_result is not None
+                    else block.calculation_parameters.prepare_functional_economics_backup()
+                )
                 supply_refresh = _refresh_official_supply_state(
                     runtime,
                     record_ff_movements=False,
@@ -176,12 +188,42 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     plan,
                     confirm_fingerprint=str(plan["plan_fingerprint"]),
                 )
-                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations()
-                economics_publication = block.calculation_parameters.publish_current_functional_economics()
+                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations(
+                    verified_backup=economics_backup,
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
+                    )
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else block.calculation_parameters.publish_current_functional_economics(
+                        verified_backup=economics_backup,
+                    )
+                )
+                completed_backup = (
+                    economics_publication.get("backup_archive")
+                    if backup_result is not None
+                    else backup_result
+                )
                 return {
                     "status": "success",
                     "mode": args.command,
-                    "backup": backup_result,
+                    "backup": completed_backup,
+                    "raw_backup": (
+                        {
+                            **dict(backup_result),
+                            "source_removed": bool(
+                                (economics_publication.get("backup_archive") or {}).get(
+                                    "source_removed"
+                                )
+                            ),
+                        }
+                        if backup_result is not None
+                        else None
+                    ),
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "ff_state": ff_state,
@@ -195,6 +237,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "plan_fingerprint": economics_publication.get("plan_fingerprint"),
                         "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
                         "database_written": economics_publication.get("database_written"),
+                        "backup_archive": economics_publication.get("backup_archive"),
                     },
                 }
             except Exception as exc:

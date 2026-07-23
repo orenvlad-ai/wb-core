@@ -36,6 +36,7 @@ jobs:
       - name: Validate Release Train
         run: |
           python3 apps/github_release_train_smoke.py
+          python3 apps/user_artifact_xlsx_smoke.py
           python3 apps/hosted_runtime_auth_preflight_smoke.py
           python3 apps/hosted_runtime_transport_reconcile_smoke.py
 

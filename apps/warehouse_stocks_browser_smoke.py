@@ -23,6 +23,7 @@ from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
     _allocated_amount_matches_eligible,
     _assert_warehouse_balance_cardinality,
     _metric_date_coverage,
+    _sku_management_dom_summary,
     _supplier_financial_detail_url,
     _visible_money,
     run_warehouse_ui_flow,
@@ -80,6 +81,7 @@ def main() -> None:
         "operator supplier financial detail URL",
     )
     _assert_metric_coverage_applicability()
+    _assert_sku_management_dom_evidence()
     with TemporaryDirectory(prefix="warehouse-browser-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime = _seed_runtime(root / "runtime")
@@ -208,6 +210,52 @@ def _assert_metric_coverage_applicability() -> None:
         margin == {"total": 3, "applicable": 1, "inapplicable": 2, "filled": 1},
         "zero-revenue margin is undefined",
     )
+
+
+def _assert_sku_management_dom_evidence() -> None:
+    source_rows = [
+        {"nm_id": 1, "profit_rub": "100", "margin_pct": "10"},
+        {"nm_id": 2, "profit_rub": None, "margin_pct": None},
+        {"nm_id": 3, "profit_rub": "25", "margin_pct": "5"},
+    ]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_content(
+            """
+            <p data-sku-management-status>SKU: 3 · настройки хранятся на сервере</p>
+            <table>
+              <tr data-sku-row-nm-id="1">
+                <td data-sku-cell="profit_rub">100 ₽</td>
+                <td data-sku-cell="margin_pct">10%</td>
+              </tr>
+              <tr data-sku-row-nm-id="2">
+                <td data-sku-cell="profit_rub">—</td>
+                <td data-sku-cell="margin_pct">—</td>
+              </tr>
+              <tr data-sku-row-nm-id="3">
+                <td data-sku-cell="profit_rub">25 ₽</td>
+                <td data-sku-cell="margin_pct">5%</td>
+              </tr>
+            </table>
+            """
+        )
+        summary = _sku_management_dom_summary(page, source_rows=source_rows)
+        page.locator('[data-sku-row-nm-id="3"] [data-sku-cell="profit_rub"]').evaluate(
+            "(node) => { node.textContent = '—'; }"
+        )
+        page.locator('[data-sku-row-nm-id="3"] [data-sku-cell="margin_pct"]').evaluate(
+            "(node) => { node.textContent = '—'; }"
+        )
+        try:
+            _sku_management_dom_summary(page, source_rows=source_rows)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("missing rendered source-populated Proxy 3 row must fail")
+        browser.close()
+    _assert(summary["row_count"] == 3, "DOM SKU count")
+    _assert(summary["proxy_3_row_count"] == 2, "DOM visible Proxy 3 count")
 
 
 def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:

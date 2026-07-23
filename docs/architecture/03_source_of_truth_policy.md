@@ -52,6 +52,10 @@ WebCore Data MCP остаётся строго read-only. Его данные п
 - User-facing `ЕБД` означает общий server-side accepted truth/runtime layer `wb-core`; это не Google Sheets/GAS, HTML UI, browser `localStorage` или private manual table.
 - Server-only behavior допустимо только когда оно воспроизводимо из versioned code и наблюдаемо через bounded logs, metrics и audit evidence.
 
+## User Artifact Boundary
+
+Созданный по запросу пользователя XLSX/CSV/DOCX/PDF/TXT вне репозитория является производным export/snapshot для передачи или анализа. Он не становится canonical code, schema, documentation, production или business-data source of truth и не подменяет источник, из которого был построен. Если единственная mutation — такой файл, применяется non-PR execution contour `user-artifact`; изменение Git-tracked правил или helper остаётся обычным `repo-only` change.
+
 ## Legacy Boundary
 
 Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths используются только:

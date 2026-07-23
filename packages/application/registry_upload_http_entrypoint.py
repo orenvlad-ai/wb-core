@@ -69,7 +69,9 @@ from packages.application.supplier_financial_documents import (
     parse_financial_document_pdf,
 )
 from packages.application.supplier_customs_breakdown import (
+    DT_ANNEX_ITEMS_PARSER_VERSION,
     build_customs_breakdown_xlsx,
+    reconcile_customs_accounting_package,
     validate_customs_breakdown_workbook,
 )
 from packages.application.supplier_expense_allocation import (
@@ -152,6 +154,7 @@ from packages.application.warehouse_functional import (
     _validated_wb_goods,
     enqueue_warehouse_targeted_recalculation,
 )
+from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
@@ -3203,24 +3206,43 @@ class RegistryUploadHttpEntrypoint:
         return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
-        try:
-            supply_payload = self.wb_supplies_block.sync_functional_sources(
-                record_ff_movements=False
-            )
-            downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
-                opening_date="2026-07-01"
-            )
-            ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
-            plan = self.warehouse_functional_block.build_sync_plan()
-            result = self.warehouse_functional_block.apply_plan(
-                plan,
-                confirm_fingerprint=str(plan["plan_fingerprint"]),
-            )
-            proxy_recalculation = self.calculation_parameters_block.process_pending_targeted_recalculations()
-            economics_publication = self.calculation_parameters_block.publish_current_functional_economics()
-        except Exception as exc:
-            self.warehouse_functional_block.record_failed_sync(exc)
-            raise
+        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
+            try:
+                economics_backup = (
+                    self.calculation_parameters_block.prepare_functional_economics_backup()
+                )
+                supply_payload = self.wb_supplies_block.sync_functional_sources(
+                    record_ff_movements=False
+                )
+                downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                    opening_date="2026-07-01"
+                )
+                ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
+                plan = self.warehouse_functional_block.build_sync_plan()
+                result = self.warehouse_functional_block.apply_plan(
+                    plan,
+                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                )
+                proxy_recalculation = (
+                    self.calculation_parameters_block.process_pending_targeted_recalculations(
+                        verified_backup=economics_backup,
+                    )
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
+                    )
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else self.calculation_parameters_block.publish_current_functional_economics(
+                        verified_backup=economics_backup,
+                    )
+                )
+            except Exception as exc:
+                self.warehouse_functional_block.record_failed_sync(exc)
+                raise
         sync = dict(supply_payload.get("sync") or {})
         return {
             "status": "success",
@@ -3241,6 +3263,7 @@ class RegistryUploadHttpEntrypoint:
                 "plan_fingerprint": economics_publication.get("plan_fingerprint"),
                 "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
                 "database_written": economics_publication.get("database_written"),
+                "backup_archive": economics_publication.get("backup_archive"),
             },
         }
 
@@ -6354,6 +6377,16 @@ def _customs_goods_item_boundary(items: Iterable[Mapping[str, Any]]) -> tuple[st
     return tuple(str(item.get("position_number") or "").strip() for item in items)
 
 
+class SupplierAccountingPackageBlockedError(ValueError):
+    """Controlled fail-closed result: no accounting ZIP may be returned."""
+
+    def __init__(self, diagnostics: Mapping[str, Any]) -> None:
+        self.diagnostics = dict(diagnostics)
+        matched = int(self.diagnostics.get("matched") or 0)
+        total = int(self.diagnostics.get("dt_row_count") or 0)
+        super().__init__(f"Пакет для бухгалтерии не сформирован: сопоставлено {matched} из {total} строк.")
+
+
 def _refresh_customs_goods_items_for_package(
     *,
     generation_row: dict[str, Any],
@@ -6367,7 +6400,13 @@ def _refresh_customs_goods_items_for_package(
     existing_items = _customs_goods_items(normalized)
     existing_complete = _complete_customs_goods_item_count(existing_items)
     existing_annex_items = _customs_annex_items(normalized)
-    if existing_items and existing_complete == len(existing_items) and existing_annex_items:
+    if (
+        existing_items
+        and existing_complete == len(existing_items)
+        and existing_annex_items
+        and str(normalized.get("annex_items_parser_version") or "") == DT_ANNEX_ITEMS_PARSER_VERSION
+        and normalized.get("annex_parent_positions_complete") is True
+    ):
         return generation_row
     reparsed = (
         customs_parser(file_bytes, filename)
@@ -6395,6 +6434,8 @@ def _refresh_customs_goods_items_for_package(
             "annex_item_count",
             "annex_quantity_total",
             "annex_quantity_conserved",
+            "annex_parent_position_count",
+            "annex_parent_positions_complete",
             "annex_items_parser_version",
         ):
             if key in reparsed_normalized:
@@ -6436,6 +6477,14 @@ def _build_supplier_order_documents_archive(
             str(item.get("file_original_name") or ""),
         )
     )
+    if package_type == "accounting":
+        return _build_strict_supplier_accounting_archive(
+            payload,
+            rows=rows,
+            file_loader=file_loader,
+            nomenclature_items=nomenclature_items,
+            customs_parser=customs_parser,
+        )
     uploaded_rows = [item for item in rows if bool(item.get("is_uploaded"))]
     expected: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
@@ -6454,24 +6503,6 @@ def _build_supplier_order_documents_archive(
             }
             expected.append(item)
             missing.append(item)
-    customs_rows = [
-        item for item in uploaded_rows
-        if str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
-    ]
-    if package_type == "accounting":
-        if customs_rows:
-            for index, row in enumerate(customs_rows, start=1):
-                expected.append(_package_expected_item(row, index=index, kind="generated_customs_breakdown"))
-        else:
-            item = {
-                "expected_key": "generated:customs_declaration_breakdown_xlsx:missing",
-                "kind": "generated_customs_breakdown",
-                "document_type": "customs_declaration_breakdown_xlsx",
-                "document_name": "Расшифровка ДТ",
-                "document_id": "",
-            }
-            expected.append(item)
-            missing.append(item)
     included: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     generated_files: list[dict[str, Any]] = []
@@ -6484,17 +6515,6 @@ def _build_supplier_order_documents_archive(
         )
     used_names: set[str] = set()
     archive_entries: list[tuple[str, bytes]] = []
-    packing_documents = [
-        dict(item)
-        for item in payload.get("required_documents") or []
-        if isinstance(item, Mapping)
-        and str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_PACKING_LIST
-        and bool(item.get("is_uploaded"))
-        and str(item.get("parse_status") or "").strip().lower()
-        != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
-    ]
-    shipment = dict(payload.get("shipment") or {})
-    shipment_lines = list(shipment.get("lines") or shipment.get("product_lines") or [])
     for row in uploaded_rows:
         expected_item = next(
             item for item in expected
@@ -6514,13 +6534,6 @@ def _build_supplier_order_documents_archive(
             failure = {**expected_item, "reason": str(exc)}
             failed.append(failure)
             warnings.append(f"{row.get('document_name') or row.get('document_type')}: {exc}")
-            if package_type == "accounting" and str(row.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
-                failed.append(
-                    {
-                        **_package_expected_item(row, index=1, kind="generated_customs_breakdown"),
-                        "reason": "source customs declaration could not be read",
-                    }
-                )
             continue
         archive_name = _unique_archive_name(used_names, _archive_document_filename(row, filename))
         archive_entries.append((archive_name, file_bytes))
@@ -6539,49 +6552,8 @@ def _build_supplier_order_documents_archive(
         )
         for warning in _string_list(row.get("warnings")):
             warnings.append(f"{row.get('document_name') or row.get('document_type')}: {warning}")
-        if package_type != "accounting" or str(row.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
-            continue
-        generated_expected = next(
-            item for item in expected
-            if item.get("kind") == "generated_customs_breakdown"
-            and str(item.get("document_id") or "") == str(row.get("document_id") or "")
-        )
-        try:
-            generation_row = _refresh_customs_goods_items_for_package(
-                generation_row=dict(row),
-                file_bytes=file_bytes,
-                filename=filename,
-                customs_parser=customs_parser,
-            )
-            workbook_bytes, workbook_filename, generation_receipt = build_customs_breakdown_xlsx(
-                customs_document=generation_row,
-                shipment=shipment,
-                shipment_lines=shipment_lines,
-                nomenclature_items=nomenclature_items,
-                packing_documents=packing_documents,
-            )
-            workbook_archive_name = _unique_archive_name(used_names, workbook_filename)
-            archive_entries.append((workbook_archive_name, workbook_bytes))
-            generated_item = {
-                **generated_expected,
-                "archive_name": workbook_archive_name,
-                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "size_bytes": len(workbook_bytes),
-                "sha256": "sha256:" + hashlib.sha256(workbook_bytes).hexdigest(),
-                "status": "generated",
-                "validation": generation_receipt,
-                "requires_review": bool(generation_receipt.get("requires_review")),
-            }
-            generated_files.append(generated_item)
-            included.append(generated_item)
-            if generated_item["requires_review"]:
-                warnings.append("Расшифровка ДТ требует проверки")
-        except Exception as exc:
-            failed.append({**generated_expected, "reason": str(exc)})
-            warnings.append(f"Расшифровка ДТ: {exc}")
 
     final_status = "error" if failed else "partial" if missing else "complete"
-    requires_review = any(bool(item.get("requires_review")) for item in generated_files)
     receipt = {
         "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_receipt",
         "status": final_status,
@@ -6598,8 +6570,8 @@ def _build_supplier_order_documents_archive(
         "failed": failed,
         "warnings": _dedupe_strings(warnings),
         "generated_files": generated_files,
-        "requires_review": requires_review,
-        "review_message": "Расшифровка ДТ требует проверки" if requires_review else "",
+        "requires_review": False,
+        "review_message": "",
         "counts": {
             "expected": len(expected),
             "uploaded": len(uploaded_rows),
@@ -6624,6 +6596,347 @@ def _build_supplier_order_documents_archive(
     archive_bytes = buffer.getvalue()
     _validate_supplier_order_package_archive(archive_bytes, manifest)
     return archive_bytes, receipt
+
+
+def _build_strict_supplier_accounting_archive(
+    payload: Mapping[str, Any],
+    *,
+    rows: Iterable[Mapping[str, Any]],
+    file_loader: Callable[[Mapping[str, Any]], tuple[bytes, str, str]],
+    nomenclature_items: Iterable[Mapping[str, Any]],
+    customs_parser: Callable[[bytes, str], Mapping[str, Any]] | None,
+) -> tuple[bytes, dict[str, Any]]:
+    rows = [dict(item) for item in rows]
+    uploaded_rows = [item for item in rows if bool(item.get("is_uploaded"))]
+    expected: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for document_type in SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES:
+        matching_rows = [item for item in uploaded_rows if str(item.get("document_type") or "") == document_type]
+        if matching_rows:
+            for index, row in enumerate(matching_rows, start=1):
+                expected.append(_package_expected_item(row, index=index, kind="document"))
+        else:
+            missing_item = {
+                "expected_key": f"document:{document_type}:missing",
+                "kind": "document",
+                "document_type": document_type,
+                "document_name": SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(document_type, document_type),
+                "document_id": "",
+            }
+            expected.append(missing_item)
+            missing.append(missing_item)
+    customs_rows = [
+        item for item in uploaded_rows
+        if str(item.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
+    ]
+    for index, row in enumerate(customs_rows, start=1):
+        expected.append(_package_expected_item(row, index=index, kind="generated_customs_breakdown"))
+    if not customs_rows:
+        generated_missing = {
+            "expected_key": "generated:customs_declaration_breakdown_xlsx:missing",
+            "kind": "generated_customs_breakdown",
+            "document_type": "customs_declaration_breakdown_xlsx",
+            "document_name": "Расшифровка ДТ",
+            "document_id": "",
+        }
+        expected.append(generated_missing)
+        missing.append(generated_missing)
+
+    loaded: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for row in uploaded_rows:
+        expected_item = next(
+            item for item in expected
+            if item.get("kind") == "document"
+            and str(item.get("document_id") or "") == str(row.get("document_id") or "")
+            and str(item.get("document_type") or "") == str(row.get("document_type") or "")
+        )
+        try:
+            file_bytes, filename, content_type = file_loader(row)
+            if not file_bytes:
+                raise ValueError("loaded file is empty")
+            expected_sha256 = str(row.get("file_sha256") or "").removeprefix("sha256:").strip().lower()
+            actual_sha256 = hashlib.sha256(file_bytes).hexdigest()
+            if expected_sha256 and actual_sha256 != expected_sha256:
+                raise ValueError("loaded file checksum does not match stored upload evidence")
+            loaded.append({
+                "row": row,
+                "expected": expected_item,
+                "body": file_bytes,
+                "filename": filename,
+                "content_type": content_type,
+                "sha256": actual_sha256,
+            })
+        except Exception as exc:
+            failed.append({**expected_item, "reason": str(exc)})
+
+    shipment = dict(payload.get("shipment") or {})
+    shipment_lines = [dict(item) for item in shipment.get("lines") or shipment.get("product_lines") or []]
+    identity_blockers = _supplier_accounting_invoice_identity_blockers(
+        shipment=shipment,
+        invoice_rows=[item for item in uploaded_rows if str(item.get("document_type") or "") == TRADE_DOCUMENT_TYPE_INVOICE],
+        loaded=loaded,
+    )
+    generation_rows: list[dict[str, Any]] = []
+    for index, item in enumerate(
+        [entry for entry in loaded if str(entry["row"].get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION],
+        start=1,
+    ):
+        generation_row = _refresh_customs_goods_items_for_package(
+            generation_row=dict(item["row"]),
+            file_bytes=item["body"],
+            filename=item["filename"],
+            customs_parser=customs_parser,
+        )
+        generation_row["_customs_document_key"] = f"dt:{index}"
+        generation_rows.append(generation_row)
+
+    matching = reconcile_customs_accounting_package(
+        customs_documents=generation_rows,
+        shipment=shipment,
+        shipment_lines=shipment_lines,
+        nomenclature_items=nomenclature_items,
+    )
+    assembly_blockers = [*matching.get("blocker_reasons", []), *identity_blockers]
+    if missing:
+        assembly_blockers.append({
+            "code": "required_accounting_documents_missing",
+            "message": "Не загружены обязательные документы бухгалтерского пакета.",
+        })
+    if failed:
+        assembly_blockers.append({
+            "code": "accounting_source_file_unreadable",
+            "message": "Один из исходных документов не удалось прочитать или проверить.",
+        })
+    matching["blocker_reasons"] = _dedupe_package_blockers(assembly_blockers)
+    matching["package_ready"] = not matching["blocker_reasons"]
+    matching["requires_review"] = not matching["package_ready"]
+    matching["reconciliation_status"] = "ready" if matching["package_ready"] else "blocked"
+    if not matching["package_ready"]:
+        raise SupplierAccountingPackageBlockedError(
+            _supplier_accounting_blocked_diagnostics(
+                matching,
+                missing=missing,
+                failed=failed,
+            )
+        )
+
+    used_names: set[str] = set()
+    archive_entries: list[tuple[str, bytes]] = []
+    included: list[dict[str, Any]] = []
+    generated_files: list[dict[str, Any]] = []
+    loaded_customs_by_id = {
+        str(item["row"].get("document_id") or ""): item
+        for item in loaded
+        if str(item["row"].get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
+    }
+    for item in loaded:
+        row = item["row"]
+        archive_name = _unique_archive_name(used_names, _archive_document_filename(row, item["filename"]))
+        archive_entries.append((archive_name, item["body"]))
+        included.append({
+            **item["expected"],
+            "archive_name": archive_name,
+            "source_filename": item["filename"],
+            "content_type": item["content_type"],
+            "status": row.get("status") or "",
+            "order_match_status": row.get("order_match_status") or "",
+            "warnings": _string_list(row.get("warnings")),
+            "size_bytes": len(item["body"]),
+            "sha256": "sha256:" + item["sha256"],
+        })
+    for index, generation_row in enumerate(generation_rows, start=1):
+        document_id = str(generation_row.get("document_id") or "")
+        source = loaded_customs_by_id[document_id]
+        generated_expected = next(
+            item for item in expected
+            if item.get("kind") == "generated_customs_breakdown"
+            and str(item.get("document_id") or "") == document_id
+        )
+        try:
+            workbook_bytes, workbook_filename, generation_receipt = build_customs_breakdown_xlsx(
+                customs_document=generation_row,
+                shipment=shipment,
+                shipment_lines=shipment_lines,
+                nomenclature_items=nomenclature_items,
+                matching_override=matching,
+                customs_document_key=f"dt:{index}",
+            )
+        except Exception as exc:
+            blocked_matching = dict(matching)
+            blocked_matching["blocker_reasons"] = _dedupe_package_blockers([
+                *matching.get("blocker_reasons", []),
+                {
+                    "code": "accounting_workbook_readback_failed",
+                    "message": "Расшифровка ДТ не прошла обязательную проверку workbook readback.",
+                    "document": f"dt:{index}",
+                },
+            ])
+            raise SupplierAccountingPackageBlockedError(
+                _supplier_accounting_blocked_diagnostics(blocked_matching, missing=(), failed=())
+            ) from exc
+        workbook_archive_name = _unique_archive_name(used_names, workbook_filename)
+        archive_entries.append((workbook_archive_name, workbook_bytes))
+        generated_item = {
+            **generated_expected,
+            "archive_name": workbook_archive_name,
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "size_bytes": len(workbook_bytes),
+            "sha256": "sha256:" + hashlib.sha256(workbook_bytes).hexdigest(),
+            "status": "generated",
+            "validation": generation_receipt,
+            "requires_review": False,
+            "source_sha256": "sha256:" + source["sha256"],
+        }
+        generated_files.append(generated_item)
+        included.append(generated_item)
+
+    receipt = {
+        "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_receipt",
+        "status": "complete",
+        "package_type": "accounting",
+        "supplier_order_id": payload.get("supplier_order_id") or "",
+        "required_document_types": list(SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES),
+        "expected": expected,
+        "uploaded": [
+            _package_expected_item(row, index=index, kind="document")
+            for index, row in enumerate(uploaded_rows, start=1)
+        ],
+        "included": included,
+        "missing": [],
+        "failed": [],
+        "warnings": [],
+        "generated_files": generated_files,
+        "requires_review": False,
+        "review_message": "",
+        "accounting_reconciliation": {key: value for key, value in matching.items() if key != "rows"},
+        "counts": {
+            "expected": len(expected),
+            "uploaded": len(uploaded_rows),
+            "included": len(included),
+            "missing": 0,
+            "failed": 0,
+            "warnings": 0,
+            "generated_files": len(generated_files),
+        },
+        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    manifest = {
+        **receipt,
+        "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_manifest",
+        "missing_required_types": [],
+    }
+    try:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for archive_name, body in archive_entries:
+                archive.writestr(archive_name, body)
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        archive_bytes = buffer.getvalue()
+        _validate_supplier_order_package_archive(archive_bytes, manifest)
+    except Exception as exc:
+        blocked_matching = dict(matching)
+        blocked_matching["blocker_reasons"] = _dedupe_package_blockers([
+            *matching.get("blocker_reasons", []),
+            {
+                "code": "accounting_zip_manifest_readback_failed",
+                "message": "Бухгалтерский ZIP не прошёл проверку состава, размеров и SHA-256.",
+            },
+        ])
+        raise SupplierAccountingPackageBlockedError(
+            _supplier_accounting_blocked_diagnostics(blocked_matching, missing=(), failed=())
+        ) from exc
+    return archive_bytes, receipt
+
+
+def _supplier_accounting_invoice_identity_blockers(
+    *,
+    shipment: Mapping[str, Any],
+    invoice_rows: Iterable[Mapping[str, Any]],
+    loaded: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    shipment_header = (
+        dict(shipment.get("header") or {})
+        if isinstance(shipment.get("header"), Mapping)
+        else dict(shipment)
+    )
+    invoice_rows = [dict(item) for item in invoice_rows]
+    loaded_invoice = [
+        item for item in loaded
+        if str(item.get("row", {}).get("document_type") or "") == TRADE_DOCUMENT_TYPE_INVOICE
+    ]
+    if len(invoice_rows) != 1 or len(loaded_invoice) != 1:
+        blockers.append({"code": "linked_invoice_not_unique", "message": "Связанный Invoice отсутствует или неоднозначен."})
+        return blockers
+    invoice = invoice_rows[0]
+    if str(invoice.get("document_id") or "") != str(shipment_header.get("invoice_document_id") or ""):
+        blockers.append({"code": "linked_invoice_identity_mismatch", "message": "Связанный Invoice не соответствует текущему заказу."})
+    shipment_sha = str(shipment_header.get("source_file_sha256") or "").removeprefix("sha256:").strip().lower()
+    row_sha = str(invoice.get("file_sha256") or "").removeprefix("sha256:").strip().lower()
+    loaded_sha = str(loaded_invoice[0].get("sha256") or "").strip().lower()
+    if not shipment_sha or not row_sha or shipment_sha != row_sha or row_sha != loaded_sha:
+        blockers.append({"code": "linked_invoice_source_hash_mismatch", "message": "Хеш связанного Invoice расходится с shipment source."})
+    if str(shipment_header.get("match_status") or "") != "all_matched" or shipment_header.get("errors"):
+        blockers.append({"code": "invoice_order_identity_not_confirmed", "message": "Invoice/order identity находится в ошибочном или неоднозначном состоянии."})
+    if str(invoice.get("document_number") or "").strip() != str(shipment_header.get("invoice_no") or "").strip():
+        blockers.append({"code": "invoice_number_mismatch", "message": "Номер связанного Invoice не совпал с заказом."})
+    return blockers
+
+
+def _supplier_accounting_blocked_diagnostics(
+    matching: Mapping[str, Any],
+    *,
+    missing: Iterable[Mapping[str, Any]],
+    failed: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    blockers = [
+        dict(item)
+        for item in matching.get("blocker_reasons") or []
+        if isinstance(item, Mapping)
+    ][:50]
+    matched = int(matching.get("matched_count") or 0)
+    dt_rows = int(matching.get("dt_annex_row_count") or 0)
+    detail_message = ""
+    if matching.get("dt_quantity_total") != matching.get("invoice_product_quantity_total"):
+        detail_message = (
+            "Количество не совпало: ДТ "
+            f"{matching.get('dt_quantity_total') or '—'}, Invoice {matching.get('invoice_product_quantity_total') or '—'}."
+        )
+    return {
+        "contract_name": "sheet_vitrina_v1_supplier_accounting_package_blocked",
+        "status": "blocked",
+        "error": f"Пакет для бухгалтерии не сформирован: сопоставлено {matched} из {dt_rows} строк.",
+        "detail": detail_message,
+        "invoice_product_row_count": int(matching.get("invoice_product_row_count") or 0),
+        "dt_row_count": dt_rows,
+        "invoice_product_quantity_total": matching.get("invoice_product_quantity_total"),
+        "dt_quantity_total": matching.get("dt_quantity_total"),
+        "matched": matched,
+        "ambiguous": int(matching.get("ambiguous_count") or 0),
+        "unmatched": int(matching.get("unmatched_count") or 0),
+        "invoice_product_lines_covered": int(matching.get("invoice_product_lines_covered") or 0),
+        "invoice_product_line_count": int(matching.get("invoice_product_line_count") or 0),
+        "per_owner_quantity_reconciled": bool(matching.get("per_owner_quantity_reconciled")),
+        "blocker_reasons": blockers,
+        "missing": [str(item.get("document_type") or "") for item in missing],
+        "failed": [str(item.get("document_type") or "") for item in failed],
+        "matching_policy_version": matching.get("matching_policy_version"),
+        "reconciliation_version": matching.get("reconciliation_version"),
+        "requires_review": True,
+    }
+
+
+def _dedupe_package_blockers(blockers: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in blockers:
+        item = dict(raw)
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
 
 
 def _package_expected_item(
@@ -6674,6 +6987,8 @@ def _validate_supplier_order_package_archive(
                     body,
                     expected_row_count=int(generation.get("workbook_row_count") or 0),
                     expected_quantity_total=generation.get("workbook_quantity_total"),
+                    require_owned_fields=True,
+                    expected_controls=generation,
                 )
                 if not workbook_validation.get("valid"):
                     raise ValueError(

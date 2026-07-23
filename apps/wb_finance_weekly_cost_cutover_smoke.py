@@ -15,6 +15,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock  # noqa: E402
+from packages.application.canonical_wb_cost_resolver import (  # noqa: E402
+    load_canonical_wb_cost_lookup,
+)
 
 
 def main() -> None:
@@ -116,6 +119,21 @@ def _assert_missing_and_forbidden_costs_block(block: WbFinanceWeeklyBlock) -> No
     forbidden_problem = _week(block, "2026-02-09")["cost_coverage"]["problem_skus"][0]
     if forbidden_problem["reason"] != "canonical_cost_forbidden_fallback_quality":
         raise AssertionError(f"fallback_average must be rejected: {forbidden}")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        blocked_lookup = load_canonical_wb_cost_lookup(
+            conn,
+            as_of_date=date(2026, 7, 1),
+        )[103]
+    if (
+        blocked_lookup["stock_qty"] != 10.0
+        or blocked_lookup["our_wb_unit_cost_rub"] is not None
+        or blocked_lookup["source_reason"]
+        != "canonical_cost_forbidden_fallback_quality"
+    ):
+        raise AssertionError(
+            f"blocked positive-quantity cost lost quantity/blocker evidence: {blocked_lookup}"
+        )
 
 
 def _assert_standalone_remuneration_adjustment_once(

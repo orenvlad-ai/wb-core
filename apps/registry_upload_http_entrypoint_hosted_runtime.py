@@ -18,7 +18,7 @@ import ssl
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -35,6 +35,8 @@ AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
+PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
+ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -1027,7 +1029,8 @@ def _build_autoanswers_os_dependencies_command(target: HostedRuntimeTarget) -> l
         f"node -e \"if(Number(process.versions.node.split('.')[0])<{AUTOANSWERS_NODE_MAJOR}) process.exit(1)\""
     )
     complete_check = (
-        f"{major_check} && command -v npm >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1"
+        f"{major_check} && command -v npm >/dev/null 2>&1 "
+        "&& command -v ffmpeg >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1"
     )
     package_names = " ".join(shlex.quote(item) for item in AUTOANSWERS_BASE_OS_PACKAGES)
     x64_sha = shlex.quote(AUTOANSWERS_NODE_SHA256["amd64"])
@@ -2415,6 +2418,250 @@ def _run_remote_finance_canonical_action(
     return payload
 
 
+def run_partner_finance_diagnostic_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_partner_finance_diagnostic(
+        target,
+        nm_id=str(getattr(args, "nm_id", "") or "").strip(),
+        weeks=tuple(str(value).strip() for value in (args.week or []) if str(value).strip()),
+    )
+    output_path = Path(str(args.output)).resolve()
+    if output_path == ROOT or ROOT in output_path.parents:
+        raise ValueError("Partner/Finance diagnostic evidence must stay outside the Git checkout")
+    _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": "partner-finance-diagnostic",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_partner_finance_diagnostic(
+    target: HostedRuntimeTarget,
+    *,
+    nm_id: str,
+    weeks: tuple[str, ...],
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action="partner-finance-diagnostic")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Partner/Finance diagnostic requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("Partner/Finance diagnostic requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/partner_finance_production_diagnostic.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--server-settings",
+        "--max-weeks",
+        "64",
+        "--max-groups",
+        "500",
+        "--max-examples",
+        "5",
+    ]
+    if nm_id:
+        runner_args.extend(["--nm-id", nm_id])
+    for week in weeks:
+        runner_args.extend(["--week", week])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode not in {0, 3}:
+        raise RuntimeError(
+            "Partner/Finance diagnostic failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Partner/Finance diagnostic returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") not in {"ready", "incomplete"}:
+        raise RuntimeError("Partner/Finance diagnostic returned an invalid result")
+    return payload
+
+
+def run_ads_historical_recovery_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ads_historical_action)
+    nm_ids = tuple(sorted({int(value) for value in args.nm_id}))
+    target_dates = tuple(sorted({str(value).strip() for value in args.target_date}))
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("ads historical reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ads_historical_recovery(
+        target,
+        action=action,
+        nm_ids=nm_ids,
+        target_dates=target_dates,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("ads historical evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"ads-historical-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_ads_historical_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    nm_ids: tuple[int, ...],
+    target_dates: tuple[str, ...],
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"ads-historical-{action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action="ads-historical-apply", dry_run=False)
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported ads historical action: {action}")
+    if not nm_ids or any(value <= 0 for value in nm_ids):
+        raise ValueError("ads historical recovery requires exact positive --nm-id values")
+    if not target_dates:
+        raise ValueError("ads historical recovery requires exact --target-date values")
+    for value in target_dates:
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid ads historical target date: {value}") from exc
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("ads historical recovery requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("ads historical recovery requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/ads_historical_recovery.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+    ]
+    reviewed_plan_json = ""
+    for nm_id in nm_ids:
+        runner_args.extend(["--nm-id", str(nm_id)])
+    for target_date in target_dates:
+        runner_args.extend(["--target-date", target_date])
+    if action == "readback":
+        runner_args.append("--readback")
+    elif action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("ads historical apply requires an existing --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        expected_scope = {
+            "nm_ids": list(nm_ids),
+            "target_dates": list(target_dates),
+        }
+        if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
+            raise ValueError("ads historical plan and --fingerprint do not match")
+        if (
+            str(plan.get("schema_version") or "") != "ads_historical_recovery_v4"
+            or plan.get("dry_run") is not True
+            or not bool(plan.get("apply_allowed"))
+            or plan.get("scope") != expected_scope
+        ):
+            raise ValueError("ads historical reviewed plan is not ready for this exact scope")
+        if not approval_reference.strip():
+            raise ValueError("ads historical apply requires --approval-reference")
+        runner_args.extend(
+            [
+                "--apply",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/ads-historical",
+                "--approval-reference",
+                approval_reference.strip(),
+                "--reviewed-plan-stdin",
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ads historical {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ads historical runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        raise RuntimeError("ads historical runner returned an invalid result")
+    if action == "readback" and (
+        payload.get("status") != "ready" or bool(payload.get("blockers"))
+    ):
+        raise RuntimeError("ads historical readback has blockers")
+    return payload
+
+
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def run_warehouse_archival_estimate_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2738,6 +2985,7 @@ def _run_remote_warehouse_functional_maintenance_action(
     target: HostedRuntimeTarget,
     *,
     action: str,
+    disable_timer: bool = False,
 ) -> dict[str, Any]:
     """Inspect, hold or restore only the warehouse functional timer boundary."""
 
@@ -2773,6 +3021,8 @@ def _run_remote_warehouse_functional_maintenance_action(
                 "2",
             ]
         )
+        if disable_timer:
+            runner_args.append("--disable-timer")
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -2805,6 +3055,7 @@ def _run_remote_warehouse_functional_maintenance_action(
     if action == "hold" and (
         str(payload.get("status") or "") != "held"
         or str(timer.get("is_active") or "") != "inactive"
+        or (disable_timer and str(timer.get("is_enabled") or "") != "disabled")
         or not warehouse_functional_service_is_quiescent(service_active)
         or service.get("quiescent") is not True
         or bool((payload.get("warehouse_lock") or {}).get("held"))
@@ -2832,6 +3083,123 @@ def run_warehouse_functional_maintenance_command(args: argparse.Namespace) -> in
             ),
             "action": f"warehouse-functional-maintenance-{args.action}",
             "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_business_data_maintenance_runner(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"business-data-maintenance-{action}"
+    )
+    if action not in {"status", "prepare", "hold"}:
+        raise ValueError(f"unsupported business-data maintenance action: {action}")
+    if action in {"prepare", "hold"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"business-data-maintenance-{action}",
+            dry_run=False,
+        )
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("business-data maintenance requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("business-data maintenance requires the hosted environment file")
+    runner_args = [
+        "python3",
+        "apps/business_data_maintenance.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+    ]
+    if action == "hold":
+        runner_args.extend(
+            ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=1500.0 if action == "hold" else 300.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"business-data maintenance {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("business-data maintenance returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("business-data maintenance returned a non-object JSON payload")
+    return payload
+
+
+def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.action)
+    evidence: dict[str, Any] = {}
+    if action == "hold":
+        evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
+            target, action="prepare"
+        )
+        evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="hold",
+            disable_timer=True,
+        )
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="deactivate",
+        )
+        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
+            target,
+            action="disable",
+        )
+        result = _run_remote_business_data_maintenance_runner(target, action="hold")
+        if (
+            result.get("quiet") is not True
+            or str(result.get("status") or "") != "held"
+        ):
+            raise RuntimeError("business-data maintenance hold readback is incomplete")
+    else:
+        result = _run_remote_business_data_maintenance_runner(target, action="status")
+        evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="status",
+        )
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="status",
+        )
+        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
+            target,
+            action="status",
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"business-data-maintenance-{action}",
+            "result": result,
+            "evidence": evidence,
         }
     )
     return 0
@@ -3094,6 +3462,7 @@ def run_finance_ui_flow_command(args: argparse.Namespace) -> int:
         auth_cookie=auth_cookie,
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
+        deployed_sha=str(args.deployed_sha or ""),
     )
     _print_json(
         {
@@ -3246,6 +3615,64 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_canonical_readback.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="readback",
+    )
+
+    partner_finance_diagnostic = subparsers.add_parser(
+        "partner-finance-diagnostic",
+        help=(
+            "Run the bounded read-only Partner/Finance raw-operation reconciliation "
+            "on the active runtime."
+        ),
+    )
+    partner_finance_diagnostic.add_argument("--nm-id", default="")
+    partner_finance_diagnostic.add_argument(
+        "--week",
+        action="append",
+        default=[],
+        help="Exact selected Partner week start; repeat as needed.",
+    )
+    partner_finance_diagnostic.add_argument("--output", required=True)
+    partner_finance_diagnostic.set_defaults(
+        handler=run_partner_finance_diagnostic_command,
+    )
+
+    ads_historical_dry_run = subparsers.add_parser(
+        "ads-historical-dry-run",
+        help="Build an exact read-only official fullstats recovery plan.",
+    )
+    ads_historical_dry_run.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_dry_run.add_argument("--target-date", action="append", required=True)
+    ads_historical_dry_run.add_argument("--output", required=True)
+    ads_historical_dry_run.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="dry-run",
+    )
+
+    ads_historical_apply = subparsers.add_parser(
+        "ads-historical-apply",
+        help="Apply one exact reviewed official fullstats recovery plan.",
+    )
+    ads_historical_apply.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_apply.add_argument("--target-date", action="append", required=True)
+    ads_historical_apply.add_argument("--plan-file", required=True)
+    ads_historical_apply.add_argument("--fingerprint", required=True)
+    ads_historical_apply.add_argument("--approval-reference", required=True)
+    ads_historical_apply.add_argument("--output", default="")
+    ads_historical_apply.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="apply",
+    )
+
+    ads_historical_readback = subparsers.add_parser(
+        "ads-historical-readback",
+        help="Read back the exact recovered ads slots and accepted closure states.",
+    )
+    ads_historical_readback.add_argument("--nm-id", action="append", type=int, required=True)
+    ads_historical_readback.add_argument("--target-date", action="append", required=True)
+    ads_historical_readback.add_argument("--output", default="")
+    ads_historical_readback.set_defaults(
+        handler=run_ads_historical_recovery_command,
+        ads_historical_action="readback",
     )
 
     archival_estimate_dry_run = subparsers.add_parser(
@@ -3424,6 +3851,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         handler=run_warehouse_functional_maintenance_command,
     )
 
+    business_data_maintenance = subparsers.add_parser(
+        "business-data-maintenance",
+        help=(
+            "Inspect or establish one audited quiet window across all repo-owned "
+            "automatic business-data writers and runtime schedules."
+        ),
+    )
+    business_data_maintenance.add_argument(
+        "action",
+        choices=("status", "hold"),
+    )
+    business_data_maintenance.set_defaults(
+        handler=run_business_data_maintenance_command,
+    )
+
     functional_emergency_dry_run = subparsers.add_parser(
         "warehouse-functional-emergency-dry-run",
         help="Build an emergency full rebuild plan from persisted local sources only.",
@@ -3542,6 +3984,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_ui_flow.add_argument("--evidence-dir", required=True)
     finance_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     finance_ui_flow.add_argument("--headed", action="store_true")
+    finance_ui_flow.add_argument(
+        "--deployed-sha",
+        default="",
+        help="Exact deployed commit expected for the machine-readable evidence.",
+    )
     finance_ui_flow.set_defaults(handler=run_finance_ui_flow_command)
 
     autoanswers_ui_flow = subparsers.add_parser(

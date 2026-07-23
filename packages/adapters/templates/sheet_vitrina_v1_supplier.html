@@ -1985,10 +1985,20 @@
           });
           if (!response.ok) {
             let message = "HTTP " + response.status;
+            let errorPayload = null;
             try {
-              const errorPayload = await response.json();
+              errorPayload = await response.json();
               message = errorPayload.error || message;
             } catch (error) { /* bounded download error */ }
+            if (
+              packageType === "accounting"
+              && response.status === 409
+              && errorPayload
+              && errorPayload.contract_name === "sheet_vitrina_v1_supplier_accounting_package_blocked"
+            ) {
+              renderPackageReceipt(packageType, errorPayload, "");
+              return;
+            }
             throw new Error(message);
           }
           const receiptHeader = response.headers.get("X-WB-Core-Package-Receipt") || "";
@@ -2058,6 +2068,15 @@
           return;
         }
         const counts = receipt.counts || {};
+        if (receipt.status === "blocked" && packageType === "accounting") {
+          const primary = receipt.error || "Пакет для бухгалтерии не сформирован";
+          const detail = receipt.detail ? " " + receipt.detail : "";
+          node.className = "package-receipt error";
+          node.innerHTML = escapeHtml(primary + detail)
+            + ' <button class="compact" type="button" data-package-retry="accounting">Повторить</button>';
+          bindPackageRetry(node);
+          return;
+        }
         const included = Number(counts.included || 0);
         const expected = Number(counts.expected || 0);
         const omitted = []

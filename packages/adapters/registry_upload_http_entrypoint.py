@@ -24,7 +24,10 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 import zlib
 
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.registry_upload_http_entrypoint import (
+    RegistryUploadHttpEntrypoint,
+    SupplierAccountingPackageBlockedError,
+)
 from packages.application.operator_instructions import (
     INSTRUCTION_NEW_BADGE_LABEL,
     InstructionBlock,
@@ -59,6 +62,7 @@ from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.partner_report import PartnerReportError
 from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
+from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.application.demand_estimation import parse_sales_avg_period_days
@@ -576,6 +580,9 @@ def _build_handler(
                             body,
                             actor=_current_web_user_config_key(self),
                         )
+                except WarehouseSyncBusyError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
@@ -656,6 +663,9 @@ def _build_handler(
                         payload = entrypoint.handle_warehouse_emergency_preview_request()
                     else:
                         payload = entrypoint.handle_warehouse_emergency_apply_request(body)
+                except WarehouseSyncBusyError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
@@ -681,7 +691,7 @@ def _build_handler(
 
                 try:
                     result = entrypoint.handle_bundle_payload(payload)
-                except Exception:  # pragma: no cover - bounded fallback
+                except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -3889,6 +3899,9 @@ def _build_handler(
                         shipment_id,
                         package_kind=package_kind,
                     )
+                except SupplierAccountingPackageBlockedError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, exc.diagnostics)
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return

@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
 
@@ -15,6 +16,7 @@ from packages.application.calculation_parameters import (
     CalculationParametersBlock,
     calculate_proxy_3,
 )
+from packages.application.canonical_wb_cost_resolver import CANONICAL_COST_POLICY_DATE
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
@@ -100,14 +102,17 @@ def build_functional_economics_backfill_plan(
             """SELECT bundle_version,as_of_date,plan_json,refreshed_at
                FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date"""
         ).fetchall()]
-    dates = sorted({day for row in snapshots for day in _snapshot_dates(row["plan_json"]) if day >= "2026-07-01"})
+    dates = sorted({day for row in snapshots for day in _snapshot_dates(row["plan_json"])})
+    warehouse_dates = [
+        day for day in dates if day >= CANONICAL_COST_POLICY_DATE.isoformat()
+    ]
     warehouse_input_manifest_digest = _warehouse_input_manifest_digest(
         runtime,
         dates=dates,
     )
     costs = {day: runtime.load_our_wb_cost_daily_state(as_of_date=day) for day in dates}
     capital = OwnProductCapitalBlock(runtime=runtime)
-    warehouse_context = _exact_functional_snapshot_context(runtime, dates)
+    warehouse_context = _exact_functional_snapshot_context(runtime, warehouse_dates)
     warehouse_covered_nm_ids = {
         day: set(item["covered_nm_ids"])
         for day, item in warehouse_context.items()
@@ -128,7 +133,12 @@ def build_functional_economics_backfill_plan(
         for day in dates
     }
     parameters = CalculationParametersBlock(runtime=runtime)
-    parameter_by_date = {day: parameters.parameters_for_date(day) for day in dates}
+    parameter_by_date = {
+        day: parameters.parameters_for_date(
+            max(day, CANONICAL_COST_POLICY_DATE.isoformat())
+        )
+        for day in dates
+    }
     if _warehouse_input_manifest_digest(runtime, dates=dates) != warehouse_input_manifest_digest:
         raise FunctionalEconomicsBackfillError(
             "functional warehouse/cost/settings inputs drifted during dry-run"
@@ -270,6 +280,7 @@ def apply_functional_economics_backfill_plan(
     *,
     confirm_fingerprint: str,
     backup_dir: Any,
+    verified_backup: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = json.loads(json.dumps(dict(plan), ensure_ascii=False))
     fingerprint = str(normalized.get("plan_fingerprint") or "")
@@ -290,19 +301,26 @@ def apply_functional_economics_backfill_plan(
         raise FunctionalEconomicsBackfillError(
             "functional cost/settings or ready snapshots drifted after dry-run"
         )
+    backup = (
+        _validate_verified_backup(
+            verified_backup,
+            expected_business_date=operation_business_date,
+        )
+        if verified_backup is not None
+        else None
+    )
     if not normalized.get("updates"):
         return {**fresh, "status": "applied", "idempotent": True, "database_written": False}
-    from pathlib import Path
-
-    backup_root = Path(backup_dir)
-    if not backup_root.is_absolute():
-        raise FunctionalEconomicsBackfillError("absolute backup_dir is required")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:16]}.sqlite3"
-    if destination.exists():
-        destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:24]}.sqlite3"
-    backup = runtime.backup_database(destination)
-    destination.chmod(0o600)
+    if backup is None:
+        backup_root = Path(backup_dir)
+        if not backup_root.is_absolute():
+            raise FunctionalEconomicsBackfillError("absolute backup_dir is required")
+        backup_root.mkdir(parents=True, exist_ok=True)
+        destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:16]}.sqlite3"
+        if destination.exists():
+            destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:24]}.sqlite3"
+        backup = runtime.backup_database(destination)
+        destination.chmod(0o600)
     if str(backup.get("integrity_check") or "") != "ok":
         raise FunctionalEconomicsBackfillError("functional economics backup integrity_check failed")
     if current_business_date_iso() != operation_business_date:
@@ -393,6 +411,87 @@ def apply_functional_economics_backfill_plan(
     }
 
 
+def _validate_verified_backup(
+    value: Mapping[str, Any],
+    *,
+    expected_business_date: str = "",
+) -> dict[str, Any]:
+    backup = json.loads(json.dumps(dict(value), ensure_ascii=False))
+    if str(backup.get("integrity_check") or backup.get("source_integrity_check") or "") != "ok":
+        raise FunctionalEconomicsBackfillError("verified economics backup integrity_check is required")
+    raw_path = str(backup.get("path") or "").strip()
+    archive_path = str(backup.get("archive_path") or "").strip()
+    if not raw_path and not archive_path:
+        raise FunctionalEconomicsBackfillError("verified economics backup path is required")
+    backup_business_date = str(backup.get("business_date") or "")[:10]
+    if (
+        str(backup.get("backup_scope") or "") == "business_day"
+        and backup_business_date != str(expected_business_date or backup_business_date)[:10]
+    ):
+        raise FunctionalEconomicsBackfillError(
+            "verified economics backup belongs to another business date"
+        )
+    if raw_path:
+        from apps.sqlite_backup_archive import build_plan
+
+        path = Path(raw_path)
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            raise FunctionalEconomicsBackfillError("verified economics backup file is unavailable")
+        if path.stat().st_mode & 0o777 != 0o600:
+            raise FunctionalEconomicsBackfillError("verified economics backup must use mode 0600")
+        actual = build_plan(source=path)
+        declared_sha = str(backup.get("sha256") or backup.get("source_sha256") or "")
+        declared_sha = declared_sha if declared_sha.startswith("sha256:") else f"sha256:{declared_sha}"
+        declared_size = int(backup.get("size_bytes") or backup.get("source_size_bytes") or -1)
+        if (
+            declared_sha != str(actual.get("source_sha256") or "")
+            or declared_size != int(actual.get("source_size_bytes") or -2)
+            or str(actual.get("source_integrity_check") or "") != "ok"
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup bytes do not match their declared fingerprint"
+            )
+        backup.update(
+            {
+                "path": str(actual["source_path"]),
+                "size_bytes": int(actual["source_size_bytes"]),
+                "sha256": str(actual["source_sha256"]).removeprefix("sha256:"),
+                "integrity_check": "ok",
+            }
+        )
+    else:
+        from apps.sqlite_backup_archive import verify_archive_manifest
+
+        archive = Path(archive_path)
+        if not archive.is_absolute() or archive.is_symlink() or not archive.is_file():
+            raise FunctionalEconomicsBackfillError("verified economics backup archive is unavailable")
+        if archive.stat().st_mode & 0o777 != 0o600:
+            raise FunctionalEconomicsBackfillError("verified economics backup archive must use mode 0600")
+        actual = verify_archive_manifest(
+            archive.with_name(archive.name + ".manifest.json")
+        )
+        if str(actual.get("archive_path") or "") != str(archive.resolve()):
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup archive provenance does not match"
+            )
+        for field in ("archive_sha256", "decompressed_sha256", "source_sha256"):
+            declared = str(backup.get(field) or "")
+            if declared and declared != str(actual.get(field) or ""):
+                raise FunctionalEconomicsBackfillError(
+                    "verified economics backup archive fingerprint changed"
+                )
+        backup.update(actual)
+    if str(backup.get("backup_scope") or "") == "business_day":
+        provenance_date = str(expected_business_date or backup_business_date)[:10]
+        expected_name = f"functional-economics-daily-{provenance_date.replace('-', '')}.sqlite3"
+        source_identity = Path(str(backup.get("source_path") or backup.get("path") or ""))
+        if source_identity.name != expected_name:
+            raise FunctionalEconomicsBackfillError(
+                "verified economics backup has invalid business-day provenance"
+            )
+    return backup
+
+
 def _plan_dates(plan: Mapping[str, Any]) -> list[str]:
     if plan.get("source_dates") is not None:
         return sorted(
@@ -426,7 +525,10 @@ def _warehouse_input_manifest_digest(
     warehouse-history or Proxy cells.
     """
 
-    selected = sorted({str(day or "")[:10] for day in dates if str(day or "")[:10]})
+    selected_set = {str(day or "")[:10] for day in dates if str(day or "")[:10]}
+    if any(day < CANONICAL_COST_POLICY_DATE.isoformat() for day in selected_set):
+        selected_set.add(CANONICAL_COST_POLICY_DATE.isoformat())
+    selected = sorted(selected_set)
     own_connection = connection is None
     conn = connection or _connect(runtime.db_path)
     try:
@@ -600,7 +702,15 @@ def _transform_snapshot(
     if not isinstance(rows, list):
         raise FunctionalEconomicsBackfillError("DATA_VITRINA rows are missing")
     dates = _date_columns(plan)
-    relevant_indices = [index for index, day in enumerate(dates) if day >= "2026-07-01"]
+    relevant_indices = list(range(len(dates)))
+    include_warehouse_rows = any(
+        day >= CANONICAL_COST_POLICY_DATE.isoformat() for day in dates
+    )
+    active_target_keys = (
+        set(TARGET_KEYS)
+        if include_warehouse_rows
+        else set(TARGET_KEYS) - WAREHOUSE_TARGET_KEYS
+    )
     before_digest = _non_target_digest(original)
     _validate_data_projection_layout(sheet, dates=dates)
     archived_rows_removed = _remove_archived_metric_rows(rows)
@@ -647,7 +757,13 @@ def _transform_snapshot(
     scope_nm_ids = {int(scope.split(":", 1)[1]) for scope in scopes}
     if not metadata_present:
         plan["metadata"] = metadata
-    inserted = _ensure_target_rows(rows, by_id=by_id, scopes=scopes, date_count=len(dates))
+    inserted = _ensure_target_rows(
+        rows,
+        by_id=by_id,
+        scopes=scopes,
+        date_count=len(dates),
+        include_warehouse=include_warehouse_rows,
+    )
     by_id = _rows_by_id(rows)
     changed = 0
     presentation_changes = 0
@@ -657,38 +773,40 @@ def _transform_snapshot(
         day = dates[index]
         params = parameters[day]
         day_warehouse = warehouse_metrics.get(day, {})
-        warehouse_known = day in warehouse_exact_dates
+        warehouse_applicable = day >= CANONICAL_COST_POLICY_DATE.isoformat()
+        warehouse_known = warehouse_applicable and day in warehouse_exact_dates
         covered_nm_ids = set(warehouse_covered_nm_ids.get(day) or set())
         uncovered_scope_nm_ids = sorted(scope_nm_ids - covered_nm_ids) if warehouse_known else sorted(scope_nm_ids)
         warehouse_totals_known = warehouse_known and not uncovered_scope_nm_ids
         live_day = day == str(operation_business_date or current_business_date_iso())[:10]
-        warehouse_coverage[day] = {
-            "status": (
-                ("live" if live_day else "closed")
-                if warehouse_totals_known
-                else ("partial" if warehouse_known else "unavailable")
-            ),
-            "reason_ru": (
-                (
-                    "Текущие незакрытые сутки: показан live-снимок канонической бизнес-даты."
-                    if live_day
-                    else "Точная функциональная версия склада сохранена для закрытой бизнес-даты."
-                )
-                if warehouse_totals_known
-                else (
-                    "Исторические итоги недоступны: не все SKU активной витрины входили в scope "
-                    "точного складского снимка этой даты. Частичная сумма не публикуется."
-                    if warehouse_known
-                    else _warehouse_history_unavailable_reason(
-                        day=day,
-                        cutover_business_date=cutover_business_date,
+        if warehouse_applicable:
+            warehouse_coverage[day] = {
+                "status": (
+                    ("live" if live_day else "closed")
+                    if warehouse_totals_known
+                    else ("partial" if warehouse_known else "unavailable")
+                ),
+                "reason_ru": (
+                    (
+                        "Текущие незакрытые сутки: показан live-снимок канонической бизнес-даты."
+                        if live_day
+                        else "Точная функциональная версия склада сохранена для закрытой бизнес-даты."
                     )
-                )
-            ),
-            "covered_nm_id_count": len(covered_nm_ids) if warehouse_known else 0,
-            "uncovered_scope_nm_ids": uncovered_scope_nm_ids,
-            "functional_version_id": str(warehouse_version_ids.get(day) or ""),
-        }
+                    if warehouse_totals_known
+                    else (
+                        "Исторические итоги недоступны: не все SKU активной витрины входили в scope "
+                        "точного складского снимка этой даты. Частичная сумма не публикуется."
+                        if warehouse_known
+                        else _warehouse_history_unavailable_reason(
+                            day=day,
+                            cutover_business_date=cutover_business_date,
+                        )
+                    )
+                ),
+                "covered_nm_id_count": len(covered_nm_ids) if warehouse_known else 0,
+                "uncovered_scope_nm_ids": uncovered_scope_nm_ids,
+                "functional_version_id": str(warehouse_version_ids.get(day) or ""),
+            }
         for scope in scopes:
             nm_id = int(scope.split(":", 1)[1])
             warehouse_state = day_warehouse.get(nm_id, {})
@@ -706,7 +824,9 @@ def _transform_snapshot(
                     else ""
                 )
             )
-            for metric_key in OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS:
+            for metric_key in (
+                OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS if warehouse_applicable else ()
+            ):
                 row = by_id.get(f"{scope}|{metric_key}")
                 if row is None:
                     continue
@@ -759,7 +879,8 @@ def _transform_snapshot(
         total_margin = None if total_revenue in (None, ZERO) or total_profit is None else total_profit / total_revenue
         # Public TOTAL WB cost is the whole official contour, not merely the
         # configured/visible SKU subset used for Proxy row aggregation.
-        cost_states = list(costs.get(day, {}).values())
+        day_costs = costs.get(day, {})
+        cost_states = list(day_costs.values())
         quantity_cost_pairs = [
             (
                 _optional_decimal((item or {}).get("stock_qty")) or ZERO,
@@ -768,12 +889,19 @@ def _transform_snapshot(
             for item in cost_states
         ]
         total_qty = sum((quantity for quantity, _ in quantity_cost_pairs), ZERO)
+        missing_visible_cost_row = any(nm_id not in day_costs for nm_id in scope_nm_ids)
         missing_positive_cost = any(quantity > ZERO and cost is None for quantity, cost in quantity_cost_pairs)
         total_capital = sum(
             (quantity * cost for quantity, cost in quantity_cost_pairs if cost is not None),
             ZERO,
         )
-        total_cost = total_capital / total_qty if total_qty > ZERO and not missing_positive_cost else None
+        total_cost = (
+            total_capital / total_qty
+            if total_qty > ZERO
+            and not missing_visible_cost_row
+            and not missing_positive_cost
+            else None
+        )
         total_values = {
             TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY: total_cost,
             OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY: total_profit,
@@ -781,52 +909,53 @@ def _transform_snapshot(
         }
         for metric_key, value in total_values.items():
             changed += _set_cell(by_id[f"TOTAL|{metric_key}"], index, value)
-        visible_warehouse_states = {
-            nm_id: state
-            for nm_id, state in day_warehouse.items()
-            if nm_id in scope_nm_ids
-        }
-        warehouse_total_values = _warehouse_total_metric_values(
-            visible_warehouse_states,
-            warehouse_known=warehouse_totals_known,
-        )
-        totals_unavailable_reason = (
-            ""
-            if warehouse_totals_known
-            else (
-                "Исторические итоги недоступны: не все SKU активной витрины входили в scope "
-                "точного складского снимка этой даты. Частичная сумма не публикуется."
-                if warehouse_known
-                else _warehouse_history_unavailable_reason(
-                    day=day,
-                    cutover_business_date=cutover_business_date,
+        if warehouse_applicable:
+            visible_warehouse_states = {
+                nm_id: state
+                for nm_id, state in day_warehouse.items()
+                if nm_id in scope_nm_ids
+            }
+            warehouse_total_values = _warehouse_total_metric_values(
+                visible_warehouse_states,
+                warehouse_known=warehouse_totals_known,
+            )
+            totals_unavailable_reason = (
+                ""
+                if warehouse_totals_known
+                else (
+                    "Исторические итоги недоступны: не все SKU активной витрины входили в scope "
+                    "точного складского снимка этой даты. Частичная сумма не публикуется."
+                    if warehouse_known
+                    else _warehouse_history_unavailable_reason(
+                        day=day,
+                        cutover_business_date=cutover_business_date,
+                    )
                 )
             )
-        )
-        for metric_key, value in warehouse_total_values.items():
-            row = by_id.get(f"TOTAL|{metric_key}")
-            if row is not None:
-                changed += _set_cell(row, index, value)
-                presentation_changes += _set_warehouse_cell_presentation(
-                    metadata,
-                    row_id=f"TOTAL|{metric_key}",
-                    day=day,
-                    unavailable_reason=totals_unavailable_reason,
-                    quality_presentation=(
-                        _warehouse_total_quality_presentation(
-                            visible_warehouse_states,
-                            metric_key=metric_key,
-                        )
-                        if warehouse_totals_known
-                        else None
-                    ),
-                )
+            for metric_key, value in warehouse_total_values.items():
+                row = by_id.get(f"TOTAL|{metric_key}")
+                if row is not None:
+                    changed += _set_cell(row, index, value)
+                    presentation_changes += _set_warehouse_cell_presentation(
+                        metadata,
+                        row_id=f"TOTAL|{metric_key}",
+                        day=day,
+                        unavailable_reason=totals_unavailable_reason,
+                        quality_presentation=(
+                            _warehouse_total_quality_presentation(
+                                visible_warehouse_states,
+                                metric_key=metric_key,
+                            )
+                            if warehouse_totals_known
+                            else None
+                        ),
+                    )
     marker = {
         "cutover_id": FUNCTIONAL_CUTOVER_ID,
         "source_fingerprint": source_fingerprint,
         "date_from": dates[relevant_indices[0]],
         "date_to": dates[relevant_indices[-1]],
-        "target_metric_keys": sorted(TARGET_KEYS),
+        "target_metric_keys": sorted(active_target_keys),
         "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
     }
     if metadata.get("functional_economics_backfill") != marker:
@@ -836,7 +965,7 @@ def _transform_snapshot(
     timestamps = metadata.setdefault("row_last_updated_at_by_row_id", {})
     if isinstance(timestamps, dict):
         for row_id in by_id:
-            if "|" in row_id and row_id.split("|", 1)[1] in TARGET_KEYS:
+            if "|" in row_id and row_id.split("|", 1)[1] in active_target_keys:
                 timestamps[row_id] = str(snapshot.get("refreshed_at") or "")
     if inserted or archived_rows_removed:
         _update_data_dimensions(sheet)
@@ -1191,6 +1320,7 @@ def _ensure_target_rows(
     by_id: Mapping[str, list[Any]],
     scopes: list[str],
     date_count: int,
+    include_warehouse: bool,
 ) -> int:
     specs = [
         ("TOTAL", TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY, OUR_WB_UNIT_COST_RUB_LABEL),
@@ -1202,11 +1332,12 @@ def _ensure_target_rows(
         for item in build_own_product_capital_metric_items()
         if item.metric_key in WAREHOUSE_TARGET_KEYS
     }
-    specs.extend(
-        ("TOTAL", metric_key, label)
-        for (scope, metric_key), label in warehouse_catalog.items()
-        if scope == "TOTAL"
-    )
+    if include_warehouse:
+        specs.extend(
+            ("TOTAL", metric_key, label)
+            for (scope, metric_key), label in warehouse_catalog.items()
+            if scope == "TOTAL"
+        )
     for scope in scopes:
         prefix = _scope_label_prefix(by_id, scope)
         specs.extend(
@@ -1216,11 +1347,12 @@ def _ensure_target_rows(
                 (scope, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, f"{prefix}: {OUR_WB_PROXY_MARGIN_3_PCT_LABEL}"),
             ]
         )
-        specs.extend(
-            (scope, metric_key, f"{prefix}: {label}")
-            for (metric_scope, metric_key), label in warehouse_catalog.items()
-            if metric_scope == "SKU"
-        )
+        if include_warehouse:
+            specs.extend(
+                (scope, metric_key, f"{prefix}: {label}")
+                for (metric_scope, metric_key), label in warehouse_catalog.items()
+                if metric_scope == "SKU"
+            )
     inserted = 0
     for scope, metric, label in specs:
         row_id = f"{scope}|{metric}"

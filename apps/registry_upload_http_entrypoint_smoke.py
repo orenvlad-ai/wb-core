@@ -25,6 +25,7 @@ from apps.registry_upload_smoke_support import (
     build_synthetic_oversized_bundle,
     write_runtime_registry_fixture,
 )
+from packages.adapters import registry_upload_http_entrypoint as registry_http_adapter
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH,
     DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
@@ -160,6 +161,23 @@ def main() -> None:
                 raise AssertionError("HTTP entrypoint must persist all metrics_v2 rows from request body")
             if accepted_payload["accepted_counts"]["formulas_v2"] != len(input_bundle["formulas_v2"]):
                 raise AssertionError("HTTP entrypoint must persist all formulas_v2 rows from request body")
+
+            invalid_status, invalid_payload = _post_json(
+                base_url,
+                {
+                    "bundle_version": "",
+                    "uploaded_at": "",
+                    "config_v2": [],
+                    "metrics_v2": [],
+                    "formulas_v2": [],
+                },
+            )
+            if invalid_status != 500 or "bundle_version must be a non-empty string" not in str(
+                invalid_payload.get("error", "")
+            ):
+                raise AssertionError(
+                    "invalid registry bundle must return controlled JSON instead of closing the connection"
+                )
 
             runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
             current_state = asdict(runtime.load_current_state())
@@ -318,6 +336,27 @@ def main() -> None:
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "plan_report_path": DEFAULT_SHEET_PLAN_REPORT_PATH,
                 "wb_finance_report_path": DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
+                **(
+                    {
+                        "partner_report_options_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+                        "partner_report_settings_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+                        "partner_report_preview_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+                        "partner_report_preview_xlsx_path": (
+                            registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH
+                        ),
+                    }
+                    if hasattr(registry_http_adapter, "DEFAULT_PARTNER_REPORT_PREVIEW_XLSX_PATH")
+                    else {
+                        "partner_report_options_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
+                        "partner_report_settings_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
+                        "partner_report_preview_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
+                        "partner_report_finalize_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_FINALIZE_PATH,
+                        "partner_report_finalized_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_FINALIZED_PATH,
+                        "partner_report_preview_package_path": (
+                            registry_http_adapter.DEFAULT_PARTNER_REPORT_PREVIEW_PACKAGE_PATH
+                        ),
+                    }
+                ),
                 "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
                 "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
                 "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
