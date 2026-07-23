@@ -488,6 +488,21 @@ def main() -> None:
         or business_args.action != "hold"
     ):
         raise AssertionError("hosted runner must expose all-writer business-data hold")
+    business_restore_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "business-data-maintenance",
+            "restore",
+            "--expected-revision",
+            "7",
+        ]
+    )
+    if (
+        business_restore_args.action != "restore"
+        or business_restore_args.expected_revision != 7
+    ):
+        raise AssertionError(
+            "business-data restore must expose exact optimistic policy revision"
+        )
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")

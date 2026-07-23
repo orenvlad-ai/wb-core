@@ -159,6 +159,16 @@
     .user-source-note { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .password-inline { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
     .password-inline input { min-width: 140px; }
+    .auto-updates-master { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: rgba(167, 139, 250, .06); }
+    .auto-updates-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+    .auto-update-card { display: grid; gap: 10px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: rgba(16, 19, 27, .48); }
+    .auto-update-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .auto-update-card h3 { margin: 0; font-size: 16px; }
+    .auto-update-statuses { display: flex; flex-wrap: wrap; gap: 7px; }
+    .auto-update-meta { display: grid; grid-template-columns: minmax(128px, .7fr) minmax(0, 1.3fr); gap: 5px 10px; margin: 0; font-size: 12px; }
+    .auto-update-meta dt { color: var(--muted); }
+    .auto-update-meta dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+    .auto-update-toggle { min-width: 124px; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
@@ -166,6 +176,9 @@
       .document-toolbar .toolbar { grid-column: auto; }
       .users-form { grid-template-columns: 1fr; }
       .calculation-grid { grid-template-columns: 1fr; }
+      .auto-updates-master, .auto-updates-grid { grid-template-columns: 1fr; }
+      .auto-update-card-header { display: grid; }
+      .auto-update-meta { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -185,7 +198,8 @@
 
       <nav class="settings-group-tabs" aria-label="Группы настроек">
         <button class="settings-tab-button is-active" type="button" data-settings-group-button="directories" aria-controls="directoriesGroupPanel" aria-selected="true">Справочники</button>
-        <button class="settings-tab-button" type="button" data-settings-group-button="user-directory" aria-controls="userDirectoryGroupPanel" aria-selected="false">Справочник пользователя</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="user-directory" aria-controls="userDirectoryGroupPanel" aria-selected="false">Расчётные параметры</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="auto-updates" aria-controls="autoUpdatesGroupPanel" aria-selected="false">Автообновления</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="users" aria-controls="usersGroupPanel" aria-selected="false">Пользователи</button>
       </nav>
 
@@ -392,12 +406,9 @@
       </div>
       </section>
 
-      <section id="userDirectoryGroupPanel" class="block settings-group-panel" data-settings-group-panel="user-directory" aria-labelledby="calculationParametersTitle" hidden>
+      <section id="userDirectoryGroupPanel" class="block settings-group-panel" data-settings-group-panel="user-directory" aria-label="Расчётные параметры" hidden>
         <div class="toolbar" style="justify-content: space-between;">
-          <div>
-            <h2 id="calculationParametersTitle">Расчётные параметры</h2>
-            <p>Версионные параметры формул. Изменение не затрагивает физические склады.</p>
-          </div>
+          <p>Версионные параметры формул. Изменение не затрагивает физические склады.</p>
           <button id="reloadCalculationParametersButton" type="button">Обновить</button>
         </div>
         <h2 style="margin-top: 18px;">Proxy прибыль и маржинальность</h2>
@@ -425,6 +436,30 @@
         <div class="table-wrap"><table class="calculation-table"><thead id="calculationReferenceHead"></thead><tbody id="calculationReferenceRows"><tr><td>Данные загружаются...</td></tr></tbody></table></div>
         <h2 style="margin-top: 22px;">История версий</h2>
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
+      </section>
+
+      <section id="autoUpdatesGroupPanel" class="block settings-group-panel" data-settings-group-panel="auto-updates" aria-labelledby="autoUpdatesTitle" hidden>
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="autoUpdatesTitle">Автообновления</h2>
+            <p>Единая audited owner policy для реальных runtime-процессов. Desired state хранится отдельно от фактического readback.</p>
+          </div>
+          <button id="reloadAutoUpdatesButton" type="button">Обновить статус</button>
+        </div>
+        <div class="auto-updates-master">
+          <div>
+            <h3 style="margin: 0 0 6px;">Общее разрешение автообновлений</h3>
+            <div id="autoUpdatesOverallStatus" class="pill warning">Состояние не подтверждено</div>
+            <p id="autoUpdatesMasterHint" class="muted">Читаем canonical maintenance status...</p>
+          </div>
+          <button id="autoUpdatesMasterButton" class="auto-update-toggle" type="button" disabled>Изменить</button>
+        </div>
+        <p id="autoUpdatesMessage" class="message">Читаем автообновления...</p>
+        <div id="autoUpdatesRows" class="auto-updates-grid"></div>
+        <details style="margin-top: 14px;">
+          <summary>Технические детали owner policy</summary>
+          <pre id="autoUpdatesTechnicalDetails" class="calculation-diff"></pre>
+        </details>
       </section>
 
       <section id="usersGroupPanel" class="block settings-group-panel" data-settings-group-panel="users" aria-labelledby="usersTitle" hidden>
@@ -509,6 +544,7 @@
       const usersPath = config.settings_users_path;
       const calculationParametersPath = config.calculation_parameters_path;
       const calculationParametersPreviewPath = config.calculation_parameters_preview_path;
+      const autoUpdatesPath = config.auto_updates_path;
       const canManageUsers = config.can_manage_users !== false;
       const rowsBody = document.getElementById("nomenclatureRows");
       const message = document.getElementById("nomenclatureMessage");
@@ -573,6 +609,13 @@
       const reloadCalculationButton = document.getElementById("reloadCalculationParametersButton");
       const previewCalculationButton = document.getElementById("previewCalculationParametersButton");
       const saveCalculationButton = document.getElementById("saveCalculationParametersButton");
+      const autoUpdatesRows = document.getElementById("autoUpdatesRows");
+      const autoUpdatesMessage = document.getElementById("autoUpdatesMessage");
+      const autoUpdatesOverallStatus = document.getElementById("autoUpdatesOverallStatus");
+      const autoUpdatesMasterHint = document.getElementById("autoUpdatesMasterHint");
+      const autoUpdatesMasterButton = document.getElementById("autoUpdatesMasterButton");
+      const autoUpdatesTechnicalDetails = document.getElementById("autoUpdatesTechnicalDetails");
+      const reloadAutoUpdatesButton = document.getElementById("reloadAutoUpdatesButton");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
       const NOMENCLATURE_COLUMNS_STORAGE_KEY = "wb-core:sheet-vitrina-v1:nomenclature-columns:v1";
@@ -603,6 +646,7 @@
       let editingContractId = "";
       let users = [];
       let calculationPreviewFingerprint = "";
+      let autoUpdatesState = null;
       let availableSections = [
         {section_id: "vitrina", label: "Витрина"},
         {section_id: "supply", label: "Поставки"},
@@ -681,7 +725,7 @@
       }
 
       function activateSettingsGroup(groupName, options) {
-        const allowed = groupName === "user-directory" || (groupName === "users" && canManageUsers);
+        const allowed = ["user-directory", "auto-updates"].includes(groupName) || (groupName === "users" && canManageUsers);
         const requested = allowed ? groupName : "directories";
         settingsGroupButtons.forEach((button) => {
           const isActive = button.dataset.settingsGroupButton === requested;
@@ -704,6 +748,9 @@
         if (requested === "user-directory") {
           loadCalculationParameters();
         }
+        if (requested === "auto-updates") {
+          loadAutoUpdates();
+        }
       }
 
       function restoreSettingsGroup() {
@@ -713,7 +760,7 @@
         } catch (error) {
           saved = "";
         }
-        activateSettingsGroup(["users", "user-directory"].includes(saved) ? saved : "directories", { persist: false });
+        activateSettingsGroup(["users", "user-directory", "auto-updates"].includes(saved) ? saved : "directories", { persist: false });
       }
 
       function activateSettingsTab(tabName, options) {
@@ -2115,6 +2162,138 @@
         }).join("") : "<tr><td colspan=\"7\">Начальная версия будет создана functional cutover.</td></tr>";
       }
 
+      function autoUpdateDescription(processKey) {
+        return ({
+          vitrina_refresh: "Плановое обновление read-моделей Витрины.",
+          vitrina_closure_retry: "Закрывает день и повторяет незавершённое закрытие.",
+          warehouse_functional: "Canonical pipeline шести складов, себестоимости и WB supplies.",
+          wb_finance_weekly: "Плановая загрузка финансового отчёта WB.",
+          feedback_complaints: "Создание разрешённых жалоб по owner schedule.",
+          spp_test: "Автоматическая проверка СПП по отдельному расписанию.",
+          autoanswers_readonly: "Read-only получение данных для Autoanswers.",
+          autoanswers_worker: "Обработка разрешённой очереди Autoanswers."
+        })[processKey] || "Repo-owned runtime process.";
+      }
+
+      function autoUpdateValue(value) {
+        const text = String(value == null || value === "" ? "—" : value);
+        return text.length > 280 ? text.slice(0, 277) + "..." : text;
+      }
+
+      function renderAutoUpdates(payload) {
+        autoUpdatesState = payload || {};
+        const processes = Array.isArray(autoUpdatesState.processes) ? autoUpdatesState.processes : [];
+        const masterDesired = Boolean(autoUpdatesState.master_desired);
+        autoUpdatesOverallStatus.textContent = autoUpdatesState.overall_status || "Состояние не подтверждено";
+        autoUpdatesOverallStatus.className = "pill " + (
+          !masterDesired ? "warning" :
+          (autoUpdatesState.drift_processes || []).length || (autoUpdatesState.unknown_processes || []).length ? "warning" : "success"
+        );
+        autoUpdatesMasterHint.textContent = masterDesired
+          ? "Общая пауза снята. Фактически запускаются только процессы с desired=ON."
+          : "Общая пауза включена. Индивидуальные состояния сохранены для безопасного resume.";
+        autoUpdatesMasterButton.textContent = masterDesired ? "Поставить на паузу" : "Снять общую паузу";
+        autoUpdatesMasterButton.disabled = !autoUpdatesState.revision;
+        autoUpdatesRows.innerHTML = processes.length ? processes.map((process) => {
+          const desiredKnown = typeof process.desired === "boolean";
+          const desiredText = desiredKnown ? (process.desired ? "Desired: ON" : "Desired: OFF") : "Desired: UNKNOWN";
+          const actualText = process.actual ? "Actual: работает" : "Actual: остановлено";
+          const futureText = !masterDesired
+            ? (process.desired ? "Будет включено после снятия общей паузы" : "Останется выключено")
+            : (process.drift_status === "matched" ? "Desired и actual совпадают" : "Есть расхождение desired/actual");
+          const timer = process.timer || {};
+          const properties = timer.properties || {};
+          const schedule = process.runtime_schedule || {};
+          return '<article class="auto-update-card" data-auto-update-process="' + escapeHtml(process.process_key) + '">' +
+            '<div class="auto-update-card-header"><div><h3>' + escapeHtml(process.display_name) + '</h3>' +
+            '<p class="muted">' + escapeHtml(autoUpdateDescription(process.process_key)) + '</p></div>' +
+            '<button class="auto-update-toggle" type="button" data-auto-update-toggle="' + escapeHtml(process.process_key) + '"' +
+            (desiredKnown ? "" : " disabled") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button></div>' +
+            '<div class="auto-update-statuses"><span class="pill">' + escapeHtml(desiredText) + '</span>' +
+            '<span class="pill ' + (process.actual ? "success" : "warning") + '">' + escapeHtml(actualText) + '</span>' +
+            '<span class="pill ' + (process.drift_status === "matched" ? "success" : "warning") + '">' + escapeHtml(process.drift_status || "unknown") + '</span></div>' +
+            '<p class="message ' + (process.drift_status === "matched" || !masterDesired ? "" : "warning") + '">' + escapeHtml(futureText) + '</p>' +
+            '<dl class="auto-update-meta">' +
+            '<dt>Последний запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.last_run)) + '</dd>' +
+            '<dt>Последний успешный</dt><dd>' + escapeHtml(autoUpdateValue(process.last_success)) + '</dd>' +
+            '<dt>Следующий запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.next_run)) + '</dd>' +
+            '<dt>Последняя ошибка</dt><dd>' + escapeHtml(autoUpdateValue(process.last_error)) + '</dd>' +
+            '<dt>Расписание</dt><dd>' + escapeHtml(autoUpdateValue(schedule.schedule || schedule.enabled_ids || properties.NextElapseUSecRealtime || "repo-owned timer")) + '</dd>' +
+            '<dt>Evidence</dt><dd>' + escapeHtml(autoUpdateValue(process.provenance)) + '</dd>' +
+            '</dl></article>';
+        }).join("") : '<p class="message warning">Canonical owner policy не вернула allowlisted процессы.</p>';
+        Array.from(autoUpdatesRows.querySelectorAll("[data-auto-update-toggle]")).forEach((button) => {
+          button.addEventListener("click", () => updateAutoUpdateProcess(button.dataset.autoUpdateToggle));
+        });
+        autoUpdatesTechnicalDetails.textContent = JSON.stringify({
+          schema_version: autoUpdatesState.schema_version,
+          revision: autoUpdatesState.revision,
+          policy_fingerprint: autoUpdatesState.policy_fingerprint,
+          changed_at: autoUpdatesState.changed_at,
+          actor: autoUpdatesState.actor,
+          reason: autoUpdatesState.reason,
+          unknown_processes: autoUpdatesState.unknown_processes || [],
+          drift_processes: autoUpdatesState.drift_processes || []
+        }, null, 2);
+      }
+
+      async function loadAutoUpdates() {
+        if (!autoUpdatesPath) return;
+        autoUpdatesMessage.textContent = "Читаем canonical desired/actual status...";
+        autoUpdatesMessage.className = "message";
+        try {
+          const payload = await fetchJson(autoUpdatesPath, {headers: {Accept: "application/json"}});
+          renderAutoUpdates(payload);
+          autoUpdatesMessage.textContent = "Статус подтверждён runtime readback.";
+          autoUpdatesMessage.className = "message success";
+        } catch (error) {
+          autoUpdatesMessage.textContent = error.message;
+          autoUpdatesMessage.className = "message error";
+          autoUpdatesMasterButton.disabled = true;
+        }
+      }
+
+      async function updateAutoUpdates(body) {
+        if (!autoUpdatesState || !autoUpdatesState.revision) return;
+        body.expected_revision = autoUpdatesState.revision;
+        body.reason = "Owner action from Settings → Автообновления";
+        autoUpdatesMessage.textContent = "Применяем policy и проверяем actual readback...";
+        autoUpdatesMessage.className = "message warning";
+        autoUpdatesMasterButton.disabled = true;
+        Array.from(autoUpdatesRows.querySelectorAll("button")).forEach((button) => { button.disabled = true; });
+        try {
+          const payload = await fetchJson(autoUpdatesPath, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
+            body: JSON.stringify(body)
+          });
+          renderAutoUpdates(payload);
+          autoUpdatesMessage.textContent = "Owner policy сохранена; actual state прочитан повторно.";
+          autoUpdatesMessage.className = "message success";
+        } catch (error) {
+          autoUpdatesMessage.textContent = error.message;
+          autoUpdatesMessage.className = "message error";
+          await loadAutoUpdates();
+        }
+      }
+
+      function updateAutoUpdateProcess(processKey) {
+        const process = (autoUpdatesState.processes || []).find((item) => item.process_key === processKey);
+        if (!process || typeof process.desired !== "boolean") return;
+        updateAutoUpdates({action: "set_process", process_key: processKey, desired: !process.desired});
+      }
+
+      function updateAutoUpdatesMaster() {
+        if (!autoUpdatesState) return;
+        const desired = !Boolean(autoUpdatesState.master_desired);
+        const warning = desired
+          ? "Снять общую паузу и восстановить только процессы с desired=ON?"
+          : "Включить общую паузу? Активные oneshot завершатся штатно.";
+        if (window.confirm(warning)) {
+          updateAutoUpdates({action: "set_master", desired});
+        }
+      }
+
       async function loadCalculationParameters() {
         if (!calculationParametersPath) return;
         calculationMessage.textContent = "Читаем расчётные параметры...";
@@ -2246,6 +2425,8 @@
       reloadCalculationButton.addEventListener("click", loadCalculationParameters);
       previewCalculationButton.addEventListener("click", previewCalculationParameters);
       saveCalculationButton.addEventListener("click", saveCalculationParameters);
+      reloadAutoUpdatesButton.addEventListener("click", loadAutoUpdates);
+      autoUpdatesMasterButton.addEventListener("click", updateAutoUpdatesMaster);
       document.addEventListener("click", () => closeAccessPickers());
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {

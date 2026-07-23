@@ -18,7 +18,13 @@ import apps.business_data_maintenance as maintenance
 
 
 class FakeSystemd:
-    def __init__(self, *, unknown_timer: str = "", active_reads: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        unknown_timer: str = "",
+        active_reads: int = 0,
+        fail_enable_unit: str = "",
+    ) -> None:
         self.timer_states = {
             unit: {
                 "unit": unit,
@@ -39,6 +45,7 @@ class FakeSystemd:
         }
         self.unknown_timer = unknown_timer
         self.active_reads = active_reads
+        self.fail_enable_unit = fail_enable_unit
         self.mutations: list[str] = []
 
     def unit_state(self, unit: str) -> dict[str, Any]:
@@ -54,6 +61,13 @@ class FakeSystemd:
         self.mutations.append(unit)
         self.timer_states[unit]["is_enabled"] = "disabled"
         self.timer_states[unit]["is_active"] = "inactive"
+
+    def enable_now(self, unit: str) -> None:
+        self.mutations.append("enable:" + unit)
+        if unit == self.fail_enable_unit:
+            raise RuntimeError("synthetic enable failure")
+        self.timer_states[unit]["is_enabled"] = "enabled"
+        self.timer_states[unit]["is_active"] = "active"
 
     def discovered_timers(self) -> list[str]:
         rows = list(maintenance.ALL_BUSINESS_TIMER_UNITS)
@@ -94,6 +108,26 @@ class FakeSchedules:
         for item in self.payloads["feedback_complaints"]["schedules"]:
             item["enabled"] = False
         self.payloads["spp"]["schedule"]["enabled"] = False
+        return self.read_all()
+
+    def restore_selected(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+        *,
+        desired: Mapping[str, bool],
+    ) -> dict[str, dict[str, Any]]:
+        self.payloads = copy.deepcopy(dict(baseline))
+        for item in self.payloads["web_vitrina"]["schedules"]:
+            item["enabled"] = bool(item.get("enabled")) and bool(
+                desired.get("vitrina_refresh")
+            )
+        for item in self.payloads["feedback_complaints"]["schedules"]:
+            item["enabled"] = bool(item.get("enabled")) and bool(
+                desired.get("feedback_complaints")
+            )
+        self.payloads["spp"]["schedule"]["enabled"] = bool(
+            self.payloads["spp"]["schedule"].get("enabled")
+        ) and bool(desired.get("spp_test"))
         return self.read_all()
 
 
@@ -176,9 +210,184 @@ def _assert_unknown_timer_fails_before_mutation() -> None:
         assert schedules.disable_calls == 0
 
 
+def _assert_status_does_not_initialize_owner_policy() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        (runtime_dir / maintenance.STATE_FILENAME).write_text(
+            json.dumps({"phase": "held", "baseline": {}})
+        )
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            status = maintenance.maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+        finally:
+            _restore_local_boundaries(old)
+        assert status["auto_updates"]["revision"] == 0
+        assert not (runtime_dir / maintenance.POLICY_FILENAME).exists()
+
+
+def _warehouse_baseline(runtime_dir: Path) -> None:
+    (runtime_dir / maintenance.WAREHOUSE_MAINTENANCE_STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "baseline": {
+                    "units": {
+                        "timer": {
+                            "unit": "wb-core-warehouse-functional-sync.timer",
+                            "is_enabled": "enabled",
+                            "is_active": "active",
+                            "properties": {},
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+
+def _assert_exact_policy_restore_and_revision_guards() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
+            assert policy["processes"]["warehouse_functional"]["desired"] is True
+            assert policy["processes"]["autoanswers_readonly"]["desired"] is False
+            assert policy["processes"]["autoanswers_worker"]["desired"] is False
+            policy = maintenance.update_process_desired_state(
+                runtime_dir,
+                process_key="spp_test",
+                desired=False,
+                expected_revision=int(policy["revision"]),
+                actor="smoke",
+                reason="intentionally off",
+            )
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now("wb-core-warehouse-functional-sync.timer")
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                expected_revision=int(policy["revision"]),
+                warehouse_restore=restore_warehouse,
+            )
+            assert restored["status"] == "restored"
+            assert restored["auto_updates"]["master_desired"] is True
+            rows = {
+                item["process_key"]: item
+                for item in restored["auto_updates"]["processes"]
+            }
+            assert rows["warehouse_functional"]["actual"] is True
+            assert rows["spp_test"]["desired"] is False
+            assert rows["spp_test"]["actual"] is False
+            assert rows["autoanswers_worker"]["actual"] is False
+            repeated = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                expected_revision=int(restored["auto_updates"]["revision"]),
+                warehouse_restore=restore_warehouse,
+            )
+            assert repeated["idempotent"] is True
+            first_state = json.loads(
+                (runtime_dir / maintenance.STATE_FILENAME).read_text()
+            )
+            assert first_state["phase"] == "restored"
+            first_hold_started_at = str(first_state["hold_started_at"])
+            systemd.disable_now("wb-core-warehouse-functional-sync.timer")
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            second_state = json.loads(
+                (runtime_dir / maintenance.STATE_FILENAME).read_text()
+            )
+            assert second_state["phase"] == "held"
+            assert str(second_state["hold_started_at"]) != first_hold_started_at
+            try:
+                maintenance.update_process_desired_state(
+                    runtime_dir,
+                    process_key="spp_test",
+                    desired=True,
+                    expected_revision=1,
+                    actor="smoke",
+                    reason="stale",
+                )
+            except RuntimeError as exc:
+                assert "stale policy revision" in str(exc)
+            else:
+                raise AssertionError("stale owner-policy revision must fail")
+        finally:
+            _restore_local_boundaries(old)
+
+
+def _assert_unknown_policy_state_blocks_resume() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            policy_path = runtime_dir / maintenance.POLICY_FILENAME
+            policy = json.loads(policy_path.read_text())
+            policy["processes"]["warehouse_functional"]["desired"] = None
+            policy_path.write_text(json.dumps(policy))
+            try:
+                maintenance.maintenance_restore(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                )
+            except RuntimeError as exc:
+                assert "unknown intended process states" in str(exc)
+            else:
+                raise AssertionError("unknown intended state must remain fail-closed")
+        finally:
+            _restore_local_boundaries(old)
+
+
 def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_unknown_timer_fails_before_mutation()
+    _assert_status_does_not_initialize_owner_policy()
+    _assert_exact_policy_restore_and_revision_guards()
+    _assert_unknown_policy_state_blocks_resume()
     print("business data maintenance smoke: ok")
     return 0
 

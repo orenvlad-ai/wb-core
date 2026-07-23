@@ -6,7 +6,7 @@ Canonical deploy intentionally enables the Web-vitrina, closure retry, Finance, 
 
 ## Current contract
 
-`python3 apps/registry_upload_http_entrypoint_hosted_runtime.py business-data-maintenance status|hold` is the only cross-writer maintenance entrypoint.
+`python3 apps/registry_upload_http_entrypoint_hosted_runtime.py business-data-maintenance status|hold|restore` is the only cross-writer maintenance entrypoint. The same server-owned contract backs `Настройки → Автообновления`; UI and CLI do not maintain separate desired-state truth.
 
 `hold`:
 
@@ -18,4 +18,6 @@ Canonical deploy intentionally enables the Web-vitrina, closure retry, Finance, 
 - fails closed for any unknown timer, cron writer, active process, active runtime job or held writer lock;
 - stores the exact pre-hold runtime schedule/systemd evidence and final readback in mode-`0600` state/audit files.
 
-Registry HTTP, Data MCP, Release Train and deploy infrastructure remain active. The runner has no implicit restore command. After any later deploy, `hold` and `status` must be repeated because deploy may re-enable managed timers.
+Owner policy is versioned separately in mode-`0600` `.auto-updates-policy.json` plus append-only audit. Initial migration derives each of the eight allowlisted processes only from canonical pre-hold evidence; unknown provenance stays `OFF/UNKNOWN`. `master OFF` preserves every individual desired state, while an individual change under the master hold changes only future resume intent.
+
+`restore --expected-revision <N>` requires the exact optimistic policy revision, a quiet readback, no unknown timers/cron/writers/locks and no unknown desired state. It restores only desired `ON` processes and leaves intentional `OFF` processes off, then verifies actual timer/schedule state process by process. Successful restore closes that hold generation; the next hold captures a fresh timer/schedule baseline. Partial failure disables the allowlist again and remains fail closed. Autoanswers `ON` is never inferred and still requires its dedicated lifecycle contract. Registry HTTP, Data MCP, Release Train and deploy infrastructure remain active. After any later deploy, `hold` and `status` must be repeated because deploy may re-enable managed timers.

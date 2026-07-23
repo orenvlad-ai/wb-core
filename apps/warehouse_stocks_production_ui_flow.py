@@ -213,6 +213,17 @@ def _run_warehouse_ui_flow(
             if response.status >= 500
             else None,
         )
+        warehouse_sync_post_requests: list[str] = []
+        page.on(
+            "request",
+            lambda candidate: warehouse_sync_post_requests.append(candidate.url)
+            if (
+                candidate.method == "POST"
+                and urlparse(candidate.url).path
+                == "/v1/sheet-vitrina-v1/warehouses/sync"
+            )
+            else None,
+        )
         page.on(
             "response",
             lambda navigation_response: navigation_chain.append(
@@ -236,9 +247,26 @@ def _run_warehouse_ui_flow(
         main_navigation_chain = list(navigation_chain)
         _assert(initial_final_url == requested_url, "warehouse main navigation must not redirect unexpectedly")
         page.locator('[data-unified-tab-panel="warehouses"]:not([hidden])').wait_for(timeout=60_000)
-        _assert(page.locator("[data-warehouse-key]").count() == 6, "exactly six warehouse selectors must render")
+        _assert(
+            page.locator('[data-warehouse-key]:not([data-warehouse-key="update"])').count() == 6,
+            "exactly six warehouse detail selectors must render",
+        )
+        _assert(
+            page.locator('[data-warehouse-key="update"]').count() == 1,
+            "separate current-source update tab must render",
+        )
+        _assert(
+            page.locator("[data-warehouse-sync], [data-warehouse-emergency]").count() == 0,
+            "manual sync/rebuild controls must be absent from six warehouse detail pages",
+        )
         _assert(bool(page.title().strip()), "document title must be non-empty")
         _assert(bool(page.locator("body").inner_text().strip()), "document body must be non-empty")
+        page.locator('[data-warehouse-key="update"]').click()
+        page.locator("[data-warehouse-update-view]:not([hidden])").wait_for(timeout=60_000)
+        _assert(
+            not warehouse_sync_post_requests,
+            "opening update tab must not start a warehouse mutation",
+        )
         warehouse_action_theme = _warehouse_action_theme_evidence(page)
 
         for warehouse_key, warehouse_name in WAREHOUSES:
@@ -1108,8 +1136,7 @@ def _run_warehouse_ui_flow(
 
 def _warehouse_action_theme_evidence(page: Page) -> dict[str, Any]:
     selectors = {
-        "sync": "[data-warehouse-sync]",
-        "rebuild": "[data-warehouse-emergency]",
+        "current_source_sync": "[data-warehouse-update-start]",
     }
 
     def _style(locator: Any) -> dict[str, Any]:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,10 @@ from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
 SCHEMA_VERSION = "business_data_maintenance_v1"
 STATE_FILENAME = ".business-data-maintenance.json"
 AUDIT_FILENAME = ".business-data-maintenance-audit.jsonl"
+POLICY_SCHEMA_VERSION = "auto_updates_owner_policy_v1"
+POLICY_FILENAME = ".auto-updates-policy.json"
+POLICY_AUDIT_FILENAME = ".auto-updates-policy-audit.jsonl"
+WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -75,6 +80,52 @@ WEB_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 FEEDBACK_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/schedules"
 SPP_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/schedule"
 SPP_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/status"
+
+PROCESS_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "vitrina_refresh",
+        "display_name": "Обновление Витрины",
+        "timer": "wb-core-sheet-vitrina-refresh.timer",
+        "schedule": "web_vitrina",
+    },
+    {
+        "key": "vitrina_closure_retry",
+        "display_name": "Закрытие и повтор закрытия данных Витрины",
+        "timer": "wb-core-sheet-vitrina-closure-retry.timer",
+    },
+    {
+        "key": "warehouse_functional",
+        "display_name": "Склады и себестоимость",
+        "timer": "wb-core-warehouse-functional-sync.timer",
+    },
+    {
+        "key": "wb_finance_weekly",
+        "display_name": "Финансовый отчёт WB",
+        "timer": "wb-core-wb-finance-weekly.timer",
+    },
+    {
+        "key": "feedback_complaints",
+        "display_name": "Авто-жалобы",
+        "timer": "wb-core-feedbacks-auto-complaints-tick.timer",
+        "schedule": "feedback_complaints",
+    },
+    {
+        "key": "spp_test",
+        "display_name": "Автоматический тест СПП",
+        "timer": "wb-core-spp-tester-schedule-tick.timer",
+        "schedule": "spp",
+    },
+    {
+        "key": "autoanswers_readonly",
+        "display_name": "Autoanswers read-only sync",
+        "timer": "wb-core-autoanswers-readonly-sync.timer",
+    },
+    {
+        "key": "autoanswers_worker",
+        "display_name": "Autoanswers worker",
+        "timer": "wb-core-autoanswers-worker.timer",
+    },
+)
 
 
 def _utc_now() -> str:
@@ -121,6 +172,14 @@ class SystemdClient:
         if result.returncode != 0:
             raise RuntimeError(
                 f"systemctl disable --now {unit} failed: "
+                + (result.stderr.strip() or f"exit {result.returncode}")
+            )
+
+    def enable_now(self, unit: str) -> None:
+        result = self._run(["enable", "--now", unit])
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"systemctl enable --now {unit} failed: "
                 + (result.stderr.strip() or f"exit {result.returncode}")
             )
 
@@ -210,6 +269,49 @@ class RuntimeScheduleClient:
         spp = dict(current.get("spp") or {})
         spp_schedule = dict(spp.get("schedule") or {})
         spp_schedule["enabled"] = False
+        self._request(SPP_SCHEDULE_PATH, {"schedule": spp_schedule})
+        return self.read_all()
+
+    def restore_selected(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+        *,
+        desired: Mapping[str, bool],
+    ) -> dict[str, dict[str, Any]]:
+        web = dict(baseline.get("web_vitrina") or {})
+        web_policy = dict(web.get("schedule_policy") or {})
+        web_schedules = [
+            {
+                **dict(item),
+                "enabled": bool(item.get("enabled")) and bool(desired.get("vitrina_refresh")),
+            }
+            for item in (web.get("schedules") or web.get("effective_schedules") or [])
+            if isinstance(item, Mapping)
+        ]
+        if not bool(desired.get("vitrina_refresh")):
+            web_policy.update({"mode": "manual", "interval_hours": None})
+        self._request(
+            WEB_SCHEDULE_PATH,
+            {"schedule_policy": web_policy, "schedules": web_schedules},
+        )
+
+        feedback = dict(baseline.get("feedback_complaints") or {})
+        feedback_schedules = [
+            {
+                **dict(item),
+                "enabled": bool(item.get("enabled"))
+                and bool(desired.get("feedback_complaints")),
+            }
+            for item in feedback.get("schedules", [])
+            if isinstance(item, Mapping)
+        ]
+        self._request(FEEDBACK_SCHEDULE_PATH, {"schedules": feedback_schedules})
+
+        spp = dict(baseline.get("spp") or {})
+        spp_schedule = dict(spp.get("schedule") or {})
+        spp_schedule["enabled"] = (
+            bool(spp_schedule.get("enabled")) and bool(desired.get("spp_test"))
+        )
         self._request(SPP_SCHEDULE_PATH, {"schedule": spp_schedule})
         return self.read_all()
 
@@ -354,6 +456,357 @@ def _append_audit_0600(path: Path, payload: Mapping[str, Any]) -> None:
     path.chmod(0o600)
 
 
+def _stable_fingerprint(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path.name} is not a JSON object")
+    return payload
+
+
+def _process_spec(process_key: str) -> dict[str, Any]:
+    for spec in PROCESS_SPECS:
+        if spec["key"] == process_key:
+            return dict(spec)
+    raise ValueError(f"unknown auto-update process key: {process_key}")
+
+
+def _initial_owner_policy(runtime_dir: Path) -> dict[str, Any]:
+    maintenance_state = _load_json_object(runtime_dir / STATE_FILENAME)
+    if not maintenance_state:
+        raise RuntimeError(
+            "cannot initialize owner policy without canonical maintenance audit state"
+        )
+    baseline = dict(maintenance_state.get("baseline") or {})
+    baseline_timers = dict(baseline.get("timers") or {})
+    schedule_baseline = dict(maintenance_state.get("runtime_schedule_baseline") or {})
+    warehouse_state = _load_json_object(
+        runtime_dir / WAREHOUSE_MAINTENANCE_STATE_FILENAME
+    )
+    warehouse_baseline = dict(
+        (((warehouse_state or {}).get("baseline") or {}).get("units") or {}).get(
+            "timer"
+        )
+        or {}
+    )
+    processes: dict[str, dict[str, Any]] = {}
+    for spec in PROCESS_SPECS:
+        timer = str(spec["timer"])
+        timer_evidence = dict(baseline_timers.get(timer) or {})
+        evidence_source = "business_data_maintenance.baseline"
+        if spec["key"] == "warehouse_functional" and warehouse_baseline:
+            timer_evidence = warehouse_baseline
+            evidence_source = "warehouse_functional_maintenance.baseline"
+        if not timer_evidence:
+            desired: bool | None = None
+        else:
+            desired = (
+                str(timer_evidence.get("is_enabled") or "") == "enabled"
+                and str(timer_evidence.get("is_active") or "") == "active"
+            )
+        schedule_key = str(spec.get("schedule") or "")
+        schedule_evidence = dict(schedule_baseline.get(schedule_key) or {})
+        if schedule_key == "web_vitrina" and schedule_evidence:
+            desired = bool(
+                [
+                    item
+                    for item in schedule_evidence.get("schedules", [])
+                    if isinstance(item, Mapping) and bool(item.get("enabled"))
+                ]
+            )
+        elif schedule_key == "feedback_complaints" and schedule_evidence:
+            desired = bool(
+                [
+                    item
+                    for item in schedule_evidence.get("schedules", [])
+                    if isinstance(item, Mapping) and bool(item.get("enabled"))
+                ]
+            )
+        elif schedule_key == "spp" and schedule_evidence:
+            desired = bool((schedule_evidence.get("schedule") or {}).get("enabled"))
+        evidence = {
+            "source": evidence_source,
+            "timer": timer_evidence,
+            "schedule": schedule_evidence,
+            "maintenance_hold_started_at": maintenance_state.get("hold_started_at"),
+            "maintenance_baseline_captured_at": baseline.get("captured_at"),
+        }
+        processes[str(spec["key"])] = {
+            "process_key": spec["key"],
+            "display_name": spec["display_name"],
+            "desired": desired,
+            "provenance": "proven" if desired is not None else "unknown",
+            "evidence": evidence,
+            "fingerprint": _stable_fingerprint(evidence),
+        }
+    created_at = _utc_now()
+    policy = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "revision": 1,
+        "master_desired": False,
+        "created_at": created_at,
+        "changed_at": created_at,
+        "actor": "initial_migration",
+        "reason": "migrated from canonical pre-hold maintenance evidence",
+        "processes": processes,
+        "runtime_schedule_baseline": schedule_baseline,
+        "migration_evidence": {
+            "business_maintenance_state_fingerprint": _stable_fingerprint(
+                maintenance_state
+            ),
+            "warehouse_maintenance_state_fingerprint": _stable_fingerprint(
+                warehouse_state
+            )
+            if warehouse_state
+            else None,
+        },
+    }
+    policy["policy_fingerprint"] = _stable_fingerprint(
+        {key: value for key, value in policy.items() if key != "policy_fingerprint"}
+    )
+    _save_json_0600(runtime_dir / POLICY_FILENAME, policy)
+    _append_audit_0600(
+        runtime_dir / POLICY_AUDIT_FILENAME,
+        {
+            "event": "initial_policy_migrated",
+            "captured_at": created_at,
+            "revision": 1,
+            "policy_fingerprint": policy["policy_fingerprint"],
+            "migration_evidence": policy["migration_evidence"],
+        },
+    )
+    return policy
+
+
+def load_or_initialize_owner_policy(runtime_dir: Path) -> dict[str, Any]:
+    return _load_json_object(runtime_dir / POLICY_FILENAME) or _initial_owner_policy(
+        runtime_dir
+    )
+
+
+def update_process_desired_state(
+    runtime_dir: Path,
+    *,
+    process_key: str,
+    desired: bool,
+    expected_revision: int,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    _process_spec(process_key)
+    policy = load_or_initialize_owner_policy(runtime_dir)
+    if int(policy.get("revision") or 0) != int(expected_revision):
+        raise RuntimeError(
+            f"stale policy revision: expected {expected_revision}, "
+            f"current {policy.get('revision')}"
+        )
+    processes = dict(policy.get("processes") or {})
+    process = dict(processes.get(process_key) or {})
+    before = process.get("desired")
+    process.update(
+        {
+            "desired": bool(desired),
+            "provenance": "explicit_owner_policy",
+            "changed_at": _utc_now(),
+            "changed_by": str(actor or "unknown"),
+            "change_reason": str(reason or "owner settings change"),
+        }
+    )
+    process["fingerprint"] = _stable_fingerprint(
+        {key: value for key, value in process.items() if key != "fingerprint"}
+    )
+    processes[process_key] = process
+    policy.update(
+        {
+            "revision": int(policy["revision"]) + 1,
+            "processes": processes,
+            "changed_at": _utc_now(),
+            "actor": str(actor or "unknown"),
+            "reason": str(reason or "owner settings change"),
+        }
+    )
+    policy["policy_fingerprint"] = _stable_fingerprint(
+        {key: value for key, value in policy.items() if key != "policy_fingerprint"}
+    )
+    _save_json_0600(runtime_dir / POLICY_FILENAME, policy)
+    _append_audit_0600(
+        runtime_dir / POLICY_AUDIT_FILENAME,
+        {
+            "event": "process_desired_changed",
+            "captured_at": _utc_now(),
+            "process_key": process_key,
+            "before": before,
+            "after": bool(desired),
+            "actor": actor,
+            "reason": reason,
+            "revision": policy["revision"],
+            "policy_fingerprint": policy["policy_fingerprint"],
+        },
+    )
+    return policy
+
+
+def _process_actual_state(
+    spec: Mapping[str, Any],
+    *,
+    status: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    timer = dict((status.get("timers") or {}).get(str(spec["timer"])) or {})
+    schedule_key = str(spec.get("schedule") or "")
+    schedule = dict((status.get("runtime_schedules") or {}).get(schedule_key) or {})
+    timer_on = (
+        str(timer.get("is_enabled") or "") == "enabled"
+        and str(timer.get("is_active") or "") == "active"
+    )
+    actual = timer_on
+    if schedule_key == "web_vitrina":
+        actual = timer_on and bool(schedule.get("enabled_ids"))
+    elif schedule_key == "feedback_complaints":
+        actual = timer_on and bool(schedule.get("enabled_ids"))
+    elif schedule_key == "spp":
+        actual = timer_on and bool(schedule.get("enabled"))
+    process = dict((policy.get("processes") or {}).get(str(spec["key"])) or {})
+    desired = process.get("desired")
+    drift = (
+        "unknown"
+        if desired is None
+        else "matched"
+        if bool(desired) == bool(actual)
+        else "drift"
+    )
+    properties = dict(timer.get("properties") or {})
+    return {
+        "process_key": spec["key"],
+        "display_name": spec["display_name"],
+        "desired": desired,
+        "actual": bool(actual),
+        "drift_status": drift,
+        "timer": timer,
+        "runtime_schedule": schedule,
+        "last_run": str(properties.get("LastTriggerUSec") or ""),
+        "last_success": (
+            str(properties.get("LastTriggerUSec") or "")
+            if str(properties.get("Result") or "success") == "success"
+            else ""
+        ),
+        "next_run": str(properties.get("NextElapseUSecRealtime") or ""),
+        "last_error": (
+            ""
+            if str(properties.get("Result") or "success") == "success"
+            else str(properties.get("Result") or "unknown")
+        ),
+        "schedule": schedule,
+        "fingerprint": process.get("fingerprint"),
+        "provenance": process.get("provenance"),
+    }
+
+
+def owner_policy_readback(
+    runtime_dir: Path,
+    *,
+    status: Mapping[str, Any],
+) -> dict[str, Any]:
+    policy = load_or_initialize_owner_policy(runtime_dir)
+    processes = [
+        _process_actual_state(spec, status=status, policy=policy)
+        for spec in PROCESS_SPECS
+    ]
+    unknown = [item["process_key"] for item in processes if item["desired"] is None]
+    drift = [
+        item["process_key"]
+        for item in processes
+        if item["drift_status"] == "drift"
+    ]
+    if not bool(policy.get("master_desired")):
+        overall = "Общая пауза включена"
+    elif unknown:
+        overall = "Состояние не подтверждено"
+    elif drift:
+        overall = "Есть расхождение или ошибка"
+    elif any(item["desired"] is False for item in processes):
+        overall = "Часть обновлений выключена"
+    else:
+        overall = "Все запланированные обновления работают"
+    return {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "master_desired": bool(policy.get("master_desired")),
+        "revision": int(policy.get("revision") or 0),
+        "policy_fingerprint": str(policy.get("policy_fingerprint") or ""),
+        "changed_at": str(policy.get("changed_at") or ""),
+        "actor": str(policy.get("actor") or ""),
+        "reason": str(policy.get("reason") or ""),
+        "overall_status": overall,
+        "unknown_processes": unknown,
+        "drift_processes": drift,
+        "processes": processes,
+        "audit_path": str(runtime_dir / POLICY_AUDIT_FILENAME),
+    }
+
+
+def _set_master_policy_paused(
+    runtime_dir: Path,
+    *,
+    actor: str,
+    reason: str,
+    expected_revision: int | None = None,
+    runtime_schedule_baseline: Mapping[str, Mapping[str, Any]] | None = None,
+    pre_hold_readback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = load_or_initialize_owner_policy(runtime_dir)
+    if expected_revision is not None and int(policy.get("revision") or 0) != int(
+        expected_revision
+    ):
+        raise RuntimeError(
+            f"stale policy revision: expected {expected_revision}, "
+            f"current {policy.get('revision')}"
+        )
+    if not bool(policy.get("master_desired")):
+        return policy
+    policy.update(
+        {
+            "master_desired": False,
+            "revision": int(policy.get("revision") or 0) + 1,
+            "changed_at": _utc_now(),
+            "actor": actor,
+            "reason": reason,
+            "runtime_schedule_baseline": (
+                dict(runtime_schedule_baseline)
+                if runtime_schedule_baseline is not None
+                else dict(policy.get("runtime_schedule_baseline") or {})
+            ),
+            "pre_hold_readback": dict(pre_hold_readback or {}),
+        }
+    )
+    policy["policy_fingerprint"] = _stable_fingerprint(
+        {key: value for key, value in policy.items() if key != "policy_fingerprint"}
+    )
+    _save_json_0600(runtime_dir / POLICY_FILENAME, policy)
+    _append_audit_0600(
+        runtime_dir / POLICY_AUDIT_FILENAME,
+        {
+            "event": "master_paused",
+            "captured_at": _utc_now(),
+            "revision": policy["revision"],
+            "actor": actor,
+            "reason": reason,
+            "policy_fingerprint": policy["policy_fingerprint"],
+        },
+    )
+    return policy
+
+
 def maintenance_status(
     runtime_dir: Path,
     *,
@@ -398,7 +851,7 @@ def maintenance_status(
         and not cron
         and not unknown_timers
     )
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "status": "quiet" if quiet else "not_quiet",
         "quiet": quiet,
@@ -414,6 +867,22 @@ def maintenance_status(
         "state_path": str(runtime_dir / STATE_FILENAME),
         "audit_path": str(runtime_dir / AUDIT_FILENAME),
     }
+    # Status/Settings GET is a readback boundary and must never create policy
+    # state.  Initial migration happens only inside an explicit hold/update
+    # mutation, where the canonical pre-hold evidence is already durable.
+    if (runtime_dir / POLICY_FILENAME).is_file():
+        result["auto_updates"] = owner_policy_readback(runtime_dir, status=result)
+    else:
+        result["auto_updates"] = {
+            "schema_version": POLICY_SCHEMA_VERSION,
+            "master_desired": False,
+            "revision": 0,
+            "overall_status": "Состояние не подтверждено",
+            "unknown_processes": [str(item["key"]) for item in PROCESS_SPECS],
+            "drift_processes": [],
+            "processes": [],
+        }
+    return result
 
 
 def maintenance_hold(
@@ -424,12 +893,18 @@ def maintenance_hold(
     proc_root: Path = Path("/proc"),
     wait_timeout_seconds: float = 1200.0,
     poll_interval_seconds: float = 2.0,
+    actor: str = "business_data_maintenance",
+    reason: str = "canonical cross-writer hold",
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     prepared = maintenance_prepare(
         runtime_dir,
         systemd=systemd,
         schedules=schedules,
         proc_root=proc_root,
+        actor=actor,
+        reason=reason,
+        expected_revision=expected_revision,
     )
     if prepared.get("quiet"):
         state_path = runtime_dir / STATE_FILENAME
@@ -461,12 +936,215 @@ def maintenance_hold(
     return {**current, "status": "held", "idempotent": False}
 
 
+def maintenance_restore(
+    runtime_dir: Path,
+    *,
+    systemd: SystemdClient,
+    schedules: RuntimeScheduleClient,
+    proc_root: Path = Path("/proc"),
+    actor: str = "repo_owned_cli",
+    reason: str = "bounded recovery completed",
+    expected_revision: int | None = None,
+    warehouse_restore: Any | None = None,
+) -> dict[str, Any]:
+    policy = load_or_initialize_owner_policy(runtime_dir)
+    revision = int(policy.get("revision") or 0)
+    if expected_revision is not None and revision != int(expected_revision):
+        raise RuntimeError(
+            f"stale policy revision: expected {expected_revision}, current {revision}"
+        )
+    desired = {
+        key: value.get("desired")
+        for key, value in dict(policy.get("processes") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    unknown = sorted(key for key, value in desired.items() if value is None)
+    if unknown:
+        raise RuntimeError(
+            "unsafe resume blocked by unknown intended process states: "
+            + ",".join(unknown)
+        )
+    if bool(desired.get("autoanswers_readonly")) or bool(
+        desired.get("autoanswers_worker")
+    ):
+        raise RuntimeError(
+            "Autoanswers ON requires its dedicated lifecycle contract; owner policy remains fail-closed"
+        )
+    before = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    if bool(policy.get("master_desired")):
+        readback = owner_policy_readback(runtime_dir, status=before)
+        if not readback["unknown_processes"] and not readback["drift_processes"]:
+            return {
+                **before,
+                "status": "restored",
+                "idempotent": True,
+                "auto_updates": readback,
+            }
+        raise RuntimeError(
+            "owner policy is already resumed but desired/actual drift exists: "
+            + ",".join(readback["drift_processes"] or readback["unknown_processes"])
+        )
+    if before["unknown_wb_core_timers"]:
+        raise RuntimeError(
+            "unknown wb-core timers block resume: "
+            + ",".join(before["unknown_wb_core_timers"])
+        )
+    if before["cron_entries"]:
+        raise RuntimeError("cron drift blocks auto-update resume")
+    if before["writer_processes"]:
+        raise RuntimeError("writer processes are still active")
+    if any(
+        bool(value.get("held"))
+        for key, value in before["writer_locks"].items()
+        if key != "seller_portal"
+    ) or bool((before["writer_locks"].get("seller_portal") or {}).get("busy")):
+        raise RuntimeError("maintenance/shared lock is still held")
+    if not before["quiet"]:
+        raise RuntimeError("business-data maintenance is not quiet before resume")
+    schedule_baseline = dict(policy.get("runtime_schedule_baseline") or {})
+    try:
+        schedules.restore_selected(
+            schedule_baseline,
+            desired={key: bool(value) for key, value in desired.items()},
+        )
+        for spec in PROCESS_SPECS:
+            key = str(spec["key"])
+            unit = str(spec["timer"])
+            if key == "warehouse_functional":
+                continue
+            if bool(desired.get(key)):
+                systemd.enable_now(unit)
+            else:
+                systemd.disable_now(unit)
+        if bool(desired.get("warehouse_functional")):
+            if warehouse_restore is None:
+                from packages.application.warehouse_functional_maintenance import (
+                    maintenance_restore as restore_warehouse_timer,
+                )
+
+                warehouse_result = restore_warehouse_timer(runtime_dir)
+            else:
+                warehouse_result = warehouse_restore(runtime_dir)
+            if str((warehouse_result or {}).get("status") or "") != "restored":
+                raise RuntimeError("warehouse timer restore did not return restored status")
+        else:
+            systemd.disable_now("wb-core-warehouse-functional-sync.timer")
+    except Exception as exc:
+        for unit in ALL_BUSINESS_TIMER_UNITS:
+            systemd.disable_now(unit)
+        schedules.disable_all(schedules.read_all())
+        _append_audit_0600(
+            runtime_dir / POLICY_AUDIT_FILENAME,
+            {
+                "event": "master_resume_failed",
+                "captured_at": _utc_now(),
+                "revision": revision,
+                "actor": actor,
+                "reason": reason,
+                "error": str(exc),
+            },
+        )
+        raise
+
+    after = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    preview_policy = dict(policy)
+    preview_policy["master_desired"] = True
+    actual = [
+        _process_actual_state(spec, status=after, policy=preview_policy)
+        for spec in PROCESS_SPECS
+    ]
+    drift = [item["process_key"] for item in actual if item["drift_status"] != "matched"]
+    if drift:
+        for unit in ALL_BUSINESS_TIMER_UNITS:
+            systemd.disable_now(unit)
+        schedules.disable_all(schedules.read_all())
+        raise RuntimeError("post-resume desired/actual drift: " + ",".join(drift))
+    policy.update(
+        {
+            "master_desired": True,
+            "revision": revision + 1,
+            "changed_at": _utc_now(),
+            "actor": actor,
+            "reason": reason,
+            "pre_resume_readback": {
+                "captured_at": before.get("captured_at"),
+                "quiet": before.get("quiet"),
+            },
+            "post_resume_readback": {
+                "captured_at": after.get("captured_at"),
+                "processes": actual,
+            },
+        }
+    )
+    policy["policy_fingerprint"] = _stable_fingerprint(
+        {key: value for key, value in policy.items() if key != "policy_fingerprint"}
+    )
+    _save_json_0600(runtime_dir / POLICY_FILENAME, policy)
+    _append_audit_0600(
+        runtime_dir / POLICY_AUDIT_FILENAME,
+        {
+            "event": "master_resumed",
+            "captured_at": _utc_now(),
+            "revision": policy["revision"],
+            "actor": actor,
+            "reason": reason,
+            "policy_fingerprint": policy["policy_fingerprint"],
+            "processes": actual,
+        },
+    )
+    final = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    state_path = runtime_dir / STATE_FILENAME
+    state = _load_json_object(state_path) or {}
+    state.update(
+        {
+            "phase": "restored",
+            "restored_at": _utc_now(),
+            "restore_policy_revision": policy["revision"],
+            "restore_readback": final,
+        }
+    )
+    _save_json_0600(state_path, state)
+    _append_audit_0600(
+        runtime_dir / AUDIT_FILENAME,
+        {
+            "event": "hold_restored",
+            "captured_at": _utc_now(),
+            "policy_revision": policy["revision"],
+            "status": final,
+        },
+    )
+    return {
+        **final,
+        "status": "restored",
+        "idempotent": False,
+        "auto_updates": owner_policy_readback(runtime_dir, status=final),
+    }
+
+
 def maintenance_prepare(
     runtime_dir: Path,
     *,
     systemd: SystemdClient,
     schedules: RuntimeScheduleClient,
     proc_root: Path = Path("/proc"),
+    actor: str = "business_data_maintenance",
+    reason: str = "canonical cross-writer hold",
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
     audit_path = runtime_dir / AUDIT_FILENAME
@@ -475,7 +1153,8 @@ def maintenance_prepare(
         loaded = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise RuntimeError("business maintenance state is not a JSON object")
-        existing = loaded
+        if str(loaded.get("phase") or "") not in {"restored", "released"}:
+            existing = loaded
     before_payloads = schedules.read_all()
     before = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
     already_quiet = bool(before["quiet"])
@@ -495,6 +1174,14 @@ def maintenance_prepare(
     )
     _save_json_0600(state_path, state)
     _append_audit_0600(audit_path, {"event": "hold_started", "captured_at": _utc_now(), "status": before})
+    _set_master_policy_paused(
+        runtime_dir,
+        actor=actor,
+        reason=reason,
+        expected_revision=expected_revision,
+        runtime_schedule_baseline=before_payloads,
+        pre_hold_readback=before,
+    )
 
     for unit in CORE_TIMER_UNITS:
         systemd.disable_now(unit)
@@ -508,12 +1195,20 @@ def maintenance_prepare(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "prepare", "hold"))
+    parser.add_argument(
+        "action",
+        choices=("status", "prepare", "hold", "restore", "set-process"),
+    )
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--base-url", default="")
     parser.add_argument("--wait-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
+    parser.add_argument("--process-key", default="")
+    parser.add_argument("--desired", choices=("on", "off"), default="")
+    parser.add_argument("--expected-revision", type=int)
+    parser.add_argument("--actor", default="repo_owned_cli")
+    parser.add_argument("--reason", default="")
     args = parser.parse_args(argv)
     env = _read_env_file(Path(args.env_file))
     base_url = (
@@ -528,7 +1223,7 @@ def main(argv: list[str] | None = None) -> int:
         result = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
     elif args.action == "prepare":
         result = maintenance_prepare(runtime_dir, systemd=systemd, schedules=schedules)
-    else:
+    elif args.action == "hold":
         result = maintenance_hold(
             runtime_dir,
             systemd=systemd,
@@ -536,6 +1231,34 @@ def main(argv: list[str] | None = None) -> int:
             wait_timeout_seconds=args.wait_timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
         )
+    elif args.action == "restore":
+        result = maintenance_restore(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            actor=args.actor,
+            reason=args.reason or "bounded recovery completed",
+            expected_revision=args.expected_revision,
+        )
+    else:
+        if not args.process_key or not args.desired or args.expected_revision is None:
+            raise ValueError(
+                "set-process requires --process-key, --desired and --expected-revision"
+            )
+        policy = update_process_desired_state(
+            runtime_dir,
+            process_key=args.process_key,
+            desired=args.desired == "on",
+            expected_revision=args.expected_revision,
+            actor=args.actor,
+            reason=args.reason or "owner settings change",
+        )
+        status = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
+        result = {
+            "status": "updated",
+            "policy": policy,
+            "auto_updates": owner_policy_readback(runtime_dir, status=status),
+        }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 

@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("hourly-sync")
     manual_sync = commands.add_parser("manual-sync")
     manual_sync.add_argument("--backup-dir", required=True)
+    sync_dry_run = commands.add_parser("sync-dry-run")
+    sync_dry_run.add_argument("--output", default="")
+    sync_apply = commands.add_parser("sync-apply")
+    _add_exact_plan_args(sync_apply)
+    sync_apply.add_argument("--backup-dir", required=True)
 
     emergency_dry_run = commands.add_parser("emergency-dry-run")
     emergency_dry_run.add_argument("--output", default="")
@@ -153,6 +158,88 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     timestamp=block.timestamp_factory(),
                 ),
             }
+    if args.command == "sync-dry-run":
+        plan, preflight = _build_sync_plan_from_disposable_refresh(runtime)
+        return _write_optional_plan(plan, str(args.output or ""), supply_refresh=preflight)
+    if args.command == "sync-apply":
+        reviewed_plan = _read_exact_plan(
+            args.plan_file,
+            args.fingerprint,
+            expected_kind="hourly_wb_sync",
+        )
+        with warehouse_functional_write_lock(runtime.runtime_dir):
+            block.calculation_parameters.preflight_fresh_economics_backup_capacity(
+                Path(str(args.backup_dir)),
+            )
+            backup_result = {
+                **_create_pre_sync_backup(
+                    runtime,
+                    backup_dir=Path(str(args.backup_dir)),
+                    timestamp=block.timestamp_factory(),
+                ),
+                "backup_scope": "reviewed_bounded_recovery",
+            }
+            if str(backup_result.get("integrity_check") or "").lower() != "ok":
+                _discard_uncommitted_backup(backup_result)
+                raise RuntimeError(
+                    "reviewed bounded recovery backup integrity_check is not ok"
+                )
+            try:
+                supply_refresh = _refresh_official_supply_state(
+                    runtime,
+                    record_ff_movements=False,
+                )
+                downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
+                ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
+                fresh_plan = block.build_sync_plan()
+                recheck = _verify_sync_external_recheck(reviewed_plan, fresh_plan)
+                result = block.apply_plan(
+                    reviewed_plan,
+                    confirm_fingerprint=str(args.fingerprint),
+                )
+                proxy_recalculation = (
+                    block.calculation_parameters.process_pending_targeted_recalculations(
+                        verified_backup=backup_result,
+                    )
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
+                    )
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else block.calculation_parameters.publish_current_functional_economics(
+                        verified_backup=backup_result,
+                    )
+                )
+                return {
+                    "status": "success",
+                    "mode": "reviewed_sync_apply",
+                    "reviewed_plan_fingerprint": args.fingerprint,
+                    "backup": backup_result,
+                    "supply_refresh": supply_refresh,
+                    "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "ff_state": ff_state,
+                    "external_optimistic_recheck": recheck,
+                    "diff": reviewed_plan.get("diff"),
+                    "active_version": result.get("active_version"),
+                    "sync": result.get("sync"),
+                    "reconciliation": result.get("reconciliation"),
+                    "proxy_targeted_recalculation": proxy_recalculation,
+                    "functional_economics_publication": {
+                        "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                        "changed_snapshot_count": economics_publication.get(
+                            "changed_snapshot_count"
+                        ),
+                        "database_written": economics_publication.get("database_written"),
+                        "backup_archive": economics_publication.get("backup_archive"),
+                    },
+                }
+            except Exception as exc:
+                block.record_failed_sync(exc)
+                raise
     if args.command in {"hourly-sync", "manual-sync"}:
         with warehouse_functional_write_lock(runtime.runtime_dir):
             if args.command == "manual-sync":
@@ -330,6 +417,36 @@ def _build_cutover_plan_from_disposable_refresh(
     }
 
 
+def _build_sync_plan_from_disposable_refresh(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a mutation-free reviewed recovery plan against fresh official sources."""
+
+    with tempfile.TemporaryDirectory(prefix="wb-core-functional-sync-plan-") as raw_dir:
+        disposable_dir = Path(raw_dir) / "state"
+        disposable_dir.mkdir(parents=True, exist_ok=True)
+        runtime.backup_database(disposable_dir / "registry_upload_runtime.sqlite3")
+        disposable_runtime = RegistryUploadDbBackedRuntime(runtime_dir=disposable_dir)
+        supply_refresh = _refresh_official_supply_state(
+            disposable_runtime,
+            record_ff_movements=False,
+        )
+        downstream_cost_layers = _materialize_downstream_cost_layers(disposable_runtime)
+        ff_state = WbSuppliesBlock(runtime=disposable_runtime).reconcile_functional_ff_state()
+        disposable_block = WarehouseFunctionalBlock(
+            runtime=disposable_runtime,
+            stocks_block=_fresh_stocks_block(),
+        )
+        plan = disposable_block.build_sync_plan()
+    return plan, {
+        **supply_refresh,
+        "downstream_cost_layers_materialized": downstream_cost_layers,
+        "ff_state": ff_state,
+        "production_source_mutation": False,
+        "capture_mode": "coherent_disposable_sqlite_copy",
+    }
+
+
 def _refresh_official_supply_state(
     runtime: RegistryUploadDbBackedRuntime,
     *,
@@ -430,6 +547,64 @@ def _verify_cutover_external_recheck(
         )
     if not bool(fresh_snapshot.get("pagination_complete")):
         raise RuntimeError("official WB optimistic recheck is incomplete")
+
+
+def _verify_sync_external_recheck(
+    reviewed: Mapping[str, Any],
+    fresh: Mapping[str, Any],
+) -> dict[str, Any]:
+    reviewed_snapshot = dict(reviewed.get("wb_snapshot") or {})
+    fresh_snapshot = dict(fresh.get("wb_snapshot") or {})
+    comparisons = {
+        "base_active_version_id": (
+            reviewed.get("base_active_version_id"),
+            fresh.get("base_active_version_id"),
+        ),
+        "local_source_digest": (
+            reviewed.get("local_source_digest"),
+            fresh.get("local_source_digest"),
+        ),
+        "wb_supply_source_digest": (
+            reviewed.get("wb_supply_source_digest"),
+            fresh.get("wb_supply_source_digest"),
+        ),
+        "wb_snapshot.snapshot_date": (
+            reviewed_snapshot.get("snapshot_date"),
+            fresh_snapshot.get("snapshot_date"),
+        ),
+        "wb_snapshot.raw_rows_digest": (
+            reviewed_snapshot.get("raw_rows_digest"),
+            fresh_snapshot.get("raw_rows_digest"),
+        ),
+        "wb_snapshot.requested_nm_ids": (
+            reviewed_snapshot.get("requested_nm_ids"),
+            fresh_snapshot.get("requested_nm_ids"),
+        ),
+        "wb_snapshot.raw_row_count": (
+            reviewed_snapshot.get("raw_row_count"),
+            fresh_snapshot.get("raw_row_count"),
+        ),
+        "calculation_digest": (
+            reviewed.get("calculation_digest"),
+            fresh.get("calculation_digest"),
+        ),
+        "diff": (reviewed.get("diff"), fresh.get("diff")),
+        "invariants": (reviewed.get("invariants"), fresh.get("invariants")),
+    }
+    drifted = [key for key, (before, after) in comparisons.items() if before != after]
+    if drifted:
+        raise RuntimeError(
+            "reviewed warehouse sync plan is stale after source recheck: "
+            + ",".join(drifted)
+        )
+    if not bool(fresh_snapshot.get("pagination_complete")):
+        raise RuntimeError("official WB optimistic recheck is incomplete")
+    return {
+        "status": "matched",
+        "primary_sources_changed": False,
+        "checked_fields": sorted(comparisons),
+        "fresh_plan_fingerprint": fresh.get("plan_fingerprint"),
+    }
 
 
 def _read_exact_plan(plan_file: str, fingerprint: str, *, expected_kind: str) -> dict[str, Any]:

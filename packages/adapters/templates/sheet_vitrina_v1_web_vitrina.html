@@ -5402,8 +5402,10 @@
         <button class="warehouse-switch" type="button" data-warehouse-key="ff_to_wb">В пути: FF → WB</button>
         <button class="warehouse-switch" type="button" data-warehouse-key="wb">Склад WB</button>
         <button class="warehouse-switch" type="button" data-warehouse-key="wb_acceptance_discrepancy">Расхождения приёмки WB</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="update">Обновление и пересчёт</button>
       </nav>
 
+      <div data-warehouse-detail-view>
       <section class="warehouse-card" aria-live="polite">
         <div class="warehouse-head">
           <div>
@@ -5411,8 +5413,6 @@
             <p class="warehouse-meta" data-warehouse-meta>Загрузка зафиксированного остатка…</p>
           </div>
           <div class="warehouse-actions">
-            <button class="warehouse-action" type="button" data-warehouse-sync>Обновить WB</button>
-            <button class="warehouse-action is-danger" type="button" data-warehouse-emergency>Пересчитать все склады и себестоимость</button>
             <span class="warehouse-status" data-tone="neutral" data-warehouse-status>Загрузка…</span>
             <p class="warehouse-status-detail" data-warehouse-status-detail>Получаем время и состояние последней синхронизации…</p>
           </div>
@@ -5453,6 +5453,32 @@
             <tbody data-warehouse-documents><tr><td colspan="12"><p class="warehouse-empty">Загрузка…</p></td></tr></tbody>
           </table>
         </div>
+      </section>
+      </div>
+
+      <section class="warehouse-card" data-warehouse-update-view aria-live="polite" hidden>
+        <div class="warehouse-head">
+          <div>
+            <h1 class="warehouse-title">Обновление и пересчёт</h1>
+            <p class="warehouse-meta">Canonical current-source pipeline для всех шести складов и себестоимостей. Исторический emergency rebuild здесь не запускается.</p>
+          </div>
+          <button class="warehouse-action" type="button" data-warehouse-update-start>Пересчитать все склады и себестоимости</button>
+        </div>
+        <p class="warehouse-status-detail" data-warehouse-update-status>Обновление ещё не запускалось.</p>
+        <div class="warehouse-summary">
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Последняя попытка</span><span class="warehouse-summary-value" data-warehouse-update-attempt>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Последний успешный запуск</span><span class="warehouse-summary-value" data-warehouse-update-success>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Run ID</span><span class="warehouse-summary-value" data-warehouse-update-run-id>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Изменено складов / SKU</span><span class="warehouse-summary-value" data-warehouse-update-changes>0 / 0</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Functional version</span><span class="warehouse-summary-value" data-warehouse-update-version>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Business date</span><span class="warehouse-summary-value" data-warehouse-update-business-date>—</span></div>
+        </div>
+        <h2 class="warehouse-section-title">Короткий лог</h2>
+        <ol data-warehouse-update-log><li>Запусков пока нет.</li></ol>
+        <details>
+          <summary>Технические детали</summary>
+          <pre data-warehouse-update-technical>{}</pre>
+        </details>
       </section>
       </div>
       <iframe class="operator-embed-frame" title="Отчёт об остатках" data-operator-embed-frame="warehouse-stock-report" data-warehouse-stock-report-frame scrolling="no" hidden></iframe>
@@ -6275,8 +6301,18 @@
     const warehouseSummaryNode = document.querySelector("[data-warehouse-summary]");
     const warehouseBalancesNode = document.querySelector("[data-warehouse-balances]");
     const warehouseDocumentsNode = document.querySelector("[data-warehouse-documents]");
-    const warehouseSyncButton = document.querySelector("[data-warehouse-sync]");
-    const warehouseEmergencyButton = document.querySelector("[data-warehouse-emergency]");
+    const warehouseDetailView = document.querySelector("[data-warehouse-detail-view]");
+    const warehouseUpdateView = document.querySelector("[data-warehouse-update-view]");
+    const warehouseUpdateStartButton = document.querySelector("[data-warehouse-update-start]");
+    const warehouseUpdateStatusNode = document.querySelector("[data-warehouse-update-status]");
+    const warehouseUpdateAttemptNode = document.querySelector("[data-warehouse-update-attempt]");
+    const warehouseUpdateSuccessNode = document.querySelector("[data-warehouse-update-success]");
+    const warehouseUpdateRunIdNode = document.querySelector("[data-warehouse-update-run-id]");
+    const warehouseUpdateChangesNode = document.querySelector("[data-warehouse-update-changes]");
+    const warehouseUpdateVersionNode = document.querySelector("[data-warehouse-update-version]");
+    const warehouseUpdateBusinessDateNode = document.querySelector("[data-warehouse-update-business-date]");
+    const warehouseUpdateLogNode = document.querySelector("[data-warehouse-update-log]");
+    const warehouseUpdateTechnicalNode = document.querySelector("[data-warehouse-update-technical]");
     const warehouseCostsButton = document.querySelector("[data-open-warehouse-costs]");
     const warehouseStockReportButton = document.querySelector("[data-open-stock-report]");
     const warehouseCostView = document.querySelector("[data-warehouse-cost-view]");
@@ -6556,7 +6592,7 @@
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const WAREHOUSES_UNIFIED_TAB = "warehouses";
     const DEFAULT_WAREHOUSE_KEY = "production";
-    const VALID_WAREHOUSE_KEYS = new Set(["production", "china_to_ff", "ff", "ff_to_wb", "wb", "wb_acceptance_discrepancy"]);
+    const VALID_WAREHOUSE_KEYS = new Set(["production", "china_to_ff", "ff", "ff_to_wb", "wb", "wb_acceptance_discrepancy", "update"]);
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const ADS_UNIFIED_TAB = "ads";
     const PRICES_UNIFIED_TAB = "prices";
@@ -6765,7 +6801,9 @@
         loading: false,
         requestSequence: 0,
         payload: null,
-        error: ""
+        error: "",
+        updateRunId: "",
+        updatePollTimer: null
       },
       tableSnapshot: {
         displayedRequestKey: "",
@@ -7284,8 +7322,7 @@
         activateWarehouseSubsection("stock-report");
       });
     }
-    if (warehouseSyncButton) warehouseSyncButton.addEventListener("click", runWarehouseManualSync);
-    if (warehouseEmergencyButton) warehouseEmergencyButton.addEventListener("click", runWarehouseEmergencyRebuild);
+    if (warehouseUpdateStartButton) warehouseUpdateStartButton.addEventListener("click", startWarehouseCurrentSync);
     window.addEventListener("message", handleOperatorEmbedMessage);
 
     if (researchPanelNode) {
@@ -8165,12 +8202,23 @@
         url.hash = "";
         window.history.replaceState({}, "", url.toString());
       }
+      const updateSelected = key === "update";
+      if (warehouseDetailView) warehouseDetailView.hidden = updateSelected;
+      if (warehouseUpdateView) warehouseUpdateView.hidden = !updateSelected;
+      if (updateSelected) {
+        loadWarehouseCurrentSyncStatus();
+        return key;
+      }
+      stopWarehouseCurrentSyncPolling();
       ensureWarehouseLoaded(key, options);
       return key;
     }
 
     function ensureWarehouseLoaded(warehouseKey, options) {
       const key = normalizeWarehouseKey(warehouseKey);
+      if (key === "update") {
+        return loadWarehouseCurrentSyncStatus();
+      }
       if ((!options || options.force !== true) && state.warehouses.loadedKey === key && state.warehouses.payload) {
         renderWarehousePayload(state.warehouses.payload);
         return Promise.resolve();
@@ -8363,48 +8411,87 @@
       }
     }
 
-    async function runWarehouseManualSync() {
-      if (!warehouseSyncButton || warehouseSyncButton.disabled) return;
-      const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
-      setWarehouseActionState(warehouseSyncButton, "loading", "Обновляем…");
-      try {
-        const response = await fetch(basePath + "/sync", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-        if (!response.ok) throw new Error("HTTP " + response.status + ": " + await response.text());
-        await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
-        setWarehouseActionState(warehouseSyncButton, "success", "WB обновлён");
-      } catch (error) {
-        // The sync endpoint persists its failure while retaining the active last-good
-        // warehouse version. Reload the detail so operators keep the usable balances
-        // and see the backend-localized failure reason instead of a generic error table.
-        await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
-        setWarehouseActionState(warehouseSyncButton, "error", "Ошибка обновления");
-      } finally {
-        window.setTimeout(function() {
-          setWarehouseActionState(warehouseSyncButton, "normal", "Обновить WB");
-        }, 1800);
+    function stopWarehouseCurrentSyncPolling() {
+      if (state.warehouses.updatePollTimer) {
+        window.clearTimeout(state.warehouses.updatePollTimer);
+        state.warehouses.updatePollTimer = null;
       }
     }
 
-    async function runWarehouseEmergencyRebuild() {
-      if (!warehouseEmergencyButton || warehouseEmergencyButton.disabled) return;
+    function scheduleWarehouseCurrentSyncPolling() {
+      stopWarehouseCurrentSyncPolling();
+      if (state.warehouses.activeKey !== "update") return;
+      state.warehouses.updatePollTimer = window.setTimeout(function() {
+        loadWarehouseCurrentSyncStatus(state.warehouses.updateRunId);
+      }, 1800);
+    }
+
+    function renderWarehouseCurrentSyncStatus(payload) {
+      const status = String((payload && payload.status) || "never");
+      state.warehouses.updateRunId = String((payload && payload.run_id) || "");
+      if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent = String((payload && payload.user_status) || "Состояние не подтверждено");
+      if (warehouseUpdateAttemptNode) warehouseUpdateAttemptNode.textContent = warehouseDate(payload && payload.last_attempt_at);
+      if (warehouseUpdateSuccessNode) warehouseUpdateSuccessNode.textContent = warehouseDate(payload && payload.last_success_at);
+      if (warehouseUpdateRunIdNode) warehouseUpdateRunIdNode.textContent = state.warehouses.updateRunId || "—";
+      if (warehouseUpdateChangesNode) warehouseUpdateChangesNode.textContent =
+        warehouseNumber(payload && payload.changed_warehouses) + " / " + warehouseNumber(payload && payload.changed_skus);
+      if (warehouseUpdateVersionNode) warehouseUpdateVersionNode.textContent = String((payload && payload.functional_version_id) || "—");
+      if (warehouseUpdateBusinessDateNode) warehouseUpdateBusinessDateNode.textContent = String((payload && payload.business_date) || "—");
+      if (warehouseUpdateLogNode) {
+        const lines = Array.isArray(payload && payload.short_log) ? payload.short_log : [];
+        warehouseUpdateLogNode.innerHTML = lines.length
+          ? lines.map(function(line) { return "<li>" + escapeHtml(line) + "</li>"; }).join("")
+          : "<li>Запусков пока нет.</li>";
+      }
+      if (warehouseUpdateTechnicalNode) {
+        warehouseUpdateTechnicalNode.textContent = JSON.stringify((payload && payload.technical_details) || {}, null, 2);
+      }
+      if (warehouseUpdateStartButton) {
+        const running = status === "running" || status === "busy";
+        setWarehouseActionState(
+          warehouseUpdateStartButton,
+          running ? "loading" : (status === "error" ? "error" : "normal"),
+          running ? "Пересчёт выполняется…" : "Пересчитать все склады и себестоимости"
+        );
+      }
+      if (status === "running" || status === "busy") {
+        scheduleWarehouseCurrentSyncPolling();
+      } else {
+        stopWarehouseCurrentSyncPolling();
+      }
+    }
+
+    async function loadWarehouseCurrentSyncStatus(runId) {
       const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
-      setWarehouseActionState(warehouseEmergencyButton, "loading", "Строим dry-run…");
+      const query = runId ? "?run_id=" + encodeURIComponent(runId) : "";
       try {
-        const previewResponse = await fetch(basePath + "/emergency-rebuild/preview", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-        if (!previewResponse.ok) throw new Error("HTTP " + previewResponse.status + ": " + await previewResponse.text());
-        const plan = await previewResponse.json();
-        const count = Number(plan && plan.diff && plan.diff.changed_line_count || 0);
-        if (warehouseStatusDetailNode) {
-          warehouseStatusDetailNode.textContent = "Dry-run готов: " + count + " изменённых строк, exact plan " + String(plan.plan_fingerprint || "—") + ". Применение выполняется через защищённый release-контур с backup и readback.";
-        }
-        setWarehouseActionState(warehouseEmergencyButton, "success", "Dry-run готов");
+        const response = await fetch(basePath + "/sync/status" + query, {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        renderWarehouseCurrentSyncStatus(payload);
       } catch (error) {
-        renderWarehouseError(String(error && error.message ? error.message : error));
-        setWarehouseActionState(warehouseEmergencyButton, "error", "Ошибка пересчёта");
-      } finally {
-        window.setTimeout(function() {
-          setWarehouseActionState(warehouseEmergencyButton, "normal", "Пересчитать все склады и себестоимость");
-        }, 1800);
+        if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent = "Не завершено: " + String(error && error.message ? error.message : error);
+        setWarehouseActionState(warehouseUpdateStartButton, "error", "Повторить");
+        stopWarehouseCurrentSyncPolling();
+      }
+    }
+
+    async function startWarehouseCurrentSync() {
+      if (!warehouseUpdateStartButton || warehouseUpdateStartButton.disabled) return;
+      const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+      setWarehouseActionState(warehouseUpdateStartButton, "loading", "Запускаем…");
+      try {
+        const response = await fetch(basePath + "/sync", {
+          method: "POST",
+          headers: {Accept: "application/json", "Content-Type": "application/json"},
+          body: "{}"
+        });
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        renderWarehouseCurrentSyncStatus(payload);
+      } catch (error) {
+        if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent = "Не завершено: " + String(error && error.message ? error.message : error);
+        setWarehouseActionState(warehouseUpdateStartButton, "error", "Повторить");
       }
     }
 

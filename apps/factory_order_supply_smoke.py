@@ -71,6 +71,7 @@ class FakeStocksBlock:
 
     def execute(self, request_obj: object) -> SimpleNamespace:
         items = []
+        warehouse_rows = []
         for nm_id in self.nm_ids:
             stock_total = 0.0
             if nm_id == 210183919:
@@ -78,7 +79,49 @@ class FakeStocksBlock:
             elif nm_id == 210184534:
                 stock_total = 20.0
             items.append(SimpleNamespace(nm_id=nm_id, stock_total=stock_total))
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
+            if nm_id == 210183919:
+                warehouse_rows.extend(
+                    [
+                        SimpleNamespace(
+                            nm_id=nm_id,
+                            warehouse_id=120762,
+                            warehouse_name="Электросталь",
+                            quantity=60.0,
+                            in_way_to_client=4.0,
+                            in_way_from_client=2.0,
+                        ),
+                        SimpleNamespace(
+                            nm_id=nm_id,
+                            warehouse_id=999,
+                            warehouse_name="Другой склад",
+                            quantity=40.0,
+                            in_way_to_client=0.0,
+                            in_way_from_client=0.0,
+                        ),
+                    ]
+                )
+            elif stock_total:
+                warehouse_rows.append(
+                    SimpleNamespace(
+                        nm_id=nm_id,
+                        warehouse_id=999,
+                        warehouse_name="Другой склад",
+                        quantity=stock_total,
+                        in_way_to_client=0.0,
+                        in_way_from_client=0.0,
+                    )
+                )
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                items=items,
+                warehouse_rows=warehouse_rows,
+                snapshot_date="2026-04-18",
+                fetched_at="2026-04-18T09:00:00Z",
+                pagination_complete=True,
+                raw_rows_digest="sha256:factory-smoke",
+            )
+        )
 
 
 class FakeSalesHistoryBlock:
@@ -323,6 +366,33 @@ def main() -> None:
             raise AssertionError("coverage without inbound files must include only stock_total_mp + stock_ff")
         if sku_one.inbound_factory_to_ff != 0.0 or sku_one.inbound_ff_to_wb != 0.0:
             raise AssertionError("missing inbound files must be treated as zero, not as blocking input")
+        excluded_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "excluded_wb_warehouse_ids": [120762],
+            }
+        )
+        excluded_sku = {item.nm_id: item for item in excluded_result.rows}[210183919]
+        if excluded_sku.stock_total_mp != 40 or excluded_sku.coverage_qty != 70:
+            raise AssertionError(
+                "factory-order exclusion must subtract only selected physical stock"
+            )
+        exclusion = excluded_result.wb_warehouse_exclusion or {}
+        if (
+            exclusion.get("actual_stock_total_mp") != 120
+            or exclusion.get("excluded_stock_total_mp") != 60
+            or exclusion.get("effective_stock_total_mp") != 60
+            or exclusion.get("reconciliation_difference") != 0
+        ):
+            raise AssertionError(f"factory-order exclusion reconciliation changed: {exclusion}")
         if round(sku_two.target_qty, 2) != _expected_target_qty(
             210184534,
             report_date="2026-04-18",

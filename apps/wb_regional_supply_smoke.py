@@ -54,6 +54,7 @@ class FakeStocksBlock:
 
     def execute(self, request_obj: object) -> SimpleNamespace:
         items = []
+        warehouse_rows = []
         for nm_id in self.nm_ids:
             central = 0.0
             northwest = 0.0
@@ -75,7 +76,50 @@ class FakeStocksBlock:
                     stock_ru_central_south=500.0 if nm_id == MAIN_NM_ID else 0.0,
                 )
             )
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
+            if nm_id == MAIN_NM_ID:
+                warehouse_rows.extend(
+                    [
+                        SimpleNamespace(
+                            nm_id=nm_id,
+                            warehouse_id=120762,
+                            warehouse_name="Электросталь",
+                            quantity=60.0,
+                            in_way_to_client=5.0,
+                            in_way_from_client=3.0,
+                            planning_zone_key=PLANNING_ZONE_CENTRAL_NORTH,
+                        ),
+                        SimpleNamespace(
+                            nm_id=nm_id,
+                            warehouse_id=999,
+                            warehouse_name="Другой склад",
+                            quantity=40.0,
+                            in_way_to_client=0.0,
+                            in_way_from_client=0.0,
+                            planning_zone_key=PLANNING_ZONE_CENTRAL_NORTH,
+                        ),
+                        SimpleNamespace(
+                            nm_id=nm_id,
+                            warehouse_id=0,
+                            warehouse_name="Остальные",
+                            quantity=100.0,
+                            in_way_to_client=0.0,
+                            in_way_from_client=0.0,
+                            planning_zone_key=DISTRICT_NORTHWEST,
+                        ),
+                    ]
+                )
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                items=items,
+                warehouse_rows=warehouse_rows,
+                planning_reconciliation={},
+                snapshot_date="2026-04-18",
+                fetched_at="2026-04-18T09:00:00Z",
+                pagination_complete=True,
+                raw_rows_digest="sha256:regional-smoke",
+            )
+        )
 
 
 class NoopSalesHistoryBlock:
@@ -219,6 +263,39 @@ def main() -> None:
             raise AssertionError("legacy scalar lead time must be exposed on district rows")
         if central_main_row.demand_diagnostics.get("lead_time_to_region_days") != 2:
             raise AssertionError("row diagnostics must expose the lead time used by the formula")
+        excluded_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "excluded_wb_warehouse_ids": [120762],
+            }
+        )
+        excluded_districts = {
+            item.district_key: item for item in excluded_result.districts
+        }
+        excluded_central = next(
+            row
+            for row in excluded_districts[PLANNING_ZONE_CENTRAL_NORTH].rows
+            if row.nm_id == MAIN_NM_ID
+        )
+        if excluded_central.current_stock != 40:
+            raise AssertionError(
+                "regional exclusion must happen by warehouseId before planning-zone aggregation"
+            )
+        if excluded_central.daily_demand_total != central_main_row.daily_demand_total:
+            raise AssertionError("warehouse exclusion must not remove demand history")
+        exclusion = excluded_result.wb_warehouse_exclusion or {}
+        if (
+            exclusion.get("actual_stock_total_mp") != 200
+            or exclusion.get("excluded_stock_total_mp") != 60
+            or exclusion.get("effective_stock_total_mp") != 140
+            or exclusion.get("reconciliation_difference") != 0
+        ):
+            raise AssertionError(f"regional exclusion reconciliation changed: {exclusion}")
 
         legacy_saved_payload = asdict(result)
         legacy_saved_payload["settings"].pop("lead_time_to_region_days_by_district", None)

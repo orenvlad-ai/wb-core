@@ -149,6 +149,8 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
                 warehouse_name=warehouse_name,
                 region_name=region_name,
                 quantity=stock_count,
+                in_way_to_client=in_way_to_client,
+                in_way_from_client=in_way_from_client,
                 planning_zone_key=planning_zone_key,
                 classification_status=classification_status,
                 classification_source=classification_source,
@@ -237,8 +239,161 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
                     6,
                 ),
             },
+            fetched_at=str(data.get("fetched_at") or ""),
+            pagination_complete=bool(data.get("pagination_complete")),
+            raw_rows_digest=str(data.get("raw_rows_digest") or ""),
         )
     )
+
+
+def parse_excluded_wb_warehouse_ids(
+    payload: Mapping[str, Any],
+    *,
+    allow_legacy_elektrostal: bool = True,
+) -> tuple[int, ...]:
+    """Parse stable warehouse identities without accepting duplicate/browser-only state."""
+
+    value = payload.get("excluded_wb_warehouse_ids")
+    if value in (None, ""):
+        if allow_legacy_elektrostal and _parse_bool(payload.get("exclude_elektrostal_stock")):
+            return (ELEKTROSTAL_WAREHOUSE_ID,)
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("excluded_wb_warehouse_ids must be an array of warehouseId")
+    parsed: list[int] = []
+    seen: set[int] = set()
+    for raw in value:
+        if isinstance(raw, bool):
+            raise ValueError("excluded_wb_warehouse_ids must contain integer warehouseId values")
+        try:
+            warehouse_id = int(str(raw).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError("excluded_wb_warehouse_ids must contain integer warehouseId values") from exc
+        if warehouse_id < 0:
+            raise ValueError("excluded_wb_warehouse_ids cannot contain negative warehouseId")
+        if warehouse_id in seen:
+            raise ValueError(f"duplicate excluded warehouseId: {warehouse_id}")
+        seen.add(warehouse_id)
+        parsed.append(warehouse_id)
+    return tuple(sorted(parsed))
+
+
+def build_wb_warehouse_exclusion(
+    *,
+    items: list[StocksItem],
+    warehouse_rows: list[StocksWarehouseRow],
+    excluded_warehouse_ids: tuple[int, ...],
+    snapshot_date: str,
+    fetched_at: str,
+    pagination_complete: bool,
+    raw_rows_digest: str,
+    require_complete: bool = False,
+) -> dict[str, Any]:
+    """Build one calculation-only exclusion contract for both supply calculators."""
+
+    if not pagination_complete and (excluded_warehouse_ids or require_complete):
+        raise ValueError(
+            "Нельзя выбрать исключаемые склады: официальный снимок WB неполный"
+        )
+    selected = set(excluded_warehouse_ids)
+    actual_by_nm = {int(item.nm_id): max(float(item.stock_total), 0.0) for item in items}
+    excluded_by_nm: dict[int, float] = defaultdict(float)
+    options_by_id: dict[int, dict[str, Any]] = {}
+    selected_seen: set[int] = set()
+    for row in warehouse_rows:
+        warehouse_id = row.warehouse_id
+        if warehouse_id is None:
+            continue
+        quantity = max(float(row.quantity), 0.0)
+        to_client = max(float(row.in_way_to_client), 0.0)
+        from_client = max(float(row.in_way_from_client), 0.0)
+        option = options_by_id.setdefault(
+            int(warehouse_id),
+            {
+                "warehouse_id": int(warehouse_id),
+                "warehouse_name": str(row.warehouse_name or f"warehouseId {warehouse_id}"),
+                "stock_quantity": 0.0,
+                "in_way_to_client": 0.0,
+                "in_way_from_client": 0.0,
+                "total_contour": 0.0,
+                "temporarily_missing": False,
+            },
+        )
+        option["stock_quantity"] += quantity
+        option["in_way_to_client"] += to_client
+        option["in_way_from_client"] += from_client
+        option["total_contour"] += quantity + to_client + from_client
+        if int(warehouse_id) in selected:
+            selected_seen.add(int(warehouse_id))
+            excluded_by_nm[int(row.nm_id)] += quantity
+
+    options = []
+    for warehouse_id, option in sorted(
+        options_by_id.items(),
+        key=lambda item: (str(item[1]["warehouse_name"]).casefold(), item[0]),
+    ):
+        if float(option["total_contour"]) <= 0 and warehouse_id not in selected:
+            continue
+        options.append(
+            {
+                **option,
+                "stock_quantity": round(float(option["stock_quantity"]), 6),
+                "in_way_to_client": round(float(option["in_way_to_client"]), 6),
+                "in_way_from_client": round(float(option["in_way_from_client"]), 6),
+                "total_contour": round(float(option["total_contour"]), 6),
+                "selected": warehouse_id in selected,
+            }
+        )
+    missing_selected = sorted(selected - selected_seen)
+    for warehouse_id in missing_selected:
+        options.append(
+            {
+                "warehouse_id": warehouse_id,
+                "warehouse_name": f"warehouseId {warehouse_id}",
+                "stock_quantity": 0.0,
+                "in_way_to_client": 0.0,
+                "in_way_from_client": 0.0,
+                "total_contour": 0.0,
+                "temporarily_missing": True,
+                "selected": True,
+                "message": "Склад временно отсутствует в текущем снимке",
+            }
+        )
+
+    by_nm_id: dict[str, dict[str, Any]] = {}
+    for nm_id, actual in sorted(actual_by_nm.items()):
+        raw_excluded = max(float(excluded_by_nm.get(nm_id, 0.0)), 0.0)
+        excluded = min(actual, raw_excluded)
+        by_nm_id[str(nm_id)] = {
+            "nm_id": nm_id,
+            "actual_stock_total_mp": round(actual, 6),
+            "excluded_stock_total_mp": round(excluded, 6),
+            "effective_stock_total_mp": round(max(actual - excluded, 0.0), 6),
+            "over_exclusion": round(max(raw_excluded - actual, 0.0), 6),
+            "reconciliation_difference": round(
+                actual - max(actual - excluded, 0.0) - excluded,
+                6,
+            ),
+        }
+    actual_total = sum(float(row["actual_stock_total_mp"]) for row in by_nm_id.values())
+    excluded_total = sum(float(row["excluded_stock_total_mp"]) for row in by_nm_id.values())
+    effective_total = sum(float(row["effective_stock_total_mp"]) for row in by_nm_id.values())
+    return {
+        "contract_name": "wb_warehouse_calculation_exclusion",
+        "contract_version": 1,
+        "excluded_wb_warehouse_ids": list(excluded_warehouse_ids),
+        "snapshot_date": snapshot_date,
+        "fetched_at": fetched_at,
+        "pagination_complete": bool(pagination_complete),
+        "raw_rows_digest": raw_rows_digest,
+        "options": options,
+        "temporarily_missing_selected_ids": missing_selected,
+        "actual_stock_total_mp": round(actual_total, 6),
+        "excluded_stock_total_mp": round(excluded_total, 6),
+        "effective_stock_total_mp": round(effective_total, 6),
+        "reconciliation_difference": round(actual_total - excluded_total - effective_total, 6),
+        "by_nm_id": by_nm_id,
+    }
 
 
 def build_elektrostal_stock_override(
@@ -292,6 +447,16 @@ def build_elektrostal_stock_override(
         "by_nm_id": result,
         "idempotent": True,
     }
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
 def _normalize_region_name(value: str) -> str:

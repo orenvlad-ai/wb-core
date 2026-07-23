@@ -391,6 +391,9 @@ def main() -> None:
                 "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
                 "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
                 "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
+                "wb_warehouse_exclusion_options_path": (
+                    registry_http_adapter.DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH
+                ),
                 "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
                 "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
                 "ff_stock_status_path": DEFAULT_FF_STOCKS_PATH,

@@ -17,7 +17,11 @@ from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
-from packages.application.stocks_block import StocksBlock, build_elektrostal_stock_override
+from packages.application.stocks_block import (
+    StocksBlock,
+    build_wb_warehouse_exclusion,
+    parse_excluded_wb_warehouse_ids,
+)
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
 from packages.application.wb_supply_overlay import (
     apply_stock_ff_overlay,
@@ -245,10 +249,14 @@ class WbRegionalSupplyBlock:
             getattr(stock_response, "planning_reconciliation", {}) or {}
         )
         stock_warehouse_rows = list(getattr(stock_response, "warehouse_rows", []) or [])
-        elektrostal_override = build_elektrostal_stock_override(
+        wb_warehouse_exclusion = build_wb_warehouse_exclusion(
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=stock_warehouse_rows,
-            enabled=settings.exclude_elektrostal_stock,
+            excluded_warehouse_ids=settings.excluded_wb_warehouse_ids,
+            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
+            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
         )
         if set(stock_items) != set(nm_ids):
             missing = sorted(set(nm_ids) - set(stock_items))
@@ -287,12 +295,20 @@ class WbRegionalSupplyBlock:
             }
             for nm_id in nm_ids
         }
-        if settings.exclude_elektrostal_stock:
-            for nm_id in nm_ids:
-                override_row = dict((elektrostal_override.get("by_nm_id") or {}).get(str(nm_id)) or {})
-                excluded_qty = max(float(override_row.get("excluded_elektrostal_stock") or 0.0), 0.0)
-                current_stock_by_nm[nm_id][PLANNING_ZONE_CENTRAL_EAST] = max(
-                    current_stock_by_nm[nm_id][PLANNING_ZONE_CENTRAL_EAST] - excluded_qty,
+        excluded_ids = set(settings.excluded_wb_warehouse_ids)
+        exclusion_zone_by_nm: dict[int, dict[str, float]] = {}
+        for row in stock_warehouse_rows:
+            if row.warehouse_id not in excluded_ids or not row.planning_zone_key:
+                continue
+            by_zone = exclusion_zone_by_nm.setdefault(int(row.nm_id), {})
+            by_zone[row.planning_zone_key] = (
+                float(by_zone.get(row.planning_zone_key, 0.0))
+                + max(float(row.quantity), 0.0)
+            )
+        for nm_id, by_zone in exclusion_zone_by_nm.items():
+            for zone_key, excluded_qty in by_zone.items():
+                current_stock_by_nm[nm_id][zone_key] = max(
+                    current_stock_by_nm[nm_id][zone_key] - excluded_qty,
                     0.0,
                 )
         regional_demand_by_nm = _estimate_wb_regional_demand(
@@ -573,7 +589,8 @@ class WbRegionalSupplyBlock:
                 "stock_ff_source_state": dict(ledger_stock_ff_state) if stock_ff_source == STOCK_FF_SOURCE_LEDGER else {},
                 "wb_supply_overlay": wb_regional_overlay_diagnostics,
                 "central_stock_reconciliation": stock_planning_reconciliation,
-                "elektrostal_stock_override": elektrostal_override,
+                "wb_warehouse_exclusion": wb_warehouse_exclusion,
+                "excluded_stock_by_nm_planning_zone": exclusion_zone_by_nm,
                 "stock_warehouse_row_count": len(stock_warehouse_rows),
             }
         )
@@ -632,6 +649,7 @@ class WbRegionalSupplyBlock:
             districts=districts,
             diagnostics=result_diagnostics,
             wb_supply_overlay=wb_supply_overlay_payload,
+            wb_warehouse_exclusion=wb_warehouse_exclusion,
             warnings=result_warnings,
         )
         self._validate_result_consistency(result)
@@ -886,7 +904,7 @@ class WbRegionalSupplyBlock:
             stock_ff_source=stock_ff_source,
             included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
             selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
-            exclude_elektrostal_stock=_parse_bool(settings_payload.get("exclude_elektrostal_stock")),
+            excluded_wb_warehouse_ids=parse_excluded_wb_warehouse_ids(settings_payload),
         )
         shared_datasets = {
             key: FactoryOrderDatasetState(
@@ -1002,6 +1020,11 @@ class WbRegionalSupplyBlock:
                 if isinstance(payload.get("wb_supply_overlay"), Mapping)
                 else None
             ),
+            wb_warehouse_exclusion=(
+                dict(payload.get("wb_warehouse_exclusion"))
+                if isinstance(payload.get("wb_warehouse_exclusion"), Mapping)
+                else None
+            ),
             warnings=tuple(str(item) for item in warnings_payload if item),
         )
 
@@ -1090,7 +1113,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
         included_district_keys=_parse_included_district_keys(payload.get("included_district_keys")),
         selected_wb_supply_ids=parse_selected_wb_supply_ids(payload),
-        exclude_elektrostal_stock=_parse_bool(payload.get("exclude_elektrostal_stock")),
+        excluded_wb_warehouse_ids=parse_excluded_wb_warehouse_ids(payload),
     )
 
 

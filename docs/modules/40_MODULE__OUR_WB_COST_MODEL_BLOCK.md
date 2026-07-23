@@ -47,7 +47,7 @@ Accepted WB supply добавляет доказанный inbound capital, но
 
 # 2. Versioned calculation parameters
 
-`Настройки → Справочник пользователя → Расчётные параметры` хранит immutable versions с effective date, revision, author/time, exact fingerprint и diff preview. Initial version effective `2026-07-01`:
+`Настройки → Расчётные параметры` хранит immutable versions с effective date, revision, author/time, exact fingerprint и diff preview. Верхняя навигация уже является заголовком раздела, поэтому страница не повторяет внутренний heading `Расчётные параметры`. Initial version effective `2026-07-01`:
 
 - buyout rate — `91%`;
 - tax — `6%`;

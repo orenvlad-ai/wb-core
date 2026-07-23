@@ -46,6 +46,8 @@ class StocksWarehouseRow:
     planning_zone_key: str | None
     classification_status: str
     classification_source: str
+    in_way_to_client: float = 0.0
+    in_way_from_client: float = 0.0
     exclusion_codes: tuple[str, ...] = ()
 
 
@@ -60,6 +62,9 @@ class StocksSuccess:
     detail: str = ""
     warehouse_rows: list[StocksWarehouseRow] = field(default_factory=list)
     planning_reconciliation: dict[str, Any] = field(default_factory=dict)
+    fetched_at: str = ""
+    pagination_complete: bool = False
+    raw_rows_digest: str = ""
 
 
 @dataclass(frozen=True)

@@ -328,6 +328,79 @@ def main() -> None:
         )
         _assert(_balance(block, second_nm_id) == balance_before_pagination_status, "journal pagination/archive status must not change balances")
 
+        fulfillment_supply_id = "wb-fulfill-after-receipt"
+        _seed_validated_downstream_cost(
+            runtime,
+            supply_id=fulfillment_supply_id,
+            nm_id=second_nm_id,
+        )
+        waiting_for_receipt = block.record_wb_supply_debit(
+            _wb_record(fulfillment_supply_id, 5, second_nm_id, 100)
+        )
+        _assert(
+            waiting_for_receipt
+            and waiting_for_receipt.get("skip_reason")
+            == "wb_supply_reserved_waiting_for_goods",
+            "insufficient physical stock must create a reservation before fulfillment",
+        )
+        supplier_fulfillment = block.record_supplier_acceptance(
+            {
+                "header": {
+                    "shipment_id": "sup-reservation-fulfillment",
+                    "invoice_no": "INV-RESERVE",
+                    "invoice_date": "2026-04-18",
+                },
+                "lines": [
+                    {
+                        "line_type": LINE_TYPE_PRODUCT,
+                        "match_status": MATCH_STATUS_MATCHED,
+                        "internal_nm_id": second_nm_id,
+                        "internal_sku": "SKU-2",
+                        "internal_name": "Second",
+                        "qty": 100,
+                    }
+                ],
+            }
+        )
+        _assert(
+            supplier_fulfillment and not supplier_fulfillment.get("idempotent"),
+            "supplier receipt for a reserved SKU must append physical stock",
+        )
+        fulfilled = block.record_wb_supply_debit(
+            _wb_record(fulfillment_supply_id, 5, second_nm_id, 100)
+        )
+        _assert(
+            fulfilled and fulfilled.get("operation_id") and not fulfilled.get("idempotent"),
+            f"sufficient supplier stock + validated cost must atomically fulfill reservation: {fulfilled}",
+        )
+        _assert(
+            runtime.list_ff_stock_reservations(supply_id=fulfillment_supply_id) == [],
+            "physical debit must close the active reservation via fulfill",
+        )
+        fulfilled_repeat = block.record_wb_supply_debit(
+            _wb_record(fulfillment_supply_id, 5, second_nm_id, 100)
+        )
+        _assert(
+            fulfilled_repeat and fulfilled_repeat.get("idempotent"),
+            "repeated replay must not create a second physical debit",
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            fulfill_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_ff_stock_reservation_operations
+                WHERE supply_id=? AND operation_type='fulfill'
+                """,
+                (fulfillment_supply_id,),
+            ).fetchone()[0]
+        _assert(fulfill_count == 1, "reservation must have exactly one fulfill transition")
+
+        _assert_reserve_15000_reconciliation(
+            Path(tmp) / "reservation-15000",
+            bundle=bundle,
+            active_nm_ids=active_nm_ids,
+        )
+
     print("ff_stock_ledger_smoke: ok")
 
 
@@ -336,6 +409,81 @@ def _operation_xlsx(rows: list[list[object]]) -> bytes:
         "Остатки ФФ",
         [["barcode", "nmId", "SKU/название/комментарий", "группа", "количество"], *rows],
     )
+
+
+def _assert_reserve_15000_reconciliation(
+    runtime_dir: Path,
+    *,
+    bundle: dict[str, object],
+    active_nm_ids: list[int],
+) -> None:
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+    _seed_nomenclature(runtime, active_nm_ids)
+    block = FfStockLedgerBlock(runtime=runtime, timestamp_factory=lambda: ACTIVATED_AT)
+    physical_nm_id, unsecured_nm_id = active_nm_ids[:2]
+    preview = block.parse_manual_operation_preview(
+        _operation_xlsx(
+            [
+                [
+                    f"460{physical_nm_id}",
+                    physical_nm_id,
+                    "Anti-Spy iPhone 15/16",
+                    "Clear",
+                    6750,
+                ]
+            ]
+        ),
+        operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+        uploaded_filename="reserve-15000-opening.xlsx",
+    )
+    block.confirm_manual_operation(preview["preview"]["preview_id"], created_by="smoke")
+    kol_revision = "sha256:40985996:revision-1"
+    shushary_revision = "sha256:40985215:revision-1"
+    first = runtime.create_ff_stock_reservation_operation(
+        operation_id="ffsr_40985996_reserve",
+        source_key="wb_supply_reservation:40985996:reserve:revision-1",
+        supply_id="40985996",
+        supply_revision=kol_revision,
+        operation_type="reserve",
+        created_at=ACTIVATED_AT,
+        diagnostics={"fixture": "reserve_15000"},
+        lines=[
+            {"nm_id": physical_nm_id, "quantity_delta": 500},
+            {"nm_id": unsecured_nm_id, "quantity_delta": 12000},
+        ],
+        expected_current={},
+    )
+    second = runtime.create_ff_stock_reservation_operation(
+        operation_id="ffsr_40985215_reserve",
+        source_key="wb_supply_reservation:40985215:reserve:revision-1",
+        supply_id="40985215",
+        supply_revision=shushary_revision,
+        operation_type="reserve",
+        created_at=ACTIVATED_AT,
+        diagnostics={"fixture": "reserve_15000"},
+        lines=[{"nm_id": unsecured_nm_id, "quantity_delta": 2500}],
+        expected_current={},
+    )
+    repeat = runtime.create_ff_stock_reservation_operation(
+        operation_id="ffsr_40985215_duplicate",
+        source_key="wb_supply_reservation:40985215:reserve:revision-1",
+        supply_id="40985215",
+        supply_revision=shushary_revision,
+        operation_type="reserve",
+        created_at=ACTIVATED_AT,
+        diagnostics={"fixture": "reserve_15000"},
+        lines=[{"nm_id": unsecured_nm_id, "quantity_delta": 2500}],
+        expected_current={},
+    )
+    _assert(not first["idempotent"] and not second["idempotent"], "two supplies of one SKU must reserve independently")
+    _assert(repeat["idempotent"], "exact supply revision + nmID replay must not duplicate reserve")
+    summary = block.reservation_summary()
+    _assert(summary["physical_quantity"] == 6750, f"reserve fixture physical mismatch: {summary}")
+    _assert(summary["reserved_quantity"] == 15000, f"reserve fixture total mismatch: {summary}")
+    _assert(summary["available_quantity"] == 6250, f"reserve fixture available mismatch: {summary}")
+    _assert(summary["unsecured_reservation_quantity"] == 14500, f"reserve fixture unsecured mismatch: {summary}")
+    _assert(summary["reservation_supply_count"] == 2, f"reserve fixture supply count mismatch: {summary}")
 
 
 def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, active_nm_ids: list[int]) -> None:
