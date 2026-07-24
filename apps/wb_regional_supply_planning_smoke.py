@@ -118,6 +118,7 @@ def main() -> None:
             raise AssertionError("blocked historical warehouses leaked into manager view")
 
         _assert_exact_tver_probe(block, source)
+        _assert_operator_exclusions(block, source, fixture)
         _assert_available_reserve_outranks_unavailable_primary(block, source, fixture)
         _assert_conflicting_can_box_fails_closed(block, source, fixture)
         _assert_missing_storage_does_not_reallocate(block, source, runtime, fixture)
@@ -257,6 +258,65 @@ def _assert_exact_tver_probe(
         raise AssertionError(f"exact Tver probe must not be suppressed by SC Tver: {north}")
     if not any(str(item.get("warehouse_id")) == "301806" for item in source.acceptance_requests):
         raise AssertionError(f"warehouseID-specific probe was not called: {source.acceptance_requests}")
+
+
+def _assert_operator_exclusions(
+    block: WbRegionalSupplyPlanningBlock,
+    source: FixturePlanningSource,
+    fixture: dict[str, object],
+) -> None:
+    source.acceptance_payload = deepcopy(fixture["acceptance_options"])
+    before = len(source.acceptance_requests)
+    south = block.build_options(
+        {
+            "district_key": PLANNING_ZONE_CENTRAL_SOUTH,
+            "excluded_wb_warehouse_ids": [507, 206348],
+        }
+    )
+    option_ids = [str(item.get("warehouse_id") or "") for item in south.get("options") or []]
+    if "507" in option_ids or "206348" in option_ids:
+        raise AssertionError(f"operator-excluded warehouse leaked into options: {south}")
+    counts = dict(south.get("diagnostics", {}).get("exclusion_reason_counts") or {})
+    if counts.get("excluded_by_operator", 0) < 2:
+        raise AssertionError(f"operator exclusions are not observable: {counts}")
+    probe_requests = source.acceptance_requests[before:]
+    if any(
+        str(item.get("warehouse_id") or "") in {"507", "206348"}
+        for item in probe_requests
+    ):
+        raise AssertionError(f"operator-excluded warehouse was probed: {probe_requests}")
+
+    source.acceptance_payload = deepcopy(fixture["acceptance_options"])
+    for barcode_row in source.acceptance_payload["result"]:
+        barcode_row["warehouses"].append({"warehouseID": 0, "canBox": True})
+    service_group_result = block.build_options(
+        {"district_key": PLANNING_ZONE_CENTRAL_SOUTH}
+    )
+    if any(
+        str(item.get("warehouse_id") or "") == "0"
+        for item in service_group_result.get("options") or []
+    ):
+        raise AssertionError("warehouseID 0 must never become a destination")
+    service_counts = dict(
+        service_group_result.get("diagnostics", {}).get("exclusion_reason_counts") or {}
+    )
+    if service_counts.get("wb_aggregate_service_group_not_destination", 0) < 1:
+        raise AssertionError(f"warehouseID 0 exclusion is not explicit: {service_counts}")
+    source.acceptance_payload = deepcopy(fixture["acceptance_options"])
+
+    all_south = block.build_options(
+        {
+            "district_key": PLANNING_ZONE_CENTRAL_SOUTH,
+            "excluded_wb_warehouse_ids": [507, 206348, 301808],
+        }
+    )
+    if all_south.get("status") != "no_options" or not any(
+        item.get("code") == "no_eligible_storage_warehouse_after_exclusions"
+        for item in all_south.get("blockers") or []
+    ):
+        raise AssertionError(
+            f"all operator exclusions need a controlled empty result: {all_south}"
+        )
 
 
 def _assert_available_reserve_outranks_unavailable_primary(
