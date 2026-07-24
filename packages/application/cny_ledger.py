@@ -448,6 +448,21 @@ class CnyLedgerBlock:
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
         now = self.timestamp_factory()
         self._sync_supplier_payment_documents_from_financial_documents(now=now)
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        for item in self.runtime.list_cny_documents():
+            if (
+                str(item.get("document_type") or "") == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                and str(item.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED
+            ):
+                capital.remove_supplier_payment(
+                    str(item.get("document_id") or ""),
+                    recalculate=False,
+                )
         existing_operations = {
             str(item.get("operation_id") or ""): dict(item)
             for item in self.runtime.list_cny_ledger_operations()
@@ -822,7 +837,151 @@ class CnyLedgerBlock:
         result["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(archived)
         return result
 
-    def _enqueue_functional_recalculation(self, document: Mapping[str, Any]) -> dict[str, Any]:
+    def restore_document(
+        self,
+        document_id: str,
+        *,
+        target_shipment_id: str,
+    ) -> dict[str, Any]:
+        document = self.runtime.load_cny_document(str(document_id or "").strip())
+        if document is None:
+            raise ValueError(f"CNY document not found: {document_id}")
+        if str(document.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED:
+            raise ValueError("CNY document is not archived")
+        old_shipment_id = str(document.get("source_order_id") or "").strip()
+        now = self.timestamp_factory()
+        restored_status = _document_status_for_parse(
+            str(document.get("document_type") or ""),
+            dict(document.get("parsed_payload") or {}),
+            _string_list(document.get("warnings")),
+            _string_list(document.get("errors")),
+        )
+        restored = self.runtime.save_cny_document(
+            {
+                **document,
+                "source": CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+                "source_order_id": str(target_shipment_id or "").strip(),
+                "context_order_id": str(target_shipment_id or "").strip(),
+                "status": restored_status,
+                "updated_at": now,
+            }
+        )
+        self._reset_supplier_certifications(
+            old_shipment_id,
+            str(target_shipment_id or "").strip(),
+            updated_at=now,
+        )
+        replay = self.replay_ledger(reason="document_restore")
+        queue = self._enqueue_functional_recalculation(
+            restored,
+            additional_shipment_ids=[old_shipment_id],
+        )
+        return {
+            **self._with_download_path(restored),
+            "outcome": (
+                "restored"
+                if old_shipment_id == str(target_shipment_id or "").strip()
+                else "relinked"
+            ),
+            "old_supplier_order_id": old_shipment_id,
+            "supplier_order_id": str(target_shipment_id or "").strip(),
+            "replay": replay.get("replay") or replay,
+            "warehouse_targeted_recalculation": queue,
+        }
+
+    def relink_document(
+        self,
+        document_id: str,
+        *,
+        target_shipment_id: str,
+    ) -> dict[str, Any]:
+        document = self.runtime.load_cny_document(str(document_id or "").strip())
+        if document is None:
+            raise ValueError(f"CNY document not found: {document_id}")
+        if str(document.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED:
+            return self.restore_document(
+                document_id,
+                target_shipment_id=target_shipment_id,
+            )
+        if str(document.get("linked_financial_document_id") or "").strip():
+            raise ValueError(
+                "CNY document is linked to a supplier financial document; relink the source document instead"
+            )
+        normalized_target = str(target_shipment_id or "").strip()
+        old_shipment_id = str(document.get("source_order_id") or "").strip()
+        if old_shipment_id == normalized_target:
+            return {
+                **self._with_download_path(document),
+                "outcome": "already_present",
+                "old_supplier_order_id": old_shipment_id,
+                "supplier_order_id": normalized_target,
+                "idempotent": True,
+            }
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).remove_supplier_payment(
+            str(document.get("document_id") or ""),
+            recalculate=False,
+        )
+        now = self.timestamp_factory()
+        moved = self.runtime.update_cny_document_context(
+            document_id=str(document.get("document_id") or ""),
+            source_order_id=normalized_target,
+            context_order_id=normalized_target,
+            updated_at=now,
+        )
+        self._reset_supplier_certifications(
+            old_shipment_id,
+            normalized_target,
+            updated_at=now,
+        )
+        replay = self.replay_ledger(reason="document_relink")
+        queue = self._enqueue_functional_recalculation(
+            moved,
+            additional_shipment_ids=[old_shipment_id],
+        )
+        return {
+            **self._with_download_path(moved),
+            "outcome": "relinked",
+            "old_supplier_order_id": old_shipment_id,
+            "supplier_order_id": normalized_target,
+            "replay": replay.get("replay") or replay,
+            "warehouse_targeted_recalculation": queue,
+        }
+
+    def _reset_supplier_certifications(
+        self,
+        *shipment_ids: str,
+        updated_at: str,
+    ) -> None:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        for shipment_id in dict.fromkeys(
+            str(item or "").strip() for item in shipment_ids if str(item or "").strip()
+        ):
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=shipment_id,
+                expenses_complete=False,
+                updated_at=updated_at,
+            )
+            capital.set_expenses_certification(
+                shipment_id=shipment_id,
+                expenses_complete=False,
+            )
+
+    def _enqueue_functional_recalculation(
+        self,
+        document: Mapping[str, Any],
+        *,
+        additional_shipment_ids: Iterable[str] = (),
+    ) -> dict[str, Any]:
         """Reset affected certifications and coalesce a replay by CNY source revision."""
 
         from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -830,11 +989,20 @@ class CnyLedgerBlock:
 
         source_order_id = str(document.get("source_order_id") or "").strip()
         shipment_summaries = self.runtime.list_supplier_shipments()
+        requested_ids = {
+            str(item or "").strip()
+            for item in [source_order_id, *additional_shipment_ids]
+            if str(item or "").strip()
+        }
         affected_ids = [
             str(item.get("shipment_id") or "")
             for item in shipment_summaries
             if str(item.get("shipment_id") or "")
-            and (not source_order_id or str(item.get("shipment_id") or "") == source_order_id)
+            and (
+                str(item.get("shipment_id") or "") in requested_ids
+                if requested_ids
+                else True
+            )
         ]
         nm_ids: set[int] = set()
         capital = OwnProductCapitalBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
@@ -859,6 +1027,8 @@ class CnyLedgerBlock:
                 "document_id",
                 "document_type",
                 "natural_key",
+                "source_order_id",
+                "context_order_id",
                 "operation_date",
                 "status",
                 "rub_amount",

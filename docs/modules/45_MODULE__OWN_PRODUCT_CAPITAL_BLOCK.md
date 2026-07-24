@@ -89,3 +89,9 @@ WB использует periodic/snapshot WAC: official snapshot задаёт qu
 До functional cutover разрешена только bounded cost projection с `2026-07-01` для `our_wb_unit_cost_rub`, Proxy 3 и direct consumers. Она использует frozen opening map от доказанной accepted-on-FF поставки около 24.06, persisted historical quantities из exact business-date columns и confirmed downstream expenses. Outer ready-snapshot date не подменяет дату колонки; current snapshot не копируется назад. Positive quantity не получает silent zero/NULL cost; fallback всегда имеет explicit quality/provenance.
 
 Source change/archive не удаляет ledger evidence: он сбрасывает certification и ставит targeted replay по stable flow/supply/SKU/effective date. Failed candidate сохраняет last good active version.
+
+## CNY document exclusion and relink
+
+An operator CNY document is durable audit evidence; exclusion never deletes its file or source row. Canonical replay removes the derived supplier-payment layer and its capital events for an excluded document, rebases remaining cumulative payment shares, and recalculates capital. Relink first compensates the old derived layer, atomically changes the document shipment context under `BEGIN IMMEDIATE`, then rebuilds exactly one posted ledger operation and one payment layer for the target shipment. Old and target expense certification are reset and one combined targeted warehouse request covers both SKU sets. Repeating the confirmation or bounded recovery is a no-op and cannot create a second CNY document, ledger operation or capital layer.
+
+Archiving a logistics/customs/bank-fee financial source likewise compensates every derived `cost_payment:financial_expense:<document_id>:*` event before recalculation. The financial document, expense lines and file remain audit evidence, but none of their derived capital survives in the active chain; restore rematerializes the original source once.

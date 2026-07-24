@@ -107,6 +107,7 @@ def main() -> None:
     _assert_historical_doprinato_paid_boundary()
     _assert_targeted_orphan_doprinato_classification()
     _assert_persisted_expense_events()
+    _assert_financial_document_compensation()
     _assert_warehouse_history_gap_reasons()
     print("own product capital smoke: OK")
 
@@ -126,6 +127,28 @@ def _assert_warehouse_history_gap_reasons() -> None:
         raise AssertionError("post-cutover warehouse gap must expose the missing exact version")
     if "до функционального cutover" in after:
         raise AssertionError("post-cutover gap must not claim a pre-cutover source limitation")
+
+
+def _assert_financial_document_compensation() -> None:
+    with TemporaryDirectory(prefix="own-capital-expense-compensation-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = OwnProductCapitalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        block.record_order_level_cost_payment(
+            document_id="financial_expense:fdoc-archive",
+            shipment_id="shipment-archive",
+            effective_date="2026-07-02",
+            capital_rub="1500",
+            product_lines=LINES,
+            component="logistics",
+        )
+        removed = block.remove_financial_document_expenses("fdoc-archive")
+        if int(removed.get("removed_event_count") or 0) != 2:
+            raise AssertionError(
+                f"archived financial source must compensate both SKU events: {removed}"
+            )
+        repeated = block.remove_financial_document_expenses("fdoc-archive")
+        if not repeated.get("idempotent"):
+            raise AssertionError("financial expense compensation must be idempotent")
 
 
 def _assert_partial_payment_layers(block: OwnProductCapitalBlock) -> None:

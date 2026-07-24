@@ -925,3 +925,9 @@ Payment upload remains parse-preview-first: missing non-date financial fields re
 # 19. SKU management HTTP/auth boundary
 
 The unified shell exposes `Управление SKU` only to principals whose server-owned `allowed_sections` includes `sku_management` (bootstrap admin retains full access). Protected routes are `GET /v1/sheet-vitrina-v1/sku-management`, `GET|POST .../settings`, `POST .../price/preview|commit`, `POST .../bid/preview|commit` and `GET .../history`. The nginx manifest publishes the exact base GET plus the narrow `/v1/sheet-vitrina-v1/sku-management/` GET/POST prefix; application session/section authorization remains authoritative. No route proxies a browser directly to WB.
+
+# 20. Supplier confirmation HTTP boundary
+
+Protected supplier mutations expose explicit preview/confirm pairs for factual dates, staged financial/CNY upload and document exclusion. Direct factual-date PATCH and direct financial-document DELETE return conflict without a matching confirmation token. Confirmation records live in SQLite with target revision, source SHA, payload, expiry, consumed timestamp and result; completion is single-use and repeat calls return the stored result idempotently.
+
+Upload confirmation returns an exact `outcome`, `document_id`, `supplier_order_id` and `readback_confirmed`. A batch request validates every token, expiry and initial target revision before committing the listed previews; repeat batch confirmation returns the stored per-token outcomes without new rows. CNY global SHA conflict never changes binding without `allow_relink`; relink/restore validates the same token and current global CNY revision. The document-list route excludes archived financial/CNY rows from active checklist/summary and returns them only in `archived_documents`.

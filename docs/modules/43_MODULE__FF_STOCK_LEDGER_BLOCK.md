@@ -258,3 +258,7 @@ Module 45 consumes V2 through the same canonical decision only; it does not merg
 ## Canonical cutover boundary (2026-07-01)
 
 The FF ledger remains the physical source of truth. Legacy operations before cutover are retained and fingerprinted but are not replayed into the new cost movement contour. Exact post-cutover normalization never inserts a receipt, debit or correction and therefore cannot change the authoritative current FF balance.
+
+## Confirmed supplier acceptance boundary
+
+Changing a supplier shipment actual FF-acceptance date is a server-confirmed mutation, not a browser-side Save. Its preview is read-only. A valid one-use confirmation creates at most one receipt with source key `supplier_shipment_acceptance:<shipment_id>`, at most one current supplier FF cost layer, then reconciles WB reservations and eligible `FF → WB` movements. Repeating the consumed token or the same acceptance source is idempotent. A stale shipment/dependency revision fails closed before receipt, layer or movement creation.

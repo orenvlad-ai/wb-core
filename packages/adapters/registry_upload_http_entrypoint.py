@@ -1848,6 +1848,89 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_factual_dates_action_path(parsed.path, "preview"):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_factual_dates_shipment_id(parsed.path)
+                    payload = entrypoint.handle_supplier_factual_dates_preview_request(
+                        shipment_id, _load_request_payload(self)
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_factual_dates_action_path(parsed.path, "confirm"):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_factual_dates_shipment_id(parsed.path)
+                    payload = entrypoint.handle_supplier_factual_dates_confirm_request(
+                        shipment_id,
+                        _load_request_payload(self),
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
+                response_status = (
+                    HTTPStatus.ACCEPTED
+                    if str(payload.get("status") or "") == "accepted"
+                    else HTTPStatus.OK
+                )
+                _write_json_response(self, response_status, payload)
+                return
+
+            if _is_supplier_financial_documents_confirm_upload_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _supplier_financial_path_parts(parsed.path)[0]
+                    payload = entrypoint.handle_supplier_financial_documents_confirm_upload_request(
+                        shipment_id, _load_request_payload(self)
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_financial_document_delete_preview_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    payload = entrypoint.handle_supplier_financial_document_delete_preview_request(
+                        shipment_id,
+                        document_id,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_financial_document_delete_confirm_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    request_payload = _load_request_payload(self)
+                    payload = entrypoint.handle_supplier_financial_document_delete_request(
+                        shipment_id,
+                        document_id,
+                        str(request_payload.get("confirmation_token") or ""),
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_financial_documents_collection_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -4884,20 +4967,16 @@ def _build_handler(
             if _is_supplier_financial_document_detail_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
-                try:
-                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
-                    payload = entrypoint.handle_supplier_financial_document_delete_request(shipment_id, document_id)
-                except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
-                    return
-                except Exception as exc:  # pragma: no cover - bounded fallback
-                    _write_json_response(
-                        self,
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier financial document delete failed: {exc}"},
-                    )
-                    return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                _write_json_response(
+                    self,
+                    HTTPStatus.CONFLICT,
+                    {
+                        "error": (
+                            "Удаление финансового документа требует server-owned "
+                            "delete preview и confirmation token."
+                        )
+                    },
+                )
                 return
 
             if _is_cny_account_document_detail_path(parsed.path):
@@ -5630,6 +5709,58 @@ def _is_supplier_financial_document_confirm_import_path(path: str) -> bool:
     )
 
 
+def _is_supplier_financial_documents_confirm_upload_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and parts[2] == "confirm-upload"
+    )
+
+
+def _is_supplier_financial_document_delete_preview_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 4
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and bool(parts[2])
+        and parts[3] == "delete-preview"
+    )
+
+
+def _is_supplier_financial_document_delete_confirm_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 4
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and bool(parts[2])
+        and parts[3] == "delete-confirm"
+    )
+
+
+def _is_supplier_factual_dates_action_path(path: str, action: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[1] == "factual-dates"
+        and parts[2] == action
+    )
+
+
+def _resolve_supplier_factual_dates_shipment_id(path: str) -> str:
+    for action in ("preview", "confirm"):
+        if _is_supplier_factual_dates_action_path(path, action):
+            return _supplier_financial_path_parts(path)[0]
+    raise ValueError(f"unsupported supplier factual dates path: {path}")
+
+
 def _is_wb_supply_detail_path(path: str) -> bool:
     if not path.startswith(DEFAULT_WB_SUPPLIES_PATH + "/"):
         return False
@@ -5832,6 +5963,8 @@ def _resolve_supplier_financial_document_ids(path: str) -> tuple[str, str]:
         _is_supplier_financial_document_detail_path(path)
         or _is_supplier_financial_document_file_path(path)
         or _is_supplier_financial_document_confirm_import_path(path)
+        or _is_supplier_financial_document_delete_preview_path(path)
+        or _is_supplier_financial_document_delete_confirm_path(path)
     ):
         raise ValueError(f"unsupported supplier financial document path: {path}")
     parts = _supplier_financial_path_parts(path)

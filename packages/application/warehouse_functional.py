@@ -278,6 +278,74 @@ def load_supplier_flow_cost_state(
                WHERE version_id=? AND warehouse_key IN (?,?)""",
             (active["version_id"], STAGE_PRODUCTION, STAGE_CHINA_TO_FF),
         ).fetchall()
+        shipment_row = (
+            conn.execute(
+                """
+                SELECT actual_shipment_date,actual_ff_acceptance_date,order_status
+                FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?
+                """,
+                (str(shipment_id or ""),),
+            ).fetchone()
+            if "sheet_vitrina_v1_supplier_shipments" in tables
+            else None
+        )
+        document_ids = (
+            [
+                str(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT document_id
+                    FROM sheet_vitrina_v1_supplier_financial_documents
+                    WHERE supplier_order_id=?
+                    """,
+                    (str(shipment_id or ""),),
+                ).fetchall()
+            ]
+            if "sheet_vitrina_v1_supplier_financial_documents" in tables
+            else []
+        )
+        cny_document_ids = (
+            [
+                str(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT document_id
+                    FROM sheet_vitrina_v1_cny_documents
+                    WHERE source_order_id=?
+                    """,
+                    (str(shipment_id or ""),),
+                ).fetchall()
+            ]
+            if "sheet_vitrina_v1_cny_documents" in tables
+            else []
+        )
+        stable_ids = [
+            f"supplier_shipment:{shipment_id}",
+            *[
+                f"supplier_financial_document:{document_id}"
+                for document_id in document_ids
+            ],
+            *[
+                f"cny_document:{document_id}"
+                for document_id in cny_document_ids
+            ],
+        ]
+        queue_rows = []
+        if (
+            stable_ids
+            and "sheet_vitrina_v1_warehouse_targeted_recalc_queue" in tables
+        ):
+            placeholders = ",".join("?" for _ in stable_ids)
+            queue_rows = conn.execute(
+                f"""
+                SELECT status,error,requested_at,started_at
+                FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                WHERE stable_source_id IN ({placeholders})
+                  AND status IN ('queued','running','error')
+                ORDER BY requested_at DESC
+                """,
+                stable_ids,
+            ).fetchall()
     selected_rows: list[dict[str, Any]] = []
     for stored_row in stored_rows:
         provenance = _loads(stored_row["provenance_json"], {})
@@ -329,7 +397,13 @@ def load_supplier_flow_cost_state(
         active_version_id=str(active["version_id"]),
     )
     totals: defaultdict[str, dict[str, Any]] = defaultdict(
-        lambda: {"quantity": ZERO, "capital": ZERO, "certified": True, "quality": set()}
+        lambda: {
+            "quantity": ZERO,
+            "capital": ZERO,
+            "certified": True,
+            "quality": set(),
+            "revalidation_failed": False,
+        }
     )
     for row in rows:
         for source in dict(row.get("provenance") or {}).get("source_records") or []:
@@ -340,6 +414,7 @@ def load_supplier_flow_cost_state(
             totals[stage]["quality"].add(str(row["quality"] or ""))
             if row.get("certification_revalidation_failed"):
                 totals[stage]["quality"].add("source_changed_provisional")
+                totals[stage]["revalidation_failed"] = True
     result: dict[str, Any] = {}
     for stage, item in totals.items():
         qty = _decimal(item["quantity"])
@@ -350,7 +425,70 @@ def load_supplier_flow_cost_state(
             "average_unit_cost_rub": _text(capital / qty) if qty > ZERO else None,
             "certified": bool(item["certified"]),
             "quality": sorted(item["quality"]),
+            "status": (
+                "stale"
+                if bool(item["revalidation_failed"])
+                else "certified"
+                if bool(item["certified"])
+                else "provisional"
+            ),
+            "blocker": (
+                "Active functional version не совпадает с текущими source/calculation fingerprints."
+                if bool(item["revalidation_failed"])
+                else ""
+            ),
         }
+    shipment_state = dict(shipment_row) if shipment_row is not None else {}
+    actual_shipment_date = str(
+        shipment_state.get("actual_shipment_date") or ""
+    ).strip()
+    actual_ff_acceptance_date = str(
+        shipment_state.get("actual_ff_acceptance_date") or ""
+    ).strip()
+    stage_applicable = (
+        {
+            STAGE_PRODUCTION: not actual_shipment_date,
+            STAGE_CHINA_TO_FF: bool(actual_shipment_date)
+            and not actual_ff_acceptance_date,
+        }
+        if shipment_row is not None
+        else {STAGE_PRODUCTION: True, STAGE_CHINA_TO_FF: True}
+    )
+    queue_state = queue_rows[0] if queue_rows else None
+    queue_status = str(queue_state["status"]) if queue_state is not None else ""
+    for stage in (STAGE_PRODUCTION, STAGE_CHINA_TO_FF):
+        if not stage_applicable[stage]:
+            result[stage] = {
+                "status": "not_applicable",
+                "average_unit_cost_rub": None,
+                "certified": False,
+                "reason": "Не применяется: поставка уже покинула эту стадию.",
+            }
+            continue
+        if queue_status == "error":
+            result[stage] = {
+                "status": "error",
+                "average_unit_cost_rub": None,
+                "certified": False,
+                "blocker": str(
+                    queue_state["error"]
+                    or "Targeted replay завершился ошибкой."
+                ),
+            }
+        elif queue_status in {"running", "queued"}:
+            result[stage] = {
+                "status": queue_status,
+                "average_unit_cost_rub": None,
+                "certified": False,
+                "reason": "Ожидает пересчёта current active functional version.",
+            }
+        elif stage not in result:
+            result[stage] = {
+                "status": "unavailable",
+                "average_unit_cost_rub": None,
+                "certified": False,
+                "blocker": "В current active functional version нет себестоимости этой стадии.",
+            }
     return result
 
 
