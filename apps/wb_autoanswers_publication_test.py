@@ -71,10 +71,20 @@ class PublicationTest(unittest.TestCase):
         row["createdDate"] = created_at
         return row
 
-    def manual_reviewed(self, feedback_id: str = "manual", *, route: str = "public_only") -> dict:
+    def manual_reviewed(
+        self,
+        feedback_id: str = "manual",
+        *,
+        route: str = "public_only",
+        rating: int = 5,
+        created_at: str = "2026-07-20T10:00:00Z",
+    ) -> dict:
         self.env["WB_CORE_WEB_AUTH_USERNAME"] = "reviewer"
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
-        self.repo.upsert_feedback(feedback(feedback_id), source_stream="unanswered", run_kind="steady")
+        raw = feedback(feedback_id)
+        raw["productValuation"] = rating
+        raw["createdDate"] = created_at
+        self.repo.upsert_feedback(raw, source_stream="unanswered", run_kind="steady")
         job = self.repo.enqueue_manual_processing(feedback_id, content_version=1, actor_id="reviewer")
         self.repo.claim_processing_job(worker_id="ai")
         result = successful_result(route)
@@ -290,6 +300,34 @@ class PublicationTest(unittest.TestCase):
                 confirmed=True,
                 expected_reply_sha256=reviewed["manual_reply_sha256"],
             )
+
+    def test_manual_publication_keeps_owner_date_order_not_rating_buckets(self) -> None:
+        old_rating_one = self.manual_reviewed(
+            "manual-old-r1",
+            rating=1,
+            created_at="2026-07-20T10:00:00Z",
+        )
+        self.repo.approve_for_publication(
+            old_rating_one["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=old_rating_one["manual_reply_sha256"],
+        )
+        new_rating_five = self.manual_reviewed(
+            "manual-new-r5",
+            rating=5,
+            created_at="2026-07-21T10:00:00Z",
+        )
+        self.repo.approve_for_publication(
+            new_rating_five["processing_key"],
+            actor_id="reviewer",
+            confirmed=True,
+            expected_reply_sha256=new_rating_five["manual_reply_sha256"],
+        )
+        self.assertEqual(
+            self.repo.claim_publication_job(worker_id="publication")["feedback_id"],
+            "manual-new-r5",
+        )
 
     def test_manual_publication_is_quarantined_if_mode_changes_before_write(self) -> None:
         reviewed = self.manual_reviewed("mode-changed")

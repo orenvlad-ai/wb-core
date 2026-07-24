@@ -116,6 +116,26 @@ class ReleaseSafetyTest(unittest.TestCase):
         )
         self.assertIs(unforced_ui_args.handler, hosted.run_autoanswers_ui_flow_command)
         self.assertEqual(unforced_ui_args.expected_state, "off-unforced")
+        full_ui_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-ui-flow",
+                "--evidence-dir",
+                "/tmp/wb-autoanswers-ui-full-test",
+                "--expected-state",
+                "auto-all",
+                "--expected-policy-epoch",
+                "11",
+                "--expected-transition-run-id",
+                "run-11",
+                "--deployed-sha",
+                "a" * 40,
+            ]
+        )
+        self.assertIs(full_ui_args.handler, hosted.run_autoanswers_ui_flow_command)
+        self.assertEqual(full_ui_args.expected_state, "auto-all")
+        self.assertEqual(full_ui_args.expected_policy_epoch, 11)
+        self.assertEqual(full_ui_args.expected_transition_run_id, "run-11")
+        self.assertEqual(full_ui_args.deployed_sha, "a" * 40)
         timer_args = hosted.build_arg_parser().parse_args(["autoanswers-readonly-timer", "enable"])
         self.assertIs(timer_args.handler, hosted.run_autoanswers_readonly_timer_command)
         for lifecycle_action in ("status", "reconcile", "suspend"):

@@ -257,7 +257,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5,6);
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5,6,7);
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -479,6 +479,374 @@ class RuntimeTest(unittest.TestCase):
                 1,
             )
         self.assertEqual(rating_outcome["content_classification"], CONTENT_CLASS_RATING_ONLY)
+
+    def test_rating_bucket_priority_is_shared_by_scope_materialization_processing_and_publication(self) -> None:
+        self.repo.update_settings(
+            max_paid_reviews_per_hour=20,
+            max_materialized_processing_jobs=5,
+            actor_id="admin",
+        )
+        rows = (
+            self.classified_feedback(
+                "content-r1-z",
+                text="rating one z",
+                rating=1,
+                created_at="2026-07-18T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-r1-a",
+                text="rating one a",
+                rating=1,
+                created_at="2026-07-18T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-r2",
+                text="rating two",
+                rating=2,
+                created_at="2026-07-25T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-r3",
+                text="rating three",
+                rating=3,
+                created_at="2026-07-24T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-r4",
+                text="rating four",
+                rating=4,
+                created_at="2026-07-23T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-r5",
+                text="rating five",
+                rating=5,
+                created_at="2026-07-22T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "rating-new",
+                rating=5,
+                created_at="2026-07-26T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "rating-old",
+                rating=1,
+                created_at="2026-07-17T10:00:00Z",
+            ),
+        )
+        for row in rows:
+            self.repo.upsert_feedback(row, source_stream="archive", run_kind="backfill")
+        indeterminate = self.classified_feedback(
+            "indeterminate-review",
+            rating=0,
+            created_at="2026-07-27T10:00:00Z",
+        )
+        indeterminate_outcome = self.repo.upsert_feedback(
+            indeterminate,
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        self.assertEqual(
+            indeterminate_outcome["content_classification"],
+            CONTENT_CLASS_INDETERMINATE,
+        )
+
+        expected_content = [
+            "content-r1-z",
+            "content-r1-a",
+            "content-r2",
+            "content-r3",
+            "content-r4",
+            "content-r5",
+        ]
+        expected_scope = [
+            *expected_content,
+            "rating-new",
+            "rating-old",
+            "indeterminate-review",
+        ]
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        sweep_id = applied["sweep"]["sweep_id"]
+        with sqlite3.connect(self.repo.db_path) as conn:
+            scope_ids = [
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT feedback_id
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope
+                    WHERE sweep_id=?
+                    ORDER BY ordinal
+                    """,
+                    (sweep_id,),
+                )
+            ]
+        self.assertEqual(scope_ids, expected_scope)
+
+        first_batch = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconcile",
+            batch_size=25,
+        )
+        self.assertEqual(first_batch["progress"]["generation_queued"], 5)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            first_materialized = [
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT feedback_id
+                    FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                    WHERE transition_run_id=?
+                    ORDER BY rowid
+                    """,
+                    (sweep_id,),
+                )
+            ]
+        self.assertEqual(first_materialized, expected_content[:5])
+
+        processing_order: list[str] = []
+        for _ in range(5):
+            claimed = self.repo.claim_processing_job(worker_id="processing")
+            processing_order.append(claimed["feedback_id"])
+            self.repo.settle_budget(claimed["processing_key"], actual_cost_usd="0.01")
+            self.repo.complete_generation(
+                claimed["processing_key"],
+                result=successful_result(),
+                worker_id="processing",
+            )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        final_content = self.repo.claim_processing_job(worker_id="processing")
+        processing_order.append(final_content["feedback_id"])
+        self.repo.settle_budget(final_content["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            final_content["processing_key"],
+            result=successful_result(),
+            worker_id="processing",
+        )
+        self.assertEqual(processing_order, expected_content)
+
+        publication_order: list[str] = []
+        for _ in expected_content:
+            publication = self.repo.claim_publication_job(worker_id="publication")
+            self.assertEqual(publication["action"], "write")
+            publication_order.append(publication["feedback_id"])
+            started = self.repo.begin_publication_write(
+                publication["publication_key"],
+                worker_id="publication",
+            )
+            self.repo.record_publication_transport(
+                publication["publication_key"],
+                attempt_id=started["attempt_id"],
+                outcome="http_response",
+                http_status=204,
+                worker_id="publication",
+            )
+            readback = self.repo.claim_publication_job(worker_id="publication")
+            self.assertEqual(readback["action"], "readback")
+            self.assertEqual(readback["feedback_id"], publication["feedback_id"])
+            self.repo.record_publication_readback(
+                readback["publication_key"],
+                answer_text=readback["exact_reply"],
+                worker_id="publication",
+            )
+        self.assertEqual(publication_order, expected_content)
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        rating_order: list[str] = []
+        for _ in range(2):
+            claimed = self.repo.claim_processing_job(worker_id="processing")
+            rating_order.append(claimed["feedback_id"])
+            self.repo.complete_rating_only_template(
+                claimed["processing_key"],
+                worker_id="processing",
+            )
+        self.assertEqual(rating_order, ["rating-new", "rating-old"])
+
+    def test_retry_and_expired_processing_claims_keep_rating_priority(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="auto_all",
+            max_paid_reviews_per_hour=20,
+            actor_id="admin",
+        )
+        for rating in (5, 2, 1):
+            row = self.classified_feedback(
+                f"content-r{rating}",
+                text=f"rating {rating}",
+                rating=rating,
+                created_at=f"2026-07-{20 + rating:02d}T10:00:00Z",
+            )
+            self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
+            self.repo.enqueue_processing(
+                f"content-r{rating}",
+                trigger_source="steady_sync",
+                actor_id="sync",
+            )
+
+        rating_one = self.repo.claim_processing_job(worker_id="worker", lease_seconds=1)
+        self.assertEqual(rating_one["feedback_id"], "content-r1")
+        self.repo.record_processing_retry(
+            rating_one["processing_key"],
+            error_code="OPENAI_HTTP_500",
+            retry_after_seconds=1,
+            worker_id="worker",
+        )
+        rating_two = self.repo.claim_processing_job(worker_id="worker", lease_seconds=1)
+        self.assertEqual(rating_two["feedback_id"], "content-r2")
+        self.clock.advance(2)
+
+        retried_rating_one = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(retried_rating_one["feedback_id"], "content-r1")
+        self.repo.settle_budget(
+            retried_rating_one["processing_key"],
+            actual_cost_usd="0.01",
+        )
+        self.repo.complete_generation(
+            retried_rating_one["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        reclaimed_rating_two = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(reclaimed_rating_two["feedback_id"], "content-r2")
+        self.repo.settle_budget(
+            reclaimed_rating_two["processing_key"],
+            actual_cost_usd="0.01",
+        )
+        self.repo.complete_generation(
+            reclaimed_rating_two["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        self.assertEqual(
+            self.repo.claim_processing_job(worker_id="worker")["feedback_id"],
+            "content-r5",
+        )
+
+    def test_manual_processing_keeps_owner_date_order_not_rating_buckets(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
+        for feedback_id, rating, created_at in (
+            ("manual-old-r1", 1, "2026-07-20T10:00:00Z"),
+            ("manual-new-r5", 5, "2026-07-21T10:00:00Z"),
+        ):
+            row = self.classified_feedback(
+                feedback_id,
+                text=f"manual rating {rating}",
+                rating=rating,
+                created_at=created_at,
+            )
+            self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
+            self.repo.enqueue_manual_processing(
+                feedback_id,
+                content_version=1,
+                actor_id="reviewer",
+            )
+        self.assertEqual(
+            self.repo.claim_processing_job(worker_id="manual-worker")["feedback_id"],
+            "manual-new-r5",
+        )
+
+    def test_rating_bucket_ties_fall_back_to_first_seen_then_feedback_id(self) -> None:
+        def insert(feedback_id: str) -> None:
+            row = self.classified_feedback(
+                feedback_id,
+                text="content",
+                rating=3,
+                created_at="",
+            )
+            self.repo.upsert_feedback(row, source_stream="archive", run_kind="backfill")
+
+        insert("fallback-old")
+        self.clock.advance(60)
+        insert("fallback-new")
+        self.clock.advance(60)
+        insert("fallback-tie-a")
+        insert("fallback-tie-z")
+
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            ordered = [
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT feedback_id
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope
+                    WHERE sweep_id=?
+                    ORDER BY ordinal
+                    """,
+                    (applied["sweep"]["sweep_id"],),
+                )
+            ]
+        self.assertEqual(
+            ordered,
+            [
+                "fallback-tie-z",
+                "fallback-tie-a",
+                "fallback-new",
+                "fallback-old",
+            ],
+        )
+
+    def test_policy_transition_reuses_ready_results_in_rating_priority(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="manual",
+            max_paid_reviews_per_hour=20,
+            actor_id="admin",
+        )
+        for rating in (5, 1):
+            row = self.classified_feedback(
+                f"ready-r{rating}",
+                text=f"ready rating {rating}",
+                rating=rating,
+                created_at=f"2026-07-{20 + rating:02d}T10:00:00Z",
+            )
+            self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
+            job = self.repo.enqueue_manual_processing(
+                f"ready-r{rating}",
+                content_version=1,
+                actor_id="reviewer",
+            )
+            self.repo.claim_processing_job(worker_id="worker")
+            self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.01")
+            self.repo.complete_generation(
+                job["processing_key"],
+                result=successful_result(),
+                worker_id="worker",
+            )
+
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        reconciled = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconcile",
+            batch_size=25,
+        )
+        self.assertEqual(reconciled["progress"]["publication_queued"], 2)
+        first_publication = self.repo.claim_publication_job(worker_id="publication")
+        self.assertEqual(first_publication["feedback_id"], "ready-r1")
 
     def test_policy_epoch_preserves_completed_prefilter_skip_without_reclaim(self) -> None:
         self.enable("draft_only")

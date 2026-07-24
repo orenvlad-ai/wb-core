@@ -348,7 +348,10 @@ def collect_evidence(runtime_dir: Path, *, now: datetime | None = None) -> dict[
                 SELECT COUNT(*) AS attempts,
                        SUM(CASE WHEN write_finished_at IS NOT NULL THEN 1 ELSE 0 END)
                          AS transport_finished,
-                       SUM(CASE WHEN readback_outcome='confirmed' THEN 1 ELSE 0 END)
+                       SUM(CASE
+                             WHEN readback_outcome='publication_confirmed_by_readback'
+                             THEN 1 ELSE 0
+                           END)
                          AS confirmed,
                        SUM(CASE WHEN write_finished_at IS NULL THEN 1 ELSE 0 END)
                          AS ambiguous,

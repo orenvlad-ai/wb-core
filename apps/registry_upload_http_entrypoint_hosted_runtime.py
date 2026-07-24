@@ -3773,6 +3773,9 @@ def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
         expected_state=expected_state,
+        expected_policy_epoch=args.expected_policy_epoch,
+        expected_transition_run_id=str(args.expected_transition_run_id or ""),
+        deployed_sha=str(args.deployed_sha or ""),
     )
     _print_json(
         {
@@ -4375,7 +4378,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     autoanswers_ui_flow.add_argument("--headed", action="store_true")
     autoanswers_ui_flow.add_argument(
-        "--expected-state", choices=("off-force", "off-unforced", "manual"), default="off-force"
+        "--expected-state",
+        choices=("off-force", "off-unforced", "manual", "auto-all"),
+        default="off-force",
+    )
+    autoanswers_ui_flow.add_argument("--expected-policy-epoch", type=int)
+    autoanswers_ui_flow.add_argument("--expected-transition-run-id", default="")
+    autoanswers_ui_flow.add_argument(
+        "--deployed-sha",
+        default="",
+        help="Exact deployed commit expected for the machine-readable evidence.",
     )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 

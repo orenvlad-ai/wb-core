@@ -9,7 +9,8 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from apps.wb_autoanswers_runtime_test import MutableClock, feedback
+from apps.wb_autoanswers_incident_evidence import collect_evidence
+from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_result
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
@@ -94,6 +95,210 @@ class IncidentRegressionTest(unittest.TestCase):
         self.assertEqual(self.repo.budget_status()["daily_actual_usd"], 0)
         with sqlite3.connect(self.repo.db_path) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations").fetchone()[0], 0)
+
+    def test_five_reclassified_publications_remain_review_only_across_policy_epoch(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        publication_keys: list[str] = []
+        for index in range(5):
+            feedback_id = f"incident-review-{index}"
+            self.repo.upsert_feedback(
+                empty_feedback(feedback_id, 5),
+                source_stream="unanswered",
+                run_kind="steady",
+            )
+            job = self.repo.enqueue_processing(
+                feedback_id,
+                trigger_source="steady_sync",
+                actor_id="sync",
+            )
+            self.repo.claim_processing_job(worker_id="worker")
+            self.repo.complete_rating_only_template(
+                job["processing_key"],
+                worker_id="worker",
+            )
+            publication_keys.append(
+                self.repo.get_feedback(feedback_id)["publications"][0]["publication_key"]
+            )
+
+        with sqlite3.connect(self.repo.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_feedbacks
+                SET content_classification='content_bearing'
+                WHERE feedback_id LIKE 'incident-review-%'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state='needs_review',
+                    regeneration_required=1,
+                    regeneration_reason='content_classification_v3_changed',
+                    review_reasons_json='["content_classification_v3_changed"]'
+                WHERE feedback_id LIKE 'incident-review-%'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_publication_jobs
+                SET state='needs_review', last_error_code=NULL
+                WHERE feedback_id LIKE 'incident-review-%'
+                """
+            )
+
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        self.assertEqual(preview["counts"]["content_bearing"], 5)
+        self.assertEqual(preview["counts"]["needs_review"], 5)
+        self.assertEqual(preview["counts"]["requires_openai"], 0)
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        reconciled = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconcile",
+            batch_size=25,
+        )
+        self.assertEqual(
+            reconciled["progress"]["regeneration_review_preserved"],
+            5,
+        )
+        self.assertEqual(self.repo.progress_status()["automatic_content_pending"], 0)
+
+        with sqlite3.connect(self.repo.db_path) as conn:
+            jobs = conn.execute(
+                """
+                SELECT state,policy_epoch,transition_run_id,regeneration_required
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                WHERE feedback_id LIKE 'incident-review-%'
+                """
+            ).fetchall()
+            publications = conn.execute(
+                """
+                SELECT publication_key,state,policy_epoch,transition_run_id,
+                       write_started_at,attempts,last_error_code
+                FROM sheet_vitrina_v1_wb_publication_jobs
+                WHERE feedback_id LIKE 'incident-review-%'
+                """
+            ).fetchall()
+        self.assertEqual(len(jobs), 5)
+        self.assertEqual(len(publications), 5)
+        self.assertEqual(
+            {row[0] for row in jobs},
+            {"needs_review"},
+        )
+        self.assertEqual(
+            {row[1] for row in jobs},
+            {applied["settings"].policy_epoch},
+        )
+        self.assertEqual(
+            {row[2] for row in jobs},
+            {applied["sweep"]["transition_run_id"]},
+        )
+        self.assertEqual({row[3] for row in jobs}, {1})
+        self.assertEqual({row[0] for row in publications}, set(publication_keys))
+        self.assertEqual({row[1] for row in publications}, {"needs_review"})
+        self.assertEqual(
+            {row[2] for row in publications},
+            {applied["settings"].policy_epoch},
+        )
+        self.assertEqual(
+            {row[3] for row in publications},
+            {applied["sweep"]["transition_run_id"]},
+        )
+        self.assertEqual({row[4] for row in publications}, {None})
+        self.assertEqual({row[5] for row in publications}, {0})
+        self.assertEqual(
+            {row[6] for row in publications},
+            {"regeneration_requires_publication_review"},
+        )
+
+        replay = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.assertEqual(
+            replay["sweep"]["transition_run_id"],
+            applied["sweep"]["transition_run_id"],
+        )
+        replayed_reconciliation = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconcile",
+            batch_size=25,
+        )
+        self.assertEqual(replayed_reconciliation["state"], "succeeded")
+        self.assertEqual(
+            replayed_reconciliation["progress"],
+            {"regeneration_review_preserved": 5},
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_publication_jobs
+                    WHERE feedback_id LIKE 'incident-review-%'
+                    """
+                ).fetchone()[0],
+                5,
+            )
+            self.assertEqual(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                    WHERE processing_key LIKE 'incident-review-%'
+                    """
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_incident_evidence_counts_exact_confirmed_readback_outcome(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(
+            feedback("confirmed-evidence"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        job = self.repo.enqueue_processing(
+            "confirmed-evidence",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            job["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        publication = self.repo.claim_publication_job(worker_id="publication")
+        started = self.repo.begin_publication_write(
+            publication["publication_key"],
+            worker_id="publication",
+        )
+        self.repo.record_publication_transport(
+            publication["publication_key"],
+            attempt_id=started["attempt_id"],
+            outcome="http_response",
+            http_status=204,
+            worker_id="publication",
+        )
+        readback = self.repo.claim_publication_job(worker_id="publication")
+        self.repo.record_publication_readback(
+            readback["publication_key"],
+            answer_text=readback["exact_reply"],
+            worker_id="publication",
+        )
+
+        evidence = collect_evidence(Path(self.temp.name), now=self.clock())
+        self.assertEqual(evidence["wb_writes_after_run_created"]["attempts"], 1)
+        self.assertEqual(evidence["wb_writes_after_run_created"]["confirmed"], 1)
+        self.assertEqual(evidence["wb_writes_after_run_created"]["ambiguous"], 0)
 
     def test_retry_terminal_and_lease_loss_release_reservations(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="draft_only", actor_id="admin")
