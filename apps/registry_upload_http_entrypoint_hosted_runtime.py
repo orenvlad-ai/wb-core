@@ -2271,6 +2271,107 @@ def run_autoanswers_budget_reconciliation_command(
     return 0
 
 
+def _run_remote_autoanswers_prefilter_skip_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    transition_run_id: str,
+    expected_rows: int,
+    fingerprint: str = "",
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"autoanswers-prefilter-skip-recovery-{action}",
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(
+            f"unsupported Autoanswers prefilter skip recovery action: {action}"
+        )
+    if not transition_run_id:
+        raise ValueError("prefilter skip recovery requires --transition-run-id")
+    if expected_rows <= 0:
+        raise ValueError("prefilter skip recovery requires positive --expected-rows")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="autoanswers-prefilter-skip-recovery-apply",
+            dry_run=False,
+        )
+        if not fingerprint:
+            raise ValueError("prefilter skip recovery apply requires --fingerprint")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    command = [
+        "python3",
+        "apps/wb_autoanswers_prefilter_skip_recovery.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--transition-run-id",
+        transition_run_id,
+        "--expected-rows",
+        str(expected_rows),
+    ]
+    if action == "apply":
+        command.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--actor",
+                "release-train",
+            ]
+        )
+    shell = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        + " ".join(shlex.quote(item) for item in command)
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Autoanswers prefilter skip recovery {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Autoanswers prefilter skip recovery returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Autoanswers prefilter skip recovery returned a non-object payload"
+        )
+    return payload
+
+
+def run_autoanswers_prefilter_skip_recovery_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_autoanswers_prefilter_skip_recovery(
+        target,
+        action=str(args.action),
+        transition_run_id=str(args.transition_run_id or ""),
+        expected_rows=int(args.expected_rows),
+        fingerprint=str(args.fingerprint or ""),
+    )
+    _print_json({"target_id": target.target_id, "result": payload})
+    return 0
+
+
 def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -3740,6 +3841,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_budget_reconciliation.add_argument("--fingerprint", default="")
     autoanswers_budget_reconciliation.set_defaults(
         handler=run_autoanswers_budget_reconciliation_command
+    )
+
+    autoanswers_prefilter_skip_recovery = subparsers.add_parser(
+        "autoanswers-prefilter-skip-recovery",
+        help=(
+            "Plan, apply or read back bounded restoration of proven "
+            "prefilter skips after an invalid policy-epoch requeue."
+        ),
+    )
+    autoanswers_prefilter_skip_recovery.add_argument(
+        "action",
+        nargs="?",
+        choices=("dry-run", "apply", "readback"),
+        default="dry-run",
+    )
+    autoanswers_prefilter_skip_recovery.add_argument(
+        "--transition-run-id",
+        required=True,
+    )
+    autoanswers_prefilter_skip_recovery.add_argument(
+        "--expected-rows",
+        type=int,
+        required=True,
+    )
+    autoanswers_prefilter_skip_recovery.add_argument(
+        "--fingerprint",
+        default="",
+    )
+    autoanswers_prefilter_skip_recovery.set_defaults(
+        handler=run_autoanswers_prefilter_skip_recovery_command
     )
 
     finance_canonical_dry_run = subparsers.add_parser(

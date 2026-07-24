@@ -5992,6 +5992,30 @@ class AutoanswersRepository:
             elif bool(job["regeneration_required"]) or bool(job["media_uncertain"]):
                 regeneration_key = str(job["processing_key"])
                 outcome = "regeneration_queued"
+            elif str(job["state"]) == STATE_SKIPPED:
+                # A frozen prefilter result is already a terminal, zero-cost
+                # evaluation for this immutable content/bundle identity.
+                # Adopting a new policy epoch must not claim the same key
+                # again: its settled reservation is immutable evidence and a
+                # second claim would otherwise reach the provider boundary
+                # without an active reservation.
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                    SET enable_epoch=?, policy_epoch=?, policy_version=?,
+                        transition_run_id=?, updated_at=?
+                    WHERE processing_key=?
+                    """,
+                    (
+                        enable_epoch,
+                        policy_epoch,
+                        DEFAULT_POLICY_VERSION,
+                        transition_run_id,
+                        iso_utc(now),
+                        job["processing_key"],
+                    ),
+                )
+                outcome = "skipped_preserved"
             elif str(job["state"]) in {STATE_NEEDS_REVIEW, STATE_TERMINAL_ERROR}:
                 # Human-only and terminal outcomes remain visible but are not
                 # automatic work.  Adopting the new run identity must not turn

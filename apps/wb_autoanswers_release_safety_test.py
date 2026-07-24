@@ -126,6 +126,22 @@ class ReleaseSafetyTest(unittest.TestCase):
                 lifecycle_args.handler, hosted.run_autoanswers_lifecycle_command
             )
             self.assertEqual(lifecycle_args.action, lifecycle_action)
+        recovery_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-prefilter-skip-recovery",
+                "dry-run",
+                "--transition-run-id",
+                "incident-run",
+                "--expected-rows",
+                "5",
+            ]
+        )
+        self.assertIs(
+            recovery_args.handler,
+            hosted.run_autoanswers_prefilter_skip_recovery_command,
+        )
+        self.assertEqual(recovery_args.action, "dry-run")
+        self.assertEqual(recovery_args.expected_rows, 5)
 
     def test_remote_readonly_command_reasserts_force_off_and_has_no_write_worker(self) -> None:
         target = hosted.load_hosted_runtime_target(TARGET)
@@ -237,6 +253,43 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("apps/wb_autoanswers_lifecycle.py reconcile", command)
         self.assertNotIn("systemctl enable", command)
         self.assertNotIn("wb_autoanswers_worker.py", command)
+
+    def test_prefilter_skip_recovery_uses_repo_owned_bounded_runner(self) -> None:
+        target = hosted.load_hosted_runtime_target(TARGET)
+        payload = {
+            "candidate_count": 5,
+            "coverage_confirmed": True,
+            "plan_fingerprint": "sha256:" + "a" * 64,
+        }
+        captured: list[list[str]] = []
+
+        def fake_run(
+            command: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+
+        with patch.object(hosted.subprocess, "run", side_effect=fake_run):
+            result = hosted._run_remote_autoanswers_prefilter_skip_recovery(
+                target,
+                action="dry-run",
+                transition_run_id="incident-run",
+                expected_rows=5,
+            )
+        self.assertEqual(result, payload)
+        command = " ".join(captured[0])
+        self.assertIn(
+            "apps/wb_autoanswers_prefilter_skip_recovery.py dry-run",
+            command,
+        )
+        self.assertIn("--transition-run-id incident-run", command)
+        self.assertIn("--expected-rows 5", command)
+        self.assertNotIn("--fingerprint", command)
 
 
 if __name__ == "__main__":

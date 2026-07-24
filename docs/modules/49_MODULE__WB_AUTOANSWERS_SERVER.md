@@ -60,7 +60,7 @@ Frozen identity:
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
 | Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
 | Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
-| Incident evidence and budget reconciliation | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py` |
+| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
 | Backend/UI | `registry_upload_http_entrypoint.py`, `sheet_vitrina_v1_web_vitrina.html` |
 
@@ -139,6 +139,16 @@ affected counts and readback. Re-applying an already consumed
 exact fingerprint returns a confirmed idempotent no-op only when every
 fingerprint-bound hold and audit row still exists and no provider-cost
 uncertainty remains. A different or stale fingerprint still fails closed.
+
+A completed frozen `skipped` result is terminal for the immutable
+content/bundle identity. Policy-epoch reconciliation adopts the new epoch/run
+metadata without queuing that processing key again or reopening its settled
+zero-cost reservation. The bounded `prefilter_skip_recovery_v1` runner repairs
+only rows already misclassified as `reservation_missing` when an earlier
+`empty_five_star` skip, a settled zero-cost reservation, no cost events and no
+publication are all proven. Dry-run is query-only and exact-row/fingerprint
+bound; apply uses `BEGIN IMMEDIATE`, restores only the job projection, appends
+audit, preserves all financial/provider/WB evidence and repeats as a no-op.
 
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
 

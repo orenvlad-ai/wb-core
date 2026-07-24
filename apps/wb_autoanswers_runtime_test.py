@@ -480,6 +480,84 @@ class RuntimeTest(unittest.TestCase):
             )
         self.assertEqual(rating_outcome["content_classification"], CONTENT_CLASS_RATING_ONLY)
 
+    def test_policy_epoch_preserves_completed_prefilter_skip_without_reclaim(self) -> None:
+        self.enable("draft_only")
+        self.insert_new("prefilter-skip")
+        queued = self.repo.enqueue_processing(
+            "prefilter-skip",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        claimed = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(claimed["processing_key"], queued["processing_key"])
+        self.repo.mark_provider_call_started(
+            queued["processing_key"],
+            worker_id="worker",
+        )
+        self.repo.settle_budget(
+            queued["processing_key"],
+            actual_cost_usd="0",
+        )
+        skipped = self.repo.complete_skip(
+            queued["processing_key"],
+            reason="empty_five_star",
+            worker_id="worker",
+        )
+        self.assertEqual(skipped["state"], "skipped")
+
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="0.50",
+        )
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        run_id = applied["sweep"]["transition_run_id"]
+        status = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconcile",
+            batch_size=25,
+        )
+
+        with sqlite3.connect(self.repo.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            job = conn.execute(
+                """
+                SELECT state,last_error_code,policy_epoch,transition_run_id,attempts
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                WHERE processing_key=?
+                """,
+                (queued["processing_key"],),
+            ).fetchone()
+            reservation = conn.execute(
+                """
+                SELECT status,actual_cost_usd,provider_call_started_at
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                WHERE processing_key=?
+                """,
+                (queued["processing_key"],),
+            ).fetchone()
+            boundary_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+                WHERE aggregate_id=? AND event_type='provider_call_boundary_entered'
+                """,
+                (queued["processing_key"],),
+            ).fetchone()[0]
+        self.assertEqual(job["state"], "skipped")
+        self.assertEqual(job["last_error_code"], "empty_five_star")
+        self.assertEqual(job["transition_run_id"], run_id)
+        self.assertEqual(job["attempts"], 1)
+        self.assertEqual(reservation["status"], "settled")
+        self.assertEqual(float(reservation["actual_cost_usd"]), 0.0)
+        self.assertIsNotNone(reservation["provider_call_started_at"])
+        self.assertEqual(boundary_count, 1)
+        self.assertGreaterEqual(status["progress"]["skipped_preserved"], 1)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+
     def test_budget_pause_and_human_only_content_do_not_open_or_deadlock_rating_gate(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
         self.repo.upsert_feedback(
