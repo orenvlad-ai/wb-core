@@ -486,6 +486,7 @@ def main() -> None:
                 )
                 _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
                 _seed_first_supplier_exact_cny_cost(runtime, payment_cost_rub=200000.0)
+                _seed_first_supplier_bank_fee_review_document(runtime)
                 frame.get_by_role("tab", name="Состав поставки").click()
                 frame.get_by_role("tab", name="Документы").click()
                 exact_cost_tile = frame.locator("#financialSummaryGroups .total", has_text="Себестоимость на единицу товара")
@@ -510,6 +511,45 @@ def main() -> None:
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Контракт")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("КП логистов")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Не загружен")
+                statement_row = frame.locator(
+                    "#financialDocumentsRows tr[data-financial-document-row]",
+                    has_text="VTB-REVIEW",
+                ).first
+                expect(statement_row).to_be_visible()
+                statement_row.click()
+                expect(frame.locator("#bankFeePreviewTitle")).to_have_text(
+                    "Операции выписки · выбор оператора"
+                )
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("Уже импортирована")
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("Требует выбора")
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("40802810012480001092")
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("платёж №11")
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text(
+                    "Несколько строк имеют одинаковую связь с платежом; нужен явный выбор оператора."
+                )
+                ambiguous_20k = frame.locator(
+                    "#bankFeePreviewContent [data-bank-fee-status='needs_review']",
+                    has_text=re.compile(r"20\s*000,00 RUB"),
+                )
+                ambiguous_58113 = frame.locator(
+                    "#bankFeePreviewContent [data-bank-fee-status='needs_review']",
+                    has_text=re.compile(r"58\s*113,66 RUB"),
+                )
+                expect(ambiguous_20k).to_be_visible()
+                expect(ambiguous_58113).to_be_visible()
+                expect(ambiguous_20k.locator("input")).not_to_be_checked()
+                expect(ambiguous_58113.locator("input")).not_to_be_checked()
+                expect(ambiguous_20k.locator("input")).to_be_enabled()
+                expect(ambiguous_58113.locator("input")).to_be_enabled()
+                expect(
+                    frame.locator("#bankFeePreviewContent [data-bank-fee-status='already_imported'] input")
+                ).to_be_disabled()
+                expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
+                ambiguous_20k.locator("input").check()
+                expect(frame.locator("#confirmBankFeeImportButton")).to_be_enabled()
+                ambiguous_20k.locator("input").uncheck()
+                expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
+                expect(frame.locator("#cancelBankFeeImportButton")).to_be_hidden()
                 expect(frame.locator("#supplierOrderDocumentsTable thead")).to_contain_text("Распределение расходов")
                 frame.locator("#financialDocumentsColumnChooser > summary").click()
                 counterparty_toggle = frame.locator("#financialDocumentsColumnChooser input[value='counterparty']")
@@ -1187,6 +1227,104 @@ def _seed_first_supplier_factual_expense(runtime: RegistryUploadDbBackedRuntime,
                 "raw": {},
             }
         ],
+    )
+
+
+def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBackedRuntime) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed bank fee review without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"cannot seed bank fee review for shipment without id: {shipments[0]}")
+    review_warning = "Несколько строк имеют одинаковую связь с платежом; нужен явный выбор оператора."
+    account_number = "40802810012480001092"
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_browser_bank_fee_statement",
+            "supplier_order_id": shipment_id,
+            "document_type": "bank_fee_statement",
+            "original_filename": "browser-vtb-review.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "browser-vtb-review-sha",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "parse_status": "parsed",
+            "vendor": "Банк ВТБ",
+            "document_number": "VTB-REVIEW",
+            "document_date": "2026-07-24",
+            "currency": "RUB",
+            "total_amount": None,
+            "total_amount_rub": None,
+            "normalized_parse": {
+                "document_type": "bank_fee_statement",
+                "statement_import": {
+                    "payment_anchors": [
+                        {
+                            "operation_number": "11",
+                            "document_number": "11",
+                            "amount_cny_display": "100000.00",
+                        }
+                    ],
+                    "matched_fee_rows": [
+                        {
+                            "semantic_operation_id": "browser-vtb-imported",
+                            "operation_date": "2026-07-19",
+                            "account_number": account_number,
+                            "currency": "RUB",
+                            "fee_category": "transfer_fee",
+                            "amount": "948.60",
+                            "matched_anchor_operation_number": "11",
+                            "operation_status": "already_imported",
+                            "import_allowed": False,
+                            "selected_by_default": False,
+                            "payment_purpose": "Комиссия банка по платежу №11",
+                            "match_reasons": ["номер платежа", "RUB-счёт"],
+                        },
+                        {
+                            "semantic_operation_id": "browser-vtb-review-20000",
+                            "operation_date": "2026-07-20",
+                            "account_number": account_number,
+                            "currency": "RUB",
+                            "fee_category": "transfer_fee",
+                            "amount": "20000.00",
+                            "matched_anchor_operation_number": "11",
+                            "operation_status": "needs_review",
+                            "import_allowed": True,
+                            "selected_by_default": False,
+                            "payment_purpose": "Комиссия по валютному контролю, платёж №11",
+                            "review_warning": review_warning,
+                            "match_reasons": ["номер платежа", "период выписки"],
+                        },
+                        {
+                            "semantic_operation_id": "browser-vtb-review-58113",
+                            "operation_date": "2026-07-21",
+                            "account_number": account_number,
+                            "currency": "RUB",
+                            "fee_category": "currency_control_fee",
+                            "amount": "58113.66",
+                            "matched_anchor_operation_number": "11",
+                            "operation_status": "needs_review",
+                            "import_allowed": True,
+                            "selected_by_default": False,
+                            "payment_purpose": "Комиссия по документу платежа №11",
+                            "review_warning": review_warning,
+                            "match_reasons": ["номер платежа", "назначение платежа"],
+                        },
+                    ],
+                    "fee_totals_by_currency": {"RUB": "79062.26"},
+                    "ignored_row_count": 0,
+                    "match_confidence": "needs_review",
+                    "warnings": [review_warning],
+                },
+            },
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [review_warning],
+            "errors": [],
+        },
+        expense_lines=[],
     )
 
 
