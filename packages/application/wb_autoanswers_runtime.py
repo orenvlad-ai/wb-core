@@ -104,6 +104,57 @@ def iso_utc(value: datetime | None = None) -> str:
     return current.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _automatic_priority_order_sql(
+    alias: str,
+    *,
+    manual_predicate: str | None = None,
+) -> str:
+    """Return the canonical automatic queue order for a feedback SQL alias."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+        raise ValueError("invalid automatic priority SQL alias")
+    if manual_predicate not in {
+        None,
+        "j.trigger_source='manual_generate'",
+        "p.request_source='manual'",
+    }:
+        raise ValueError("invalid manual priority SQL predicate")
+    manual_prefix = (
+        f"""
+        CASE WHEN {manual_predicate} THEN 0 ELSE 1 END,
+        CASE WHEN {manual_predicate} THEN 0 ELSE
+          CASE {alias}.content_classification
+            WHEN '{CONTENT_CLASS_CONTENT_BEARING}' THEN 0
+            WHEN '{CONTENT_CLASS_INDETERMINATE}' THEN 1
+            ELSE 2 END
+        END,
+        CASE WHEN {manual_predicate} THEN 0 ELSE
+          CASE
+            WHEN {alias}.content_classification='{CONTENT_CLASS_CONTENT_BEARING}'
+              THEN CASE WHEN {alias}.rating BETWEEN 1 AND 5 THEN {alias}.rating ELSE 6 END
+            ELSE 0 END
+        END,
+        """
+        if manual_predicate
+        else f"""
+        CASE {alias}.content_classification
+          WHEN '{CONTENT_CLASS_CONTENT_BEARING}' THEN 0
+          WHEN '{CONTENT_CLASS_INDETERMINATE}' THEN 1
+          ELSE 2 END,
+        CASE
+          WHEN {alias}.content_classification='{CONTENT_CLASS_CONTENT_BEARING}'
+            THEN CASE WHEN {alias}.rating BETWEEN 1 AND 5 THEN {alias}.rating ELSE 6 END
+          ELSE 0 END,
+        """
+    )
+    return f"""
+        {manual_prefix}
+        CASE WHEN {alias}.created_at_wb IS NULL OR trim({alias}.created_at_wb)=''
+             THEN {alias}.first_seen_at ELSE {alias}.created_at_wb END DESC,
+        {alias}.feedback_id DESC
+    """.strip()
+
+
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1400,7 +1451,11 @@ class AutoanswersRepository:
         now = self._now()
         with self.transaction() as conn:
             current = conn.execute(
-                "SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
+                """
+                SELECT stop_reason,stop_details_json
+                FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+                WHERE singleton=1
+                """
             ).fetchone()
             conn.execute(
                 """
@@ -1426,7 +1481,118 @@ class AutoanswersRepository:
                 # the stronger fail-closed reason.
                 current_reason = str(current["stop_reason"] or "") if current is not None else ""
                 if current_reason not in {"budget_state_unknown", "openai_quota_exhausted"}:
-                    self._set_stop_reason(conn, reason, details={"code": code}, at=now)
+                    self._set_stop_reason(
+                        conn,
+                        reason,
+                        details={
+                            "code": code,
+                            "stage": _clean_text(errors[0].get("stage")),
+                        },
+                        at=now,
+                    )
+            elif current is not None and str(current["stop_reason"] or "") == "worker_error":
+                try:
+                    current_details = json.loads(str(current["stop_details_json"] or "{}"))
+                except json.JSONDecodeError:
+                    current_details = {}
+                if (
+                    str(current_details.get("code") or "") == "publication_already_exists"
+                    and str(current_details.get("stage") or "") in {"", "reconciliation"}
+                ):
+                    settings = conn.execute(
+                        "SELECT policy_epoch FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+                    ).fetchone()
+                    sweep = (
+                        conn.execute(
+                            """
+                            SELECT sweep_id,transition_run_id
+                            FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                            WHERE policy_epoch=?
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                            """,
+                            (int(settings["policy_epoch"]),),
+                        ).fetchone()
+                        if settings is not None
+                        else None
+                    )
+                    remaining_conflicts = 1
+                    if sweep is not None:
+                        remaining_conflicts = int(
+                            conn.execute(
+                                """
+                                SELECT COUNT(*)
+                                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                                JOIN sheet_vitrina_v1_wb_feedbacks f
+                                  ON f.feedback_id=rs.feedback_id
+                                 AND f.content_version=rs.content_version_at_preview
+                                 AND f.content_version_hash=rs.content_version_hash_at_preview
+                                JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+                                  ON j.feedback_id=f.feedback_id
+                                 AND j.content_version=f.content_version
+                                 AND j.bundle_version=?
+                                JOIN sheet_vitrina_v1_wb_publication_jobs p
+                                  ON p.processing_key=j.processing_key
+                                WHERE rs.sweep_id=?
+                                  AND COALESCE(f.answer_text,'')=''
+                                  AND COALESCE(j.policy_epoch,-1)<>?
+                                  AND (COALESCE(j.regeneration_required,0)=1
+                                       OR COALESCE(j.media_uncertain,0)=1)
+                                  AND p.write_started_at IS NULL
+                                """,
+                                (
+                                    PROMPT_BUNDLE_VERSION,
+                                    sweep["sweep_id"],
+                                    int(settings["policy_epoch"]),
+                                ),
+                            ).fetchone()[0]
+                        )
+                    active_reservations = int(
+                        conn.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                            WHERE status='reserved'
+                            """
+                        ).fetchone()[0]
+                    )
+                    unresolved_uncertainty = len(
+                        self._budget_uncertainty_candidates(conn)
+                    )
+                    if (
+                        remaining_conflicts == 0
+                        and active_reservations == 0
+                        and unresolved_uncertainty == 0
+                    ):
+                        recovery_details = {
+                            "recovered_code": "publication_already_exists",
+                            "transition_run_id": str(
+                                sweep["transition_run_id"] or sweep["sweep_id"]
+                            ),
+                            "policy_epoch": int(settings["policy_epoch"]),
+                            "clean_scheduler_tick_at": iso_utc(now),
+                            "remaining_publication_bound_conflicts": 0,
+                            "active_reservations": 0,
+                            "unresolved_uncertainty": 0,
+                        }
+                        self._set_stop_reason(
+                            conn,
+                            None,
+                            details=recovery_details,
+                            at=now,
+                        )
+                        self._audit(
+                            conn,
+                            aggregate_type="runtime",
+                            aggregate_id="singleton",
+                            event_type="publication_conflict_worker_latch_reconciled",
+                            actor_type="worker",
+                            actor_id="scheduler",
+                            details=recovery_details,
+                            at=now,
+                            previous_state="worker_error",
+                            next_state="running",
+                        )
 
     def _audit(
         self,
@@ -3765,7 +3931,7 @@ class AutoanswersRepository:
                 str(sweep["transition_run_id"] or "") if sweep is not None else ""
             )
             row = conn.execute(
-                """
+                f"""
                 SELECT j.* FROM sheet_vitrina_v1_wb_autoanswer_jobs j
                 JOIN sheet_vitrina_v1_wb_feedbacks f
                   ON f.feedback_id=j.feedback_id AND f.content_version=j.content_version
@@ -3778,14 +3944,10 @@ class AutoanswersRepository:
                   AND (? <> ? OR j.trigger_source='manual_generate')
                   AND (j.trigger_source='manual_generate' OR ?='' OR j.transition_run_id=?)
                   AND (?=0 OR j.trigger_source='manual_generate' OR f.content_classification=?)
-                ORDER BY CASE
-                           WHEN j.trigger_source='manual_generate' THEN 0
-                           WHEN f.content_classification=? THEN 1
-                           WHEN f.content_classification=? THEN 2
-                           ELSE 3 END,
-                         CASE WHEN f.created_at_wb IS NULL OR trim(f.created_at_wb)=''
-                              THEN f.first_seen_at ELSE f.created_at_wb END DESC,
-                         f.feedback_id DESC
+                ORDER BY {_automatic_priority_order_sql(
+                    "f",
+                    manual_predicate="j.trigger_source='manual_generate'",
+                )}
                 LIMIT 1
                 """,
                 (
@@ -3802,8 +3964,6 @@ class AutoanswersRepository:
                     active_run_id,
                     content_pending,
                     CONTENT_CLASS_CONTENT_BEARING,
-                    CONTENT_CLASS_CONTENT_BEARING,
-                    CONTENT_CLASS_INDETERMINATE,
                 ),
             ).fetchone()
             if row is None:
@@ -4891,7 +5051,7 @@ class AutoanswersRepository:
                     str(sweep["transition_run_id"] or "") if sweep is not None else ""
                 )
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT p.* FROM sheet_vitrina_v1_wb_publication_jobs p
                     JOIN sheet_vitrina_v1_wb_feedbacks f
                       ON f.feedback_id=p.feedback_id AND f.content_version=p.content_version
@@ -4905,14 +5065,10 @@ class AutoanswersRepository:
                         p.request_source='manual' OR ?=0
                         OR f.content_classification=?
                       )
-                    ORDER BY CASE
-                               WHEN p.request_source='manual' THEN 0
-                               WHEN f.content_classification=? THEN 1
-                               WHEN f.content_classification=? THEN 2
-                               ELSE 3 END,
-                             CASE WHEN f.created_at_wb IS NULL OR trim(f.created_at_wb)=''
-                                  THEN f.first_seen_at ELSE f.created_at_wb END DESC,
-                             f.feedback_id DESC
+                    ORDER BY {_automatic_priority_order_sql(
+                        "f",
+                        manual_predicate="p.request_source='manual'",
+                    )}
                     LIMIT 1
                     """,
                     (
@@ -4925,8 +5081,6 @@ class AutoanswersRepository:
                         active_run_id,
                         content_pending,
                         CONTENT_CLASS_CONTENT_BEARING,
-                        CONTENT_CLASS_CONTENT_BEARING,
-                        CONTENT_CLASS_INDETERMINATE,
                     ),
                 ).fetchone()
                 action = "write"
@@ -5413,13 +5567,7 @@ class AutoanswersRepository:
             LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
               ON p.processing_key=j.processing_key
             WHERE {' AND '.join(clauses)}
-            ORDER BY CASE f.content_classification
-                       WHEN '{CONTENT_CLASS_CONTENT_BEARING}' THEN 0
-                       WHEN '{CONTENT_CLASS_INDETERMINATE}' THEN 1
-                       ELSE 2 END,
-                     CASE WHEN f.created_at_wb IS NULL OR trim(f.created_at_wb)=''
-                          THEN f.first_seen_at ELSE f.created_at_wb END DESC,
-                     f.feedback_id DESC
+            ORDER BY {_automatic_priority_order_sql("f")}
             """,
             [PROMPT_BUNDLE_VERSION, *params],
         ).fetchall()
@@ -5865,6 +6013,14 @@ class AutoanswersRepository:
                 """,
                 (feedback_id, feedback["content_version"], PROMPT_BUNDLE_VERSION),
             ).fetchone()
+            publication = (
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?",
+                    (job["processing_key"],),
+                ).fetchone()
+                if job is not None
+                else None
+            )
             if feedback["answer_text"]:
                 if job is not None and str(job["state"]) != STATE_PUBLISHED:
                     conn.execute(
@@ -5989,9 +6145,14 @@ class AutoanswersRepository:
                 return "already_reconciled"
             elif str(job["state"]) == STATE_PUBLISHED:
                 return "published_preserved"
-            elif bool(job["regeneration_required"]) or bool(job["media_uncertain"]):
-                regeneration_key = str(job["processing_key"])
-                outcome = "regeneration_queued"
+            elif publication is not None and publication["write_started_at"]:
+                # A possible write is reconciled only by readback; policy
+                # transitions must never manufacture a second POST.
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET enable_epoch=?, policy_epoch=?, updated_at=? WHERE processing_key=?",
+                    (enable_epoch, policy_epoch, iso_utc(now), job["processing_key"]),
+                )
+                return "readback_preserved"
             elif str(job["state"]) == STATE_SKIPPED:
                 # A frozen prefilter result is already a terminal, zero-cost
                 # evaluation for this immutable content/bundle identity.
@@ -6016,7 +6177,19 @@ class AutoanswersRepository:
                     ),
                 )
                 outcome = "skipped_preserved"
-            elif str(job["state"]) in {STATE_NEEDS_REVIEW, STATE_TERMINAL_ERROR}:
+            elif (
+                str(job["state"]) == STATE_TERMINAL_ERROR
+                or (
+                    str(job["state"]) == STATE_NEEDS_REVIEW
+                    and (
+                        publication is not None
+                        or not (
+                            bool(job["regeneration_required"])
+                            or bool(job["media_uncertain"])
+                        )
+                    )
+                )
+            ):
                 # Human-only and terminal outcomes remain visible but are not
                 # automatic work.  Adopting the new run identity must not turn
                 # them back into paid generation or hold the rating-only gate.
@@ -6036,24 +6209,70 @@ class AutoanswersRepository:
                         job["processing_key"],
                     ),
                 )
+                if publication is not None:
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_wb_publication_jobs
+                        SET policy_epoch=?, transition_run_id=?, updated_at=?
+                        WHERE publication_key=?
+                        """,
+                        (
+                            policy_epoch,
+                            transition_run_id,
+                            iso_utc(now),
+                            publication["publication_key"],
+                        ),
+                    )
                 outcome = (
                     "review_required_preserved"
                     if str(job["state"]) == STATE_NEEDS_REVIEW
                     else "terminal_error_preserved"
                 )
-            else:
-                publication = conn.execute(
-                    "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?",
-                    (job["processing_key"],),
-                ).fetchone()
-                if publication is not None and publication["write_started_at"]:
-                    # A possible write is reconciled only by readback; policy
-                    # transitions must never manufacture a second POST.
+            elif bool(job["regeneration_required"]) or bool(job["media_uncertain"]):
+                if publication is None:
+                    regeneration_key = str(job["processing_key"])
+                    outcome = "regeneration_queued"
+                else:
+                    # Publication aggregates are immutable evidence for an
+                    # exact reply.  They cannot be replaced by regeneration,
+                    # so retain the row for explicit review instead of
+                    # repeatedly calling request_regeneration(), which must
+                    # continue to reject publication-bound jobs.
                     conn.execute(
-                        "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET enable_epoch=?, policy_epoch=?, updated_at=? WHERE processing_key=?",
-                        (enable_epoch, policy_epoch, iso_utc(now), job["processing_key"]),
+                        """
+                        UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                        SET state=?, enable_epoch=?, policy_epoch=?,
+                            policy_version=?, transition_run_id=?,
+                            last_error_code='publication_bound_regeneration_requires_review',
+                            updated_at=? WHERE processing_key=?
+                        """,
+                        (
+                            STATE_NEEDS_REVIEW,
+                            enable_epoch,
+                            policy_epoch,
+                            DEFAULT_POLICY_VERSION,
+                            transition_run_id,
+                            iso_utc(now),
+                            job["processing_key"],
+                        ),
                     )
-                    return "readback_preserved"
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_wb_publication_jobs
+                        SET state=?, policy_epoch=?, transition_run_id=?,
+                            last_error_code='publication_bound_regeneration_requires_review',
+                            updated_at=? WHERE publication_key=?
+                        """,
+                        (
+                            STATE_NEEDS_REVIEW,
+                            policy_epoch,
+                            transition_run_id,
+                            iso_utc(now),
+                            publication["publication_key"],
+                        ),
+                    )
+                    outcome = "publication_bound_regeneration_preserved"
+            else:
                 ready = (
                     bool(job["final_reply"])
                     and bool(job["hard_gates_passed"])
@@ -6357,13 +6576,7 @@ class AutoanswersRepository:
                        OR j.state IN (?,?))
                   {membership_clause}
                   {scope_clause}
-                ORDER BY CASE f.content_classification
-                           WHEN '{CONTENT_CLASS_CONTENT_BEARING}' THEN 0
-                           WHEN '{CONTENT_CLASS_INDETERMINATE}' THEN 1
-                           ELSE 2 END,
-                    CASE WHEN f.created_at_wb IS NULL OR trim(f.created_at_wb)=''
-                         THEN f.first_seen_at ELSE f.created_at_wb END DESC,
-                    f.feedback_id DESC
+                ORDER BY {_automatic_priority_order_sql("f")}
                 LIMIT ?
                 """,
                 params,

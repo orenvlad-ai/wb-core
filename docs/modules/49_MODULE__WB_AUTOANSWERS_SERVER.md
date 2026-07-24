@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Schema v6 adds a feature-owned readonly/worker lifecycle, actual-runtime UI readback and conservative append-only reconciliation for unknown provider-cost boundaries. Mode/run/cap truth remains in the existing Autoanswers SQLite contract."
+update_note: "The current runtime adds one end-to-end content rating priority, publication-bound reconciliation hardening and bounded GET-only lifecycle refresh while preserving the schema-v6 lifecycle, budget and mode/run/cap contracts."
 ---
 
 # WB Autoanswers Server v1
@@ -126,7 +126,18 @@ GET window; that concurrent progress is not attributed to the readonly sync.
 
 Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot. Reviews observed after preview remain outside that run and require a new preview. Apply creates a new `policy_epoch`, transition run and resumable lazy sweep. Replaying the same consumed preview is an exact no-op; a fresh owner-confirmed capped preview creates a new run even when the selected automatic mode is unchanged.
 
-Every automatic stage uses the same strict ordering: `content_bearing` before `rating_only`; within a class `created_at_wb DESC`, falling back to `first_seen_at DESC`, then `feedback_id DESC`. This governs snapshot ordinals, reconciliation, lazy materialization, processing/retry/expired-lease claims, ready-result reuse, publication enqueue and publication claims. Rating does not participate. Explicit manual work retains its separate owner-triggered semantics.
+Every automatic stage uses one strict order. `content_bearing` is split into
+rating buckets `1`, `2`, `3`, `4`, `5` in that order. Within each bucket the
+deterministic tie-break is `created_at_wb DESC`, falling back to
+`first_seen_at DESC`, then `feedback_id DESC`. Only after every scoped content
+bucket has no claimable or pending automatic step may non-content work proceed;
+the existing deterministic non-content order remains `indeterminate` review
+evidence followed by the final `rating_only` block, newest first with the same
+fallback/tie-break. A content job that becomes claimable again preempts queued
+rating-only work on the next claim. This single order governs snapshot
+ordinals, reconciliation, lazy materialization, processing/retry/expired-lease
+claims, ready-result reuse, publication enqueue and publication claims.
+Explicit manual work retains its separate owner-triggered semantics.
 
 `rating_only` cannot materialize, claim or begin a new WB write while a scoped `content_bearing` member still has an automatic next step, including regeneration, retry/backoff, budget wait, publication or readback. Budget/run caps do not open the empty-review lane. `needs_review`, terminal/hard-gate outcomes, external answers and policy-ineligible publication do not hold the barrier forever. Old rating-only jobs remain immutable evidence but are excluded from current content capacity accounting and cannot be claimed ahead of content. A write already started is the sole safety exception: mandatory GET readback remains first and never creates a second POST.
 
@@ -163,6 +174,19 @@ are all read back. It has its own dry-run/fingerprint/apply/readback contract,
 changes one runtime-state row plus one audit event, and preserves provider,
 cost and WB evidence.
 
+Policy reconciliation never sends an immutable publication aggregate back
+through regeneration. Existing `needs_review`/terminal evidence is adopted
+before regeneration checks; any other unpublished publication-bound
+regeneration candidate is quarantined as
+`publication_bound_regeneration_requires_review`. A clean scheduler tick may
+release only a prior reconciliation-stage
+`worker_error/publication_already_exists` presentation latch (including the
+legacy stage-less form), and only after exact current-run scope readback proves
+zero remaining stale publication-bound candidates, zero active reservations
+and zero unresolved provider-cost boundaries. The release appends one audit
+event and is idempotent. It does not clear `reservation_missing`,
+`budget_state_unknown`, quota or other provider/safety latches.
+
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
 
 Policy v3 classifies a current version as `content_bearing` when trimmed text, pros, cons, any non-empty tag, photo or video exists. Canonical media rows and `has_photo`/`has_video` are conservative positive evidence. Only a review with none of those surfaces and a rating 1–5 is `rating_only`; malformed or contradictory data is `indeterminate` and fails closed to review. True `rating_only` continues to use the unchanged owner-approved v2 template contract, costs `$0` and never invokes Node/OpenAI. The frozen v1.4.2 prefilter is not modified.
@@ -196,6 +220,15 @@ cannot render a green full-mode state when a timer is inactive, the tick is
 stale, lifecycle drift exists or budget truth is unknown. `Настройки →
 Автообновления` exposes the same server-owned fields as a monitoring-only card
 and has no Autoanswers individual mutation control.
+
+If the initial settings GET observes a desired runtime in `starting`, `error`
+or lifecycle drift, the visible `Отзывы` tab performs a bounded refresh of at
+most 30 additional settings GETs at two-second intervals. The refresh stops
+when the tab is hidden, the subsection changes, the policy epoch changes or
+server truth becomes stable. It performs no lifecycle, queue, provider or WB
+mutation and cannot turn stale client state into a green badge without a fresh
+server payload whose lifecycle is `running`, `actual=true` and
+`drift_status=matched`.
 
 Detail keeps only rating/date, review, non-empty pros/cons/tags, product identity, customer media, WB answer, AI reply, friendly status and actions visible. Routes, raw states, case code, attempts, cost, warnings, contracts, guards, media uncertainty, hashes, idempotency and audit are in closed-by-default `Техническая информация`. Before generation the same technical fields remain named explicitly with a `не запускался` state, rather than disappearing or implying a passed check. The full-width reply textarea auto-grows on render, generation, input and detail refresh. Desktop and 390px narrow behavior are browser-tested.
 
