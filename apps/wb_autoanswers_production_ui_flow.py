@@ -96,8 +96,10 @@ def run_autoanswers_ui_flow(
         raise ValueError("autoanswers UI flow requires a valid app-session cookie")
     evidence_dir = evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    if expected_state not in {"off-force", "off-unforced", "manual"}:
-        raise ValueError("expected_state must be off-force, off-unforced or manual")
+    if expected_state not in {"off-force", "off-unforced", "manual", "auto_all"}:
+        raise ValueError(
+            "expected_state must be off-force, off-unforced, manual or auto_all"
+        )
 
     requested_url = normalized_base_url + UI_PATH
     page_errors: list[str] = []
@@ -163,7 +165,10 @@ def run_autoanswers_ui_flow(
         _assert(response is not None and response.status == 200, "autoanswers document must return HTTP 200")
         page.locator('[data-unified-tab-panel="feedbacks"]:not([hidden])').wait_for(timeout=60_000)
         page.locator('[data-feedbacks-subpanel="server-reviews"]:not([hidden])').wait_for(timeout=60_000)
-        expected_title = "Ручной режим" if expected_state == "manual" else "Автоответы выключены"
+        expected_title = {
+            "manual": "Ручной режим",
+            "auto_all": "Работает",
+        }.get(expected_state, "Автоответы выключены")
         page.wait_for_function(
             "title => document.querySelector('[data-autoanswers-master-status]').textContent.trim() === title",
             arg=expected_title,
@@ -177,6 +182,11 @@ def run_autoanswers_ui_flow(
         elif expected_state == "manual":
             page.wait_for_function(
                 "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('только кнопкой')",
+                timeout=60_000,
+            )
+        elif expected_state == "auto_all":
+            page.wait_for_function(
+                "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('hard safety gates')",
                 timeout=60_000,
             )
         else:
@@ -208,35 +218,82 @@ def run_autoanswers_ui_flow(
             _assert(str(setting_values.get("mode") or "") == "manual", "effective production mode must be manual")
             _assert(page.locator("[data-autoanswers-mode]").input_value() == "manual", "selector must show manual")
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin mode selector must be enabled")
+        elif expected_state == "auto_all":
+            _assert(
+                setting_values.get("master_enabled") is True,
+                "auto_all acceptance requires persisted master ON",
+            )
+            _assert(
+                setting_values.get("force_off") is False,
+                "auto_all acceptance requires force-off removed",
+            )
+            _assert(
+                setting_values.get("effective_enabled") is True,
+                "auto_all acceptance requires effective ON",
+            )
+            _assert(
+                str(setting_values.get("mode") or "") == "auto_all",
+                "effective production mode must be auto_all",
+            )
+            _assert(
+                page.locator("[data-autoanswers-mode]").input_value() == "auto_all",
+                "selector must show Full/auto_all",
+            )
+            lifecycle = dict(settings.get("lifecycle") or {})
+            components = dict(
+                lifecycle.get("components")
+                or lifecycle.get("component_states")
+                or {}
+            )
+            _assert(
+                lifecycle.get("lifecycle_state") == "running"
+                and lifecycle.get("desired") is True
+                and lifecycle.get("actual") is True
+                and lifecycle.get("drift_status") == "matched"
+                and lifecycle.get("fresh_scheduler_tick") is True,
+                "auto_all lifecycle must be running, matched and fresh",
+            )
+            for component_name in ("worker", "readonly_sync"):
+                component = dict(components.get(component_name) or {})
+                _assert(
+                    component.get("desired") is True
+                    and component.get("actual") is True
+                    and component.get("drift_status") == "matched",
+                    f"auto_all {component_name} component must be desired/actual/matched",
+                )
         else:
             _assert(setting_values.get("master_enabled") is False, "unforced OFF requires persisted master-switch OFF")
             _assert(setting_values.get("force_off") is False, "unforced OFF requires force-off removed")
             _assert(setting_values.get("effective_enabled") is False, "unforced OFF must remain ineffective")
             _assert(page.locator("[data-autoanswers-mode]").input_value() == "off", "selector must show OFF")
             _assert(not page.locator("[data-autoanswers-mode]").is_disabled(), "admin selector must remain available")
-        _assert(page.locator("[data-autoanswers-backlog]").is_disabled(), "backlog control must be disabled while OFF/manual")
+        _assert(
+            page.locator("[data-autoanswers-backlog]").is_disabled(),
+            "obsolete backlog control must stay disabled",
+        )
         runtime_before = dict(settings.get("runtime") or {})
         budget_before = dict(settings.get("budget") or {})
-        _assert(
-            int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
-            "manual production acceptance requires zero claimable AI jobs",
-        )
-        _assert(
-            int(runtime_before.get("claimable_publication_writes") or 0) == 0,
-            "manual production acceptance requires zero claimable publication writes",
-        )
-        _assert(
-            int((runtime_before.get("ai_jobs") or {}).get("processing") or 0) == 0,
-            "manual production acceptance requires zero active AI jobs",
-        )
-        _assert(
-            int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0) == 0,
-            "manual production acceptance requires zero active publication writes",
-        )
-        _assert(
-            float(budget_before.get("active_reserved_usd") or 0) == 0,
-            "manual production acceptance requires zero active reservations",
-        )
+        if expected_state != "auto_all":
+            _assert(
+                int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
+                "inactive/manual production acceptance requires zero claimable AI jobs",
+            )
+            _assert(
+                int(runtime_before.get("claimable_publication_writes") or 0) == 0,
+                "inactive/manual production acceptance requires zero claimable publication writes",
+            )
+            _assert(
+                int((runtime_before.get("ai_jobs") or {}).get("processing") or 0) == 0,
+                "inactive/manual production acceptance requires zero active AI jobs",
+            )
+            _assert(
+                int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0) == 0,
+                "inactive/manual production acceptance requires zero active publication writes",
+            )
+            _assert(
+                float(budget_before.get("active_reserved_usd") or 0) == 0,
+                "inactive/manual production acceptance requires zero active reservations",
+            )
         filter_names = (
             "unanswered",
             "status",
@@ -308,7 +365,16 @@ def run_autoanswers_ui_flow(
                 _assert(f"осталось {remaining}" in text, f"{stage_name} remaining is missing")
                 display_percent = float(stage["percent"])
                 _assert(f"{display_percent:.1f}%" in text, f"{stage_name} exact percent is missing")
-            _assert("Приостановлено вручную" in text, f"{stage_name} must show manual pause")
+            if expected_state == "manual":
+                _assert(
+                    "Приостановлено вручную" in text,
+                    f"{stage_name} must show manual pause",
+                )
+            elif expected_state == "auto_all":
+                _assert(
+                    "Приостановлено вручную" not in text,
+                    f"{stage_name} must not show a manual pause in auto_all",
+                )
             stage_evidence[stage_name] = {
                 "done": done,
                 "total": total,
@@ -508,7 +574,10 @@ def run_autoanswers_ui_flow(
                         "an existing current job must suppress duplicate generation",
                     )
             if expected_state != "manual":
-                _assert(page.locator("[data-autoanswers-generate]").count() == 0, "OFF must hide manual generation")
+                _assert(
+                    page.locator("[data-autoanswers-generate]").count() == 0,
+                    "non-manual mode must hide manual generation",
+                )
             detail_evidence = {
                 "feedback_id_sha256": hashlib.sha256(str(first_item["id"]).encode("utf-8")).hexdigest(),
                 "media_count": len(detail_row["media"]),
@@ -663,11 +732,13 @@ def run_autoanswers_ui_flow(
             label="autoanswers settings readback",
         )
         runtime_after = dict(settings_after.get("runtime") or {})
-        _assert(runtime_after.get("ai_jobs") == runtime_before.get("ai_jobs"), "UI acceptance created AI jobs")
-        _assert(
-            runtime_after.get("publication_jobs") == runtime_before.get("publication_jobs"),
-            "UI acceptance created publication jobs",
+        jobs_unchanged = (
+            runtime_after.get("ai_jobs") == runtime_before.get("ai_jobs")
+            and runtime_after.get("publication_jobs")
+            == runtime_before.get("publication_jobs")
         )
+        if expected_state != "auto_all":
+            _assert(jobs_unchanged, "read-only UI acceptance changed durable jobs")
 
         narrow_screenshot_path = evidence_dir / "wb_autoanswers_progress_narrow.png"
         page.screenshot(path=str(narrow_screenshot_path), full_page=True)
@@ -691,7 +762,9 @@ def run_autoanswers_ui_flow(
             "mode": setting_values["mode"],
         },
         "expected_state": expected_state,
-        "jobs_unchanged": True,
+        "jobs_unchanged": jobs_unchanged,
+        "background_progress_allowed": expected_state == "auto_all",
+        "ui_business_mutations": 0,
         "active_ai_jobs": int((runtime_before.get("ai_jobs") or {}).get("processing") or 0),
         "active_publication_jobs": int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0),
         "active_reserved_usd": float(budget_before.get("active_reserved_usd") or 0),

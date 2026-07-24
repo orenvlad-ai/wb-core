@@ -4375,7 +4375,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     autoanswers_ui_flow.add_argument("--headed", action="store_true")
     autoanswers_ui_flow.add_argument(
-        "--expected-state", choices=("off-force", "off-unforced", "manual"), default="off-force"
+        "--expected-state",
+        choices=("off-force", "off-unforced", "manual", "auto_all"),
+        default="off-force",
     )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 

@@ -272,9 +272,14 @@ transition run/cap. After deploy it reconciles any `budget_state_unknown`,
 resumes through the dedicated lifecycle, proves both component readbacks and a
 fresh scheduler tick, then observes ordinary queue movement without synthetic
 OpenAI/WB writes. Authenticated UI Flow covers Settings monitoring/ownership and
-the actual indicator in `Отзывы → Отзывы`, with compact/narrow/dark render and
-zero 5xx/page/console errors. Any publication proof comes only from normal
-policy-allowed flow and mandatory WB readback.
+the actual indicator in `Отзывы → Отзывы`, including a live `auto_all` mode
+that requires master/effective ON, Full selector, lifecycle
+`running/actual/matched`, both desired/actual/matched components and a fresh
+scheduler tick. In live automatic mode the read-only Flow permits independent
+background worker progress but performs zero business mutations itself. It
+still requires compact/narrow/dark render and zero 5xx/page/console errors. Any
+publication proof comes only from normal policy-allowed flow and mandatory WB
+readback.
 
 Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v6 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 
