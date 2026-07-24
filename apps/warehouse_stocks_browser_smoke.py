@@ -319,7 +319,9 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
         "changed_at": "2026-07-23T12:00:00Z",
         "actor": "initial_migration",
         "reason": "browser fixture",
-        "overall_status": "Общая пауза включена",
+        "overall_status_code": "global_pause",
+        "overall_status": "Приостановлено общей паузой",
+        "overall_explanation": "Общая пауза временно удерживает все автоматические запуски.",
         "unknown_processes": [],
         "drift_processes": [],
         "processes": [
@@ -342,10 +344,44 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 "runtime_schedule": {},
                 "timer": {"properties": {}},
                 "provenance": "proven",
+                "operator_status_code": "global_pause",
+                "operator_status": "Приостановлено общей паузой",
+                "operator_explanation": "Desired сохранён, но выполнение удерживается общей паузой.",
             }
             for key, label, desired, capability, location in process_specs
         ],
     }
+    autoanswers_fixture = next(
+        item
+        for item in auto_payload["processes"]
+        if item["process_key"] == "autoanswers"
+    )
+    autoanswers_fixture.update(
+        {
+            "business_mode": "auto_all",
+            "fresh_scheduler_tick": True,
+            "runtime_schedule": {
+                "policy_epoch": 7,
+                "transition_run_id": "transition:fixture",
+                "last_scheduler_tick_at": "2026-07-23T10:00:00Z",
+            },
+            "component_states": {
+                "readonly_sync": {"desired": True, "actual": False},
+                "worker": {"desired": True, "actual": False},
+            },
+            "budget": {
+                "budget_state": "conservative_unverified",
+                "confirmed_actual_usd": 0,
+                "uncertainty_hold_usd": 0.2,
+                "uncertainty_hold_count": 2,
+                "unresolved_uncertainty_count": 0,
+                "hold_explanation": (
+                    "Консервативный hold — верхняя граница возможного расхода, "
+                    "а не подтверждённое списание."
+                ),
+            },
+        }
+    )
     auto_current = json.loads(json.dumps(auto_payload))
     auto_posts: list[dict[str, object]] = []
     auto_mode: dict[str, object] = {"next": "", "stale": None}
@@ -410,16 +446,30 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                             process["drift_status"] = "matched"
                             process["lifecycle_state"] = "running" if process["desired"] else "off"
                             process["suspended_by_master"] = False
+                            process["operator_status_code"] = "healthy" if process["desired"] else "user_pause"
+                            process["operator_status"] = "Работает штатно" if process["desired"] else "Приостановлено пользователем"
+                            process["operator_explanation"] = (
+                                "Desired и actual совпадают; runtime readback свежий."
+                                if process["desired"]
+                                else "Процесс выключен владельцем в функциональном разделе."
+                            )
                         changed["drift_processes"] = []
-                        changed["overall_status"] = "Часть обновлений выключена"
+                        changed["overall_status_code"] = "user_pause"
+                        changed["overall_status"] = "Приостановлено пользователем"
+                        changed["overall_explanation"] = "Часть процессов выключена в своём функциональном разделе."
                     else:
                         for process in changed["processes"]:
                             process["actual"] = False
                             process["drift_status"] = "matched"
                             process["lifecycle_state"] = "suspended_by_master" if process["desired"] else "off"
                             process["suspended_by_master"] = True
+                            process["operator_status_code"] = "global_pause"
+                            process["operator_status"] = "Приостановлено общей паузой"
+                            process["operator_explanation"] = "Desired сохранён, но выполнение удерживается общей паузой."
                         changed["drift_processes"] = []
-                        changed["overall_status"] = "Общая пауза включена"
+                        changed["overall_status_code"] = "global_pause"
+                        changed["overall_status"] = "Приостановлено общей паузой"
+                        changed["overall_explanation"] = "Общая пауза временно удерживает все автоматические запуски."
                     changed["mutation"] = {
                         "status": "confirmed",
                         "persisted": True,
@@ -561,11 +611,11 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             _assert(not auto_posts, "opening Auto-updates must be read-only")
             _assert(
                 surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
-                == "Общая пауза включена",
+                == "Приостановлено общей паузой",
                 "master hold status must be visible",
             )
             _assert(
-                "Будет включено после снятия общей паузы"
+                "Desired сохранён, но выполнение удерживается общей паузой."
                 in surface.locator(
                     '[data-auto-update-process="warehouse_functional"]'
                 ).inner_text(),
@@ -597,6 +647,17 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 ).inner_text(),
                 "Autoanswers monitoring card must name its feature control location",
             )
+            autoanswers_text = surface.locator(
+                '[data-auto-update-process="autoanswers"]'
+            ).inner_text()
+            _assert(
+                "Режим" in autoanswers_text
+                and "auto_all" in autoanswers_text
+                and "Консервативные holds" in autoanswers_text
+                and "$0.20" in autoanswers_text
+                and "не подтверждённый расход" in autoanswers_text,
+                f"Autoanswers monitoring card must explain lifecycle and holds: {autoanswers_text!r}",
+            )
             surface.locator(
                 '[data-auto-update-toggle="warehouse_functional"]'
             ).click()
@@ -620,7 +681,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             ).wait_for()
             _assert(
                 surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
-                == "Общая пауза включена",
+                == "Приостановлено общей паузой",
                 "backend failure must preserve and render the actual paused state",
             )
             surface.locator("#autoUpdatesMasterButton").click()
@@ -630,7 +691,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             ).wait_for()
             _assert(
                 surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
-                == "Часть обновлений выключена",
+                == "Приостановлено пользователем",
                 "successful resume must render confirmed actual state without reload",
             )
             auto_mode["next"] = "stale_readback"
@@ -640,7 +701,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             ).wait_for()
             _assert(
                 surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
-                == "Общая пауза включена",
+                == "Приостановлено общей паузой",
                 "failed post-write readback must render the later factual state",
             )
             surface.locator("#autoUpdatesMasterButton").click()
@@ -657,7 +718,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             surface.locator('[data-auto-update-process="warehouse_functional"]').wait_for()
             _assert(
                 surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
-                == "Часть обновлений выключена"
+                == "Приостановлено пользователем"
                 and len(auto_posts) == posts_before_reload,
                 "page reload must preserve confirmed resume state without mutation",
             )
