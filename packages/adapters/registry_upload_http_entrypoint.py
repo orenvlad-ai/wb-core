@@ -362,6 +362,7 @@ DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
 DEFAULT_AUTO_UPDATES_PATH = "/v1/sheet-vitrina-v1/settings/auto-updates"
+DEFAULT_AUTO_UPDATES_MONITORING_PATH = "/v1/sheet-vitrina-v1/auto-updates/status"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -2588,6 +2589,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"auto-updates status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_AUTO_UPDATES_MONITORING_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_auto_updates_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"auto-updates monitoring failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -7213,8 +7229,6 @@ def _required_section_for_path(path: str) -> str:
     if normalized in {
         DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
         DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
-        DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
-        DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
         DEFAULT_SHEET_REFRESH_PATH,
         DEFAULT_SHEET_LOAD_PATH,
@@ -7254,6 +7268,8 @@ def _required_section_for_path(path: str) -> str:
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PATH
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH
         or normalized == DEFAULT_AUTO_UPDATES_PATH
+        or normalized == DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH
+        or normalized == DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH
     ):
         return WEB_AUTH_SECTION_SETTINGS
     if (
@@ -7279,6 +7295,15 @@ def _required_section_for_path(path: str) -> str:
 def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = "") -> bool:
     normalized = str(path or "").split("?", 1)[0]
     role = str(user.get("role") or "").strip()
+    if normalized == DEFAULT_AUTO_UPDATES_MONITORING_PATH:
+        return role != WEB_AUTH_ROLE_SUPPLIER and any(
+            _user_has_section_access(user, section)
+            for section in (
+                WEB_AUTH_SECTION_SETTINGS,
+                WEB_AUTH_SECTION_FEEDBACKS,
+                WEB_AUTH_SECTION_PRICES,
+            )
+        )
     if normalized == DEFAULT_SETTINGS_USERS_PATH or normalized.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
         return _user_can_manage_users(user)
     if normalized == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
@@ -7809,6 +7834,9 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
+        "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
+        "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
+        "job_path": DEFAULT_SHEET_JOB_PATH,
         "calculation_parameters_preview_path": DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
@@ -8072,11 +8100,10 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "initial_tab_is_route_explicit": bool(active_tab),
         "read_path": read_path,
         "operator_path": operator_path,
+        "auto_updates_path": DEFAULT_AUTO_UPDATES_MONITORING_PATH,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
-        "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
-        "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         "user_config_path": DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,

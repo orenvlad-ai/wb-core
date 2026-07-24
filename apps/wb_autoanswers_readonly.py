@@ -77,8 +77,6 @@ def _sum_counts(values: dict[str, int]) -> int:
 
 def _assert_force_off(repository: AutoanswersRepository) -> None:
     settings = repository.settings()
-    if settings.master_enabled:
-        raise RuntimeError("read-only production operation requires persisted master-switch OFF")
     if not settings.force_off or settings.effective_enabled:
         raise RuntimeError("read-only production operation requires effective emergency force-off")
 

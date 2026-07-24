@@ -2846,7 +2846,11 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     if payload["headerIds"][:2] != ["metric_label", "section"] or not all(str(column_id).startswith("date:") or column_id == "" for column_id in payload["headerIds"][2:]):
         raise AssertionError(f"main table columns must render metric, section, then dates after removing updated column, got {payload}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("table", "auto", "metrics", "actions")]
+    if order_values["auto"] != -1:
+        raise AssertionError(
+            f"Vitrina must not retain an auto-update control surface, got {payload}"
+        )
+    expected_order = [order_values[key] for key in ("table", "metrics", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
     if order_values["oldToolbar"] != -1:
@@ -3111,6 +3115,23 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
 
 
 def _check_auto_schedule_block(page: object) -> dict[str, object]:
+    duplicate_surface = page.locator(
+        "[data-vitrina-auto-schedule], [data-vitrina-auto-schedules-body], "
+        "[data-vitrina-auto-policy-select], [data-vitrina-auto-save]"
+    ).count()
+    if duplicate_surface:
+        raise AssertionError(
+            "Vitrina must not retain a second auto-update control surface"
+        )
+    return {
+        "removed_from_vitrina": True,
+        "duplicate_control_count": duplicate_surface,
+        "canonical_location": "Настройки → Автообновления",
+    }
+
+    # Historical assertions below intentionally remain unreachable while old
+    # browser fixtures are being reused; the production surface is proven
+    # absent above and its editor is covered by Settings browser acceptance.
     page.wait_for_selector("[data-vitrina-auto-schedule]", timeout=10000)
     collapsed_state = page.evaluate(
         """() => {

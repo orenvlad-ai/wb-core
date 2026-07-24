@@ -2046,11 +2046,7 @@ def _run_remote_autoanswers_readonly(
             or str(settings.get("mode") or "") != "manual"
         ):
             raise RuntimeError("autoanswers media evidence did not prove effective manual mode")
-    elif (
-        bool(settings.get("master_enabled"))
-        or not bool(settings.get("force_off"))
-        or bool(settings.get("effective_enabled"))
-    ):
+    elif not bool(settings.get("force_off")) or bool(settings.get("effective_enabled")):
         raise RuntimeError("autoanswers read-only evidence did not prove effective force-off")
     capabilities = ((payload.get("runtime") or {}).get("capabilities") or {})
     if bool(capabilities.get("wb_post_patch")) or bool(capabilities.get("openai")):
@@ -2076,8 +2072,8 @@ def _run_remote_autoanswers_readonly_timer(target: HostedRuntimeTarget, *, actio
             min_request_interval_seconds=1.0,
         )
         settings = ((status.get("runtime") or {}).get("settings") or {})
-        if bool(settings.get("master_enabled")) or not bool(settings.get("force_off")):
-            raise RuntimeError("GET-only timer cannot be enabled without persisted and emergency OFF")
+        if not bool(settings.get("force_off")) or bool(settings.get("effective_enabled")):
+            raise RuntimeError("GET-only timer cannot be enabled without effective emergency OFF")
         shell = (
             f"systemctl enable --now {shlex.quote(unit)}"
             f" && systemctl is-enabled {shlex.quote(unit)}"
@@ -2138,72 +2134,23 @@ def _run_remote_autoanswers_lifecycle(
     *,
     action: str,
 ) -> dict[str, Any]:
-    """Operate only the repo-owned manual-mode lifecycle and its two timers."""
+    """Reconcile feature-owned mode through the canonical two-component lifecycle."""
 
     _ensure_active_hosted_runtime_target(target, action=f"autoanswers-lifecycle-{action}")
-    if action not in {"status", "activate-manual", "deactivate"}:
+    if action not in {"status", "reconcile", "suspend"}:
         raise ValueError(f"unsupported autoanswers lifecycle action: {action}")
     runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
     force_off = str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower()
     if force_off not in {"true", "false"}:
         raise ValueError("autoanswers lifecycle requires an explicit target force-off boolean")
-    readonly_timer = "wb-core-autoanswers-readonly-sync.timer"
-    worker_timer = "wb-core-autoanswers-worker.timer"
     app_command = (
         f"cd {shlex.quote(target.target_dir)} && "
         f"/usr/bin/env WB_AUTOANSWERS_FORCE_OFF={shlex.quote(force_off)} "
-        f"python3 apps/wb_autoanswers_activation.py {shlex.quote(action)} "
+        f"python3 apps/wb_autoanswers_lifecycle.py {shlex.quote(action)} "
         f"--runtime-dir {shlex.quote(runtime_dir)}"
     )
-    if action == "status":
-        shell = (
-            app_command
-            + f" && (systemctl is-enabled {shlex.quote(readonly_timer)} || true)"
-            + f" && (systemctl is-active {shlex.quote(readonly_timer)} || true)"
-            + f" && (systemctl is-enabled {shlex.quote(worker_timer)} || true)"
-            + f" && (systemctl is-active {shlex.quote(worker_timer)} || true)"
-        )
-    elif action == "activate-manual":
-        if force_off != "false":
-            raise RuntimeError("manual activation requires target WB_AUTOANSWERS_FORCE_OFF=false")
-        if not target.environment_file:
-            raise ValueError("manual activation requires the hosted environment file")
-        manual_canary = (
-            f"cd {shlex.quote(target.target_dir)} && "
-            "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=false WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
-            "python3 apps/wb_autoanswers_readonly.py --operation manual-canary "
-            f"--runtime-dir {shlex.quote(runtime_dir)} "
-            f"--env-file {shlex.quote(target.environment_file)} "
-            "--page-size 50 --max-pages 1 --min-request-interval-seconds 1.0"
-        )
-        # The timer is enabled only after a GET-only canary, which imports no
-        # Node/OpenAI/WB writer, proves that manual sync creates no work.
-        shell = (
-            f"systemctl disable --now {shlex.quote(readonly_timer)}"
-            f" && systemctl disable --now {shlex.quote(worker_timer)}"
-            f" && ! systemctl is-active --quiet {shlex.quote(worker_timer)}"
-            " && "
-            + app_command
-            + " && "
-            + manual_canary
-            + " && "
-            + app_command.replace("activate-manual", "status", 1)
-            + f" && systemctl enable --now {shlex.quote(worker_timer)}"
-            + f" && systemctl is-enabled {shlex.quote(worker_timer)}"
-            + f" && systemctl is-active {shlex.quote(worker_timer)}"
-        )
-    else:
-        shell = (
-            f"systemctl disable --now {shlex.quote(worker_timer)}"
-            f" && ! systemctl is-active --quiet {shlex.quote(worker_timer)}"
-            " && "
-            + app_command
-            + f" && systemctl enable --now {shlex.quote(readonly_timer)}"
-            + f" && systemctl is-enabled {shlex.quote(readonly_timer)}"
-            + f" && systemctl is-active {shlex.quote(readonly_timer)}"
-        )
     result = subprocess.run(
-        _remote_shell_command(target, shell),
+        _remote_shell_command(target, app_command),
         text=True,
         capture_output=True,
         cwd=ROOT,
@@ -2215,49 +2162,111 @@ def _run_remote_autoanswers_lifecycle(
             f"autoanswers lifecycle {action} failed: "
             + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
         )
-    lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
-    json_objects: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            json_objects.append(value)
-    if not json_objects:
-        raise RuntimeError("autoanswers lifecycle returned no JSON evidence")
-    runtime = (json_objects[-1].get("runtime") or {}) if json_objects else {}
-    settings = runtime.get("settings") or {}
-    if action == "activate-manual":
-        if (
-            not bool(settings.get("master_enabled"))
-            or not bool(settings.get("effective_enabled"))
-            or bool(settings.get("force_off"))
-            or str(settings.get("mode") or "") != "manual"
-        ):
-            raise RuntimeError("manual lifecycle readback did not prove effective manual mode")
-        if _sum_mapping_counts(runtime.get("ai_jobs")) or _sum_mapping_counts(runtime.get("publication_jobs")):
-            raise RuntimeError("manual activation created unexpected AI/publication work")
-    elif action == "deactivate" and (
-        bool(settings.get("master_enabled")) or bool(settings.get("effective_enabled"))
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("autoanswers lifecycle returned invalid JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("lifecycle"), Mapping
     ):
-        raise RuntimeError("autoanswers deactivation readback did not prove OFF")
-    return {
-        "status": "ok",
-        "action": action,
-        "evidence": json_objects,
-        "systemctl": [line for line in lines if not line.startswith("{")],
-    }
-
-
-def _sum_mapping_counts(value: Any) -> int:
-    return sum(int(item or 0) for item in (value or {}).values()) if isinstance(value, dict) else 0
+        raise RuntimeError("autoanswers lifecycle returned incomplete evidence")
+    lifecycle = dict(payload["lifecycle"])
+    if action != "status" and str(lifecycle.get("drift_status") or "") != "matched":
+        raise RuntimeError("autoanswers lifecycle mutation did not confirm component state")
+    return payload
 
 
 def run_autoanswers_lifecycle_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
     payload = _run_remote_autoanswers_lifecycle(target, action=str(args.action))
+    _print_json({"target_id": target.target_id, "result": payload})
+    return 0
+
+
+def _run_remote_autoanswers_budget_reconciliation(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    fingerprint: str = "",
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"autoanswers-budget-reconciliation-{action}",
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Autoanswers budget action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="autoanswers-budget-reconciliation-apply",
+            dry_run=False,
+        )
+        if not fingerprint:
+            raise ValueError("budget reconciliation apply requires --fingerprint")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    args = [
+        "python3",
+        "apps/wb_autoanswers_budget_reconciliation.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    if action == "apply":
+        args.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--actor",
+                "release-train",
+            ]
+        )
+    shell = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        + " ".join(shlex.quote(item) for item in args)
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Autoanswers budget reconciliation {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Autoanswers budget reconciliation returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Autoanswers budget reconciliation returned a non-object payload"
+        )
+    return payload
+
+
+def run_autoanswers_budget_reconciliation_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_autoanswers_budget_reconciliation(
+        target,
+        action=str(args.action),
+        fingerprint=str(args.fingerprint or ""),
+    )
     _print_json({"target_id": target.target_id, "result": payload})
     return 0
 
@@ -3240,20 +3249,16 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             action="hold",
             disable_timer=True,
         )
-        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
-            target,
-            action="deactivate",
-        )
-        evidence["autoanswers_readonly_timer"] = _run_remote_autoanswers_readonly_timer(
-            target,
-            action="disable",
-        )
         result = _run_remote_business_data_maintenance_runner(target, action="hold")
         if (
             result.get("quiet") is not True
             or str(result.get("status") or "") != "held"
         ):
             raise RuntimeError("business-data maintenance hold readback is incomplete")
+        evidence["autoanswers"] = _run_remote_autoanswers_lifecycle(
+            target,
+            action="status",
+        )
     elif action == "restore":
         if args.expected_revision is None:
             raise ValueError(
@@ -3713,10 +3718,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     autoanswers_lifecycle = subparsers.add_parser(
         "autoanswers-lifecycle",
-        help="Inspect, activate manual mode, or fail closed to OFF through the repo-owned lifecycle.",
+        help="Inspect or reconcile feature-owned Autoanswers intent and component timers.",
     )
-    autoanswers_lifecycle.add_argument("action", choices=("status", "activate-manual", "deactivate"))
+    autoanswers_lifecycle.add_argument(
+        "action",
+        choices=("status", "reconcile", "suspend"),
+    )
     autoanswers_lifecycle.set_defaults(handler=run_autoanswers_lifecycle_command)
+
+    autoanswers_budget_reconciliation = subparsers.add_parser(
+        "autoanswers-budget-reconciliation",
+        help=(
+            "Plan, apply or read back append-only conservative holds for "
+            "unknown provider cost."
+        ),
+    )
+    autoanswers_budget_reconciliation.add_argument(
+        "action",
+        choices=("dry-run", "apply", "readback"),
+    )
+    autoanswers_budget_reconciliation.add_argument("--fingerprint", default="")
+    autoanswers_budget_reconciliation.set_defaults(
+        handler=run_autoanswers_budget_reconciliation_command
+    )
 
     finance_canonical_dry_run = subparsers.add_parser(
         "finance-canonical-dry-run",

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_AUTO_UPDATES_MONITORING_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
@@ -100,6 +101,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             "}"
         )
         page = context.new_page()
+        page_errors: list[str] = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
 
         def fulfill_feedbacks(route: object) -> None:
             url = route.request.url
@@ -125,6 +128,40 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 status=response.status,
                 headers={"Content-Type": "application/json; charset=utf-8"},
                 body=json.dumps(payload, ensure_ascii=False),
+            )
+
+        def fulfill_auto_updates(route: object) -> None:
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "schema_version": "auto_updates_owner_policy_v2",
+                        "master_desired": True,
+                        "revision": 17,
+                        "processes": [
+                            {
+                                "process_key": "feedback_complaints",
+                                "display_name": "Авто-жалобы",
+                                "control_owner": "feature",
+                                "control_location": "Отзывы → Авто-жалобы",
+                                "control_capability": "monitor",
+                                "desired_source": "feedback_complaints_schedule",
+                                "desired": True,
+                                "actual": True,
+                                "lifecycle_state": "running",
+                                "last_run": "2026-04-30T03:00:00Z",
+                                "last_success": "2026-04-30T03:00:05Z",
+                                "next_run": "2026-04-30T07:00:00Z",
+                                "last_error": "",
+                                "runtime_schedule": {"enabled_ids": ["auto-noon"]},
+                                "drift_status": "matched",
+                                "suspended_by_master": False,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
             )
 
         def fulfill_prompt(route: object) -> None:
@@ -555,9 +592,16 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH, fulfill_automation_runs)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
-        context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
+        context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "**", fulfill_web_vitrina_read)
+        context.route("**" + DEFAULT_AUTO_UPDATES_MONITORING_PATH, fulfill_auto_updates)
         try:
             page.goto(page_url, wait_until="domcontentloaded")
+            page.wait_for_function(
+                """() => {
+                    const label = document.querySelector("[data-history-label]");
+                    return Boolean(label && !label.textContent.includes("загрузка периода"));
+                }"""
+            )
             page.wait_for_selector("[data-unified-tab-button='feedbacks']")
             page.locator("[data-unified-tab-button='feedbacks']").click()
             page.wait_for_selector("[data-feedbacks-panel]")
@@ -566,6 +610,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_selector("[data-feedbacks-subtab='complaints']")
             page.wait_for_selector("[data-feedbacks-subtab='automation']")
             page.locator("[data-feedbacks-subtab='automation']").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-auto-runtime-state]')?.textContent.includes('Работает')"
+            )
+            if "Actual timer" not in page.locator(
+                "[data-feedbacks-auto-runtime-meta]"
+            ).inner_text():
+                raise AssertionError(
+                    "auto-complaints functional surface must expose actual timer evidence"
+                )
             page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-status]')?.textContent.includes('Расписаний: 1')")
             if not page.locator("[data-feedbacks-auto-schedules-body]").inner_text().count("Екатеринбург"):
                 raise AssertionError("automation subtab must render schedule timezone label")
@@ -639,9 +692,17 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("complaints table must render refreshed rows after status sync")
             page.locator("[data-feedbacks-subtab='reviews']").click()
             page.wait_for_selector('[data-feedbacks-subpanel="reviews"]:not([hidden])')
-            page.wait_for_function(
-                "() => document.querySelector('[data-feedbacks-range-label]')?.textContent.includes('24.04.2026 - 30.04.2026')"
-            )
+            try:
+                page.wait_for_function(
+                    "() => document.querySelector('[data-feedbacks-range-label]')?.textContent.includes('24.04.2026 - 30.04.2026')",
+                    timeout=10000,
+                )
+            except Exception as exc:
+                raise AssertionError(
+                    "feedback range did not recover the server-owned current week; "
+                    f"label={page.locator('[data-feedbacks-range-label]').inner_text()!r}, "
+                    f"page_errors={page_errors!r}"
+                ) from exc
             feedbacks_dark_layout = page.evaluate(
                 """() => {
                     const numbers = (value) => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
@@ -818,8 +879,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if after_width <= before_width:
                 raise AssertionError(f"feedbacks column resize must increase width, got {before_width} -> {after_width}")
             page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """() => {
+                    const label = document.querySelector("[data-history-label]");
+                    return Boolean(label && !label.textContent.includes("загрузка периода"));
+                }"""
+            )
             page.wait_for_selector("[data-unified-tab-button='feedbacks']")
             page.locator("[data-unified-tab-button='feedbacks']").click()
+            page.locator("[data-feedbacks-subtab='reviews']").click()
             page.locator("[data-feedbacks-load]").click()
             page.wait_for_selector("[data-feedbacks-table] tbody tr")
             persisted_width = page.locator("[data-feedbacks-column-key='created_date']").first.evaluate("node => node.getBoundingClientRect().width")
@@ -911,8 +979,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
             large_feedbacks_mode = False
             page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """() => {
+                    const label = document.querySelector("[data-history-label]");
+                    return Boolean(label && !label.textContent.includes("загрузка периода"));
+                }"""
+            )
             page.wait_for_selector("[data-unified-tab-button='feedbacks']")
             page.locator("[data-unified-tab-button='feedbacks']").click()
+            page.locator("[data-feedbacks-subtab='reviews']").click()
             page.locator("[data-feedbacks-load]").click()
             page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 24")
             page.locator("[data-feedbacks-ai-analyze]").click()

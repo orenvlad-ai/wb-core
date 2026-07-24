@@ -156,13 +156,15 @@ class ReadonlyRunnerTest(unittest.TestCase):
         self.assertEqual(result["runtime"]["ai_jobs"], {})
         self.assertEqual(result["runtime"]["publication_jobs"], {})
 
-    def test_persisted_on_blocks_external_read_operation_even_with_force_off(self) -> None:
+    def test_readonly_sync_remains_allowed_when_feature_mode_is_on(self) -> None:
         self.env.pop("WB_AUTOANSWERS_FORCE_OFF")
         self.repo.update_settings(master_enabled=True, actor_id="admin")
         self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
-        with self.assertRaisesRegex(RuntimeError, "master-switch OFF"):
-            self.run_case("canary")
-        self.assertEqual(self.source.page_calls, 0)
+        result = self.run_case("canary")
+        self.assertEqual(result["status"], "passed")
+        self.assertGreater(self.source.page_calls, 0)
+        self.assertEqual(result["runtime"]["ai_jobs"], {})
+        self.assertEqual(result["runtime"]["publication_jobs"], {})
 
     def test_status_has_no_external_dependency_and_reports_get_only_capabilities(self) -> None:
         result = run_operation(

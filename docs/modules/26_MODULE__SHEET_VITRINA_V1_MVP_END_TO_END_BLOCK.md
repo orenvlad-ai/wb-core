@@ -276,9 +276,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - host-side VNC contour is additionally hardened with `x11vnc -noxdamage`, because user-facing truth here is the noVNC canvas rather than host-side local screenshots
   - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`; current Google Sheets `load` archived, so `Последняя удачная отправка` is historical state and must not be used as completion proof
   - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является доказательством Google Sheets write
-  - page дополнительно показывает compact block `Автообновления`, который заполняется из server-driven auto-schedules/status surface
-  - `Автообновления` is runtime-managed: schedule rows live in server runtime JSON, expose editable `HH:mm`, enabled flag, next run, last run, last success, status/error and run-now action; the systemd timer is only a due-check ticker
-  - тот же auto block additionally показывает `Последний запуск`, `Последний успех`, `Следующий запуск`, `Статус/ошибка` из backend/status surface
+  - page не содержит дублирующий block `Автообновления`; единственный editor/status surface Витрины расположен в `Настройки → Автообновления`
+  - schedule rows остаются в прежнем server runtime JSON и там же expose editable `HH:mm`, enabled flag, next run, last run, last success, status/error and run-now action; the systemd timer is only a due-check ticker
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
   - top-level tab `Расчёт поставок`
@@ -706,7 +705,7 @@ Bounded допущение:
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator compatibility page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и не становится 404;
   - что `GET /sheet-vitrina-v1/vitrina` и `GET /v1/sheet-vitrina-v1/web-vitrina` поднимаются тем же contour, with unified top tabs and unchanged read contract;
-  - что embedded compatibility panels still expose compact `Ручная загрузка данных` + `Автообновления`, separate `Лог`, fixed-height scroll viewport and `Скачать лог` for legacy/manual probes;
+  - что embedded compatibility panels expose compact `Ручная загрузка данных`, separate `Лог`, fixed-height scroll viewport and `Скачать лог`, но не содержат второй `Автообновления`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`, но не называет snapshot existence ordinary green success;
