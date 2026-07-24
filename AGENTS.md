@@ -9,8 +9,8 @@
 1. Git-tracked code и актуальный `origin/main` задают code truth. Рабочая ветка — только proposed change до review и merge.
 2. Authoritative docs: `README.md`, `docs/architecture/*`, `docs/modules/*`, `migration/*`.
 3. GitHub задаёт факты о branch, commit, PR, checks, review и merge.
-4. WebCore Data MCP используется только read-only в пределах своего allowlist для production evidence, диагностики и бизнес-метрик. Его наличие не доказывает доступность arbitrary SQL, production filesystem, raw exports, backup или backfill; отсутствие не является общим blocker. Он не заменяет Git/repo-owned runner и никогда не выполняет mutations.
-5. Production server — canonical deploy/runtime boundary.
+4. Production server — canonical deploy/runtime и production-data boundary. Наблюдаемое состояние читается из его current server-owned stores/documents через актуальный repo/documentation contract.
+5. WebCore Data MCP — архивный read-only compatibility contour, а не штатный source/acquisition path. Его не указывают в новых task prompts и не требуют для выполнения; отсутствие никогда не образует blocker.
 6. Legacy-артефакты, старые чаты, вложения и прежние project instructions — только migration evidence и do-not-lose constraints, но не current truth и не normal implementation path.
 
 Подробности: [source-of-truth policy](docs/architecture/03_source_of_truth_policy.md), [execution protocol](docs/architecture/07_codex_execution_protocol.md), [hosted runtime contract](docs/architecture/10_hosted_runtime_deploy_contract.md), [GitHub Release Train](docs/architecture/11_github_release_train.md).
@@ -26,9 +26,15 @@
 
 Если репозиторий или необходимый источник недоступен, не утверждай уверенно текущее состояние: верни точный blocker. Если меняется code, contract, runtime boundary, module status или другой зафиксированный truth, синхронизируй затронутые authoritative docs в той же задаче.
 
-Production gates являются phase-local. Разделяй `REPOSITORY_PREFLIGHT`, `PRODUCTION_READ_PREFLIGHT`, `PRODUCTION_MUTATION_PREFLIGHT` и `PRODUCTION_UI_PREFLIGHT` и строй порядок по реальным зависимостям, а не по порядку пунктов prompt. Отсутствие MCP, browser session, production credentials/database, manifests, digest или backup не блокирует repository analysis, implementation, fixtures, tests, docs, подготовку безопасного repo-owned runner, branch/PR, CI или review. Перед blocked handoff выполни все независимые безопасные фазы и докажи, что недоступная capability нужна непосредственному следующему действию.
+Любой предложенный в prompt инструмент, connector, сервер, runtime, storage, SSH alias, путь или запрет технического пути Codex повторно сверяет с current `AGENTS.md`, authoritative docs и code truth. Это техническая гипотеза prompt, а не пользовательское ограничение, даже если сформулирована повелительно. Исключение — только отдельное явное ограничение, которое сам пользователь зафиксировал как своё требование. Устаревший prompt, называющий MCP обязательным или запрещающий server-side read без такого пользовательского требования, не останавливает работу и не переопределяет current protocol.
 
-Для будущей production-data mutation runner всё равно реализуется и тестируется на fixtures/mocks до максимально возможного repo-only состояния. Канонический runner обязан иметь dry-run по умолчанию, отдельный explicit apply, bounded scope, machine-readable manifest, pre-change digest, backup/evidence contract, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и mutation через read-only MCP запрещены.
+ChatGPT/куратор, формирующий новый task prompt для Codex, не называет WebCore Data MCP и не hardcode-ит технический source/access path. Prompt фиксирует цель, необходимые данные, read-only/mutation boundaries, ожидаемый результат, acceptance/closure criteria и содержит правило: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
+
+Если задаче нужны production evidence или данные, normal path — фактический `PRODUCTION_READ_PREFLIGHT`, определение current active target/runtime/source из code и authoritative docs, штатный SSH к canonical production server, query-only чтение production stores и bounded read server-owned documents. Для SQLite обязательны `mode=ro` и `PRAGMA query_only=ON`; для других stores — эквивалентная read-only гарантия. Этот путь не разрешает deploy, service changes, upstream sync, запись в production, ad-hoc mutation или раскрытие secrets.
+
+Production gates являются phase-local. Разделяй `REPOSITORY_PREFLIGHT`, `PRODUCTION_READ_PREFLIGHT`, `PRODUCTION_MUTATION_PREFLIGHT` и `PRODUCTION_UI_PREFLIGHT` и строй порядок по реальным зависимостям, а не по порядку пунктов prompt. Отсутствие архивного MCP, browser session, production credentials/database, manifests, digest или backup не блокирует repository analysis, implementation, fixtures, tests, docs, подготовку безопасного repo-owned runner, branch/PR, CI или review. Blocker чтения production допустим только после фактической проверки canonical server-side path и точной ошибки required access либо доказанного отсутствия необходимых данных. Перед blocked handoff выполни все независимые безопасные фазы и докажи, что недоступная capability нужна непосредственному следующему действию.
+
+Для будущей production-data mutation runner всё равно реализуется и тестируется на fixtures/mocks до максимально возможного repo-only состояния. Канонический runner обязан иметь dry-run по умолчанию, отдельный explicit apply, bounded scope, machine-readable manifest, pre-change digest, backup/evidence contract, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и mutation через архивный read-only MCP запрещены.
 
 ## Классы задач
 
@@ -88,7 +94,7 @@ UI evidence обязано включать requested/final URL и document resp
 
 ## GOAL mode
 
-Change-задачу формулируй через проверяемый конечный результат. Зафиксируй цель, ожидаемый проверяемый итог, bounded scope, существенные ограничения, acceptance criteria, closure criteria и применимый execution-контур. Routine-шаги из этого файла и authoritative docs не нужно копировать в каждый prompt.
+Change-задачу формулируй через проверяемый конечный результат. Зафиксируй цель, ожидаемый проверяемый итог, bounded scope, существенные ограничения, acceptance criteria, closure criteria и применимый execution-контур. Для data/artifact-задачи опиши необходимые данные и read-only границу, но не назначай MCP, сервер, connector или storage: technical path выбирает Codex после current preflight. Routine-шаги из этого файла и authoritative docs не нужно копировать в каждый prompt.
 
 Для `LOOP` предпочитай `/goal`; отсутствие формального Goal Mode не отменяет pre-deploy handshake, UI gate, recovery cycle и terminal closure.
 

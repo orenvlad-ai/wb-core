@@ -1838,7 +1838,7 @@ def _assert_phase_local_goal_regressions() -> None:
             "required_capability",
             "capability_evidence",
             "next_executable_action",
-            "allowlist",
+            "query-only",
             "repo-owned runner",
             "dry-run",
             "fixtures/mocks",

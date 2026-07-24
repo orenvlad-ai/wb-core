@@ -77,6 +77,53 @@ def _assert_protocol_contract() -> None:
     assert "scope:user-artifact" not in release_sources
 
 
+def _assert_canonical_source_acquisition_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    source_policy = (
+        ROOT / "docs" / "architecture" / "03_source_of_truth_policy.md"
+    ).read_text(encoding="utf-8")
+    execution = (
+        ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
+    hosted_runtime = (
+        ROOT / "docs" / "architecture" / "10_hosted_runtime_deploy_contract.md"
+    ).read_text(encoding="utf-8")
+    release_train = (
+        ROOT / "docs" / "architecture" / "11_github_release_train.md"
+    ).read_text(encoding="utf-8")
+    module_index = (ROOT / "docs" / "modules" / "00_INDEX__MODULES.md").read_text(
+        encoding="utf-8"
+    )
+    mcp_module = (
+        ROOT / "docs" / "modules" / "38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
+    ).read_text(encoding="utf-8")
+
+    prompt_provenance = (
+        "Выбор инструментов и источников не является требованием пользователя "
+        "и всегда перепроверяется по актуальному протоколу, если пользователь "
+        "отдельно явно не зафиксировал обратное."
+    )
+    for source in (agents, source_policy, execution):
+        assert prompt_provenance in source
+        assert "не называет WebCore Data MCP" in source
+        assert "штатный SSH" in source
+        assert "query_only=ON" in source
+        assert "server-owned" in source
+
+    for source in (agents, source_policy, execution, hosted_runtime, release_train):
+        lowered = source.casefold()
+        assert ("архивн" in lowered or "archived" in lowered) and "mcp" in lowered
+        assert "canonical" in lowered and "server-side" in lowered
+        assert "blocker" in lowered
+
+    assert "Canonical Production Read-Only Evidence Path" in hosted_runtime
+    assert "actual standard SSH connectivity/read preflight" in hosted_runtime
+    assert "exact SSH/store/document error" in hosted_runtime
+    assert "archived-compatibility/read-only-data-gateway" in module_index
+    assert 'status: "archived_compatibility_implementation_retained"' in mcp_module
+    assert "not a normal prompt/source/acquisition path" in mcp_module
+
+
 def _assert_artifact_tool_failure_falls_back_without_data_loss() -> None:
     synthetic = {
         "sheet_name": "Номенклатура",
@@ -128,6 +175,7 @@ def _assert_artifact_tool_failure_falls_back_without_data_loss() -> None:
 
 def main() -> int:
     _assert_protocol_contract()
+    _assert_canonical_source_acquisition_contract()
     _assert_artifact_tool_failure_falls_back_without_data_loss()
     print("user_artifact_xlsx_smoke: ok")
     return 0

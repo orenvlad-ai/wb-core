@@ -2,9 +2,9 @@
 title: "Модуль: webcore_data_mcp_block"
 doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
-status: "repo_implemented_private_loopback_live_gated"
-purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data и bounded ops diagnostics `wb-core`."
-scope: "Standalone bounded-concurrency HTTP MCP server with 16 short model-visible read-only tools for freshness, metrics, SKU, supplier/WB supplies, artifacts, factory-order/stock and ops health; legacy tool names remain server-callable compatibility aliases but are hidden from tools/list. Exact output schemas, compact structured results, deadlines, bounded SQLite, payload caps, lifecycle audit and repo-owned deploy identity are part of the contract. No arbitrary SQL, shell, SSH, upstream sync/backfill/refresh/load, arbitrary filesystem browsing, secrets, auth/session material, env dumps or unbounded payload dumps."
+status: "archived_compatibility_implementation_retained"
+purpose: "Сохранить исторический read-only MCP implementation contract только для legacy compatibility/evidence; normal Codex/ChatGPT production reads идут через canonical server-side SSH/query-only/document path."
+scope: "Archived compatibility standalone HTTP MCP server with historical bounded read-only tools and aliases. It is not a normal prompt/source/acquisition path, prerequisite or fallback. Existing output schemas, deadlines, bounded SQLite, payload caps, lifecycle audit and redaction constraints remain authoritative only when the retained compatibility surface is explicitly maintained."
 source_basis:
   - "packages/application/webcore_data_mcp.py"
   - "packages/application/webcore_ops_diagnostics.py"
@@ -67,18 +67,20 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "The production contract uses bounded threaded HTTP/tool execution, a per-call deadline, SQLite progress cancellation, a 512 KiB result cap and start/finish/timeout/error audit events. tools/list publishes 16 short exact-schema tools; all previous names stay callable for existing chats but navigation/resolver/generic-table/debug tools are hidden. Direct requests no longer require a data-map/resolver preflight. Owner-only OAuth 2.1 + PKCE/scopes and all read-only/redaction boundaries are unchanged."
+update_note: "Archived compatibility only. New prompts and normal production reads never select or require MCP; retained implementation details remain documented for legacy-call maintenance and evidence."
 ---
+
+> **Архивный compatibility contour.** Этот implementation сохранён для legacy calls и исторического evidence. Новые task prompts не называют MCP; Codex не проверяет и не требует его для production data. Current normal path — production preflight, штатный SSH к target из актуального repo/docs truth, query-only production stores и bounded server-owned document reads. Недоступность MCP никогда не является blocker.
 
 # 1. Identifier and Status
 
 - `module_id`: `webcore_data_mcp_block`
-- `family`: `production-facing-integration/read-only-data-gateway`
-- `status_repo`: implemented
-- `status_live`: loopback service installed/enabled on the active EU host; exact public `/mcp` route is allowed only as bearer-auth fail-closed proxy to `127.0.0.1:8766`
-- `status_auth`: owner-only OAuth 2.1 auth-code + PKCE S256 for ChatGPT connector use; bearer auth retained only for protected server/admin diagnostics
+- `family`: `archived-compatibility/read-only-data-gateway`
+- `status_repo`: archived compatibility implementation retained
+- `status_live`: compatibility loopback service may remain installed/enabled on the active EU host pending a separately scoped production decommission; runtime presence does not make it a normal source
+- `status_auth`: historical owner-only OAuth 2.1 auth-code + PKCE S256 contract retained only for explicit compatibility maintenance
 
-This module is intentionally separate from DevControl MCP and from the main WebCore operator HTTP handler.
+This archived module remains intentionally separate from DevControl MCP and from the main WebCore operator HTTP handler.
 
 # 2. Runtime Boundary
 
@@ -107,7 +109,7 @@ Systemd artifact:
 
 `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service`
 
-Current active EU live state:
+Retained compatibility runtime state:
 
 - installed as `wb-core-data-mcp.service`;
 - enabled and running;
@@ -364,9 +366,9 @@ The smoke proves:
 - lifecycle audit contains request/correlation id, safe identity hash, start/terminal state, duration and result size without arguments, tokens, paths or payloads;
 - no sync/backfill/refresh/write tools are reachable.
 
-# 10. Live Publication Gate
+# 10. Archived Compatibility Publication Evidence
 
-This module is repo-implemented and private-live on the active EU host. Public HTTPS publication is auth-gated and ChatGPT-ready after OAuth env is configured on the live service.
+The retained implementation may still be private-live on the active EU host because production decommission is outside this repo-only protocol change. That runtime presence is compatibility evidence, not a normal data-acquisition path or current model-selection instruction.
 
 Current verified state:
 
@@ -374,9 +376,9 @@ Current verified state:
 - public `https://api.selleros.pro/mcp` may be routed by nginx to the loopback MCP service;
 - public no-token/no-bearer requests must return auth-required/no business data;
 - no Secure MCP Tunnel client is configured yet;
-- normal ChatGPT Project connector use selects OAuth and signs in through `/oauth/authorize`.
+- a legacy ChatGPT Project connector can select OAuth and sign in through `/oauth/authorize` only when that archived compatibility surface is explicitly maintained.
 
-Before treating `/mcp` as live-verified ChatGPT-ready:
+Before treating `/mcp` as verified for an explicitly scoped archived-compatibility task:
 
 1. Configure env-only OAuth signing secret and owner auth material on the host.
 2. Keep all secrets env-only/server-side.
@@ -386,4 +388,4 @@ Before treating `/mcp` as live-verified ChatGPT-ready:
 6. Confirm `deploy_state.app.commit` equals the merged commit deployed through the canonical runner.
 7. Keep DevControl MCP unchanged and separate.
 
-After a live `tools/list` metadata change, the only permitted human UI step is: `ChatGPT -> Settings -> Plugins -> WebCore Data MCP -> Refresh`.
+After a compatibility `tools/list` metadata change, connector refresh is relevant only to that explicitly scoped archival maintenance task. It is never required for normal production evidence/data acquisition.
