@@ -15,6 +15,7 @@ from packages.adapters.wb_supplies import (
     WbSuppliesTransportError,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.stocks_block import parse_excluded_wb_warehouse_ids
 from packages.application.wb_supply_overlay import (
     DISTRICT_UNMAPPED,
     augment_supply_row_with_district,
@@ -295,13 +296,34 @@ class WbRegionalSupplyPlanningBlock:
             raw_option_rows=raw_option_rows,
             warehouses=list(enrichment.get("warehouses") or []),
             warnings=warnings,
+            excluded_warehouse_ids=request["excluded_wb_warehouse_ids"],
         )
         raw_option_rows.extend(list(warehouse_specific_probe_result.get("raw_rows") or []))
         if not raw_option_rows:
+            operator_exclusions = set(request["excluded_wb_warehouse_ids"])
+            selected_zone_ids = {
+                item.warehouse_id
+                for item in CENTRAL_STORAGE_WAREHOUSES
+                if item.planning_zone_key == district_key and item.recommendation_enabled
+            }
+            exclusions_removed_zone = bool(operator_exclusions & selected_zone_ids)
+            empty_blockers = (
+                [
+                    {
+                        "code": "no_eligible_storage_warehouse_after_exclusions",
+                        "message": (
+                            "После выбранных исключений не осталось разрешённых "
+                            "складов назначения WB."
+                        ),
+                    }
+                ]
+                if exclusions_removed_zone
+                else acceptance_blockers
+            )
             return {
                 **payload_without_options,
                 "status": STATUS_NO_OPTIONS,
-                "blockers": acceptance_blockers,
+                "blockers": empty_blockers,
                 "warnings": warnings + ["WB acceptance/options не вернул доступных вариантов."],
                 "evidence": {
                     **payload_without_options["evidence"],
@@ -325,6 +347,7 @@ class WbRegionalSupplyPlanningBlock:
             date_filter=request["date"],
             enrichment=enrichment,
             warnings=warnings,
+            excluded_warehouse_ids=request["excluded_wb_warehouse_ids"],
             warehouse_specific_probes=dict(
                 warehouse_specific_probe_result.get("diagnostics") or {}
             ),
@@ -338,12 +361,29 @@ class WbRegionalSupplyPlanningBlock:
             warnings.append("После фильтров не осталось доступных вариантов WB.")
         response_blockers: list[dict[str, Any]] = []
         if not options:
-            response_blockers = list(acceptance_blockers) or [
-                {
-                    "code": "no_eligible_storage_warehouse",
-                    "message": "Нет доступного склада хранения для всех обязательных ШК.",
-                }
-            ]
+            exclusion_counts = dict(
+                dict(planning_result.get("diagnostics") or {}).get(
+                    "exclusion_reason_counts"
+                )
+                or {}
+            )
+            if exclusion_counts.get("excluded_by_operator", 0) > 0:
+                response_blockers = [
+                    {
+                        "code": "no_eligible_storage_warehouse_after_exclusions",
+                        "message": (
+                            "После выбранных исключений не осталось разрешённых "
+                            "складов назначения WB."
+                        ),
+                    }
+                ]
+            else:
+                response_blockers = list(acceptance_blockers) or [
+                    {
+                        "code": "no_eligible_storage_warehouse",
+                        "message": "Нет доступного склада хранения для всех обязательных ШК.",
+                    }
+                ]
         elif available_option_count <= 0:
             response_blockers = [
                 {
@@ -412,6 +452,9 @@ class WbRegionalSupplyPlanningBlock:
                 "date": request.get("date") or "",
                 "only_same_district": bool(request.get("only_same_district")),
                 "include_transit": bool(request.get("include_transit")),
+                "excluded_wb_warehouse_ids": list(
+                    request.get("excluded_wb_warehouse_ids") or ()
+                ),
             },
             "products": [],
             "barcode_summary": {
@@ -440,6 +483,9 @@ class WbRegionalSupplyPlanningBlock:
                 "wb_api_read_only": True,
                 "no_wb_mutations": True,
                 "warehouse_registry_version": WAREHOUSE_REGISTRY_VERSION,
+                "excluded_wb_warehouse_ids": list(
+                    request.get("excluded_wb_warehouse_ids") or ()
+                ),
             },
         }
 
@@ -571,6 +617,7 @@ def _build_options(
     date_filter: str,
     enrichment: Mapping[str, Any],
     warnings: list[str],
+    excluded_warehouse_ids: tuple[int, ...] = (),
     warehouse_specific_probes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the manager view from WB evidence after fail-closed filtering."""
@@ -617,6 +664,7 @@ def _build_options(
     manager_options: list[dict[str, Any]] = []
     exclusion_diagnostics: list[dict[str, Any]] = []
     exclusion_counts: dict[str, int] = {}
+    operator_exclusions = set(excluded_warehouse_ids)
     for group in grouped_rows:
         warehouse_id = str(group.get("warehouse_id") or "").strip()
         warehouse_lookup_key = _warehouse_key(warehouse_id)
@@ -701,6 +749,10 @@ def _build_options(
         exclusion_codes: list[str] = []
         if not warehouse_id:
             exclusion_codes.append("warehouse_id_missing")
+        if warehouse_id == "0":
+            exclusion_codes.append("wb_aggregate_service_group_not_destination")
+        if warehouse_id.isdigit() and int(warehouse_id) in operator_exclusions:
+            exclusion_codes.append("excluded_by_operator")
         if is_central_zone and registry_item is None:
             exclusion_codes.append("warehouse_unclassified")
         if planning_zone_key != district_key:
@@ -924,6 +976,10 @@ def _build_options(
             "inactive_excluded_count": exclusion_counts.get("warehouse_inactive", 0),
             "blocked_excluded_count": exclusion_counts.get("warehouse_blocked", 0),
             "unmapped_excluded_count": exclusion_counts.get("warehouse_unclassified", 0),
+            "operator_excluded_count": exclusion_counts.get("excluded_by_operator", 0),
+            "service_group_excluded_count": exclusion_counts.get(
+                "wb_aggregate_service_group_not_destination", 0
+            ),
         },
         "diagnostics": {
             "request_id": str(acceptance_payload.get("requestId") or ""),
@@ -949,6 +1005,7 @@ def _fetch_missing_major_warehouse_probes(
     raw_option_rows: list[Mapping[str, Any]],
     warehouses: list[Mapping[str, Any]],
     warnings: list[str],
+    excluded_warehouse_ids: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     expected = [
         item
@@ -969,6 +1026,7 @@ def _fetch_missing_major_warehouse_probes(
     diagnostics: dict[str, Any] = {}
     probed_raw_rows: list[Mapping[str, Any]] = []
     probe_calls = 0
+    operator_exclusions = set(excluded_warehouse_ids)
     for registry_item in expected:
         warehouse_id = str(registry_item.warehouse_id)
         warehouse_lookup_key = _warehouse_key(warehouse_id)
@@ -984,6 +1042,13 @@ def _fetch_missing_major_warehouse_probes(
                 else None
             ),
         }
+        if registry_item.warehouse_id in operator_exclusions:
+            diagnostics[registry_item.canonical_name] = {
+                **base_diagnostic,
+                "status": "excluded_by_operator",
+                "probe_called": False,
+            }
+            continue
         if warehouse_lookup_key in general_ids:
             diagnostics[registry_item.canonical_name] = {
                 **base_diagnostic,
@@ -1198,6 +1263,10 @@ def _parse_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "date": str(payload.get("date") or "").strip(),
         "only_same_district": _as_bool(payload.get("only_same_district"), default=True),
         "include_transit": _as_bool(payload.get("include_transit"), default=False),
+        "excluded_wb_warehouse_ids": parse_excluded_wb_warehouse_ids(
+            payload,
+            allow_legacy_elektrostal=False,
+        ),
     }
 
 

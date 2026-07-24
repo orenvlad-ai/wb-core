@@ -107,6 +107,13 @@ def _check_shared_warehouse_exclusion() -> None:
         999,
         120762,
     }
+    service_group = next(
+        item for item in selected["options"] if item["warehouse_id"] == 0
+    )
+    assert service_group["warehouse_name"] == "Остальные — служебная группа WB"
+    assert service_group["destination_eligible"] is False
+    assert service_group["service_group"] is True
+    assert "не привязал к конкретному складу" in service_group["message"]
     assert len(
         [item for item in selected["options"] if item["warehouse_name"] == "Одинаковое имя"]
     ) == 2

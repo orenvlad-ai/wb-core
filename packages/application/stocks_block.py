@@ -311,12 +311,23 @@ def build_wb_warehouse_exclusion(
             int(warehouse_id),
             {
                 "warehouse_id": int(warehouse_id),
-                "warehouse_name": str(row.warehouse_name or f"warehouseId {warehouse_id}"),
+                "warehouse_name": (
+                    "Остальные — служебная группа WB"
+                    if int(warehouse_id) == 0
+                    else str(row.warehouse_name or f"warehouseId {warehouse_id}")
+                ),
                 "stock_quantity": 0.0,
                 "in_way_to_client": 0.0,
                 "in_way_from_client": 0.0,
                 "total_contour": 0.0,
                 "temporarily_missing": False,
+                "destination_eligible": int(warehouse_id) != 0,
+                "service_group": int(warehouse_id) == 0,
+                "message": (
+                    "Агрегированные остатки, которые WB не привязал к конкретному складу"
+                    if int(warehouse_id) == 0
+                    else ""
+                ),
             },
         )
         option["stock_quantity"] += quantity
@@ -346,17 +357,28 @@ def build_wb_warehouse_exclusion(
         )
     missing_selected = sorted(selected - selected_seen)
     for warehouse_id in missing_selected:
+        is_service_group = warehouse_id == 0
         options.append(
             {
                 "warehouse_id": warehouse_id,
-                "warehouse_name": f"warehouseId {warehouse_id}",
+                "warehouse_name": (
+                    "Остальные — служебная группа WB"
+                    if is_service_group
+                    else f"warehouseId {warehouse_id}"
+                ),
                 "stock_quantity": 0.0,
                 "in_way_to_client": 0.0,
                 "in_way_from_client": 0.0,
                 "total_contour": 0.0,
                 "temporarily_missing": True,
                 "selected": True,
-                "message": "Склад временно отсутствует в текущем снимке",
+                "destination_eligible": not is_service_group,
+                "service_group": is_service_group,
+                "message": (
+                    "Агрегированные остатки, которые WB не привязал к конкретному складу"
+                    if is_service_group
+                    else "Склад временно отсутствует в текущем снимке"
+                ),
             }
         )
 

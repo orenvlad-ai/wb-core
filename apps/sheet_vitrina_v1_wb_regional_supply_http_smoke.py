@@ -201,6 +201,9 @@ def main() -> None:
                 "data-regional-planning-district",
                 "data-regional-lead-time-district",
                 "lead_time_to_region_days_by_district",
+                "excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()",
+                "Остальные — служебная группа WB",
+                "Агрегированные остатки, которые WB не привязал к конкретному складу",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
