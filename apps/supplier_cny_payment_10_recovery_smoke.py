@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,11 +87,16 @@ def main() -> int:
         plan = build_plan(runtime.db_path)
         _assert(plan["would_change"], "dry-run detects the old shipment binding")
         _assert(plan["expected_affected_rows"] == 1, "exact affected row count")
-        result = apply_plan(
-            runtime,
-            plan,
-            backup_root=runtime.runtime_dir / "backups",
-        )
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=MemoryError("whole-file reads are forbidden"),
+        ):
+            result = apply_plan(
+                runtime,
+                plan,
+                backup_root=runtime.runtime_dir / "backups",
+            )
         _assert(result["applied"], "approved relink is applied")
         _assert(Path(result["backup"]["path"]).is_file(), "coherent backup exists")
         readback = result["post_apply"]["readback"]
