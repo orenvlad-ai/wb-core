@@ -766,10 +766,21 @@ def _supplier_allocation_with_certification(
         )
     )
     expenses_complete = bool(result.get("expenses_complete"))
-    certified = expenses_complete and matches_active
+    document_controls = list(result.get("document_controls") or [])
+    allocation_complete = bool(
+        document_controls
+        and all(
+            bool(item.get("conserved"))
+            and int(item.get("eligible_component_count") or 0)
+            == int(item.get("allocated_component_count") or 0)
+            for item in document_controls
+        )
+    )
+    certified = expenses_complete and matches_active and allocation_complete
     result["certification"] = {
         "certified": certified,
         "source_fingerprint_matches": matches_active,
+        "allocation_complete": allocation_complete,
         "source_fingerprint": result.get("source_fingerprint"),
         "calculation_fingerprint": result.get("calculation_fingerprint"),
         "certified_source_fingerprint": active_fingerprints[0] if active_fingerprints else None,
@@ -785,7 +796,7 @@ def _supplier_allocation_with_certification(
             "Актуальные source/calculation fingerprints совпадают с сертифицированной версией."
             if certified
             else (
-                "Поставка отмечена закрытой, но актуальный расчёт ещё не совпал с сертифицированной версией."
+                "Поставка отмечена закрытой, но актуальный расчёт ещё не совпал с сертифицированной версией или не прошёл полный контроль распределения."
                 if expenses_complete
                 else "Не все расходы поставки подтверждены."
             )
@@ -1198,10 +1209,12 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
     financial_documents = {
         str(row.get("document_id") or ""): dict(row)
         for row in sources.get("financial_documents") or []
+        if str(row.get("parse_status") or "") != "excluded"
     }
     expenses: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in sources.get("financial_expense_lines") or []:
-        expenses[str(raw.get("supplier_order_id") or "")].append(dict(raw))
+        if str(raw.get("financial_document_id") or "") in financial_documents:
+            expenses[str(raw.get("supplier_order_id") or "")].append(dict(raw))
     for rows in product_lines.values():
         rows.sort(
             key=lambda item: (
@@ -3107,6 +3120,9 @@ class WarehouseFunctionalBlock:
             "new_events": events,
             "movement_documents": movement_documents,
             "supplier_cost_states": supplier_cost_states,
+            "targeted_recalc_requests": [
+                dict(item) for item in capture.get("targeted_recalc_requests") or []
+            ],
             "ff_reservations": _ff_reservation_snapshot_rows(capture),
             "diff": _balance_diff(previous, lines),
             "invariants": {
@@ -3572,12 +3588,23 @@ class WarehouseFunctionalBlock:
                     )
                 self._insert_documents(conn, version_id=version_id, plan=normalized, created_at=now)
                 _verify_version(conn, version_id=version_id, expected=normalized)
-                conn.execute(
-                    """UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
-                       SET status='complete',finished_at=?,error=NULL
-                       WHERE status IN ('queued','running')""",
-                    (now,),
-                )
+                for request in normalized.get("targeted_recalc_requests") or []:
+                    updated = conn.execute(
+                        """UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                           SET status='complete',finished_at=?,error=NULL
+                           WHERE queue_id=? AND stable_source_id=? AND source_revision=?
+                             AND status IN ('queued','running')""",
+                        (
+                            now,
+                            str(request.get("queue_id") or ""),
+                            str(request.get("stable_source_id") or ""),
+                            str(request.get("source_revision") or ""),
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise WarehouseFunctionalError(
+                            "targeted recalculation request drifted before exact publication"
+                        )
                 if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
                     raise WarehouseFunctionalError(
                         "functional plan crossed the canonical business-date boundary before commit"
@@ -6045,6 +6072,7 @@ def _source_rows(
         "downstream_cost_rows": "SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id",
         "historical_wb_daily_quantities": "SELECT as_of_date,nm_id,physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE stage='WB' AND as_of_date>='2026-07-01' ORDER BY as_of_date,nm_id",
         "archival_estimate_active": "SELECT version.version_id,version.effective_date,version.unit_cost_rub,version.quality,version.owner_approval_reference,version.manifest_digest,version.production_dry_run_plan_sha256,version.source_digest,version.plan_fingerprint,row.nm_id,row.unit_cost_rub row_unit_cost_rub,row.quality row_quality,row.lineage_json,row.row_fingerprint FROM sheet_vitrina_v1_warehouse_archival_estimate_active active JOIN sheet_vitrina_v1_warehouse_archival_estimate_versions version ON version.version_id=active.version_id JOIN sheet_vitrina_v1_warehouse_archival_estimate_rows row ON row.version_id=version.version_id WHERE active.slot=1 ORDER BY row.nm_id",
+        "targeted_recalc_requests": "SELECT queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,status,requested_at,started_at FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE status IN ('queued','running') ORDER BY requested_at,queue_id",
     }
     if "sheet_vitrina_v1_cny_documents" in tables:
         queries["cny_documents"] = (
@@ -6398,6 +6426,21 @@ def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     normalized = dict(sources)
+    active_financial_documents = [
+        dict(item)
+        for item in normalized.get("financial_documents") or []
+        if str(item.get("parse_status") or "") != "excluded"
+    ]
+    active_financial_document_ids = {
+        str(item.get("document_id") or "") for item in active_financial_documents
+    }
+    normalized["financial_documents"] = active_financial_documents
+    normalized["financial_expense_lines"] = [
+        dict(item)
+        for item in normalized.get("financial_expense_lines") or []
+        if str(item.get("financial_document_id") or "")
+        in active_financial_document_ids
+    ]
     normalized["historical_wb_daily_quantities"] = _merge_historical_wb_quantity_evidence(
         canonical_rows=normalized.get("historical_wb_daily_quantities") or [],
         ready_snapshot_rows=normalized.get("ready_snapshots") or [],

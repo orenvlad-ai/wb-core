@@ -169,6 +169,15 @@ def _check_runtime_merge_and_background_job() -> None:
             transit_cost_source=FakeTransitCostSource({"40422317": 10164.0}),
             timestamp_factory=lambda: "2026-06-27T00:00:00Z",
         )
+        reconciled_supply_ids: list[list[str]] = []
+        block.transit_cost_reconciliation_callback = lambda supply_ids: (
+            reconciled_supply_ids.append(list(supply_ids))
+            or {
+                "status": "complete",
+                "supply_ids": list(supply_ids),
+                "reservation_fulfillment": "canonical",
+            }
+        )
         before = block.list_supplies({"size_filter": "all", "limit": 100})
         before_rows = {row["wb_supply_id"]: row for row in before["rows"]}
         if before_rows["40422317"]["effective_cost_source"] != "unknown":
@@ -185,6 +194,11 @@ def _check_runtime_merge_and_background_job() -> None:
         run = _wait_run(block, run_id)
         if run.get("status") != "success" or run.get("success_count") != 1 or run.get("processed_count") != 1:
             raise AssertionError(f"fake transit cost run must succeed once, got {run}")
+        if reconciled_supply_ids != [["40422317"]]:
+            raise AssertionError(
+                "successful cost evidence must trigger one bounded canonical "
+                f"cost/reservation reconciliation, got {reconciled_supply_ids}"
+            )
         after = block.list_supplies({"size_filter": "all", "limit": 100})
         after_rows = {row["wb_supply_id"]: row for row in after["rows"]}
         enriched = after_rows["40422317"]

@@ -92,6 +92,86 @@ def main() -> None:
         _assert_wb_supply_cost_layer(runtime)
         _seed_wb_supply(
             runtime,
+            supply_id="transit_enriched",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 0}],
+            has_transit_cost_marker=True,
+            acceptance_cost=None,
+            cost_total=None,
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
+            raise AssertionError("transit supply without cost must materialize one fail-closed layer")
+        _assert_transit_supply_cost(runtime, expected_status="transit_missing", expected_per_unit=None)
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "transit_enriched",
+                "amount": 1000,
+                "currency": "RUB",
+                "amount_label": "1 000 ₽",
+                "is_transit": True,
+                "source": "display_text",
+                "evidence_type": "unverified",
+                "confidence": "high",
+                "fetched_at": NOW,
+                "status": "success",
+                "error": "",
+                "source_endpoint_path": "/untrusted",
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 0:
+            raise AssertionError(
+                "positive display text without canonical source evidence must remain fail-closed"
+            )
+        _assert_transit_supply_cost(
+            runtime,
+            expected_status="transit_missing",
+            expected_per_unit=None,
+        )
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "transit_enriched",
+                "amount": 1000,
+                "currency": "RUB",
+                "amount_label": "1 000 ₽",
+                "is_transit": True,
+                "source": "seller_portal_browser",
+                "evidence_type": "network_json",
+                "confidence": "high",
+                "fetched_at": NOW,
+                "status": "success",
+                "error": "",
+                "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
+            raise AssertionError("confirmed supplemental transit evidence must rebuild one canonical cost layer")
+        _assert_transit_supply_cost(runtime, expected_status="transit_confirmed", expected_per_unit=100.0)
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 0:
+            raise AssertionError("repeated transit evidence materialization must be a no-op")
+        _seed_wb_supply(
+            runtime,
+            supply_id="transit_official",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 0}],
+            has_transit_cost_marker=True,
+            acceptance_cost=0,
+            transit_cost=800,
+            cost_total=800,
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
+            raise AssertionError("official normalized transit fact must materialize one canonical cost layer")
+        _assert_transit_supply_cost(
+            runtime,
+            supply_id="transit_official",
+            expected_status="transit_confirmed",
+            expected_per_unit=80.0,
+        )
+        _seed_wb_supply(
+            runtime,
             supply_id="receiving_accepted_qty",
             status_id=4,
             goods=[{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 7}],
@@ -312,6 +392,39 @@ def _seed_financial_inputs(runtime: RegistryUploadDbBackedRuntime, *, shipment_i
             """,
             (f"{shipment_id}_customs_line", f"{shipment_id}_customs", shipment_id),
         )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_supplier_financial_documents (
+                document_id, supplier_order_id, document_type, original_filename, stored_file_path,
+                file_content_type, file_sha256, uploaded_at, updated_at, parse_status,
+                document_number, document_date, currency, total_amount, total_amount_rub,
+                raw_parse_json, normalized_parse_json, warnings_json, errors_json
+            ) VALUES (?, ?, 'logistics_invoice', 'archive-136.pdf', '/tmp/archive-136.pdf',
+                'application/pdf', ?, ?, ?, 'excluded', '136', '2026-06-25', 'RUB', 1075030, 1075030,
+                '{}', '{}', '[]', '[]')
+            """,
+            (
+                f"{shipment_id}_archive_136",
+                shipment_id,
+                f"sha-{shipment_id}-archive-136",
+                NOW,
+                NOW,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_supplier_financial_expense_lines (
+                line_id, financial_document_id, supplier_order_id, sort_order, category, amount,
+                currency, amount_rub, included_in_logistics_efficiency, included_in_customs_total,
+                raw_json
+            ) VALUES (?, ?, ?, 1, 'logistics', 1075030, 'RUB', 1075030, 1, 0, '{}')
+            """,
+            (
+                f"{shipment_id}_archive_136_line",
+                f"{shipment_id}_archive_136",
+                shipment_id,
+            ),
+        )
 
 
 def _seed_wb_supply(
@@ -320,6 +433,10 @@ def _seed_wb_supply(
     supply_id: str = "40431461",
     status_id: int = 5,
     goods: list[dict[str, object]] | None = None,
+    has_transit_cost_marker: bool = False,
+    acceptance_cost: float | None = 0,
+    transit_cost: float | None = None,
+    cost_total: float | None = 0,
 ) -> None:
     goods_payload = goods or [{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}]
     quantity_total = sum(float(item.get("quantity") or item.get("acceptedQuantity") or 0) for item in goods_payload)
@@ -348,9 +465,11 @@ def _seed_wb_supply(
                         "supply_id": supply_id,
                         "status_id": status_id,
                         "warehouseName": "Электросталь",
-                        "has_transit_cost_marker": 0,
-                        "acceptanceCost": 0,
-                        "cost_total": 0,
+                        "has_transit_cost_marker": 1 if has_transit_cost_marker else 0,
+                        "transit_warehouse_id": 507 if has_transit_cost_marker else None,
+                        "acceptanceCost": acceptance_cost,
+                        "transitCost": transit_cost,
+                        "cost_total": cost_total,
                         "cost_evidence": "detail.acceptanceCost",
                     },
                     ensure_ascii=False,
@@ -380,6 +499,43 @@ def _assert_wb_supply_cost_layer(runtime: RegistryUploadDbBackedRuntime) -> None
         raise AssertionError(f"direct WB supply must have confirmed zero transit, got {dict(row)}")
     if row["our_wb_unit_cost_rub"] is None:
         raise AssertionError("WB supply cost layer must calculate our_wb_unit_cost_rub")
+
+
+def _assert_transit_supply_cost(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str = "transit_enriched",
+    expected_status: str,
+    expected_per_unit: float | None,
+) -> None:
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT transit_cost_status, transit_amount_total, transit_per_unit_rub,
+                   our_wb_unit_cost_rub, missing_reason
+            FROM sheet_vitrina_v1_wb_supply_cost_layers
+            WHERE wb_supply_id = ? AND nm_id = 497413000 AND is_current = 1
+            """,
+            (supply_id,),
+        ).fetchone()
+    if row is None or row["transit_cost_status"] != expected_status:
+        raise AssertionError(
+            f"transit enrichment canonical status mismatch: {dict(row) if row else None}"
+        )
+    if expected_per_unit is None:
+        if row["transit_amount_total"] is not None or str(row["missing_reason"] or "") != (
+            "transit_marker_present_but_cost_missing"
+        ):
+            raise AssertionError(f"missing transit cost must remain fail-closed: {dict(row)}")
+    else:
+        _assert_close(
+            float(row["transit_per_unit_rub"]),
+            expected_per_unit,
+            "supplemental transit cost per full packed composition",
+        )
+        if row["our_wb_unit_cost_rub"] is None:
+            raise AssertionError("confirmed transit evidence must produce canonical WB unit cost")
 
 
 def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) -> None:

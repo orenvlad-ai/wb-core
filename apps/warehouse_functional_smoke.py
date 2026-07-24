@@ -60,6 +60,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     load_supplier_flow_cost_state,
     _supply_downstream_component_index,
     _supply_revision,
+    _supplier_allocation_with_certification,
     _supplier_cost_allocations,
     _summaries,
     _validate_historical_projection_calendar,
@@ -737,6 +738,130 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
         and "packing_list" not in allocation["cost_affecting_document_types"],
         "canonical document controls conserve every customs component and exclude informational files",
     )
+    archived_sources = copy.deepcopy(allocation_sources)
+    archived_sources["financial_documents"].extend(
+        [
+            {
+                "document_id": "bank-fee-rub-a",
+                "supplier_order_id": shipment_id,
+                "document_type": "bank_fee_statement",
+                "document_number": "FEE-RUB-A",
+                "document_date": "2026-05-21",
+                "parse_status": "confirmed",
+            },
+            {
+                "document_id": "bank-fee-rub-b",
+                "supplier_order_id": shipment_id,
+                "document_type": "bank_fee_statement",
+                "document_number": "FEE-RUB-B",
+                "document_date": "2026-05-21",
+                "parse_status": "confirmed",
+            },
+            {
+                "document_id": "log136-archive",
+                "supplier_order_id": shipment_id,
+                "document_type": "logistics_invoice",
+                "document_number": "136",
+                "document_date": "2026-07-03",
+                "file_sha256": "same-as-active-log136",
+                "parse_status": "excluded",
+            },
+        ]
+    )
+    archived_sources["financial_expense_lines"].extend(
+        [
+            {
+                "line_id": "bank-fee-rub-a:fee",
+                "financial_document_id": "bank-fee-rub-a",
+                "supplier_order_id": shipment_id,
+                "category": "bank_transfer_fee",
+                "amount_rub": "100",
+                "currency": "RUB",
+                "status": "confirmed",
+            },
+            {
+                "line_id": "bank-fee-rub-b:fee",
+                "financial_document_id": "bank-fee-rub-b",
+                "supplier_order_id": shipment_id,
+                "category": "currency_control_fee",
+                "amount_rub": "200",
+                "currency": "RUB",
+                "status": "confirmed",
+            },
+            {
+                "line_id": "log136-archive:logistics",
+                "financial_document_id": "log136-archive",
+                "supplier_order_id": shipment_id,
+                "category": "logistics",
+                "amount_rub": "1075030",
+                "currency": "RUB",
+                "status": "confirmed",
+            },
+        ]
+    )
+    active_only = _supplier_cost_allocations(archived_sources)[shipment_id]
+    active_component_count = sum(
+        int(item["eligible_component_count"])
+        for item in active_only["document_controls"]
+    )
+    _assert(
+        active_component_count == 9
+        and all(
+            item["document_id"] != "log136-archive"
+            for item in active_only["document_controls"]
+        )
+        and active_only["controls"]["document_allocation_conserved"] is True,
+        "excluded duplicate invoice 136 is absent from the active 9-of-9 allocation",
+    )
+    stale_sources = copy.deepcopy(archived_sources)
+    next(
+        item
+        for item in stale_sources["financial_documents"]
+        if item["document_id"] == "log136-archive"
+    )["parse_status"] = "confirmed"
+    stale_allocation = _supplier_cost_allocations(stale_sources)[shipment_id]
+    _assert(
+        sum(
+            int(item["eligible_component_count"])
+            for item in stale_allocation["document_controls"]
+        )
+        == 10
+        and Decimal(stale_allocation["capital_rub"])
+        - Decimal(active_only["capital_rub"])
+        == Decimal("1075030")
+        and stale_allocation["source_fingerprint"]
+        != active_only["source_fingerprint"],
+        "excluding archived invoice 136 creates a semantic source revision and removes exactly 1,075,030 RUB",
+    )
+    stale_certification = _supplier_allocation_with_certification(
+        active_only,
+        active_version_id="whfv-stale-duplicate",
+        active_fingerprints=(
+            stale_allocation["source_fingerprint"],
+            stale_allocation["calculation_fingerprint"],
+        ),
+    )
+    fresh_certification = _supplier_allocation_with_certification(
+        active_only,
+        active_version_id="whfv-active-only",
+        active_fingerprints=(
+            active_only["source_fingerprint"],
+            active_only["calculation_fingerprint"],
+        ),
+    )
+    repeated = _supplier_cost_allocations(archived_sources)[shipment_id]
+    _assert(
+        stale_certification["certification"]["certified"] is False
+        and fresh_certification["certification"]["certified"] is True
+        and repeated["source_fingerprint"] == active_only["source_fingerprint"]
+        and repeated["calculation_fingerprint"]
+        == active_only["calculation_fingerprint"]
+        and any(
+            item["document_id"] == "log136-archive"
+            for item in archived_sources["financial_documents"]
+        ),
+        "stale fingerprint cannot certify; replay is stable and excluded audit evidence is preserved",
+    )
     partial_sources = copy.deepcopy(allocation_sources)
     partial_sources["financial_expense_lines"].append(
         {
@@ -1029,6 +1154,34 @@ def _test_discrepancy_pool() -> None:
     _assert(unmatched_by_nm == {10: Decimal("2"), 99: Decimal("1")}, "unmatched is quarantined")
     _assert(all(Decimal(str(item["quantity"])) >= 0 for item in balances), "no negative discrepancy")
     _assert({item["source_id"] for item in audit} == {"d1", "d2"}, "doprinato movement audit is complete")
+    exact_balances, exact_unmatched = reconcile_discrepancies(
+        discrepancies=[
+            {
+                "source_id": "40985996:short-receipt",
+                "nm_id": 391660889,
+                "quantity": "253",
+                "capital": "25300",
+            }
+        ],
+        doprinato=[
+            {
+                "source_id": "40985996:over-receipt-other-sku",
+                "business_date": "2026-07-18",
+                "nm_id": 391661710,
+                "quantity": "249",
+            }
+        ],
+        audit=[],
+    )
+    _assert(
+        exact_balances
+        and Decimal(str(exact_balances[0]["quantity"])) == Decimal("253")
+        and int(exact_balances[0]["nm_id"]) == 391660889
+        and exact_unmatched
+        and Decimal(str(exact_unmatched[0]["quantity"])) == Decimal("249")
+        and int(exact_unmatched[0]["nm_id"]) == 391661710,
+        "40985996 short receipt 253 is never netted with +249 of another SKU",
+    )
 
 
 def _test_cutover_ff_debit_coverage() -> None:

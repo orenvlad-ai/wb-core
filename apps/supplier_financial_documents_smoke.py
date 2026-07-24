@@ -42,7 +42,10 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     SupplierFinancialDocumentsBlock,
     _enrich_customs_goods_items_from_annex_rows,
     _extract_customs_annex_rows_from_layout_pages,
+    _statement_row_from_segment,
+    _statement_reference_identity,
     apply_supplier_order_document_match,
+    build_bank_fee_statement_import_preview,
     build_financial_summary,
     build_supplier_shipment_registry,
     parse_financial_document_upload,
@@ -650,6 +653,18 @@ BANK_TRANSFER_PDFTOTEXT_LAYOUT_TEXT = """
                                                                                                        22.05.2026 в 00:43:03
 """
 
+VTB_RECLASSIFICATION_TEXT = """
+ВЫПИСКА за период с 29.06.2026 по 24.07.2026
+Счет 40802810012480001092 (Валюта 643, Российский рубль)
+Владелец счета: Тест
+Входящий остаток на 29.06.2026: 20000.00
+Дата № ВО Контрагент Обороты, RUR Назначение
+30.06.2026 37 01 7728486029 044525092 40702810470010357554 ЛОГИСТ 5000.00 0.00 Счёт на оплату №121 от 29 июня 2026 г.
+ИТОГО за период с 29.06.2026 по 24.07.2026
+ИСХОДЯЩИЙ ОСТАТОК: 15000.00
+ФИЛИАЛ "ЦЕНТРАЛЬНЫЙ" БАНКА ВТБ (ПАО)
+"""
+
 TEXT_BY_FILENAME = {
     "quote.pdf": QUOTE_TEXT,
     "quote-2026-06-19.pdf": QUOTE_2026_06_19_TEXT,
@@ -659,6 +674,7 @@ TEXT_BY_FILENAME = {
     "customs.pdf": CUSTOMS_TEXT,
     "bank-control.pdf": BANK_CONTROL_TEXT,
     "bank-transfer.pdf": BANK_TRANSFER_TEXT,
+    "vtb-reclassification.pdf": VTB_RECLASSIFICATION_TEXT,
 }
 
 
@@ -683,11 +699,280 @@ def _packing_list_workbook_bytes() -> bytes:
 
 def main() -> None:
     _assert_parser_smoke()
+    _assert_parser_reclassification_staging()
     _assert_http_api_smoke()
     print("supplier_financial_documents_smoke: OK")
 
 
+def _assert_vtb_statement_parser_and_preview() -> None:
+    incidental_invoice_wording = parse_financial_document_text(
+        """
+        Платёжный реестр контрагента
+        30.06.2026 операция 37: назначение платежа Счёт на оплату №121.
+        Этот фрагмент не содержит заголовка счёта или структуры банковской выписки.
+        """,
+        filename="unknown-register.pdf",
+    )
+    if (
+        incidental_invoice_wording.get("raw_parse", {})
+        .get("classification", {})
+        .get("status")
+        != "needs_review"
+    ):
+        raise AssertionError(
+            "incidental payment-purpose wording must not classify an invoice"
+        )
+    overlapping_row = (
+        "30.06.2026 130623 02 7702070139 044525187 "
+        "30101810700000000187 БАНК ВТБ 948.60 0.00 "
+        "Комиссия за ВК по платежу №7 на сумму 59921.25 CNY."
+    )
+    overlap_a = _statement_row_from_segment(
+        overlapping_row
+        + " ИТОГО за период с 29.06.2026 по 24.07.2026 "
+        + "ИСХОДЯЩИЙ ОСТАТОК: 10.00",
+        index=1,
+        account_currency="RUB",
+        account_number="40802810012480001092",
+        section_id="section-a",
+    )
+    overlap_b = _statement_row_from_segment(
+        overlapping_row
+        + " ИТОГО за период с 20.06.2026 по 30.07.2026 "
+        + "ИСХОДЯЩИЙ ОСТАТОК: 20.00",
+        index=99,
+        account_currency="RUB",
+        account_number="40802810012480001092",
+        section_id="section-b",
+    )
+    if overlap_a["semantic_operation_id"] != overlap_b["semantic_operation_id"]:
+        raise AssertionError(
+            "overlapping statement page trailers changed semantic identity"
+        )
+    statement_text = """
+ВЫПИСКА за период с 29.06.2026 по 24.07.2026
+Счет 40802156616580000008 (Валюта 156, Китайский юань)
+Владелец счета: Тест
+Входящий остаток на 29.06.2026 CNY: 100.00
+Дата № ВО Контрагент Обороты, RUR Обороты, CNY Назначение
+30.06.2026 7 01 7702070139 VTBRCNSHXXX 40807156200610034920 SUPPLIER 686841.34 0.00 59921.25 0.00 ADV PMT FOR GOODS CONTRACT FR-001/26
+20.07.2026 11 01 7702070139 VTBRCNSHXXX 40807156200610034920 SUPPLIER 3925309.26 0.00 339553.75 0.00 ADV PMT FOR GOODS CONTRACT FR-001/26
+ИТОГО за период с 29.06.2026 по 24.07.2026
+ИСХОДЯЩИЙ ОСТАТОК: CNY: 1.00
+ВЫПИСКА за период с 29.06.2026 по 24.07.2026
+Счет 40802810012480001092 (Валюта 643, Российский рубль)
+Владелец счета: Тест
+Входящий остаток на 29.06.2026: 20000.00
+Дата № ВО Контрагент Обороты, RUR Назначение
+30.06.2026 130623 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 948.60 0.00 Комиссия за ВК по платежу №7 на сумму 59921.25 CNY.
+30.06.2026 443906 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 13668.11 0.00 Комиссия за перевод (SWIFT) №7 на сумму 59921.25 CNY.
+20.07.2026 50149 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 4788.83 0.00 Комиссия за ВК по платежу №11 на сумму 339553.75 CNY.
+20.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 20000.00 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
+21.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 58113.66 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
+30.06.2026 37 01 7728486029 044525092 40702810470010357554 ЛОГИСТ 5000.00 0.00 Счёт на оплату №121 от 29 июня 2026 г.
+ИТОГО за период с 29.06.2026 по 24.07.2026
+ИСХОДЯЩИЙ ОСТАТОК: 1539258.96
+ФИЛИАЛ "ЦЕНТРАЛЬНЫЙ" БАНКА ВТБ (ПАО)
+"""
+    parsed = parse_financial_document_text(
+        statement_text, filename="VTB_BankStatement_some_accounts.pdf"
+    )
+    normalized = dict(parsed.get("normalized_parse") or {})
+    classification = dict(parsed.get("raw_parse") or {}).get("classification") or {}
+    if (
+        normalized.get("document_type") != "bank_fee_statement"
+        or classification.get("status") != "classified"
+        or len(normalized.get("account_sections") or []) != 2
+        or [item.get("account_currency") for item in normalized["account_sections"]]
+        != ["CNY", "RUB"]
+    ):
+        raise AssertionError(
+            f"mixed VTB statement classification/sections changed: {parsed}"
+        )
+    preview = build_bank_fee_statement_import_preview(
+        normalized,
+        shipment={"header": {"invoice_no": "26GN527"}},
+        payment_documents=[
+            {
+                "document_id": "payment-7",
+                "document_number": "7",
+                "cny_amount": "59921.25",
+                "payment_details": "",
+            },
+            {
+                "document_id": "payment-11",
+                "document_number": "11",
+                "cny_amount": "339553.75",
+                "payment_details": "",
+            },
+        ],
+    )
+    fees = list(preview.get("matched_fee_rows") or [])
+    amounts = sorted(str(item.get("amount") or "") for item in fees)
+    selected = sorted(
+        str(item.get("amount") or "")
+        for item in fees
+        if item.get("selected_by_default")
+    )
+    review = sorted(
+        str(item.get("amount") or "")
+        for item in fees
+        if item.get("operation_status") == "needs_review"
+    )
+    if (
+        amounts != sorted(["948.60", "13668.11", "4788.83", "20000", "58113.66"])
+        or selected != sorted(["948.60", "13668.11", "4788.83"])
+        or review != sorted(["20000", "58113.66"])
+        or preview.get("fee_totals_by_currency", {}).get("RUB") != "97519.20"
+    ):
+        raise AssertionError(f"VTB exact preview changed: {preview}")
+    operation_ids = {
+        str(item.get("semantic_operation_id") or "") for item in fees
+    }
+    overlap = build_bank_fee_statement_import_preview(
+        normalized,
+        shipment={"header": {"invoice_no": "26GN527"}},
+        payment_documents=[
+            {"document_id": "payment-7", "document_number": "7", "cny_amount": "59921.25"},
+            {"document_id": "payment-11", "document_number": "11", "cny_amount": "339553.75"},
+        ],
+        existing_operation_ids=operation_ids,
+    )
+    if not overlap.get("matched_fee_rows") or any(
+        item.get("operation_status") != "already_imported"
+        for item in overlap["matched_fee_rows"]
+    ):
+        raise AssertionError(
+            f"overlapping statement operations must dedupe semantically: {overlap}"
+        )
+    conflict_row = next(
+        item
+        for item in fees
+        if str(item.get("amount") or "") == "948.60"
+    )
+    conflict = build_bank_fee_statement_import_preview(
+        normalized,
+        shipment={"header": {"invoice_no": "26GN527"}},
+        payment_documents=[
+            {"document_id": "payment-7", "document_number": "7", "cny_amount": "59921.25"},
+            {"document_id": "payment-11", "document_number": "11", "cny_amount": "339553.75"},
+        ],
+        existing_operation_index={
+            _statement_reference_identity(conflict_row): {
+                "bankop_existing_different_semantics"
+            }
+        },
+    )
+    conflicting = next(
+        item
+        for item in conflict["matched_fee_rows"]
+        if str(item.get("amount") or "") == "948.60"
+    )
+    if (
+        conflicting.get("operation_status") != "conflict"
+        or conflicting.get("import_allowed") is not False
+        or conflicting.get("selected_by_default") is not False
+    ):
+        raise AssertionError(f"semantic reference conflict must fail closed: {conflicting}")
+    same_amount_different_dates = [
+        item
+        for item in normalized.get("fee_rows") or []
+        if str(item.get("bank_document_number") or "") == "244189"
+    ]
+    if len({item.get("semantic_operation_id") for item in same_amount_different_dates}) != 2:
+        raise AssertionError("same reference on different operation dates collapsed")
+    with TemporaryDirectory(prefix="vtb-confirm-idempotency-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(
+            runtime_dir=Path(tmp) / "runtime"
+        )
+        _seed_supplier_order(runtime)
+        document_id = "fdoc_vtb_confirm_smoke"
+        runtime.save_supplier_financial_document(
+            document={
+                "document_id": document_id,
+                "supplier_order_id": "sup_financial",
+                "document_type": "bank_fee_statement",
+                "original_filename": "VTB_BankStatement_some_accounts.pdf",
+                "stored_file_path": "",
+                "file_content_type": "application/pdf",
+                "file_sha256": "a" * 64,
+                "uploaded_at": "2026-07-24T08:00:00Z",
+                "updated_at": "2026-07-24T08:00:00Z",
+                "parse_status": "parsed",
+                "vendor": "ВТБ",
+                "currency": "MIXED",
+                "normalized_parse": {
+                    **normalized,
+                    "statement_import": {
+                        **preview,
+                        "import_status": "preview_pending",
+                        "confirmed_at": "",
+                    },
+                },
+                "parser_version": "supplier_vtb_bank_fee_statement_parser_v2",
+            },
+            expense_lines=[],
+        )
+        block = SupplierFinancialDocumentsBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-07-24T09:00:00Z",
+        )
+        selected_ids = [
+            str(item.get("semantic_operation_id") or "")
+            for item in fees
+            if item.get("selected_by_default")
+        ]
+        confirmed = block.confirm_bank_fee_statement_import(
+            "sup_financial",
+            document_id,
+            selected_operation_ids=selected_ids,
+        )
+        repeated = block.confirm_bank_fee_statement_import(
+            "sup_financial",
+            document_id,
+            selected_operation_ids=selected_ids,
+        )
+        stored = runtime.load_supplier_financial_document(
+            supplier_order_id="sup_financial",
+            document_id=document_id,
+        ) or {}
+        stored_preview = dict(
+            dict(stored.get("normalized_parse") or {}).get(
+                "statement_import"
+            )
+            or {}
+        )
+        imported_amounts = sorted(
+            str(item.get("amount") or "")
+            for item in stored.get("expense_lines") or []
+        )
+        review_after = sorted(
+            str(item.get("amount") or "")
+            for item in stored_preview.get("matched_fee_rows") or []
+            if item.get("operation_status") == "needs_review"
+        )
+        if (
+            imported_amounts != sorted(["948.6", "13668.11", "4788.83"])
+            or review_after != sorted(["20000", "58113.66"])
+            or not repeated.get("idempotent")
+            or repeated.get("cny_fee_rows_for_ledger")
+            or len(confirmed.get("expense_lines") or []) != 3
+        ):
+            raise AssertionError(
+                "selected confirm must import only exact defaults and repeat as no-op: "
+                + repr(
+                    {
+                        "confirmed": confirmed,
+                        "repeated": repeated,
+                        "imported_amounts": imported_amounts,
+                        "review_after": review_after,
+                    }
+                )
+            )
+
+
 def _assert_parser_smoke() -> None:
+    _assert_vtb_statement_parser_and_preview()
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
     _assert_transitplus_quote_payload(quote_payload)
 
@@ -2182,6 +2467,103 @@ def _document_from_parsed(document_id: str, parsed: dict[str, Any], *, cbr_rate:
         "cbr_usd_rate_effective_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date"),
         "normalized_parse": normalized,
     }
+
+
+def _assert_parser_reclassification_staging() -> None:
+    with TemporaryDirectory(prefix="supplier-financial-reclassification-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        _seed_supplier_order(runtime)
+        source_bytes = b"%PDF-1.4\n% VTB statement with invoice wording\n"
+        archived_path = runtime_dir / "supplier_financial_documents" / "wrong.pdf"
+        archived_path.parent.mkdir(parents=True, exist_ok=True)
+        archived_path.write_bytes(source_bytes)
+        archived_id = "fdoc_wrong_archived_bank_statement"
+        runtime.save_supplier_financial_document(
+            document={
+                "document_id": archived_id,
+                "supplier_order_id": "sup_financial",
+                "document_type": "logistics_invoice",
+                "original_filename": "vtb-reclassification.pdf",
+                "stored_file_path": str(archived_path),
+                "file_content_type": "application/pdf",
+                "file_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "uploaded_at": "2026-06-19T07:00:00Z",
+                "updated_at": "2026-06-19T07:00:00Z",
+                "parse_status": "excluded",
+                "document_number": "121",
+                "currency": "RUB",
+                "normalized_parse": {
+                    "document_type": "logistics_invoice",
+                    "invoice_number": "121",
+                },
+                "parser_version": "supplier_financial_document_parser_v7",
+            },
+            expense_lines=[],
+        )
+        block = SupplierFinancialDocumentsBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-06-19T08:00:00Z",
+            pdf_text_extractor=_fixture_text_extractor,
+        )
+        preview = block.preview_document_upload(
+            "sup_financial",
+            file_bytes=source_bytes,
+            uploaded_filename="vtb-reclassification.pdf",
+            uploaded_content_type="application/pdf",
+        )
+        if (
+            preview.get("duplicate_action") != "parser_reclassification"
+            or preview.get("document", {}).get("document_type")
+            != "bank_fee_statement"
+        ):
+            raise AssertionError(
+                f"parser correction must not restore stale classification: {preview}"
+            )
+        result = block.confirm_document_upload(
+            "sup_financial",
+            confirmation_token=str(preview["confirmation_token"]),
+        )
+        archived = runtime.load_supplier_financial_document(
+            supplier_order_id="sup_financial",
+            document_id=archived_id,
+        )
+        replacement = runtime.load_supplier_financial_document(
+            supplier_order_id="sup_financial",
+            document_id=str(result.get("document_id") or ""),
+        )
+        if (
+            result.get("duplicate_action") != "parser_reclassification"
+            or not result.get("preview_required")
+            or replacement is None
+            or replacement.get("document_type") != "bank_fee_statement"
+            or str(replacement.get("document_id") or "") == archived_id
+            or archived is None
+            or archived.get("parse_status") != "excluded"
+        ):
+            raise AssertionError(
+                "parser correction must stage a new bank preview and preserve archived audit: "
+                + repr({"result": result, "archived": archived, "replacement": replacement})
+            )
+        repeat_preview = block.preview_document_upload(
+            "sup_financial",
+            file_bytes=source_bytes,
+            uploaded_filename="vtb-reclassification.pdf",
+            uploaded_content_type="application/pdf",
+        )
+        repeated = block.confirm_document_upload(
+            "sup_financial",
+            confirmation_token=str(repeat_preview["confirmation_token"]),
+        )
+        if (
+            repeat_preview.get("duplicate_action") != "idempotent_active"
+            or not repeated.get("idempotent")
+            or repeated.get("document_id") != result.get("document_id")
+            or not repeated.get("preview_required")
+        ):
+            raise AssertionError(
+                f"re-uploaded staged bank statement must be an exact no-op: {repeated}"
+            )
 
 
 def _assert_http_api_smoke() -> None:

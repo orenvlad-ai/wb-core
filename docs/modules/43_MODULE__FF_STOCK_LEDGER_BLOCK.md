@@ -34,6 +34,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/ff-stocks/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file"
 related_runners:
+  - "apps/ff_reservations_transit_cost_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
@@ -158,8 +159,10 @@ Future-arrival reservation contract:
 - insufficient physical availability creates/updates a reservation and never creates negative FF quantity/capital or an FF→WB movement;
 - missing/pending downstream cost may keep the reservation waiting and does not block unrelated official WB snapshot/publication;
 - sufficient physical availability plus validated positive FF/pre-acceptance cost for every SKU creates the physical debit and reservation `fulfill` in the same transaction, fixing FF moving WAC at that moment;
+- physical debit and reservation-fulfill operation IDs are deterministic hashes of the canonical supply source/revision and operation type; retries cannot manufacture a second identity for the same movement;
 - a factual supplier FF receipt immediately reconciles active reservations, with no extra operator action;
 - actual movement without validated downstream cost remains fail closed.
+- validated positive supplemental Seller Portal transit evidence enters the same canonical supply cost layer as official/approved downstream components and triggers bounded reconciliation for that supply; it is never inferred from display text or a tariff formula. One missing cost cannot prevent fulfillment of another fully proven reservation.
 
 Activation and balance guards:
 - WB supply sync/backfill/detail enrichment first ensures a WB auto-writeoff checkpoint against the current cache. This captures already-known historical supplies as baseline by `cache_key`, `wb_supply_debit:<cache_key or supply_id>` and `supply_id`.

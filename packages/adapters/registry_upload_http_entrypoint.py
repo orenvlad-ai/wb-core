@@ -1963,9 +1963,20 @@ def _build_handler(
                     return
                 try:
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    confirm_payload = _load_optional_request_payload(self)
+                    selected_operation_ids = confirm_payload.get(
+                        "selected_operation_ids"
+                    )
+                    if selected_operation_ids is not None and not isinstance(
+                        selected_operation_ids, list
+                    ):
+                        raise ValueError(
+                            "selected_operation_ids must be an array"
+                        )
                     payload = entrypoint.handle_supplier_financial_document_confirm_import_request(
                         shipment_id,
                         document_id,
+                        selected_operation_ids=selected_operation_ids,
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})

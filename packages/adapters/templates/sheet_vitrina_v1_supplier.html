@@ -2706,12 +2706,30 @@
         const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
         const totals = preview.fee_totals_by_currency || {};
         const feeText = fees.length
-          ? fees.map((row) => escapeHtml([
-            financialCategoryLabels[row.fee_category] || row.fee_category || "Комиссия",
-            formatAmount(row.amount, row.currency),
-            row.confidence || "",
-            (Array.isArray(row.match_reasons) ? row.match_reasons.join(", ") : "")
-          ].filter(Boolean).join(" · "))).join("<br>")
+          ? fees.map((row) => {
+            const operationId = String(row.semantic_operation_id || "");
+            const disabled = row.import_allowed === false || row.operation_status === "already_imported";
+            const checked = row.selected_by_default === true && !disabled;
+            const details = [
+              row.operation_date || "дата не распознана",
+              row.account_number || "счёт не распознан",
+              row.currency || "валюта не распознана",
+              financialCategoryLabels[row.fee_category] || row.fee_category || "Комиссия",
+              formatAmount(row.amount, row.currency),
+              "платёж №" + (row.matched_anchor_operation_number || "—"),
+              row.operation_status || "needs_review"
+            ].filter(Boolean).join(" · ");
+            return [
+              '<label class="finance-field">',
+              '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '"' +
+                (checked ? " checked" : "") + (disabled ? " disabled" : "") + '>',
+              '<span><strong>' + escapeHtml(details) + '</strong>',
+              '<small>' + escapeHtml(row.payment_purpose || "") + '</small>',
+              row.review_warning ? '<small>' + escapeHtml(row.review_warning) + '</small>' : "",
+              '<small>' + escapeHtml((Array.isArray(row.match_reasons) ? row.match_reasons.join(", ") : "") || "Основание сопоставления отсутствует") + '</small>',
+              '</span></label>'
+            ].join("");
+          }).join("")
           : "Комиссии для этого payment anchor не найдены.";
         const totalsText = Object.keys(totals).length
           ? Object.keys(totals).sort().map((currency) => formatAmount(totals[currency], currency)).join(", ")
@@ -2724,7 +2742,13 @@
           '<div class="finance-field"><span>Confidence</span><strong>' + escapeHtml(preview.match_confidence || "—") + '</strong></div>',
           '<div class="finance-field"><span>Warnings</span><strong>' + escapeHtml(warnings.join("; ") || "—") + '</strong></div>'
         ].join("");
-        confirmBankFeeImportButton.disabled = preview.status !== "ready_to_confirm" || !fees.length;
+        const selectedInputs = bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]:checked");
+        confirmBankFeeImportButton.disabled = !selectedInputs.length;
+        bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]").forEach((input) => {
+          input.addEventListener("change", () => {
+            confirmBankFeeImportButton.disabled = !bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]:checked").length;
+          });
+        });
       }
 
       function confirmImportPath(shipmentId, documentId) {
@@ -2996,9 +3020,13 @@
         confirmBankFeeImportButton.disabled = true;
         setMessage(financialDocumentsMessage, "Импортируем комиссии...", "");
         try {
+          const selectedOperationIds = Array.from(
+            bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]:checked")
+          ).map((input) => input.getAttribute("data-bank-fee-operation") || "").filter(Boolean);
           await fetchJson(confirmImportPath(currentShipment.shipment_id, documentId), {
             method: "POST",
-            headers: { Accept: "application/json" }
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ selected_operation_ids: selectedOperationIds })
           });
           pendingBankFeePreview = null;
           renderBankFeePreview();

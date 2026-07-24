@@ -722,6 +722,17 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 and len(auto_posts) == posts_before_reload,
                 "page reload must preserve confirmed resume state without mutation",
             )
+            autoanswers_card = surface.locator(
+                '[data-auto-update-process="autoanswers"]'
+            )
+            _assert(
+                autoanswers_card.locator("details:not([open])").count() == 1,
+                "Autoanswers technical identifiers must remain collapsed by default",
+            )
+            _assert(
+                len(auto_posts) == posts_before_reload,
+                "Autoanswers monitoring render must not mutate owner policy",
+            )
             page.set_viewport_size({"width": 560, "height": 900})
             _assert(
                 surface.locator("#autoUpdatesGroupPanel").evaluate(

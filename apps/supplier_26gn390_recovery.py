@@ -8,10 +8,11 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import sqlite3
 import sys
+from tempfile import TemporaryDirectory
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,16 +22,24 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
-from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
-    RegistryUploadHttpEntrypoint,
-)
 from packages.application.own_product_capital import (  # noqa: E402
     OwnProductCapitalBlock,
 )
+from packages.application.our_wb_costs import OurWbCostBlock  # noqa: E402
 from packages.application.warehouse_functional import (  # noqa: E402
+    WarehouseFunctionalBlock,
+    _functional_local_source_view,
+    _source_rows,
+    _supplier_cost_allocations,
     enqueue_warehouse_targeted_recalculation,
 )
-from apps.recovery_file_utils import file_sha256  # noqa: E402
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
+)
+from packages.application.supplier_shipment_factual_correction import (  # noqa: E402
+    _sqlite_backup as create_verified_sqlite_backup,
+    restore_verified_supplier_backup,
+)
 
 
 SHIPMENT_ID = "sup_b3070385b00b4eb680bd805d751d65be"
@@ -42,6 +51,8 @@ EXPECTED_FILE_SHA256 = (
     "e9358919df6b1de9ebb75943e2d2d05dc2a522df8c16328c05559a07c3837136"
 )
 EXPECTED_AMOUNT_RUB = "1075030.00"
+EXPECTED_STALE_FF_CAPITAL_RUB = "10177161.12"
+EXPECTED_ACTIVE_FF_CAPITAL_RUB = "9102131.12"
 TARGET_FF_ACCEPTANCE_DATE = "2026-07-21"
 TARGET_DOCUMENT_IDS = {ACTIVE_DOCUMENT_ID, ARCHIVED_DOCUMENT_ID}
 AUDIT_TABLE = "sheet_vitrina_v1_supplier_26gn390_recovery_audit"
@@ -72,10 +83,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_plan(db_path: Path) -> dict[str, Any]:
+    planned_at = _stable_business_timestamp()
     with _connect(db_path, read_only=True) as conn:
         shipment = _shipment(conn)
         documents = _documents(conn)
         side_effects = _side_effects(conn)
+        functional_fingerprints = _supplier_functional_fingerprint_projection(
+            conn,
+            recovery_end_date=planned_at[:10],
+        )
+        side_effects["functional_fingerprints"] = functional_fingerprints
         target_digest = _target_digest(shipment, documents)
         non_target_digest = _non_target_digest(conn)
     _validate_identity(shipment, documents)
@@ -85,22 +102,21 @@ def build_plan(db_path: Path) -> dict[str, Any]:
     archive = next(
         item for item in documents if item["document_id"] == ARCHIVED_DOCUMENT_ID
     )
-    changes: list[dict[str, Any]] = []
-    if str(active["parse_status"]) == "excluded":
-        changes.append(
-            {
-                "action": "restore_active",
-                "document_id": ACTIVE_DOCUMENT_ID,
-                "new_status": "parsed",
-            }
+    invoice_136_documents = [
+        item for item in documents if _is_invoice_136(item)
+    ]
+    if {str(item["document_id"]) for item in invoice_136_documents} != (
+        TARGET_DOCUMENT_IDS
+    ):
+        raise ValueError(
+            "approved recovery requires exactly the diagnosed two invoice-136 documents"
         )
-    if str(archive["parse_status"]) != "excluded":
-        changes.append(
-            {
-                "action": "archive_duplicate",
-                "document_id": ARCHIVED_DOCUMENT_ID,
-                "new_status": "excluded",
-            }
+    if (
+        str(active["parse_status"]) == "excluded"
+        or str(archive["parse_status"]) != "excluded"
+    ):
+        raise ValueError(
+            "approved recovery requires one active and the diagnosed archived invoice-136 document"
         )
     extra_active = [
         item
@@ -109,30 +125,18 @@ def build_plan(db_path: Path) -> dict[str, Any]:
         and _is_invoice_136(item)
         and str(item["parse_status"]) != "excluded"
     ]
-    for item in extra_active:
-        changes.append(
-            {
-                "action": "archive_unexpected_duplicate",
-                "document_id": item["document_id"],
-                "new_status": "excluded",
-            }
-        )
+    if extra_active:
+        raise ValueError("unexpected active invoice-136 duplicate blocks recovery")
     actual_ff_acceptance_date = str(
         shipment.get("actual_ff_acceptance_date") or ""
     )
-    if actual_ff_acceptance_date not in {"", TARGET_FF_ACCEPTANCE_DATE}:
-        raise ValueError(
-            "target shipment has an unexpected actual FF acceptance date"
-        )
     if actual_ff_acceptance_date != TARGET_FF_ACCEPTANCE_DATE:
-        changes.append(
-            {
-                "action": "confirm_ff_acceptance_date",
-                "shipment_id": SHIPMENT_ID,
-                "old_value": actual_ff_acceptance_date,
-                "new_value": TARGET_FF_ACCEPTANCE_DATE,
-            }
+        raise ValueError(
+            "target shipment FF acceptance date differs from the approved current truth"
         )
+    if not bool(shipment.get("expenses_complete")):
+        raise ValueError("26GN390 expenses_complete must already be true")
+    changes: list[dict[str, Any]] = []
     if (
         int(side_effects.get("archived_financial_capital_event_count") or 0) > 0
         or int(side_effects.get("active_financial_capital_event_count") or 0) == 0
@@ -144,16 +148,79 @@ def build_plan(db_path: Path) -> dict[str, Any]:
                 "archived_document_id": ARCHIVED_DOCUMENT_ID,
             }
         )
-    direct_changes = [
-        item
-        for item in changes
-        if item["action"]
-        in {
-            "restore_active",
-            "archive_duplicate",
-            "archive_unexpected_duplicate",
+    current_ff_capital = _money(
+        side_effects.get("current_ff_cost_layer_capital_rub")
+    )
+    if current_ff_capital not in {
+        EXPECTED_STALE_FF_CAPITAL_RUB,
+        EXPECTED_ACTIVE_FF_CAPITAL_RUB,
+    }:
+        raise ValueError(
+            "current supplier FF capital differs from the approved bounded target: "
+            + current_ff_capital
+        )
+    if current_ff_capital == EXPECTED_STALE_FF_CAPITAL_RUB:
+        changes.append(
+            {
+                "action": "rebuild_supplier_costs",
+                "shipment_id": SHIPMENT_ID,
+                "old_capital_rub": EXPECTED_STALE_FF_CAPITAL_RUB,
+                "new_capital_rub": EXPECTED_ACTIVE_FF_CAPITAL_RUB,
+                "removed_archived_amount_rub": EXPECTED_AMOUNT_RUB,
+            }
+        )
+    if not bool(functional_fingerprints.get("matches_active_version")):
+        changes.append(
+            {
+                "action": "publish_functional_source_revision",
+                "active_version_id": functional_fingerprints.get(
+                    "active_version_id"
+                ),
+                "active_source_fingerprint": functional_fingerprints.get(
+                    "active_source_fingerprint"
+                ),
+                "active_calculation_fingerprint": functional_fingerprints.get(
+                    "active_calculation_fingerprint"
+                ),
+                "current_source_fingerprint": functional_fingerprints.get(
+                    "current_source_fingerprint"
+                ),
+                "current_calculation_fingerprint": functional_fingerprints.get(
+                    "current_calculation_fingerprint"
+                ),
+            }
+        )
+    source_revision = "sha256:" + _hash(
+        {
+            "shipment_id": SHIPMENT_ID,
+            "target_digest": target_digest,
+            "active_document_id": ACTIVE_DOCUMENT_ID,
+            "archived_document_id": ARCHIVED_DOCUMENT_ID,
+            "current_source_fingerprint": functional_fingerprints.get(
+                "current_source_fingerprint"
+            ),
+            "current_calculation_fingerprint": functional_fingerprints.get(
+                "current_calculation_fingerprint"
+            ),
         }
-    ]
+    )
+    candidate = (
+        _candidate_recovery_projection(
+            db_path,
+            planned_at=planned_at,
+            source_revision=source_revision,
+            reconcile_capital=any(
+                item["action"] == "reconcile_financial_capital_chain"
+                for item in changes
+            ),
+            rebuild_supplier_costs=any(
+                item["action"] == "rebuild_supplier_costs"
+                for item in changes
+            ),
+        )
+        if changes
+        else None
+    )
     plan_material = {
         "contract_name": "supplier_26gn390_recovery_plan_v1",
         "scope": {
@@ -166,10 +233,13 @@ def build_plan(db_path: Path) -> dict[str, Any]:
             "amount_rub": EXPECTED_AMOUNT_RUB,
         },
         "target_before_digest": target_digest,
+        "target_derived_before": side_effects,
         "non_target_before_digest": non_target_digest,
+        "source_revision": source_revision,
+        "planned_at": planned_at,
         "expected_affected_rows": len(changes),
-        "expected_direct_rows": len(direct_changes),
         "changes": changes,
+        "candidate": candidate,
     }
     fingerprint = "sha256:" + _hash(plan_material)
     return {
@@ -195,74 +265,104 @@ def apply_plan(
             "backup": None,
             "post_apply": {"idempotent": True, "changed_rows": 0},
         }
+    with warehouse_functional_write_lock(runtime.runtime_dir):
+        return _apply_plan_locked(runtime, plan, backup_root=backup_root)
+
+
+def _apply_plan_locked(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+    *,
+    backup_root: Path,
+) -> dict[str, Any]:
+    current = build_plan(runtime.db_path)
+    if str(current.get("fingerprint") or "") != str(
+        plan.get("fingerprint") or ""
+    ):
+        raise ValueError("26GN390 source or candidate changed after dry-run")
     backup_root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = backup_root / f"registry_upload.26gn390.{timestamp}.sqlite3"
-    _sqlite_backup(runtime.db_path, backup_path)
-    applied_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
-    with _connect(runtime.db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            shipment = _shipment(conn)
-            documents = _documents(conn)
-            _validate_identity(shipment, documents)
-            if _target_digest(shipment, documents) != plan["target_before_digest"]:
-                raise ValueError("target source fingerprint changed after dry-run")
-            if _non_target_digest(conn) != plan["non_target_before_digest"]:
-                raise ValueError("non-target source fingerprint changed after dry-run")
-            changed_rows = 0
-            direct_changes = [
-                item
-                for item in plan.get("changes") or []
-                if item["action"]
-                in {
-                    "restore_active",
-                    "archive_duplicate",
-                    "archive_unexpected_duplicate",
-                }
-            ]
-            for change in direct_changes:
-                cursor = conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_supplier_financial_documents
-                    SET parse_status=?,updated_at=?
-                    WHERE supplier_order_id=? AND document_id=?
-                      AND parse_status<>?
-                    """,
-                    (
-                        change["new_status"],
-                        applied_at,
-                        SHIPMENT_ID,
-                        change["document_id"],
-                        change["new_status"],
-                    ),
-                )
-                changed_rows += int(cursor.rowcount or 0)
-                if change["new_status"] == "excluded":
-                    conn.execute(
-                        """
-                        UPDATE sheet_vitrina_v1_cny_documents
-                        SET status='excluded',updated_at=?
-                        WHERE linked_financial_document_id=?
-                          AND status<>'excluded'
-                        """,
-                        (applied_at, change["document_id"]),
-                    )
-            if changed_rows != int(plan["expected_direct_rows"]):
-                raise ValueError(
-                    "affected row count differs from approved dry-run plan"
-                )
-            if direct_changes:
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_supplier_shipments
-                    SET expenses_complete=0,updated_at=?
-                    WHERE shipment_id=?
-                    """,
-                    (applied_at, SHIPMENT_ID),
-                )
+    backup = create_verified_sqlite_backup(runtime.db_path, backup_path)
+    applied_at = str(plan.get("planned_at") or "")
+    capital_reconciliation: dict[str, Any] | None = None
+    queue: dict[str, Any] | None = None
+    supplier_cost_rebuild: dict[str, Any] | None = None
+    functional_publication: dict[str, Any] | None = None
+    try:
+        shipment = runtime.load_supplier_shipment(SHIPMENT_ID) or {}
+        if any(
+            item["action"] == "reconcile_financial_capital_chain"
+            for item in plan.get("changes") or []
+        ):
+            capital = OwnProductCapitalBlock(
+                runtime=runtime,
+                timestamp_factory=lambda: applied_at,
+            )
+            removed = capital.remove_financial_document_expenses(
+                ARCHIVED_DOCUMENT_ID,
+                recalculate=False,
+            )
+            materialized = capital.materialize_persisted_expense_events(
+                shipment_id=SHIPMENT_ID,
+            )
+            capital_reconciliation = {
+                "archived_events_removed": int(
+                    removed.get("removed_event_count") or 0
+                ),
+                "active_chain": materialized,
+            }
+        nm_ids = sorted(
+            {
+                int(item.get("internal_nm_id") or 0)
+                for item in shipment.get("lines") or []
+                if int(item.get("internal_nm_id") or 0) > 0
+            }
+        )
+        queue = enqueue_warehouse_targeted_recalculation(
+            runtime=runtime,
+            stable_source_id=f"supplier_shipment:{SHIPMENT_ID}",
+            source_revision=str(plan["source_revision"]),
+            effective_date=str(
+                (shipment.get("header") or {}).get("actual_shipment_date")
+                or (shipment.get("header") or {}).get("invoice_date")
+                or applied_at[:10]
+            )[:10],
+            affected_nm_ids=nm_ids,
+            requested_at=applied_at,
+        )
+        if any(
+            item["action"] == "rebuild_supplier_costs"
+            for item in plan.get("changes") or []
+        ):
+            supplier_cost_rebuild = OurWbCostBlock(
+                runtime=runtime,
+                timestamp_factory=lambda: applied_at,
+            ).materialize_supplier_ff_cost_layer(SHIPMENT_ID)
+        functional = WarehouseFunctionalBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: applied_at,
+        )
+        functional_plan = functional.build_emergency_rebuild_plan()
+        expected_functional_fingerprint = str(
+            dict(plan.get("candidate") or {})
+            .get("functional_publication", {})
+            .get("plan_fingerprint")
+            or ""
+        )
+        if (
+            str(functional_plan.get("plan_fingerprint") or "")
+            != expected_functional_fingerprint
+        ):
+            raise ValueError(
+                "functional publication differs from approved candidate"
+            )
+        functional_publication = functional._apply_plan_locked(  # noqa: SLF001
+            functional_plan,
+            confirm_fingerprint=str(functional_plan["plan_fingerprint"]),
+            backup_dir=backup_root,
+        )
+        with _connect(runtime.db_path) as conn:
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {AUDIT_TABLE}(
@@ -275,7 +375,10 @@ def apply_plan(
                 )
                 """
             )
-            recovery_id = "s26r_" + str(plan["fingerprint"]).split(":", 1)[-1][:24]
+            recovery_id = (
+                "s26r_"
+                + str(plan["fingerprint"]).split(":", 1)[-1][:24]
+            )
             conn.execute(
                 f"""
                 INSERT INTO {AUDIT_TABLE}(
@@ -288,116 +391,50 @@ def apply_plan(
                     plan["fingerprint"],
                     applied_at,
                     str(backup_path),
-                    changed_rows,
-                    json.dumps(dict(plan), ensure_ascii=False, sort_keys=True),
+                    len(plan.get("changes") or []),
+                    json.dumps(
+                        dict(plan), ensure_ascii=False, sort_keys=True
+                    ),
                 ),
             )
-            if _non_target_digest(conn) != plan["non_target_before_digest"]:
-                raise ValueError("non-target invariant changed inside transaction")
             conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    shipment = runtime.load_supplier_shipment(SHIPMENT_ID) or {}
-    capital_reconciliation: dict[str, Any] | None = None
-    if any(
-        item["action"] == "reconcile_financial_capital_chain"
-        for item in plan.get("changes") or []
-    ):
-        capital = OwnProductCapitalBlock(
-            runtime=runtime,
-            timestamp_factory=lambda: applied_at,
-        )
-        removed = capital.remove_financial_document_expenses(
-            ARCHIVED_DOCUMENT_ID,
-            recalculate=False,
-        )
-        materialized = capital.materialize_persisted_expense_events(
-            shipment_id=SHIPMENT_ID,
-        )
-        capital_reconciliation = {
-            "archived_events_removed": int(
-                removed.get("removed_event_count") or 0
-            ),
-            "active_chain": materialized,
-        }
-    queue: dict[str, Any] | None = None
-    if any(
-        item["action"]
-        in {
-            "restore_active",
-            "archive_duplicate",
-            "archive_unexpected_duplicate",
-            "reconcile_financial_capital_chain",
-        }
-        for item in plan.get("changes") or []
-    ):
-        nm_ids = sorted(
-            {
-                int(item.get("internal_nm_id") or 0)
-                for item in shipment.get("lines") or []
-                if int(item.get("internal_nm_id") or 0) > 0
-            }
-        )
-        queue = enqueue_warehouse_targeted_recalculation(
-            runtime=runtime,
-            stable_source_id=f"supplier_shipment:{SHIPMENT_ID}",
-            source_revision=str(plan["fingerprint"]),
-            effective_date=str(
-                (shipment.get("header") or {}).get("actual_shipment_date")
-                or (shipment.get("header") or {}).get("invoice_date")
-                or applied_at[:10]
-            )[:10],
-            affected_nm_ids=nm_ids,
-            requested_at=applied_at,
-        )
-    date_confirmation: dict[str, Any] | None = None
-    if any(
-        item["action"] == "confirm_ff_acceptance_date"
-        for item in plan.get("changes") or []
-    ):
-        entrypoint = RegistryUploadHttpEntrypoint(
-            runtime_dir=runtime.runtime_dir,
-            runtime=runtime,
-            activated_at_factory=lambda: applied_at,
-        )
-        preview = entrypoint.handle_supplier_factual_dates_preview_request(
-            SHIPMENT_ID,
-            {"actual_ff_acceptance_date": TARGET_FF_ACCEPTANCE_DATE},
-        )
-        date_confirmation = (
-            entrypoint.handle_supplier_factual_dates_confirm_request(
-                SHIPMENT_ID,
-                {"confirmation_token": preview["confirmation_token"]},
-                actor="supplier_26gn390_recovery",
+        post = build_plan(runtime.db_path)
+        if post["would_change"]:
+            raise ValueError("post-apply readback is not idempotent")
+        if post["non_target_before_digest"] != plan["non_target_before_digest"]:
+            raise ValueError("non-target invariant changed after recovery")
+        readback = dict(post["readback"])
+        if (
+            int(readback.get("active_count") or 0) != 1
+            or int(readback.get("excluded_count") or 0) != 1
+            or int(
+                readback.get("active_financial_capital_event_count") or 0
             )
-        )
-    post = build_plan(runtime.db_path)
-    if post["would_change"]:
-        raise ValueError("post-apply readback is not idempotent")
-    if post["non_target_before_digest"] != plan["non_target_before_digest"]:
-        raise ValueError("non-target invariant changed after recovery")
-    readback = dict(post["readback"])
-    if (
-        int(readback.get("active_count") or 0) != 1
-        or int(readback.get("excluded_count") or 0) < 1
-        or int(readback.get("active_financial_capital_event_count") or 0) <= 0
-        or int(readback.get("archived_financial_capital_event_count") or 0) != 0
-        or int(readback.get("ff_receipt_count") or 0) != 1
-        or int(readback.get("ff_cost_layer_count") or 0) != 1
-    ):
-        raise ValueError("post-apply document/capital/FF chain invariant failed")
+            <= 0
+            or int(
+                readback.get("archived_financial_capital_event_count") or 0
+            )
+            != 0
+            or int(readback.get("ff_receipt_count") or 0) != 1
+            or int(readback.get("ff_cost_layer_count") or 0) != 1
+            or _money(readback.get("current_ff_cost_layer_capital_rub"))
+            != EXPECTED_ACTIVE_FF_CAPITAL_RUB
+        ):
+            raise ValueError(
+                "post-apply document/capital/FF chain invariant failed"
+            )
+    except Exception:
+        restore_verified_supplier_backup(backup_path, runtime.db_path)
+        raise
     return {
         **dict(plan),
         "mode": "apply",
         "applied": True,
-        "backup": {
-            "path": str(backup_path),
-            "sha256": file_sha256(backup_path),
-        },
+        "backup": backup,
         "targeted_recalculation": queue,
         "capital_reconciliation": capital_reconciliation,
-        "date_confirmation": date_confirmation,
+        "supplier_cost_rebuild": supplier_cost_rebuild,
+        "functional_publication": functional_publication,
         "post_apply": {
             "idempotent": True,
             "changed_rows": int(plan["expected_affected_rows"]),
@@ -532,6 +569,16 @@ def _side_effects(conn: sqlite3.Connection) -> dict[str, Any]:
         """,
         (SHIPMENT_ID,),
     ).fetchall()
+    current_layer_capital = conn.execute(
+        """
+        SELECT COALESCE(SUM(line.line_total_cost_rub),0)
+        FROM sheet_vitrina_v1_supplier_ff_cost_layer_lines line
+        JOIN sheet_vitrina_v1_supplier_ff_cost_layers layer
+          ON layer.layer_id=line.layer_id
+        WHERE layer.supplier_shipment_id=? AND layer.is_current=1
+        """,
+        (SHIPMENT_ID,),
+    ).fetchone()[0]
     tables = {
         str(row[0])
         for row in conn.execute(
@@ -563,6 +610,7 @@ def _side_effects(conn: sqlite3.Connection) -> dict[str, Any]:
         "ff_receipt_count": receipt_count,
         "ff_cost_layer_count": len(layer_rows),
         "ff_cost_layers": [dict(row) for row in layer_rows],
+        "current_ff_cost_layer_capital_rub": _money(current_layer_capital),
         "active_financial_capital_event_count": capital_counts[
             ACTIVE_DOCUMENT_ID
         ],
@@ -647,13 +695,313 @@ def _non_target_digest(conn: sqlite3.Connection) -> str:
     return "sha256:" + _hash({"documents": documents, "shipments": shipments})
 
 
-def _sqlite_backup(source: Path, target: Path) -> None:
+def _supplier_functional_fingerprint_projection(
+    conn: sqlite3.Connection,
+    *,
+    recovery_end_date: str,
+) -> dict[str, Any]:
+    sources = _functional_local_source_view(
+        _source_rows(
+            conn,
+            recovery_end_date=recovery_end_date,
+            include_historical_correction=True,
+        )
+    )
+    allocation = _supplier_cost_allocations(sources).get(SHIPMENT_ID)
+    if not allocation:
+        raise ValueError(
+            "current source has no canonical 26GN390 supplier allocation"
+        )
+    active_row = conn.execute(
+        """
+        SELECT active.version_id,state.source_fingerprint,
+               state.calculation_fingerprint
+        FROM sheet_vitrina_v1_warehouse_functional_active active
+        LEFT JOIN sheet_vitrina_v1_warehouse_supplier_cost_states state
+          ON state.version_id=active.version_id AND state.shipment_id=?
+        WHERE active.slot=1
+        """,
+        (SHIPMENT_ID,),
+    ).fetchone()
+    active = dict(active_row) if active_row is not None else {}
+    current_source = str(allocation.get("source_fingerprint") or "")
+    current_calculation = str(
+        allocation.get("calculation_fingerprint") or ""
+    )
+    active_source = str(active.get("source_fingerprint") or "")
+    active_calculation = str(active.get("calculation_fingerprint") or "")
+    return {
+        "active_version_id": str(active.get("version_id") or ""),
+        "active_source_fingerprint": active_source,
+        "active_calculation_fingerprint": active_calculation,
+        "current_source_fingerprint": current_source,
+        "current_calculation_fingerprint": current_calculation,
+        "matches_active_version": bool(
+            current_source
+            and current_calculation
+            and current_source == active_source
+            and current_calculation == active_calculation
+        ),
+    }
+
+
+def _stable_business_timestamp() -> str:
+    """Return one deterministic publication timestamp for the local business day."""
+
+    current = datetime.now(ZoneInfo("Asia/Yekaterinburg"))
+    return current.replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _candidate_recovery_projection(
+    db_path: Path,
+    *,
+    planned_at: str,
+    source_revision: str,
+    reconcile_capital: bool,
+    rebuild_supplier_costs: bool,
+) -> dict[str, Any]:
+    """Simulate the entire bounded mutation on a coherent disposable snapshot."""
+
+    from decimal import Decimal
+
+    with TemporaryDirectory(prefix="supplier-26gn390-candidate-") as temp_dir:
+        candidate_runtime_dir = Path(temp_dir) / "runtime"
+        candidate_runtime_dir.mkdir(parents=True, exist_ok=True)
+        candidate_db = candidate_runtime_dir / "registry_upload_runtime.sqlite3"
+        _readonly_sqlite_copy(db_path, candidate_db)
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=candidate_runtime_dir)
+        shipment = runtime.load_supplier_shipment(SHIPMENT_ID) or {}
+        if not shipment:
+            raise ValueError("candidate snapshot lost the target shipment")
+
+        capital_reconciliation: dict[str, Any] | None = None
+        if reconcile_capital:
+            capital = OwnProductCapitalBlock(
+                runtime=runtime,
+                timestamp_factory=lambda: planned_at,
+            )
+            removed = capital.remove_financial_document_expenses(
+                ARCHIVED_DOCUMENT_ID,
+                recalculate=False,
+            )
+            materialized = capital.materialize_persisted_expense_events(
+                shipment_id=SHIPMENT_ID,
+            )
+            capital_reconciliation = {
+                "archived_events_removed": int(
+                    removed.get("removed_event_count") or 0
+                ),
+                "active_chain": materialized,
+            }
+
+        nm_ids = sorted(
+            {
+                int(item.get("internal_nm_id") or 0)
+                for item in shipment.get("lines") or []
+                if int(item.get("internal_nm_id") or 0) > 0
+            }
+        )
+        queue = enqueue_warehouse_targeted_recalculation(
+            runtime=runtime,
+            stable_source_id=f"supplier_shipment:{SHIPMENT_ID}",
+            source_revision=source_revision,
+            effective_date=str(
+                (shipment.get("header") or {}).get("actual_shipment_date")
+                or (shipment.get("header") or {}).get("invoice_date")
+                or planned_at[:10]
+            )[:10],
+            affected_nm_ids=nm_ids,
+            requested_at=planned_at,
+        )
+        supplier_cost_rebuild: dict[str, Any] | None = None
+        if rebuild_supplier_costs:
+            supplier_cost_rebuild = OurWbCostBlock(
+                runtime=runtime,
+                timestamp_factory=lambda: planned_at,
+            ).materialize_supplier_ff_cost_layer(SHIPMENT_ID)
+
+        with _connect(candidate_db) as conn:
+            sources = _functional_local_source_view(
+                _source_rows(
+                    conn,
+                    recovery_end_date=planned_at[:10],
+                    include_historical_correction=True,
+                )
+            )
+        allocation = _supplier_cost_allocations(sources).get(SHIPMENT_ID)
+        if not allocation:
+            raise ValueError("candidate has no canonical supplier allocation")
+        archived_source_ids = {
+            str(item.get("document_id") or "")
+            for item in sources.get("financial_documents") or []
+            if str(item.get("parse_status") or "") == "excluded"
+        }
+        active_invoice_136_ids = {
+            str(item.get("document_id") or "")
+            for item in sources.get("financial_documents") or []
+            if _is_invoice_136(item)
+        }
+        if ARCHIVED_DOCUMENT_ID in archived_source_ids:
+            raise ValueError("archived document leaked into active candidate source")
+        if active_invoice_136_ids != {ACTIVE_DOCUMENT_ID}:
+            raise ValueError(
+                "candidate must contain exactly the active invoice-136 source"
+            )
+
+        controls = list(allocation.get("document_controls") or [])
+        eligible_components = sum(
+            int(item.get("eligible_component_count") or 0) for item in controls
+        )
+        allocated_components = sum(
+            int(item.get("allocated_component_count") or 0) for item in controls
+        )
+        eligible_amount = sum(
+            (
+                Decimal(str(item.get("eligible_amount_rub") or "0"))
+                for item in controls
+            ),
+            Decimal("0"),
+        )
+        allocated_amount = sum(
+            (
+                Decimal(str(item.get("allocated_amount_rub") or "0"))
+                for item in controls
+            ),
+            Decimal("0"),
+        )
+        unallocated_amount = eligible_amount - allocated_amount
+        if (
+            eligible_components != 9
+            or allocated_components != 9
+            or _money(eligible_amount) != EXPECTED_ACTIVE_FF_CAPITAL_RUB
+            or _money(allocated_amount) != EXPECTED_ACTIVE_FF_CAPITAL_RUB
+            or _money(unallocated_amount) != "0.00"
+            or _money(allocation.get("capital_rub"))
+            != EXPECTED_ACTIVE_FF_CAPITAL_RUB
+            or list(allocation.get("blockers") or [])
+        ):
+            raise ValueError(
+                "candidate does not match approved 9/9 and 9,102,131.12 ₽ allocation"
+            )
+
+        functional = WarehouseFunctionalBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: planned_at,
+        )
+        functional_plan = functional.build_emergency_rebuild_plan()
+        diff_rows = list(
+            dict(functional_plan.get("diff") or {}).get("lines") or []
+        )
+        if any(
+            int(item.get("nm_id") or 0) not in set(nm_ids)
+            or _money(item.get("quantity_delta")) != "0.00"
+            for item in diff_rows
+        ):
+            raise ValueError(
+                "candidate functional diff escapes target shipment SKUs or changes quantity"
+            )
+        supplier_state = next(
+            (
+                dict(item)
+                for item in functional_plan.get("supplier_cost_states") or []
+                if str(item.get("shipment_id") or "") == SHIPMENT_ID
+            ),
+            None,
+        )
+        if supplier_state is None:
+            raise ValueError(
+                "candidate functional version omitted target supplier cost state"
+            )
+        if (
+            str(supplier_state.get("source_fingerprint") or "")
+            != str(allocation.get("source_fingerprint") or "")
+            or str(supplier_state.get("calculation_fingerprint") or "")
+            != str(allocation.get("calculation_fingerprint") or "")
+            or not bool(supplier_state.get("expenses_complete"))
+            or not bool(supplier_state.get("calculation_available"))
+        ):
+            raise ValueError(
+                "candidate functional version does not bind exact supplier fingerprints"
+            )
+        return {
+            "capital_reconciliation": capital_reconciliation,
+            "targeted_recalculation": {
+                key: queue.get(key)
+                for key in (
+                    "queue_id",
+                    "stable_source_id",
+                    "source_revision",
+                    "effective_date",
+                    "affected_nm_ids",
+                    "status",
+                )
+            },
+            "supplier_cost_rebuild": (
+                {
+                    key: supplier_cost_rebuild.get(key)
+                    for key in (
+                        "supplier_shipment_id",
+                        "layer_id",
+                        "status",
+                        "capital_rub",
+                    )
+                }
+                if supplier_cost_rebuild
+                else None
+            ),
+            "allocation": {
+                "eligible_component_count": eligible_components,
+                "allocated_component_count": allocated_components,
+                "eligible_amount_rub": _money(eligible_amount),
+                "allocated_amount_rub": _money(allocated_amount),
+                "unallocated_amount_rub": _money(unallocated_amount),
+                "capital_rub": _money(allocation.get("capital_rub")),
+                "source_fingerprint": allocation.get("source_fingerprint"),
+                "calculation_fingerprint": allocation.get(
+                    "calculation_fingerprint"
+                ),
+                "active_invoice_136_document_ids": sorted(
+                    active_invoice_136_ids
+                ),
+            },
+            "functional_publication": {
+                "plan_fingerprint": functional_plan.get("plan_fingerprint"),
+                "base_active_version_id": functional_plan.get(
+                    "base_active_version_id"
+                ),
+                "effective_date": functional_plan.get("effective_date"),
+                "local_source_digest": functional_plan.get(
+                    "local_source_digest"
+                ),
+                "calculation_digest": functional_plan.get(
+                    "calculation_digest"
+                ),
+                "target_supplier_cost_state": supplier_state,
+                "diff": functional_plan.get("diff"),
+                "invariants": functional_plan.get("invariants"),
+            },
+        }
+
+
+def _readonly_sqlite_copy(source: Path, target: Path) -> None:
+    """Copy a live SQLite database through one query-only coherent snapshot."""
+
     if target.exists():
         raise ValueError(f"backup target already exists: {target}")
-    with sqlite3.connect(source) as source_conn, sqlite3.connect(target) as target_conn:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True) as source_conn,
+        sqlite3.connect(target) as target_conn,
+    ):
+        source_conn.execute("PRAGMA query_only=ON")
         source_conn.backup(target_conn)
-    if target.stat().st_size <= 0:
-        raise ValueError("SQLite backup is empty")
+        target_conn.commit()
+    with sqlite3.connect(f"file:{target.resolve()}?mode=ro", uri=True) as check:
+        check.execute("PRAGMA query_only=ON")
+        integrity = str(check.execute("PRAGMA integrity_check").fetchone()[0])
+    if target.stat().st_size <= 0 or integrity.lower() != "ok":
+        target.unlink(missing_ok=True)
+        raise ValueError("read-only candidate SQLite snapshot failed integrity_check")
 
 
 def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:

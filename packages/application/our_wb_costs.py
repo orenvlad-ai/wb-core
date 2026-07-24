@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
+from packages.adapters.seller_portal_transit_costs import (
+    SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH,
+    SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+    SELLER_PORTAL_TRANSIT_COST_SOURCE,
+)
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
@@ -116,8 +121,20 @@ class OurWbCostBlock:
                 "historical accepted-without-date status does not materialize an FF cost layer"
             )
         lines = [dict(item or {}) for item in (detail.get("lines") or [])]
-        financial_documents = self.runtime.list_supplier_financial_documents(shipment_id)
-        expense_lines = self.runtime.list_supplier_financial_expense_lines(shipment_id)
+        all_financial_documents = self.runtime.list_supplier_financial_documents(shipment_id)
+        financial_documents = [
+            item
+            for item in all_financial_documents
+            if str(item.get("parse_status") or "") != "excluded"
+        ]
+        active_document_ids = {
+            str(item.get("document_id") or "") for item in financial_documents
+        }
+        expense_lines = [
+            item
+            for item in self.runtime.list_supplier_financial_expense_lines(shipment_id)
+            if str(item.get("financial_document_id") or "") in active_document_ids
+        ]
         calculation = self._calculate_supplier_ff_layer(
             header=header,
             lines=lines,
@@ -325,6 +342,12 @@ class OurWbCostBlock:
     def materialize_wb_supply_cost_layers(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> int:
         ff_overlay_block = FulfillmentServicesBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
         ff_overlays = ff_overlay_block.approved_overlay_by_supply()
+        transit_enrichments = {
+            str(item.get("supply_id") or ""): dict(item)
+            for item in self.runtime.list_wb_supply_transit_cost_enrichments()
+            if _canonical_seller_portal_transit_enrichment(item)
+            and str(item.get("supply_id") or "")
+        }
         current_ff_lines = self._load_current_supplier_ff_cost_lines_by_nm()
         count = 0
         now = self.timestamp_factory()
@@ -341,6 +364,27 @@ class OurWbCostBlock:
             ).fetchall()
             for row in rows:
                 supply = _wb_supply_row_to_dict(row)
+                transit_enrichment = transit_enrichments.get(
+                    str(supply.get("supply_id") or "")
+                )
+                if transit_enrichment is not None:
+                    supply.update(
+                        {
+                            "seller_portal_transit_cost": transit_enrichment.get(
+                                "amount"
+                            ),
+                            "effective_transit_cost_total": transit_enrichment.get(
+                                "amount"
+                            ),
+                            "effective_transit_cost_source": (
+                                str(transit_enrichment.get("source") or "")
+                                + ":"
+                                + str(
+                                    transit_enrichment.get("evidence_type") or ""
+                                )
+                            ).strip(":"),
+                        }
+                    )
                 goods = _parse_wb_goods(supply.get("raw_goods_json"))
                 if not goods:
                     continue
@@ -1568,7 +1612,31 @@ def _wb_good_quantity_is_final_accepted(*, supply: Mapping[str, Any], quantity: 
 
 
 def _wb_supply_row_to_dict(row: Any) -> dict[str, Any]:
-    return {key: row[key] for key in row.keys()}
+    # The canonical WB supply facts live in normalized_row_json. The SQL
+    # columns intentionally contain only indexable/cache metadata, so cost
+    # classification must restore the normalized fields before evaluating
+    # official transit evidence.
+    result = _json_loads(row["normalized_row_json"])
+    result.update({key: row[key] for key in row.keys()})
+    return result
+
+
+def _canonical_seller_portal_transit_enrichment(
+    item: Mapping[str, Any],
+) -> bool:
+    return bool(
+        str(item.get("status") or "") == "success"
+        and _positive_number(item.get("amount")) > 0
+        and str(item.get("currency") or "").upper() == "RUB"
+        and bool(item.get("is_transit"))
+        and str(item.get("source") or "") == SELLER_PORTAL_TRANSIT_COST_SOURCE
+        and str(item.get("evidence_type") or "")
+        == SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE
+        and str(item.get("source_endpoint_path") or "")
+        == SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH
+        and str(item.get("confidence") or "") in {"high", "medium"}
+        and not str(item.get("error") or "")
+    )
 
 
 def _selected_supplier_header_inputs(header: Mapping[str, Any]) -> dict[str, Any]:

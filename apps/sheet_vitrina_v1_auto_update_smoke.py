@@ -336,22 +336,30 @@ def main() -> None:
             wb_auto = refresh_payload.get("wb_supplies_auto_sync") or {}
             wb_official = wb_auto.get("official_sync") or {}
             if (
-                refresh_payload.get("wb_supplies_auto_sync_status") != "warning"
-                or wb_official.get("status") != "success"
-                or wb_official.get("new_rows") != 1
-                or (wb_auto.get("transit_cost") or {}).get("status") != "skipped_session_not_valid"
-                or [1, 2, 3, 4] not in fake_wb_supplies_source.list_calls
-                or [5, 6] not in fake_wb_supplies_source.list_calls
+                refresh_payload.get("wb_supplies_auto_sync_status") != "success"
+                or wb_official.get("status") != "materialized_hourly"
+                or (wb_auto.get("transit_cost") or {}).get("status")
+                != "not_requested"
+                or fake_wb_supplies_source.list_calls
             ):
-                raise AssertionError(f"auto_refresh must run WB supplies official sync as nonfatal stage, got {wb_auto}")
-            if fake_our_wb_cost_block.rebuild_calls != 1:
                 raise AssertionError(
-                    "auto_refresh must run our WB cost post-refresh recalculation once, "
+                    "Vitrina auto_refresh must consume the hourly materialized "
+                    f"WB state without upstream side effects, got {wb_auto}"
+                )
+            if fake_our_wb_cost_block.rebuild_calls != 0:
+                raise AssertionError(
+                    "Vitrina auto_refresh must not rebuild WB costs outside the "
+                    "hourly warehouse contour, "
                     f"got {fake_our_wb_cost_block.rebuild_calls}"
                 )
             diagnostics = refresh_payload.get("refresh_diagnostics") or {}
             cost_recalc = diagnostics.get("our_wb_cost_recalculate") or {}
-            if cost_recalc.get("daily_state_rows_materialized") != 0 or cost_recalc.get("changed") is not False:
+            if (
+                cost_recalc.get("status") != "skipped"
+                or cost_recalc.get("reason")
+                != "materialized_functional_state_read_only"
+                or cost_recalc.get("changed") is not False
+            ):
                 raise AssertionError(f"idempotent our WB recalc diagnostics mismatch, got {cost_recalc}")
             _assert_counting_calls(counters)
             plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
@@ -391,7 +399,9 @@ def main() -> None:
             if (server_context.get("last_auto_run_result") or {}).get("snapshot_id") != refresh_payload.get("snapshot_id"):
                 raise AssertionError(f"auto_refresh must persist the refresh-only auto result, got {server_context}")
             persisted_wb = (server_context.get("last_auto_run_result") or {}).get("wb_supplies_auto_sync") or {}
-            if (persisted_wb.get("official_sync") or {}).get("status") != "success":
+            if (
+                persisted_wb.get("official_sync") or {}
+            ).get("status") != "materialized_hourly":
                 raise AssertionError(f"status context must persist WB supplies auto sync diagnostics, got {persisted_wb}")
             if status_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("status must keep manual timestamps empty after refresh-only daily path")

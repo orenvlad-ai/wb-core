@@ -2439,7 +2439,9 @@
             '<dt>Последняя ошибка</dt><dd>' + escapeHtml(autoUpdateValue(process.last_error)) + '</dd>' +
             '<dt>Источник подтверждения</dt><dd>' + escapeHtml(autoUpdateValue(process.provenance)) + '</dd>' +
             autoanswersDetails +
-            '</dl>' + (process.process_key === "vitrina_refresh" ? vitrinaScheduleEditorHtml() : "") + '</article>';
+            '</dl>' +
+            '<details><summary>Технические детали</summary><pre class="calculation-diff">' + escapeHtml(JSON.stringify({control_owner: process.control_owner, desired_source: process.desired_source, timer: process.timer || {}, service: process.service || {}, schedule: schedule, components: components, fingerprint: process.fingerprint, readback_captured_at: process.readback_captured_at}, null, 2)) + '</pre></details>' +
+            (process.process_key === "vitrina_refresh" ? vitrinaScheduleEditorHtml() : "") + '</article>';
         }).join("") : '<p class="message warning">Canonical owner policy не вернула allowlisted процессы.</p>';
         Array.from(autoUpdatesRows.querySelectorAll("[data-auto-update-toggle]")).forEach((button) => {
           button.addEventListener("click", () => updateAutoUpdateProcess(button.dataset.autoUpdateToggle));

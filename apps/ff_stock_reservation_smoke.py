@@ -155,7 +155,134 @@ def main() -> None:
         _assert(negative_row["reserved_quantity"] == 0.0, negative_row)
         _assert(negative_row["unsecured_reservation_quantity"] == 0.0, negative_row)
         _assert(negative_row["reservation_status"] == "", negative_row)
-        print("ff_stock_reservation_smoke: OK")
+    _test_four_supply_43000_atomic_fulfillment()
+    print("ff_stock_reservation_smoke: OK")
+
+
+def _test_four_supply_43000_atomic_fulfillment() -> None:
+    with TemporaryDirectory(prefix="ff-reservation-43000-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        runtime.ingest_bundle(
+            json.loads(FIXTURE.read_text(encoding="utf-8")),
+            activated_at=ACTIVATED_AT,
+        )
+        nm_ids = [
+            int(item.nm_id)
+            for item in runtime.load_current_state().config_v2
+            if item.enabled and item.nm_id is not None
+        ][:2]
+        if len(nm_ids) < 2:
+            raise AssertionError("43,000 reservation smoke requires two active SKU")
+        _seed_nomenclature(runtime, nm_ids)
+        activation_nm, target_nm = nm_ids
+        runtime.create_ff_stock_operation(
+            operation_id="ffso-43000-activation",
+            operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+            source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+            source_key="reservation-43000:activation",
+            source_object_id="reservation-43000",
+            source_object_label="43,000 reservation activation",
+            created_at=ACTIVATED_AT,
+            created_by="smoke",
+            warnings=[],
+            diagnostics={},
+            lines=[{"nm_id": activation_nm, "quantity_delta": 1}],
+        )
+        block = FfStockLedgerBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: CHECKPOINT_AT,
+        )
+        block.ensure_wb_supply_auto_writeoff_checkpoint(
+            [], reason="reservation_43000_smoke"
+        )
+        _append_receipt(
+            runtime,
+            target_nm,
+            74500,
+            source_key="reservation-43000:physical",
+        )
+        targets = {
+            "41058085": 5750,
+            "41058204": 6250,
+            "41058408": 14000,
+            "41058611": 17000,
+        }
+        for supply_id, quantity in targets.items():
+            _save_supply(
+                runtime,
+                supply_id,
+                3,
+                [(target_nm, quantity)],
+                revision="1",
+            )
+        _save_supply(
+            runtime,
+            "non-target-waiting",
+            3,
+            [(target_nm, 10)],
+            revision="1",
+        )
+        waiting = block.record_wb_supply_debits(
+            runtime.list_wb_supplies_cache_records()
+        )
+        target_reserved = sum(
+            float(item["quantity"])
+            for supply_id in targets
+            for item in runtime.list_ff_stock_reservations(supply_id=supply_id)
+        )
+        _assert(target_reserved == 43000.0, waiting)
+        _assert(
+            _balance(runtime, target_nm) == 74500.0,
+            "waiting-for-cost reservations changed physical FF",
+        )
+        for supply_id in targets:
+            _seed_valid_cost(runtime, supply_id, target_nm)
+        fulfilled = block.record_wb_supply_debits(
+            runtime.list_wb_supplies_cache_records()
+        )
+        _assert(fulfilled["created_count"] == 4, fulfilled)
+        _assert(
+            len(set(fulfilled["created_operation_ids"])) == 4
+            and all(
+                str(operation_id).startswith("ffso_")
+                and ":" not in str(operation_id)
+                for operation_id in fulfilled["created_operation_ids"]
+            ),
+            "physical debit identities must be deterministic source-derived IDs",
+        )
+        _assert(
+            sum(
+                len(runtime.list_ff_stock_reservations(supply_id=supply_id))
+                for supply_id in targets
+            )
+            == 0,
+            "four exact target reservations were not fulfilled",
+        )
+        _assert(
+            len(runtime.list_ff_stock_reservations(supply_id="non-target-waiting"))
+            == 1,
+            "unrelated waiting reservation changed",
+        )
+        _assert(
+            _balance(runtime, target_nm) == 31500.0,
+            "four target debits must remove exactly 43,000 from physical FF",
+        )
+        for supply_id in targets:
+            _assert(
+                runtime.load_ff_stock_operation_by_source_key(
+                    "wb_supply_debit:" + supply_id
+                )
+                is not None,
+                f"exact physical debit missing for {supply_id}",
+            )
+        repeated = block.record_wb_supply_debits(
+            runtime.list_wb_supplies_cache_records()
+        )
+        _assert(repeated["created_count"] == 0, repeated)
+        _assert(
+            _balance(runtime, target_nm) == 31500.0,
+            "repeated reconciliation double-debited one of four supplies",
+        )
 
 
 def _save_supply(

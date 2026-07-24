@@ -137,7 +137,7 @@ BANK_CONTROL_REFRESH_FIELDS = (
     "contract_number",
     "contract_date",
 )
-BANK_FEE_STATEMENT_PARSER_VERSION = "supplier_vtb_bank_fee_statement_parser_v1"
+BANK_FEE_STATEMENT_PARSER_VERSION = "supplier_vtb_bank_fee_statement_parser_v2"
 PACKING_LIST_PARSER_VERSION = "supplier_packing_list_parser_v1"
 BINARY_FINANCIAL_DOCUMENT_EXTENSIONS = {".xls", ".xlsx"}
 BANK_FEE_CATEGORIES = {
@@ -521,6 +521,17 @@ class SupplierFinancialDocumentsBlock:
             for item in all_documents
             if str(item.get("file_sha256") or "") == file_sha256
         ]
+        parsed_document_type = str(normalized.get("document_type") or "")
+        classification_mismatches = [
+            item
+            for item in exact_duplicates
+            if str(item.get("document_type") or "") != parsed_document_type
+        ]
+        matching_exact_duplicates = [
+            item
+            for item in exact_duplicates
+            if str(item.get("document_type") or "") == parsed_document_type
+        ]
         semantic_key = _financial_document_semantic_key_from_parse(normalized)
         semantic_duplicates = [
             item
@@ -532,7 +543,7 @@ class SupplierFinancialDocumentsBlock:
         active_exact = next(
             (
                 item
-                for item in exact_duplicates
+                for item in matching_exact_duplicates
                 if str(item.get("parse_status") or "")
                 != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
             ),
@@ -541,7 +552,7 @@ class SupplierFinancialDocumentsBlock:
         excluded_exact = next(
             (
                 item
-                for item in exact_duplicates
+                for item in matching_exact_duplicates
                 if str(item.get("parse_status") or "")
                 == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
             ),
@@ -580,6 +591,10 @@ class SupplierFinancialDocumentsBlock:
             "semantic_duplicate_ids": [
                 str(item.get("document_id") or "") for item in semantic_duplicates
             ],
+            "classification_mismatch_ids": [
+                str(item.get("document_id") or "")
+                for item in classification_mismatches
+            ],
         }
         self.runtime.save_supplier_confirmation_preview(
             token=token,
@@ -597,6 +612,8 @@ class SupplierFinancialDocumentsBlock:
             if active_exact
             else "restore_excluded"
             if excluded_exact
+            else "parser_reclassification"
+            if classification_mismatches
             else "semantic_warning"
             if semantic_duplicates
             else "create"
@@ -609,6 +626,11 @@ class SupplierFinancialDocumentsBlock:
         if excluded_exact:
             duplicate_warnings.append(
                 "Файл с тем же SHA находится в архиве; будет предложено восстановление."
+            )
+        if classification_mismatches:
+            duplicate_warnings.append(
+                "Файл с тем же SHA сохранён под другим типом документа. "
+                "Архивная запись останется в audit, а новый parser result будет staged отдельно."
             )
         if semantic_duplicates:
             duplicate_warnings.append(
@@ -678,11 +700,35 @@ class SupplierFinancialDocumentsBlock:
             if str(item.get("file_sha256") or "")
             == str(preview.get("source_sha256") or "")
         ]
+        parsed_document_type = str(
+            dict(data.get("normalized_parse") or {}).get("document_type") or ""
+        )
+        matching_current_exact = [
+            item
+            for item in current_exact
+            if str(item.get("document_type") or "") == parsed_document_type
+        ]
+        classification_mismatches = [
+            item
+            for item in current_exact
+            if str(item.get("document_type") or "") != parsed_document_type
+        ]
+        active_classification_mismatches = [
+            item
+            for item in classification_mismatches
+            if str(item.get("parse_status") or "")
+            != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ]
+        if active_classification_mismatches:
+            raise ValueError(
+                "the same file is active under another document type; "
+                "archive that conflicting classification before confirmation"
+            )
         active_exact_id = str(
             next(
                 (
                     item.get("document_id")
-                    for item in current_exact
+                    for item in matching_current_exact
                     if str(item.get("parse_status") or "")
                     != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
                 ),
@@ -693,7 +739,7 @@ class SupplierFinancialDocumentsBlock:
             next(
                 (
                     item.get("document_id")
-                    for item in current_exact
+                    for item in matching_current_exact
                     if str(item.get("parse_status") or "")
                     == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
                 ),
@@ -726,7 +772,21 @@ class SupplierFinancialDocumentsBlock:
                     "semantic duplicate requires explicit confirmation and a reason"
                 )
         if active_exact_id:
-            result = self.get_document(supplier_order_id, active_exact_id)
+            active_exact_document = self.runtime.load_supplier_financial_document(
+                supplier_order_id=supplier_order_id,
+                document_id=active_exact_id,
+            )
+            if (
+                active_exact_document is not None
+                and str(active_exact_document.get("document_type") or "")
+                == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+            ):
+                result = self._bank_fee_statement_preview_response(
+                    active_exact_document,
+                    idempotent=True,
+                )
+            else:
+                result = self.get_document(supplier_order_id, active_exact_id)
             result.update(
                 {
                     "idempotent": True,
@@ -748,6 +808,19 @@ class SupplierFinancialDocumentsBlock:
                 excluded_exact_id,
                 restored_status,
             )
+            if (
+                str(stored.get("document_type") or "")
+                == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+            ):
+                restored = self.runtime.load_supplier_financial_document(
+                    supplier_order_id=supplier_order_id,
+                    document_id=excluded_exact_id,
+                )
+                if restored is not None:
+                    result = self._bank_fee_statement_preview_response(
+                        restored,
+                        idempotent=False,
+                    )
             result.update(
                 {
                     "idempotent": False,
@@ -777,9 +850,18 @@ class SupplierFinancialDocumentsBlock:
                     manual_payment_date_actor=str(data.get("actor") or ""),
                 )
             result["duplicate_action"] = (
-                "explicit_semantic_duplicate" if semantic_ids else "created"
+                "parser_reclassification"
+                if classification_mismatches
+                else "explicit_semantic_duplicate"
+                if semantic_ids
+                else "created"
             )
             result["outcome"] = "created"
+            if classification_mismatches:
+                result["superseded_archived_document_ids"] = [
+                    str(item.get("document_id") or "")
+                    for item in classification_mismatches
+                ]
             if semantic_ids:
                 result["duplicate_reason"] = str(duplicate_reason or "").strip()
         result_document_id = str(result.get("document_id") or "")
@@ -1009,6 +1091,12 @@ class SupplierFinancialDocumentsBlock:
             normalized,
             shipment=shipment,
             payment_documents=self._supplier_order_payment_documents(supplier_order_id),
+            existing_operation_ids=self._existing_bank_fee_operation_ids(
+                supplier_order_id
+            ),
+            existing_operation_index=self._existing_bank_fee_operation_index(
+                supplier_order_id
+            ),
         )
         now = self.timestamp_factory()
         document_id = "fdoc_" + uuid4().hex
@@ -1068,7 +1156,13 @@ class SupplierFinancialDocumentsBlock:
         saved = self.runtime.save_supplier_financial_document(document=document, expense_lines=[])
         return self._bank_fee_statement_preview_response(saved, idempotent=False)
 
-    def confirm_bank_fee_statement_import(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
+    def confirm_bank_fee_statement_import(
+        self,
+        supplier_order_id: str,
+        document_id: str,
+        *,
+        selected_operation_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         document = self.runtime.load_supplier_financial_document(
             supplier_order_id=supplier_order_id,
@@ -1080,29 +1174,80 @@ class SupplierFinancialDocumentsBlock:
             raise ValueError("financial document is not a bank fee statement")
         normalized = dict(document.get("normalized_parse") or {})
         statement_import = dict(normalized.get("statement_import") or {})
-        import_status = str(statement_import.get("import_status") or "")
-        if import_status == "confirmed":
-            payload = self.get_document(supplier_order_id, document_id)
-            payload["idempotent"] = True
-            payload["already_added"] = True
-            payload["cny_fee_rows_for_ledger"] = _confirmed_cny_fee_rows(payload)
-            return payload
-        if statement_import.get("status") == "needs_review":
-            raise ValueError("bank statement fee import requires manual review")
-        matched_rows = [
+        confirmed_operation_ids = {
+            str(value)
+            for value in statement_import.get("confirmed_operation_ids") or []
+            if str(value)
+        }
+        requested_operation_ids = (
+            {
+                str(value).strip()
+                for value in selected_operation_ids
+                if str(value).strip()
+            }
+            if selected_operation_ids is not None
+            else {
+                str(item.get("semantic_operation_id") or "")
+                for item in statement_import.get("matched_fee_rows") or []
+                if bool(item.get("selected_by_default"))
+            }
+        )
+        all_matched_rows = [
             dict(item)
             for item in statement_import.get("matched_fee_rows") or []
             if str(item.get("confidence") or "") in BANK_FEE_IMPORTABLE_CONFIDENCES
-            and not bool(item.get("already_imported"))
+            and bool(item.get("import_allowed", True))
+        ]
+        rows_by_operation_id = {
+            str(item.get("semantic_operation_id") or ""): item
+            for item in all_matched_rows
+            if str(item.get("semantic_operation_id") or "")
+        }
+        unknown_ids = sorted(requested_operation_ids - set(rows_by_operation_id))
+        if unknown_ids:
+            raise ValueError(
+                "selected bank statement operations are not present in the exact preview: "
+                + ",".join(unknown_ids)
+            )
+        matched_rows = [
+            rows_by_operation_id[operation_id]
+            for operation_id in sorted(requested_operation_ids - confirmed_operation_ids)
+            if not bool(rows_by_operation_id[operation_id].get("already_imported"))
         ]
         if not matched_rows:
-            raise ValueError("bank statement preview has no importable fee rows")
+            payload = self.get_document(supplier_order_id, document_id)
+            payload["idempotent"] = True
+            payload["already_added"] = True
+            payload["cny_fee_rows_for_ledger"] = []
+            return payload
         now = self.timestamp_factory()
+        newly_confirmed_ids = {
+            str(item.get("semantic_operation_id") or "") for item in matched_rows
+        }
+        confirmed_operation_ids.update(newly_confirmed_ids)
+        updated_preview_rows = [
+            {
+                **item,
+                "operation_status": (
+                    "already_imported"
+                    if str(item.get("semantic_operation_id") or "")
+                    in confirmed_operation_ids
+                    else item.get("operation_status") or "new"
+                ),
+                "already_imported": (
+                    str(item.get("semantic_operation_id") or "")
+                    in confirmed_operation_ids
+                ),
+            }
+            for item in statement_import.get("matched_fee_rows") or []
+        ]
         updated_import = {
             **statement_import,
-            "import_status": "confirmed",
+            "matched_fee_rows": updated_preview_rows,
+            "import_status": "confirmed_partial_or_complete",
             "confirmed_at": now,
-            "confirmed_fee_count": len(matched_rows),
+            "confirmed_fee_count": len(confirmed_operation_ids),
+            "confirmed_operation_ids": sorted(confirmed_operation_ids),
         }
         updated_document = {
             **document,
@@ -1112,12 +1257,15 @@ class SupplierFinancialDocumentsBlock:
             "warnings": _dedupe_strings(_string_list(document.get("warnings"))),
             "errors": _dedupe_strings(_string_list(document.get("errors"))),
         }
-        expense_lines = [
+        existing_expense_lines = [
+            dict(item) for item in document.get("expense_lines") or []
+        ]
+        expense_lines = existing_expense_lines + [
             _bank_fee_expense_line_for_storage(
                 row,
                 supplier_order_id=supplier_order_id,
                 document_id=document_id,
-                sort_order=index,
+                sort_order=len(existing_expense_lines) + index,
             )
             for index, row in enumerate(matched_rows, start=1)
         ]
@@ -1128,7 +1276,12 @@ class SupplierFinancialDocumentsBlock:
         payload = self.get_document(supplier_order_id, document_id)
         payload["idempotent"] = False
         payload["already_added"] = False
-        payload["cny_fee_rows_for_ledger"] = _confirmed_cny_fee_rows(saved)
+        payload["cny_fee_rows_for_ledger"] = [
+            item
+            for item in _confirmed_cny_fee_rows(saved)
+            if str(item.get("semantic_operation_id") or "")
+            in newly_confirmed_ids
+        ]
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
@@ -1675,6 +1828,44 @@ class SupplierFinancialDocumentsBlock:
                 )
                 return loaded or document
         return None
+
+    def _existing_bank_fee_operation_ids(
+        self,
+        supplier_order_id: str,
+    ) -> set[str]:
+        operation_ids: set[str] = set()
+        for line in self.runtime.list_supplier_financial_expense_lines(
+            supplier_order_id
+        ):
+            raw = dict(line.get("raw") or {})
+            operation_id = str(
+                raw.get("semantic_operation_id")
+                or dict(raw.get("row") or {}).get("semantic_operation_id")
+                or ""
+            ).strip()
+            if operation_id:
+                operation_ids.add(operation_id)
+        return operation_ids
+
+    def _existing_bank_fee_operation_index(
+        self,
+        supplier_order_id: str,
+    ) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for line in self.runtime.list_supplier_financial_expense_lines(
+            supplier_order_id
+        ):
+            raw = dict(line.get("raw") or {})
+            row = dict(raw.get("row") or {})
+            operation_id = str(
+                raw.get("semantic_operation_id")
+                or row.get("semantic_operation_id")
+                or ""
+            ).strip()
+            reference_identity = _statement_reference_identity(row)
+            if operation_id and reference_identity:
+                result.setdefault(reference_identity, set()).add(operation_id)
+        return result
 
     def _supplier_order_payment_documents(self, supplier_order_id: str) -> list[dict[str, Any]]:
         payments: list[dict[str, Any]] = []
@@ -2312,7 +2503,11 @@ def parse_financial_document_text(
             warnings=warnings,
             errors=errors,
         )
-    document_type = detect_financial_document_type(normalized_text, filename=filename)
+    classification = classify_financial_document(
+        normalized_text, filename=filename
+    )
+    document_type = str(classification.get("document_type") or "")
+    raw_parse["classification"] = classification
     if document_type == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE:
         normalized, expense_lines, parser_warnings = _parse_logistics_quote(normalized_text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE:
@@ -2326,7 +2521,9 @@ def parse_financial_document_text(
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
         normalized, expense_lines, parser_warnings = _parse_vtb_bank_fee_statement(normalized_text)
     else:
-        normalized, expense_lines, parser_warnings = {}, [], ["unsupported financial document type"]
+        normalized, expense_lines, parser_warnings = {}, [], [
+            "financial document type needs review"
+        ]
     warnings.extend(parser_warnings)
     if document_type:
         normalized["document_type"] = document_type
@@ -2340,20 +2537,59 @@ def parse_financial_document_text(
 
 
 def detect_financial_document_type(text: str, *, filename: str = "") -> str:
+    return str(
+        classify_financial_document(text, filename=filename).get("document_type")
+        or ""
+    )
+
+
+def classify_financial_document(text: str, *, filename: str = "") -> dict[str, Any]:
     haystack = f"{filename}\n{text}".casefold()
-    if "коммерческое предложение" in haystack and "transitplus" in haystack:
-        return FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE
-    if "счет на оплату" in haystack or "счёт на оплату" in haystack or "счет_покупателю" in haystack:
-        return FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE
-    if "декларация на товары" in haystack or re.search(r"\b\d{8}/\d{6}/\d{6,}\b", text):
-        return FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
-    if "ведомость банковского контроля по контракту" in haystack:
-        return FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT
-    if "заявление" in haystack and "на перевод" in haystack:
-        return FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
+    reasons: list[str] = []
+    warnings: list[str] = []
     if _looks_like_bank_fee_statement(haystack):
-        return FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
-    return ""
+        reasons.extend(
+            [
+                "document-wide bank statement header",
+                "VTB bank identity",
+                "account and statement-period structure",
+            ]
+        )
+        if "счет на оплату" in haystack or "счёт на оплату" in haystack:
+            warnings.append(
+                "invoice wording appears inside statement operations and does not override bank structure"
+            )
+        return {
+            "status": "classified",
+            "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
+            "reasons": reasons,
+            "warnings": warnings,
+        }
+    if "коммерческое предложение" in haystack and "transitplus" in haystack:
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE, "reasons": ["commercial proposal title and vendor identity"], "warnings": []}
+    if (
+        re.search(
+            r"(?im)^\s*сч[её]т\s+на\s+оплату\s*№",
+            haystack,
+        )
+        or (
+            "счет_покупателю" in haystack
+            and ("всего к оплате" in haystack or "итого:" in haystack)
+        )
+    ):
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE, "reasons": ["invoice title marker without conflicting bank-statement structure"], "warnings": []}
+    if "декларация на товары" in haystack or re.search(r"\b\d{8}/\d{6}/\d{6,}\b", text):
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION, "reasons": ["customs declaration structure"], "warnings": []}
+    if "ведомость банковского контроля по контракту" in haystack:
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT, "reasons": ["bank control statement title"], "warnings": []}
+    if "заявление" in haystack and "на перевод" in haystack:
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION, "reasons": ["transfer application structure"], "warnings": []}
+    return {
+        "status": "needs_review",
+        "document_type": "",
+        "reasons": ["no supported document structure reached the evidence threshold"],
+        "warnings": ["manual document-type review is required"],
+    }
 
 
 def extract_pdf_text_layer(file_bytes: bytes, filename: str = "") -> tuple[str, dict[str, Any], list[str]]:
@@ -4457,20 +4693,123 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
 
 
 def _looks_like_bank_fee_statement(haystack: str) -> bool:
-    return (
-        ("выписка" in haystack or "statement" in haystack)
-        and ("втб" in haystack or "vtb" in haystack)
-        and ("счет" in haystack or "счёт" in haystack or "account" in haystack)
+    return bool(
+        ("втб" in haystack or "vtb" in haystack)
+        and re.search(
+            r"(?im)^\s*(?:выписка(?:\s+за\s+период|\s+по\s+сч[её]ту)?|bank\s+statement)\b",
+            haystack,
+        )
+        and (
+            re.search(r"(?:\d[\s-]?){20}", haystack)
+            or re.search(r"\baccount\s*(?:no\.?|number)?\s*[:№]?", haystack)
+        )
+        and (
+            re.search(
+                r"(?:за\s+период|period)[^\n]{0,80}\d{1,2}[./]\d{1,2}[./]\d{4}",
+                haystack,
+            )
+            or (
+                "opening balance" in haystack
+                and "closing balance" in haystack
+            )
+        )
     )
 
 
 def _parse_vtb_bank_fee_statement(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
-    period_start, period_end = _extract_statement_period(text)
+    account_sections: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for section_index, section_text in enumerate(
+        _split_vtb_account_sections(text), start=1
+    ):
+        section_period_start, section_period_end = _extract_statement_period(
+            section_text
+        )
+        section_accounts = _extract_statement_accounts(section_text)
+        section_account = _extract_statement_account_number(
+            section_text, section_accounts
+        )
+        section_currency = _extract_statement_account_currency(
+            section_text, account_number=section_account
+        )
+        section_id = "stmtsec_" + hashlib.sha256(
+            "|".join(
+                [
+                    section_account,
+                    section_currency,
+                    section_period_start,
+                    section_period_end,
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        section_rows = _extract_vtb_statement_rows(
+            section_text,
+            account_currency=section_currency,
+            account_number=section_account,
+            section_id=section_id,
+        )
+        section_review_required = bool(
+            not section_account
+            or not section_currency
+            or not section_period_start
+            or not section_period_end
+        )
+        if section_review_required:
+            section_rows = [
+                {**item, "section_review_required": True}
+                for item in section_rows
+            ]
+        rows.extend(section_rows)
+        account_sections.append(
+            {
+                "section_id": section_id,
+                "section_index": section_index,
+                "account_number": section_account,
+                "account_currency": section_currency,
+                "period_start": section_period_start,
+                "period_end": section_period_end,
+                "opening_balance": _decimal_to_storage(
+                    _extract_statement_balance(
+                        section_text, ("Входящий остаток", "Opening balance")
+                    )
+                ),
+                "closing_balance": _decimal_to_storage(
+                    _extract_statement_balance(
+                        section_text, ("Исходящий остаток", "Closing balance")
+                    )
+                ),
+                "operations": section_rows,
+                "review_required": section_review_required,
+            }
+        )
+    period_start = min(
+        (
+            str(item.get("period_start") or "")
+            for item in account_sections
+            if str(item.get("period_start") or "")
+        ),
+        default="",
+    )
+    period_end = max(
+        (
+            str(item.get("period_end") or "")
+            for item in account_sections
+            if str(item.get("period_end") or "")
+        ),
+        default="",
+    )
     accounts = _extract_statement_accounts(text)
-    account_number = _extract_statement_account_number(text, accounts)
-    account_currency = _extract_statement_account_currency(text, account_number=account_number)
-    rows = _extract_vtb_statement_rows(text, account_currency=account_currency)
+    account_number = (
+        str(account_sections[0].get("account_number") or "")
+        if len(account_sections) == 1
+        else ""
+    )
+    account_currency = (
+        str(account_sections[0].get("account_currency") or "")
+        if len(account_sections) == 1
+        else "MIXED"
+    )
     normalized = {
         "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
         "vendor": "ВТБ",
@@ -4482,8 +4821,18 @@ def _parse_vtb_bank_fee_statement(text: str) -> tuple[dict[str, Any], list[dict[
         "statement_period_end": period_end,
         "account_number": account_number,
         "account_currency": account_currency,
-        "opening_balance": _decimal_to_storage(_extract_statement_balance(text, ("Входящий остаток", "Opening balance"))),
-        "closing_balance": _decimal_to_storage(_extract_statement_balance(text, ("Исходящий остаток", "Closing balance"))),
+        "accounts": accounts,
+        "account_sections": account_sections,
+        "opening_balance": (
+            account_sections[0].get("opening_balance")
+            if len(account_sections) == 1
+            else None
+        ),
+        "closing_balance": (
+            account_sections[0].get("closing_balance")
+            if len(account_sections) == 1
+            else None
+        ),
         "operations": rows,
         "fee_rows": [row for row in rows if row.get("row_type") == "bank_fee"],
         "payment_rows": [row for row in rows if row.get("row_type") == "supplier_payment"],
@@ -4501,7 +4850,28 @@ def _parse_vtb_bank_fee_statement(text: str) -> tuple[dict[str, Any], list[dict[
     )
     if not normalized["fee_rows"]:
         warnings.append("VTB statement parser found no bank fee rows")
+    if any(bool(item.get("review_required")) for item in account_sections):
+        warnings.append(
+            "One or more VTB statement sections need account/currency/period review"
+        )
     return normalized, [], warnings
+
+
+def _split_vtb_account_sections(text: str) -> list[str]:
+    matches = list(
+        re.finditer(
+            r"(?im)^ВЫПИСКА\s+за\s+период[^\n]*\nСч[её]т\s+(?:\d[\s-]?){20}",
+            text,
+        )
+    )
+    if not matches:
+        return [text]
+    sections: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections.append(text[start:end])
+    return sections
 
 
 def build_bank_fee_statement_import_preview(
@@ -4509,6 +4879,8 @@ def build_bank_fee_statement_import_preview(
     *,
     shipment: Mapping[str, Any],
     payment_documents: list[Mapping[str, Any]],
+    existing_operation_ids: set[str] | None = None,
+    existing_operation_index: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     anchors = [_payment_anchor_from_document(document) for document in payment_documents]
     anchors = [anchor for anchor in anchors if anchor.get("amount_cny") is not None or anchor.get("operation_number")]
@@ -4532,6 +4904,41 @@ def build_bank_fee_statement_import_preview(
             continue
         ignored_rows.append(_statement_row_preview(row, reason=_ignored_statement_row_reason(row, anchors)))
     matched_fee_rows = _dedupe_statement_rows(matched_fee_rows)
+    existing_ids = set(existing_operation_ids or set())
+    existing_by_reference = {
+        str(key): {str(value) for value in values}
+        for key, values in dict(existing_operation_index or {}).items()
+    }
+    ambiguity_counts: dict[tuple[str, str], int] = {}
+    for row in matched_fee_rows:
+        key = (
+            str(row.get("matched_anchor_operation_number") or ""),
+            str(row.get("fee_category") or ""),
+        )
+        ambiguity_counts[key] = ambiguity_counts.get(key, 0) + 1
+    matched_fee_rows = [
+        _statement_preview_import_state(
+            row,
+            already_imported=str(row.get("semantic_operation_id") or "")
+            in existing_ids,
+            conflict=bool(
+                existing_by_reference.get(_statement_reference_identity(row), set())
+                - {str(row.get("semantic_operation_id") or "")}
+            ),
+            ambiguous=(
+                ambiguity_counts.get(
+                    (
+                        str(row.get("matched_anchor_operation_number") or ""),
+                        str(row.get("fee_category") or ""),
+                    ),
+                    0,
+                )
+                > 1
+                or bool(row.get("section_review_required"))
+            ),
+        )
+        for row in matched_fee_rows
+    ]
     if not anchors:
         warnings.append("В заказе нет CNY payment anchor: загрузите заявление на перевод перед импортом выписки")
     weak_candidates = [
@@ -4544,9 +4951,21 @@ def build_bank_fee_statement_import_preview(
     ]
     if weak_candidates:
         warnings.append("Есть fee rows со слабым совпадением; автоматический импорт не выполняется для weak match")
-    status = "ready_to_confirm" if matched_fee_rows else "needs_review"
+    status = (
+        "ready_to_confirm"
+        if any(
+            item.get("operation_status") == "new"
+            and bool(item.get("selected_by_default"))
+            for item in matched_fee_rows
+        )
+        else "needs_review"
+    )
     if not matched_fee_rows:
         warnings.append("Комиссии, привязанные к payment anchor заказа, не найдены")
+    if any(item.get("operation_status") == "needs_review" for item in matched_fee_rows):
+        warnings.append(
+            "Несколько комиссий совпали с одним платежом и категорией; строки показаны отдельно и не выбраны автоматически"
+        )
     totals = _fee_totals_by_currency(matched_fee_rows)
     confidence_order = {BANK_FEE_CONFIDENCE_STRONG: 3, BANK_FEE_CONFIDENCE_PROBABLE: 2, BANK_FEE_CONFIDENCE_WEAK: 1}
     best_confidence = ""
@@ -4570,6 +4989,56 @@ def build_bank_fee_statement_import_preview(
         "warnings": _dedupe_strings(warnings),
         "ignored_row_count": len(ignored_rows),
     }
+
+
+def _statement_preview_import_state(
+    row: Mapping[str, Any],
+    *,
+    already_imported: bool,
+    conflict: bool,
+    ambiguous: bool,
+) -> dict[str, Any]:
+    if already_imported:
+        status = "already_imported"
+    elif conflict:
+        status = "conflict"
+    elif ambiguous:
+        status = "needs_review"
+    else:
+        status = "new"
+    return {
+        **dict(row),
+        "operation_status": status,
+        "already_imported": already_imported,
+        "selected_by_default": status == "new",
+        "import_allowed": status in {"new", "needs_review"},
+        "review_warning": (
+            "Та же банковская reference identity уже импортирована с другими semantic данными."
+            if conflict
+            else "Страница/секция не имеет полного доказанного account/currency/period context; нужен явный выбор оператора."
+            if ambiguous and bool(row.get("section_review_required"))
+            else
+            "Несколько строк имеют одинаковую связь с платежом; нужен явный выбор оператора."
+            if ambiguous
+            else ""
+        ),
+    }
+
+
+def _statement_reference_identity(row: Mapping[str, Any]) -> str:
+    material = [
+        re.sub(r"\D+", "", str(row.get("account_number") or "")),
+        str(row.get("account_currency") or row.get("currency") or "").upper(),
+        str(row.get("operation_date") or ""),
+        str(row.get("bank_document_number") or row.get("document_number") or ""),
+        str(row.get("operation_number") or ""),
+        str(row.get("fee_category") or ""),
+    ]
+    if not any(material[2:5]):
+        return ""
+    return "bankref_" + hashlib.sha256(
+        "|".join(material).encode("utf-8")
+    ).hexdigest()
 
 
 def _extract_statement_period(text: str) -> tuple[str, str]:
@@ -4610,6 +5079,26 @@ def _extract_statement_account_number(text: str, accounts: list[str]) -> str:
 
 def _extract_statement_account_currency(text: str, *, account_number: str) -> str:
     window = _window_around(text, account_number, radius=300) if account_number else text[:1200]
+    header_window = (
+        text[
+            max(0, text.find(account_number) - 40) : text.find(account_number)
+            + len(account_number)
+            + 160
+        ]
+        if account_number and text.find(account_number) >= 0
+        else window[:240]
+    )
+    header_currency = _first_match(
+        header_window,
+        r"Валюта\s+(156|643|CNY|CNH|RMB|RUB|RUR|ЮАН|РУБ)",
+        flags=re.I,
+    )
+    if header_currency:
+        return _normalize_statement_currency(header_currency)
+    if re.search(r"Китайск(?:ий|ого)\s+юан", header_window, flags=re.I):
+        return "CNY"
+    if re.search(r"Российск(?:ий|ого)\s+руб", header_window, flags=re.I):
+        return "RUB"
     explicit = _first_match(
         window,
         r"(?:Валюта\s+(?:сч[её]та|account)|Account\s+currency)[^\n\rA-ZА-Яа-я]{0,40}(RUB|CNY|CNH|RMB|РУБ|ЮАН)",
@@ -4626,9 +5115,9 @@ def _extract_statement_account_currency(text: str, *, account_number: str) -> st
 
 def _normalize_statement_currency(value: Any) -> str:
     text = str(value or "").strip().upper()
-    if text in {"CNY", "CNH", "RMB", "ЮАН"}:
+    if text in {"156", "CNY", "CNH", "RMB", "ЮАН"}:
         return "CNY"
-    if text in {"RUB", "РУБ"}:
+    if text in {"643", "RUB", "RUR", "РУБ"}:
         return "RUB"
     return text
 
@@ -4642,7 +5131,13 @@ def _extract_statement_balance(text: str, labels: tuple[str, ...]) -> Decimal | 
     return None
 
 
-def _extract_vtb_statement_rows(text: str, *, account_currency: str) -> list[dict[str, Any]]:
+def _extract_vtb_statement_rows(
+    text: str,
+    *,
+    account_currency: str,
+    account_number: str = "",
+    section_id: str = "",
+) -> list[dict[str, Any]]:
     lines = _text_to_lines(text)
     candidates: list[tuple[int, str]] = []
     current_index = -1
@@ -4674,7 +5169,13 @@ def _extract_vtb_statement_rows(text: str, *, account_currency: str) -> list[dic
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, segment in candidates:
-        row = _statement_row_from_segment(segment, index=index, account_currency=account_currency)
+        row = _statement_row_from_segment(
+            segment,
+            index=index,
+            account_currency=account_currency,
+            account_number=account_number,
+            section_id=section_id,
+        )
         if not row:
             continue
         row_id = str(row.get("row_id") or "")
@@ -4686,12 +5187,24 @@ def _extract_vtb_statement_rows(text: str, *, account_currency: str) -> list[dic
     return rows
 
 
-def _statement_row_from_segment(segment: str, *, index: int, account_currency: str) -> dict[str, Any]:
-    purpose = _clean_value(segment)
+def _statement_row_from_segment(
+    segment: str,
+    *,
+    index: int,
+    account_currency: str,
+    account_number: str = "",
+    section_id: str = "",
+) -> dict[str, Any]:
+    purpose = _normalized_statement_business_segment(segment)
     operation_date = _parse_date(_first_match(segment, r"(\d{1,2}\.\d{1,2}\.\d{4})"))
     document_number = (
         _first_match(segment, r"(?:Плат[её]жное\s+поручение|Поручение|Док(?:умент)?\.?)\s*№\s*([A-Za-zА-Яа-я0-9/-]+)", flags=re.I)
         or _first_match(segment, r"^\d{1,2}\.\d{1,2}\.\d{2,4}\s+([A-Za-zА-Яа-я0-9/-]+)\s+\S+\s+\d{8,14}\s+\d{9}\s+(?:\d[\s-]?){20}", flags=re.I)
+        or _first_match(
+            segment,
+            r"^\d{1,2}\.\d{1,2}\.\d{2,4}\s+(\S+)\s+\d{2}\b",
+            flags=re.I,
+        )
         or ""
     )
     operation_number = _extract_statement_operation_number(segment)
@@ -4705,20 +5218,28 @@ def _statement_row_from_segment(segment: str, *, index: int, account_currency: s
     credit_cny = amount_currency[0] if amount_currency[1] == "CNY" and row_type == "conversion_in" else None
     credit_rub = amount_currency[0] if amount_currency[1] == "RUB" and row_type == "conversion_in" else None
     amount_in_purpose = _statement_amount_in_purpose(segment)
-    row_id_seed = "|".join(
+    semantic_seed = "|".join(
         [
+            re.sub(r"\D+", "", account_number),
+            account_currency,
             operation_date,
             document_number,
             operation_number,
             row_type,
             category,
             _decimal_to_storage(amount_currency[0]),
-            purpose[:180],
-            str(index),
+            re.sub(r"\s+", " ", purpose).strip().casefold(),
         ]
     )
+    semantic_operation_id = "bankop_" + hashlib.sha256(
+        semantic_seed.encode("utf-8")
+    ).hexdigest()
     return {
-        "row_id": "stmtrow_" + hashlib.sha256(row_id_seed.encode("utf-8")).hexdigest()[:20],
+        "row_id": "stmtrow_" + semantic_operation_id.split("_", 1)[1][:20],
+        "semantic_operation_id": semantic_operation_id,
+        "section_id": section_id,
+        "account_number": account_number,
+        "account_currency": account_currency,
         "source_line_index": index,
         "row_type": row_type,
         "operation_date": operation_date,
@@ -4746,9 +5267,31 @@ def _statement_row_from_segment(segment: str, *, index: int, account_currency: s
     }
 
 
+def _normalized_statement_business_segment(segment: str) -> str:
+    """Remove page/section trailers that are not part of a bank operation."""
+
+    business = re.split(
+        r"(?i)\s+(?:"
+        r"ИТОГО\s+за\s+период|"
+        r"ИСХОДЯЩИЙ\s+ОСТАТОК|"
+        r"ВЫПИСКА\s+за\s+период|"
+        r"ФИЛИАЛ\s+[\"«]|"
+        r"СТРАНИЦА\s+\d+"
+        r")",
+        str(segment or ""),
+        maxsplit=1,
+    )[0]
+    return _clean_value(business)
+
+
 def _looks_like_statement_row_start(line: str) -> bool:
     if not re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", line):
         return False
+    if re.match(
+        r"^\d{1,2}\.\d{1,2}\.\d{2,4}\s+\S+\s+\d{2}\b",
+        line,
+    ):
+        return True
     if re.search(r"\b(?:\d[\s-]?){20}\b", line):
         return True
     if re.search(r"\b(?:Документ|Док\.|Плат[её]жное\s+поручение|Поручение)\b", line, flags=re.I):
@@ -4771,7 +5314,9 @@ def _statement_fee_category(segment: str) -> str:
         return EXPENSE_CATEGORY_CURRENCY_CONTROL_VAT
     if ("вк" in lower or "валютн" in lower) and "комис" in lower:
         return EXPENSE_CATEGORY_CURRENCY_CONTROL_FEE
-    if "swift" in lower or "шанх" in lower or ("комис" in lower and "перевод" in lower):
+    if "комис" in lower and (
+        "swift" in lower or "шанх" in lower or "перевод" in lower
+    ):
         return EXPENSE_CATEGORY_BANK_TRANSFER_FEE
     if "комис" in lower:
         return EXPENSE_CATEGORY_OTHER_BANK_FEE
@@ -4867,6 +5412,7 @@ def _extract_statement_operation_number(segment: str) -> str:
     return (
         _first_match(segment, r"операц(?:ии|ия|и)?\s*№\s*([0-9]+)", flags=re.I)
         or _first_match(segment, r"Плат[её]жное\s+поручение\s*№\s*([0-9]+)", flags=re.I)
+        or _first_match(segment, r"по\s+платеж[уа]\s*№\s*([0-9]+)", flags=re.I)
         or _first_match(segment, r"(?:swift|шанхай)[^№]{0,40}№\s*([0-9]+)", flags=re.I)
         or _first_match(segment, r"\boperation\s*#?\s*([0-9]+)", flags=re.I)
         or ""
@@ -7168,6 +7714,9 @@ def _bank_fee_expense_line_for_storage(
         "raw": {
             "source": "bank_fee_statement",
             "statement_row_id": row_id,
+            "semantic_operation_id": str(
+                row.get("semantic_operation_id") or ""
+            ),
             "statement_operation_number": str(row.get("operation_number") or ""),
             "match_confidence": str(row.get("confidence") or ""),
             "match_reasons": _string_list(row.get("match_reasons")),
@@ -7190,6 +7739,9 @@ def _fee_confidence_score(confidence: str) -> Decimal:
 
 
 def _bank_fee_cny_natural_key(*, document_id: str, row: Mapping[str, Any]) -> str:
+    semantic_operation_id = str(row.get("semantic_operation_id") or "").strip()
+    if semantic_operation_id:
+        return f"bank_fee_statement:{semantic_operation_id}"
     return f"bank_fee_statement:{document_id}:{str(row.get('row_id') or '')}"
 
 

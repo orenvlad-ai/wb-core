@@ -221,6 +221,19 @@ stale, lifecycle drift exists or budget truth is unknown. `Настройки �
 Автообновления` exposes the same server-owned fields as a monitoring-only card
 and has no Autoanswers individual mutation control.
 
+The monitoring card reduces readback to explicit human states:
+`Работает штатно`, `Запускается`, `Приостановлено пользователем`,
+`Приостановлено общей паузой`, `Есть расхождение`, `Ошибка процесса`,
+`Нет свежего подтверждения` and `Состояние неизвестно`. A yellow/error state
+always includes its reason. The primary card shows desired/actual, last
+successful cycle, scheduler freshness, pause/stop reason, last error and
+readback source; Autoanswers additionally shows mode, readonly and worker
+desired/actual pairs, lifecycle, policy revision/transition run and budget.
+Conservative hold is explained as uncertainty reserved against a cap, not
+confirmed provider spend. Service/timer IDs, raw reasons and fingerprints stay
+inside a closed technical disclosure. Rendering or polling this card performs
+no mode/policy/cap/hold mutation, provider call or WB write.
+
 If the initial settings GET observes a desired runtime in `starting`, `error`
 or lifecycle drift, the visible `Отзывы` tab performs a bounded refresh of at
 most 30 additional settings GETs at two-second intervals. The refresh stops
