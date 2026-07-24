@@ -142,6 +142,23 @@ class ReleaseSafetyTest(unittest.TestCase):
         )
         self.assertEqual(recovery_args.action, "dry-run")
         self.assertEqual(recovery_args.expected_rows, 5)
+        latch_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-prefilter-skip-recovery",
+                "release-dry-run",
+                "--transition-run-id",
+                "incident-run",
+                "--expected-rows",
+                "5",
+                "--source-fingerprint",
+                "sha256:" + "b" * 64,
+            ]
+        )
+        self.assertEqual(latch_args.action, "release-dry-run")
+        self.assertEqual(
+            latch_args.source_fingerprint,
+            "sha256:" + "b" * 64,
+        )
 
     def test_remote_readonly_command_reasserts_force_off_and_has_no_write_worker(self) -> None:
         target = hosted.load_hosted_runtime_target(TARGET)
@@ -290,6 +307,19 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("--transition-run-id incident-run", command)
         self.assertIn("--expected-rows 5", command)
         self.assertNotIn("--fingerprint", command)
+
+        captured.clear()
+        with patch.object(hosted.subprocess, "run", side_effect=fake_run):
+            hosted._run_remote_autoanswers_prefilter_skip_recovery(
+                target,
+                action="release-dry-run",
+                transition_run_id="incident-run",
+                expected_rows=5,
+                source_fingerprint="sha256:" + "b" * 64,
+            )
+        command = " ".join(captured[0])
+        self.assertIn("release-dry-run", command)
+        self.assertIn("--source-fingerprint", command)
 
 
 if __name__ == "__main__":
