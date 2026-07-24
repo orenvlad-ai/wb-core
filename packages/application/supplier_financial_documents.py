@@ -4860,7 +4860,8 @@ def _parse_vtb_bank_fee_statement(text: str) -> tuple[dict[str, Any], list[dict[
 def _split_vtb_account_sections(text: str) -> list[str]:
     matches = list(
         re.finditer(
-            r"(?im)^ВЫПИСКА\s+за\s+период[^\n]*\nСч[её]т\s+(?:\d[\s-]?){20}",
+            r"(?im)^[ \t\f]*ВЫПИСКА\s+за\s+период[^\n]*\r?\n"
+            r"[ \t\f]*Сч[её]т\s+(?:\d[\s-]?){20}",
             text,
         )
     )
