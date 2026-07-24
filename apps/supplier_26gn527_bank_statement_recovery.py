@@ -81,7 +81,7 @@ def build_plan(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
             runtime_dir=Path(temp_dir) / "runtime"
         )
         snapshot_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-        _readonly_sqlite_copy(runtime.db_path, snapshot_runtime.db_path)
+        _readonly_target_snapshot(runtime.db_path, snapshot_runtime.db_path)
         return _build_plan_from_snapshot(
             snapshot_runtime,
             source_runtime_dir=source_runtime_dir,
@@ -492,20 +492,82 @@ def _resolve_source_file_path(
     return resolved
 
 
-def _readonly_sqlite_copy(source: Path, target: Path) -> None:
+def _readonly_target_snapshot(source: Path, target: Path) -> None:
+    """Copy only the bounded supplier-order rows needed by the recovery plan."""
+
+    if target.exists():
+        raise ValueError(f"target snapshot already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Let the deployed runtime create its current schema in the disposable DB.
+    RegistryUploadDbBackedRuntime(runtime_dir=target.parent).list_supplier_shipments()
+    table_filters = (
+        ("sheet_vitrina_v1_supplier_shipments", "shipment_id = ?", (SHIPMENT_ID,)),
+        (
+            "sheet_vitrina_v1_supplier_shipment_lines",
+            "shipment_id = ?",
+            (SHIPMENT_ID,),
+        ),
+        (
+            "sheet_vitrina_v1_supplier_financial_documents",
+            "supplier_order_id = ?",
+            (SHIPMENT_ID,),
+        ),
+        (
+            "sheet_vitrina_v1_supplier_financial_expense_lines",
+            "supplier_order_id = ?",
+            (SHIPMENT_ID,),
+        ),
+        (
+            "sheet_vitrina_v1_cny_documents",
+            "source_order_id = ? OR context_order_id = ?",
+            (SHIPMENT_ID, SHIPMENT_ID),
+        ),
+    )
     with sqlite3.connect(
         f"file:{source.resolve()}?mode=ro", uri=True
     ) as source_conn, sqlite3.connect(target) as target_conn:
+        source_conn.row_factory = sqlite3.Row
         source_conn.execute("PRAGMA query_only=ON")
-        source_conn.backup(target_conn)
+        for table_name, where_sql, params in table_filters:
+            source_columns = [
+                str(row[1])
+                for row in source_conn.execute(
+                    f"PRAGMA table_info({table_name})"
+                ).fetchall()
+            ]
+            target_columns = {
+                str(row[1])
+                for row in target_conn.execute(
+                    f"PRAGMA table_info({table_name})"
+                ).fetchall()
+            }
+            columns = [
+                column for column in source_columns if column in target_columns
+            ]
+            if not columns:
+                raise ValueError(
+                    f"target snapshot schema is missing table {table_name}"
+                )
+            quoted_columns = ",".join(f'"{column}"' for column in columns)
+            rows = source_conn.execute(
+                f"SELECT {quoted_columns} FROM {table_name} "
+                f"WHERE {where_sql}",
+                params,
+            ).fetchall()
+            if rows:
+                target_conn.executemany(
+                    f"INSERT INTO {table_name}({quoted_columns}) VALUES("
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    [tuple(row[column] for column in columns) for row in rows],
+                )
         target_conn.commit()
     with sqlite3.connect(
         f"file:{target.resolve()}?mode=ro", uri=True
     ) as check:
         check.execute("PRAGMA query_only=ON")
         if str(check.execute("PRAGMA integrity_check").fetchone()[0]).lower() != "ok":
-            raise ValueError("read-only SQLite snapshot integrity_check failed")
+            raise ValueError("bounded read-only SQLite snapshot integrity_check failed")
 
 
 def _money(value: Any) -> str:
