@@ -879,6 +879,67 @@ def main() -> None:
     if truncated is not False or bytes_read != len(short_payload) or json.loads(body)["rows"][-1] != "ok":
         raise AssertionError("probe reader must assemble all short reads before declaring EOF")
 
+    truncated_warehouse_prefix = json.dumps(
+        {
+            "contract_name": "sheet_vitrina_v1_warehouse_functional",
+            "contract_version": "v2",
+            "status": "ready",
+            "warehouse": {"warehouse_key": "ff", "warehouse_name": "Склад FF"},
+            "balances": [],
+            "documents": [],
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )[:-1] + ',"oversized":['
+    warehouse_result = {
+        "route": "warehouse_ff",
+        "method": "GET",
+        "url": "http://127.0.0.1:8765/v1/sheet-vitrina-v1/warehouses/ff",
+        "http_status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "body_excerpt": truncated_warehouse_prefix,
+        "body_truncated": True,
+        "body_bytes_read": hosted_runtime.PROBE_BODY_LIMIT_BYTES,
+        "json_body": None,
+        "network_error": None,
+    }
+    warehouse_evaluation = hosted_runtime._evaluate_route_result(
+        warehouse_result,
+        route_paths=active_target.route_paths,
+    )
+    if warehouse_evaluation["ok"] is not True:
+        raise AssertionError(
+            "truncated canonical FF warehouse detail must remain verifiable: "
+            + str(warehouse_evaluation)
+        )
+    for invalid_warehouse in (True, {"warehouse_key": "wb"}):
+        invalid_payload = {
+            "contract_name": "sheet_vitrina_v1_warehouse_functional",
+            "contract_version": "v2",
+            "status": "ready",
+            "warehouse": invalid_warehouse,
+            "balances": [],
+            "documents": [],
+        }
+        invalid_result = {
+            **warehouse_result,
+            "body_excerpt": json.dumps(
+                invalid_payload,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )[:-1]
+            + ',"oversized":[',
+        }
+        invalid_evaluation = hosted_runtime._evaluate_route_result(
+            invalid_result,
+            route_paths=active_target.route_paths,
+        )
+        if invalid_evaluation["ok"] is not False:
+            raise AssertionError(
+                "invalid truncated FF warehouse detail must fail closed: "
+                + str(invalid_evaluation)
+            )
+
     with TemporaryDirectory(prefix="hosted-runtime-contract-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
