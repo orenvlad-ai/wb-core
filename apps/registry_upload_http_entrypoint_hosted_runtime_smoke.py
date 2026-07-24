@@ -74,6 +74,41 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    truncated_ff_probe = {
+        "route": "warehouse_ff",
+        "method": "GET",
+        "url": "http://127.0.0.1:8765/v1/sheet-vitrina-v1/warehouses/ff",
+        "http_status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "body_excerpt": (
+            '{"contract_name":"sheet_vitrina_v1_warehouses",'
+            '"contract_version":"1","status":"ready",'
+            '"warehouse":{"warehouse_key":"ff","status_label":"Подтверждено"},'
+            '"balances":[],"documents":['
+        ),
+        "body_truncated": True,
+        "json_body": None,
+        "network_error": None,
+    }
+    truncated_ff_result = hosted_runtime._evaluate_route_result(
+        truncated_ff_probe,
+        route_paths=active_target.route_paths,
+    )
+    if not truncated_ff_result.get("ok"):
+        raise AssertionError("truncated FF warehouse detail must retain nested identity proof")
+    malformed_ff_result = hosted_runtime._evaluate_route_result(
+        {
+            **truncated_ff_probe,
+            "body_excerpt": (
+                '{"contract_name":"sheet_vitrina_v1_warehouses",'
+                '"contract_version":"1","status":"ready","warehouse":true,'
+                '"balances":[],"documents":['
+            ),
+        },
+        route_paths=active_target.route_paths,
+    )
+    if malformed_ff_result.get("ok"):
+        raise AssertionError("truncated FF warehouse detail without nested identity must fail closed")
     with TemporaryDirectory(prefix="finance-canonical-hosted-smoke-") as finance_temp_dir:
         finance_plan_path = Path(finance_temp_dir) / "plan.json"
         finance_plan_path.write_text(

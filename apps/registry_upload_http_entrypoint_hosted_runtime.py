@@ -5070,9 +5070,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             payload,
             success_keys=["contract_name", "contract_version", "status", "warehouse", "balances", "documents"],
         )
-        if evaluation["ok"] and str((payload.get("warehouse") or {}).get("warehouse_key") or "") != "ff":
-            evaluation["ok"] = False
-            evaluation["detail"] = "expected canonical FF warehouse detail"
+        if evaluation["ok"]:
+            warehouse = payload.get("warehouse")
+            warehouse_key_is_ff = (
+                isinstance(warehouse, dict)
+                and str(warehouse.get("warehouse_key") or "") == "ff"
+            )
+            if result.get("body_truncated") and not warehouse_key_is_ff:
+                warehouse_key_is_ff = bool(
+                    re.search(
+                        r'"warehouse"\s*:\s*\{.{0,4096}?'
+                        r'"warehouse_key"\s*:\s*"ff"',
+                        str(result.get("body_excerpt") or ""),
+                        flags=re.DOTALL,
+                    )
+                )
+            if not warehouse_key_is_ff:
+                evaluation["ok"] = False
+                evaluation["detail"] = "expected canonical FF warehouse detail"
         return evaluation
 
     if route == "load_route":
