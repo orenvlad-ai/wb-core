@@ -15,13 +15,18 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from typing import Any, Mapping
 from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_autoanswers_runtime import (
     EVALUATION_SIGNATURE,
     PROMPT_BUNDLE_VERSION,
-)
+)  # noqa: E402
 
 
 DATABASE_FILENAME = "registry_upload_runtime.sqlite3"

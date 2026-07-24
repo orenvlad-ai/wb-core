@@ -5,8 +5,11 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -17,6 +20,9 @@ from apps.wb_autoanswers_prefilter_skip_recovery import (
     readback,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def feedback(feedback_id: str) -> dict:
@@ -246,6 +252,29 @@ class PrefilterSkipRecoveryTest(unittest.TestCase):
                 expected_fingerprint="sha256:" + "0" * 64,
                 actor="test",
             )
+
+    def test_repo_root_cli_bootstrap_supports_direct_execution(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "apps/wb_autoanswers_prefilter_skip_recovery.py",
+                "dry-run",
+                "--runtime-dir",
+                str(self.runtime_dir),
+                "--transition-run-id",
+                "incident-run",
+                "--expected-rows",
+                "1",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertTrue(payload["coverage_confirmed"])
 
     def test_queued_invalid_reclaim_is_restored_without_provider_mutation(self) -> None:
         with self.repo.transaction() as conn:
