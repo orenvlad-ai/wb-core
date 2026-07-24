@@ -735,7 +735,15 @@ class FfStockLedgerBlock:
                 if quantity > 0
             ]
             reservation_transition = {
-                "operation_id": "ffsr_" + uuid4().hex[:20],
+                "operation_id": "ffsr_"
+                + _fingerprint(
+                    {
+                        "supply_id": supply_id,
+                        "supply_revision": supply_revision,
+                        "operation_type": FF_STOCK_RESERVATION_FULFILL,
+                        "physical_source_key": source_key,
+                    }
+                ).removeprefix("sha256:")[:20],
                 "source_key": _reservation_source_key(
                     supply_id,
                     supply_revision,
@@ -751,7 +759,14 @@ class FfStockLedgerBlock:
                 "expected_current": current_reservations,
             }
         operation = self.runtime.create_ff_stock_operation_guarded(
-            operation_id="ffso_" + uuid4().hex[:20],
+            operation_id="ffso_"
+            + _fingerprint(
+                {
+                    "source_key": source_key,
+                    "supply_revision": supply_revision,
+                    "operation_type": FF_STOCK_OPERATION_AUTO_WRITEOFF,
+                }
+            ).removeprefix("sha256:")[:20],
             operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
             source_type=FF_STOCK_SOURCE_WB_SUPPLY,
             source_key=source_key,

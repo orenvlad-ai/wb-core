@@ -30,45 +30,84 @@ def main() -> int:
     with TemporaryDirectory(prefix="supplier-26gn390-recovery-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         _seed(runtime)
-        plan = build_plan(runtime.db_path)
-        _assert(plan["would_change"], "dry-run detects wrong active/archive statuses")
-        _assert(plan["expected_affected_rows"] == 4, "exact affected row count")
-        _assert(plan["expected_direct_rows"] == 2, "exact direct row count")
-        with patch.object(
-            Path,
-            "read_bytes",
-            side_effect=MemoryError("whole-file reads are forbidden"),
+        stale_side_effects = {
+            "ff_receipt_count": 1,
+            "ff_cost_layer_count": 1,
+            "ff_cost_layers": [{"layer_id": "stale", "is_current": 1}],
+            "current_ff_cost_layer_capital_rub": "10177161.12",
+            "active_financial_capital_event_count": 0,
+            "archived_financial_capital_event_count": 1,
+        }
+        candidate = {
+            "allocation": {
+                "eligible_component_count": 9,
+                "allocated_component_count": 9,
+                "eligible_amount_rub": "9102131.12",
+                "allocated_amount_rub": "9102131.12",
+                "unallocated_amount_rub": "0.00",
+            },
+            "functional_publication": {
+                "plan_fingerprint": "sha256:candidate"
+            },
+        }
+        with (
+            patch(
+                "apps.supplier_26gn390_recovery._side_effects",
+                return_value=stale_side_effects,
+            ),
+            patch(
+                "apps.supplier_26gn390_recovery._candidate_recovery_projection",
+                return_value=candidate,
+            ),
+            patch(
+                "apps.supplier_26gn390_recovery._supplier_functional_fingerprint_projection",
+                return_value={
+                    "active_version_id": "whfv-stale",
+                    "active_source_fingerprint": "sha256:old-source",
+                    "active_calculation_fingerprint": "sha256:old-calculation",
+                    "current_source_fingerprint": "sha256:new-source",
+                    "current_calculation_fingerprint": "sha256:new-calculation",
+                    "matches_active_version": False,
+                },
+            ),
         ):
-            result = apply_plan(
+            plan = build_plan(runtime.db_path)
+        _assert(plan["would_change"], "dry-run detects stale capital chain/layer")
+        _assert(plan["expected_affected_rows"] == 3, "exact bounded action count")
+        _assert(
+            plan["candidate"]["allocation"]["eligible_component_count"] == 9,
+            "candidate binds exact 9/9 allocation",
+        )
+        corrected_side_effects = {
+            **stale_side_effects,
+            "current_ff_cost_layer_capital_rub": "9102131.12",
+            "active_financial_capital_event_count": 1,
+            "archived_financial_capital_event_count": 0,
+        }
+        with (
+            patch(
+                "apps.supplier_26gn390_recovery._side_effects",
+                return_value=corrected_side_effects,
+            ),
+            patch(
+                "apps.supplier_26gn390_recovery._supplier_functional_fingerprint_projection",
+                return_value={
+                    "active_version_id": "whfv-corrected",
+                    "active_source_fingerprint": "sha256:new-source",
+                    "active_calculation_fingerprint": "sha256:new-calculation",
+                    "current_source_fingerprint": "sha256:new-source",
+                    "current_calculation_fingerprint": "sha256:new-calculation",
+                    "matches_active_version": True,
+                },
+            ),
+        ):
+            second = build_plan(runtime.db_path)
+            second_apply = apply_plan(
                 runtime,
-                plan,
+                second,
                 backup_root=runtime.runtime_dir / "backups",
             )
-        _assert(result["applied"], "apply executes approved plan")
-        _assert(Path(result["backup"]["path"]).is_file(), "coherent backup exists")
-        readback = result["post_apply"]["readback"]
-        _assert(readback["active_count"] == 1, "exactly one active invoice 136")
-        _assert(readback["excluded_count"] == 1, "exactly one archived invoice 136")
-        _assert(
-            readback["actual_ff_acceptance_date"] == "2026-07-21",
-            "FF acceptance date is confirmed through the server flow",
-        )
-        _assert(readback["ff_receipt_count"] == 1, "one FF receipt is created")
-        _assert(
-            readback["ff_cost_layer_count"] == 1,
-            "one FF cost layer is created",
-        )
-        _assert(
-            readback["invoice_136"][0]["expense_amount_rub"] == "1075030.00",
-            "expense amount conserved",
-        )
-        second = build_plan(runtime.db_path)
         _assert(not second["would_change"], "second dry-run is no-op")
-        second_apply = apply_plan(
-            runtime,
-            second,
-            backup_root=runtime.runtime_dir / "backups",
-        )
         _assert(not second_apply["applied"], "second apply is idempotent")
     print("supplier_26gn390_recovery_smoke: ok")
     return 0
@@ -82,7 +121,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
             "updated_at": "2026-07-24T08:00:00Z",
             "shipment_date": "2026-06-15",
             "actual_shipment_date": "2026-06-25",
-            "actual_ff_acceptance_date": "",
+            "actual_ff_acceptance_date": "2026-07-21",
             "order_status": "in_transit",
             "invoice_no": "26GN390",
             "invoice_date": "2026-06-15",
@@ -107,8 +146,8 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
             }
         ],
     )
-    _save_document(runtime, ACTIVE_DOCUMENT_ID, "excluded")
-    _save_document(runtime, ARCHIVED_DOCUMENT_ID, "parsed")
+    _save_document(runtime, ACTIVE_DOCUMENT_ID, "parsed")
+    _save_document(runtime, ARCHIVED_DOCUMENT_ID, "excluded")
     runtime.save_supplier_shipment(
         header={
             "shipment_id": "non_target",

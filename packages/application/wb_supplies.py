@@ -167,6 +167,9 @@ class WbSuppliesBlock:
         self.transit_cost_source = transit_cost_source or SellerPortalTransitCostNetworkJsonSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
         self.fulfillment_overlay_provider: Callable[[], Mapping[str, Mapping[str, Any]]] | None = None
+        self.transit_cost_reconciliation_callback: (
+            Callable[[list[str]], Mapping[str, Any]] | None
+        ) = None
         self.ff_stock_ledger = FfStockLedgerBlock(
             runtime=self.runtime,
             timestamp_factory=self.timestamp_factory,
@@ -1065,6 +1068,40 @@ class WbSuppliesBlock:
                 updated_at=self.timestamp_factory(),
                 **counters,
             )
+        successful_supply_ids = sorted(
+            {
+                str(item.get("supply_id") or "")
+                for item in results
+                if str(item.get("status") or "") == "success"
+                and str(item.get("supply_id") or "")
+            }
+        )
+        reconciliation_error = ""
+        if successful_supply_ids and self.transit_cost_reconciliation_callback:
+            try:
+                reconciliation = dict(
+                    self.transit_cost_reconciliation_callback(
+                        successful_supply_ids
+                    )
+                    or {}
+                )
+                logs.append(
+                    _run_log(
+                        self.timestamp_factory(),
+                        "Canonical cost/reservation reconciliation completed: "
+                        + json.dumps(reconciliation, ensure_ascii=False, sort_keys=True),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - evidence stays saved, reconciliation fails closed.
+                reconciliation_error = _safe_error_message(exc)
+                counters["failed_count"] += 1
+                logs.append(
+                    _run_log(
+                        self.timestamp_factory(),
+                        "Canonical cost/reservation reconciliation failed: "
+                        + reconciliation_error,
+                    )
+                )
         completed_at = self.timestamp_factory()
         if counters["session_expired_count"]:
             status = "session_expired"
@@ -1087,7 +1124,10 @@ class WbSuppliesBlock:
             updated_at=completed_at,
             completed_at=completed_at,
             candidate_count=len(candidates),
-            last_error="" if status == "success" else _last_error(results),
+            last_error=(
+                reconciliation_error
+                or ("" if status == "success" else _last_error(results))
+            ),
             logs=logs,
             **counters,
         )
@@ -3151,7 +3191,7 @@ def _row_with_transit_cost_enrichment(
     amount = _optional_number(enrichment.get("amount")) if enrichment else None
     status = str(enrichment.get("status") or "") if enrichment else ""
     confidence = str(enrichment.get("confidence") or "") if enrichment else ""
-    is_success = bool(enrichment and status == "success" and amount is not None and confidence in {"high", "medium"})
+    is_success = _is_canonical_seller_portal_transit_enrichment(enrichment)
     result["seller_portal_transit_cost"] = amount if is_success else None
     result["seller_portal_transit_cost_display"] = str(enrichment.get("amount_label") or _format_effective_cost(amount)) if is_success else "—"
     result["seller_portal_transit_cost_source"] = str(enrichment.get("source") or "") if enrichment else ""
@@ -3244,14 +3284,34 @@ def _has_fresh_success_transit_cost(
 ) -> bool:
     enrichment = _lookup_transit_cost_enrichment(row, enrichments)
     return bool(
-        enrichment
-        and str(enrichment.get("status") or "") == "success"
-        and _optional_number(enrichment.get("amount")) is not None
+        _is_canonical_seller_portal_transit_enrichment(enrichment)
         and _is_recent_iso_timestamp(
             str(enrichment.get("fetched_at") or enrichment.get("updated_at") or ""),
             now_text=now_text,
             max_age_seconds=TRANSIT_COST_ENRICHMENT_FRESH_SECONDS,
         )
+    )
+
+
+def _is_canonical_seller_portal_transit_enrichment(
+    enrichment: Mapping[str, Any],
+) -> bool:
+    amount = _optional_number(enrichment.get("amount"))
+    return bool(
+        enrichment
+        and str(enrichment.get("status") or "") == "success"
+        and amount is not None
+        and amount > 0
+        and str(enrichment.get("currency") or "").upper() == "RUB"
+        and bool(enrichment.get("is_transit"))
+        and str(enrichment.get("source") or "")
+        == SELLER_PORTAL_TRANSIT_COST_SOURCE
+        and str(enrichment.get("evidence_type") or "")
+        == SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE
+        and str(enrichment.get("source_endpoint_path") or "")
+        == SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH
+        and str(enrichment.get("confidence") or "") in {"high", "medium"}
+        and not str(enrichment.get("error") or "")
     )
 
 

@@ -87,6 +87,22 @@ Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3
 
 Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All active direct consumers, including товарный капитал, его рентабельность, web-vitrina, Finance, Partner, Proxy 3 and `Управление SKU`, call the same temporal functional projection; independent retro maps and hidden fallback to 1C/legacy cost are prohibited.
 
+Supplier financial-document exclusion is an active-source correction, not a
+presentation filter. Excluded parent documents and their expense lines are
+absent before supplier FF layer materialization, so the active same-SHA source
+is counted once and archived capital cannot survive in WB WAC, товарный
+капитал, Proxy 3 or Finance. Dependent consumers change only through a newly
+published fingerprint-matching functional version; queued/error/stale supplier
+proof never exposes the old numeric cost as current. No unrelated historical
+Finance backfill is implied by such a correction.
+
+WB supply cost materialization restores canonical normalized supply facts from
+`normalized_row_json` before classifying transit cost. A positive official
+transit fact therefore remains first-party evidence; a persisted successful
+Seller Portal network enrichment is joined only as the bounded supplemental
+fallback when the official amount is absent. Both paths feed the same
+per-supply/SKU cost layer and full packed-composition denominator.
+
 Finance has no separately valued cost source. Its shared consumer resolver projects the exact same-`nmId` canonical WB WAC from `2026-07-01` backwards for every Finance operation before that date, and uses the exact canonical operation-date row from `2026-07-01` onward. A missing 01.07 row is a blocker unless the same `nmId` is present in the active migration-109 archival manifest. That manifest is a warehouse-domain canonical cost source, not a Finance fallback: it pins owner approval, effective date, 100 ₽, target/source digests and fingerprints. With no later factual cost basis the last valid 100 ₽ survives zero stock and returns; a real accepted quantity/capital layer resumes ordinary moving WAC and supersedes the estimate. No quantity, capital, supply or movement is created by the estimate. Finance still cannot choose a later/other-SKU/average/legacy/zero value. Existing `wb_finance_retro_cost_map` rows from a superseded migration are ignored historical evidence, not a parallel source.
 
 The Partner V4 marketing/classifier recovery does not alter this resolver, its 01.07 boundary, Vitrina values or Proxy 3. It rebuilds only Finance-derived projections under the same canonical cost digest and changes which already classified signed expenses Partner routes to its main/subrows.

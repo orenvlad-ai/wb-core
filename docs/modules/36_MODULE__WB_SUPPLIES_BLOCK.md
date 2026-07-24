@@ -52,6 +52,7 @@ related_endpoints:
   - "DELETE /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}/payment-validation.pdf"
 related_runners:
+  - "apps/ff_reservations_transit_cost_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
@@ -238,7 +239,7 @@ Display priority:
 2. Seller Portal enrichment amount only when the row is transit, official `cost_total` is unknown and enrichment status is `success`;
 3. `—`.
 
-Seller Portal values must not overwrite `cost_total` or become official raw evidence.
+Seller Portal values must not overwrite `cost_total` or become official raw evidence. A successful positive enrichment is nevertheless a canonical downstream-cost input: after saving the normalized evidence the application idempotently rematerializes canonical WB supply/SKU cost layers and immediately invokes the existing FF reservation reconciliation; the run reports the exact successful target supply IDs. Physical FF debit and reservation fulfillment remain one atomic ledger transaction; a reconciliation failure is visible on the enrichment run and never discards or promotes the saved evidence silently. Missing/failed evidence leaves that supply waiting and does not block independent supplies. Repeating the same enrichment/reconciliation is a no-op.
 
 Fulfillment overlay values must not overwrite WB API fields, Seller Portal enrichment fields, `cost_total`, `effective_cost_total`, ready snapshots, 1C cost rows or ЕБД metric rows. They are display/payment-validation overlay values only.
 
@@ -304,6 +305,8 @@ Candidate rules:
 - explicit ids/list params prioritize the current visible/filter scope; otherwise newest missing/stale transit rows are selected server-side.
 
 The worker uses the shared Seller Portal storage-state path/lock contract, navigates to `/supplies-management/all-supplies`, searches by supply id, waits for `listSupplies` and `supply/cost` network JSON, joins by `data.{supplyID}`, and extracts `costInSupplierCurrency.amountWithVat` before falling back to `cost`.
+
+`apps/ff_reservations_transit_cost_recovery.py` is the bounded production recovery for exact supplies `41058085`, `41058204`, `41058408` and `41058611`. Dry-run is query-only and accepts only a positive canonical official WB transit fact or, when official cost is absent, Seller Portal network JSON obtained through the same read-only adapter. It pins current cache revisions, full compositions, active reservations, affected/non-target ledger digests, exact total quantity and the `40985996` SKU-discrepancy invariant. Apply is allowed only when all four positive costs are proven and the projected physical FF delta is exactly `-43 000`; it creates a verified backup, optimistically rechecks every fingerprint, stores only supplemental enrichment rows, rematerializes canonical costs, performs normal atomic reservation fulfillment and requires repeat reconciliation to be a no-op. It never writes WB, guesses a tariff or nets shortages across SKU.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status?run_id=...`
 

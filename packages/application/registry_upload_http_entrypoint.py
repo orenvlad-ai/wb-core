@@ -1113,6 +1113,9 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
+        self.wb_supplies_block.transit_cost_reconciliation_callback = (
+            self._reconcile_completed_transit_costs
+        )
         self.own_product_capital_block = OwnProductCapitalBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
@@ -4186,8 +4189,14 @@ class RegistryUploadHttpEntrypoint:
         self,
         shipment_id: str,
         document_id: str,
+        *,
+        selected_operation_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
-        payload = self.supplier_financial_documents_block.confirm_bank_fee_statement_import(shipment_id, document_id)
+        payload = self.supplier_financial_documents_block.confirm_bank_fee_statement_import(
+            shipment_id,
+            document_id,
+            selected_operation_ids=selected_operation_ids,
+        )
         cny_rows = list(payload.pop("cny_fee_rows_for_ledger", []) or [])
         for row in cny_rows:
             self.cny_ledger_block.save_bank_fee_document(
@@ -4575,6 +4584,24 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_supplies_transit_cost_enrich_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.start_transit_cost_enrichment(payload)
+
+    def _reconcile_completed_transit_costs(
+        self,
+        supply_ids: list[str],
+    ) -> dict[str, Any]:
+        """Consume saved Seller Portal evidence through canonical cost/FF paths."""
+
+        targets = sorted({str(value) for value in supply_ids if str(value)})
+        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=True):
+            materialized = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                opening_date="2026-07-01"
+            )
+            ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
+        return {
+            "target_supply_ids": targets,
+            "wb_supply_cost_layers_materialized": materialized,
+            "ff_stock_debits": dict(ff_state.get("ff_stock_debits") or {}),
+        }
 
     def handle_wb_supplies_transit_cost_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.get_transit_cost_enrichment_status(params)
