@@ -357,14 +357,31 @@ def _run_warehouse_ui_flow(
                     ],
                     "Склад FF: physical and reservation summary labels",
                 )
+            expected_status = str(detail_summary.get("status_label") or "").strip()
+            expected_status_detail = str(
+                detail_summary.get("status_description") or ""
+            ).strip()
+            page.wait_for_function(
+                """expected => {
+                    const status = (
+                        document.querySelector("[data-warehouse-status]")?.textContent || ""
+                    ).trim();
+                    const detail = (
+                        document.querySelector("[data-warehouse-status-detail]")?.textContent || ""
+                    ).trim();
+                    return status === expected.status && detail === expected.detail;
+                }""",
+                arg={"status": expected_status, "detail": expected_status_detail},
+                timeout=60_000,
+            )
             visible_status = page.locator("[data-warehouse-status]").inner_text().strip()
             _assert(
-                visible_status == str(detail_summary.get("status_label") or "").strip(),
+                visible_status == expected_status,
                 f"{warehouse_name}: localized functional status",
             )
             _assert(
                 page.locator("[data-warehouse-status-detail]").inner_text().strip()
-                == str(detail_summary.get("status_description") or "").strip(),
+                == expected_status_detail,
                 f"{warehouse_name}: status reason and timestamp surface",
             )
             _assert(
