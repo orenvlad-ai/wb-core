@@ -6055,6 +6055,10 @@ def _source_rows(
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
+    result["ff_operations"] = sorted(
+        result["ff_operations"],
+        key=_ff_operation_replay_sort_key,
+    )
     result.setdefault("cny_documents", [])
     ready_snapshots, frozen_projection = _historical_recovery_source_rows(
         conn,
@@ -6096,6 +6100,19 @@ def _source_rows(
         "ff_cost_layer_id": str((report.get("primary_shipment") or {}).get("ff_cost_layer_id") or ""),
     }
     return result
+
+
+def _ff_operation_replay_sort_key(operation: Mapping[str, Any]) -> tuple[str, int, str]:
+    """Keep same-second supplier receipts ahead of dependent FF outbounds."""
+    is_supplier_receipt = (
+        str(operation.get("source_type") or "") == "supplier_shipment"
+        and str(operation.get("operation_type") or "") == "auto_receipt"
+    )
+    return (
+        str(operation.get("created_at") or ""),
+        0 if is_supplier_receipt else 1,
+        str(operation.get("operation_id") or ""),
+    )
 
 
 def _ready_snapshot_recovery_rows(
