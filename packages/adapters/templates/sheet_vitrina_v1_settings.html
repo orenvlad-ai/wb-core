@@ -2196,6 +2196,8 @@
         autoUpdatesMasterButton.disabled = !autoUpdatesState.revision;
         autoUpdatesRows.innerHTML = processes.length ? processes.map((process) => {
           const desiredKnown = typeof process.desired === "boolean";
+          const canEnable = process.can_enable !== false;
+          const enablingBlocked = desiredKnown && !process.desired && !canEnable;
           const desiredText = desiredKnown ? (process.desired ? "Desired: ON" : "Desired: OFF") : "Desired: UNKNOWN";
           const actualText = process.actual ? "Actual: работает" : "Actual: остановлено";
           const futureText = !masterDesired
@@ -2208,11 +2210,12 @@
             '<div class="auto-update-card-header"><div><h3>' + escapeHtml(process.display_name) + '</h3>' +
             '<p class="muted">' + escapeHtml(autoUpdateDescription(process.process_key)) + '</p></div>' +
             '<button class="auto-update-toggle" type="button" data-auto-update-toggle="' + escapeHtml(process.process_key) + '"' +
-            (desiredKnown ? "" : " disabled") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button></div>' +
+            ((!desiredKnown || enablingBlocked) ? " disabled" : "") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button></div>' +
             '<div class="auto-update-statuses"><span class="pill">' + escapeHtml(desiredText) + '</span>' +
             '<span class="pill ' + (process.actual ? "success" : "warning") + '">' + escapeHtml(actualText) + '</span>' +
             '<span class="pill ' + (process.drift_status === "matched" ? "success" : "warning") + '">' + escapeHtml(process.drift_status || "unknown") + '</span></div>' +
             '<p class="message ' + (process.drift_status === "matched" || !masterDesired ? "" : "warning") + '">' + escapeHtml(futureText) + '</p>' +
+            (enablingBlocked ? '<p class="message warning">' + escapeHtml(process.enable_blocker || "Включение требует отдельного безопасного lifecycle.") + '</p>' : "") +
             '<dl class="auto-update-meta">' +
             '<dt>Последний запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.last_run)) + '</dd>' +
             '<dt>Последний успешный</dt><dd>' + escapeHtml(autoUpdateValue(process.last_success)) + '</dd>' +
@@ -2237,12 +2240,16 @@
         }, null, 2);
       }
 
+      async function readAutoUpdatesStatus() {
+        return fetchJson(autoUpdatesPath, {headers: {Accept: "application/json"}});
+      }
+
       async function loadAutoUpdates() {
         if (!autoUpdatesPath) return;
         autoUpdatesMessage.textContent = "Читаем canonical desired/actual status...";
         autoUpdatesMessage.className = "message";
         try {
-          const payload = await fetchJson(autoUpdatesPath, {headers: {Accept: "application/json"}});
+          const payload = await readAutoUpdatesStatus();
           renderAutoUpdates(payload);
           autoUpdatesMessage.textContent = "Статус подтверждён runtime readback.";
           autoUpdatesMessage.className = "message success";
@@ -2267,13 +2274,54 @@
             headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
             body: JSON.stringify(body)
           });
-          renderAutoUpdates(payload);
-          autoUpdatesMessage.textContent = "Owner policy сохранена; actual state прочитан повторно.";
+          const mutation = payload && payload.mutation;
+          if (!mutation || mutation.status !== "confirmed" || mutation.persisted !== true || mutation.runtime_readback_confirmed !== true) {
+            throw new Error("Backend не подтвердил persisted mutation и runtime readback.");
+          }
+          const readback = await readAutoUpdatesStatus();
+          const sameRevision = Number(readback.revision || 0) === Number(payload.revision || 0);
+          const sameFingerprint = String(readback.policy_fingerprint || "") === String(payload.policy_fingerprint || "");
+          let requestedStateConfirmed = false;
+          if (body.action === "set_master") {
+            requestedStateConfirmed = Boolean(readback.master_desired) === Boolean(body.desired);
+            if (body.desired) {
+              requestedStateConfirmed = requestedStateConfirmed
+                && !(readback.drift_processes || []).length
+                && !(readback.unknown_processes || []).length;
+            } else {
+              requestedStateConfirmed = requestedStateConfirmed
+                && (readback.processes || []).every((process) => !process.actual);
+            }
+          } else if (body.action === "set_process") {
+            const process = (readback.processes || []).find((item) => item.process_key === body.process_key);
+            requestedStateConfirmed = Boolean(process)
+              && typeof process.desired === "boolean"
+              && Boolean(process.desired) === Boolean(body.desired);
+            if (readback.master_desired) {
+              requestedStateConfirmed = requestedStateConfirmed && process.drift_status === "matched";
+            }
+          }
+          renderAutoUpdates(readback);
+          if (!sameRevision || !sameFingerprint || !requestedStateConfirmed) {
+            throw new Error(
+              "Изменение было принято, но повторный runtime readback не подтвердил сохранённое состояние."
+            );
+          }
+          autoUpdatesMessage.textContent = "Изменение сохранено и подтверждено повторным runtime readback.";
           autoUpdatesMessage.className = "message success";
         } catch (error) {
-          autoUpdatesMessage.textContent = error.message;
+          const actionError = error && error.message ? error.message : String(error);
+          let readbackError = "";
+          try {
+            const readback = await readAutoUpdatesStatus();
+            renderAutoUpdates(readback);
+          } catch (readError) {
+            readbackError = readError && readError.message ? readError.message : String(readError);
+            autoUpdatesMasterButton.disabled = true;
+          }
+          autoUpdatesMessage.textContent = "Не применено: " + actionError
+            + (readbackError ? " Повторный readback также не выполнен: " + readbackError : " Фактическое состояние перечитано.");
           autoUpdatesMessage.className = "message error";
-          await loadAutoUpdates();
         }
       }
 

@@ -526,14 +526,30 @@ def _build_handler(
                         body,
                         actor=_current_web_user_config_key(self),
                     )
-                except (ValueError, RuntimeError) as exc:
-                    text = str(exc)
+                except ValueError as exc:
                     _write_json_response(
                         self,
-                        HTTPStatus.CONFLICT
-                        if "stale" in text.lower() or "block" in text.lower()
-                        else HTTPStatus.UNPROCESSABLE_ENTITY,
-                        {"error": text},
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc), "code": "auto_updates_invalid_request"},
+                    )
+                    return
+                except RuntimeError as exc:
+                    text = str(exc)
+                    lowered = text.lower()
+                    if "stale policy revision" in lowered:
+                        code = "auto_updates_stale_revision"
+                    elif "no-op" in lowered:
+                        code = "auto_updates_no_change"
+                    elif "lifecycle contract" in lowered:
+                        code = "auto_updates_dedicated_lifecycle_required"
+                    elif "readback" in lowered or "drift" in lowered:
+                        code = "auto_updates_readback_failed"
+                    else:
+                        code = "auto_updates_action_blocked"
+                    _write_json_response(
+                        self,
+                        HTTPStatus.CONFLICT,
+                        {"error": text, "code": code},
                     )
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback

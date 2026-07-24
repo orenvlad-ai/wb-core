@@ -382,12 +382,211 @@ def _assert_unknown_policy_state_blocks_resume() -> None:
             _restore_local_boundaries(old)
 
 
+def _assert_unsupported_enable_and_noop_are_preflighted() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            policy_path = runtime_dir / maintenance.POLICY_FILENAME
+            audit_path = runtime_dir / maintenance.POLICY_AUDIT_FILENAME
+            before_policy = policy_path.read_bytes()
+            before_audit = audit_path.read_bytes()
+            policy = json.loads(before_policy)
+            revision = int(policy["revision"])
+            for desired, expected_text in (
+                (True, "отдельный Autoanswers lifecycle"),
+                (False, "no-op desired state"),
+            ):
+                try:
+                    maintenance.update_process_desired_state(
+                        runtime_dir,
+                        process_key="autoanswers_readonly",
+                        desired=desired,
+                        expected_revision=revision,
+                        actor="smoke",
+                        reason="must not mutate",
+                    )
+                except RuntimeError as exc:
+                    assert expected_text in str(exc)
+                else:
+                    raise AssertionError("blocked/no-op desired state must fail")
+                assert policy_path.read_bytes() == before_policy
+                assert audit_path.read_bytes() == before_audit
+
+            changed = maintenance.update_process_desired_state(
+                runtime_dir,
+                process_key="warehouse_functional",
+                desired=False,
+                expected_revision=revision,
+                actor="smoke",
+                reason="supported desired change",
+            )
+            changed_bytes = policy_path.read_bytes()
+            try:
+                maintenance.update_process_desired_state(
+                    runtime_dir,
+                    process_key="spp_test",
+                    desired=False,
+                    expected_revision=revision,
+                    actor="concurrent-smoke",
+                    reason="stale concurrent hold",
+                )
+            except RuntimeError as exc:
+                assert "stale policy revision" in str(exc)
+            else:
+                raise AssertionError("concurrent stale mutation must fail")
+            assert int(changed["revision"]) == revision + 1
+            assert policy_path.read_bytes() == changed_bytes
+        finally:
+            _restore_local_boundaries(old)
+
+
+def _assert_failed_resume_stays_paused_and_audited() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd(
+            fail_enable_unit="wb-core-wb-finance-weekly.timer"
+        )
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now("wb-core-warehouse-functional-sync.timer")
+                return {"status": "restored"}
+
+            try:
+                maintenance.maintenance_restore(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=int(policy["revision"]),
+                    warehouse_restore=restore_warehouse,
+                )
+            except RuntimeError as exc:
+                assert "synthetic enable failure" in str(exc)
+            else:
+                raise AssertionError("backend enable failure must remain fail-closed")
+            final = maintenance.maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            assert final["quiet"] is True
+            assert final["auto_updates"]["master_desired"] is False
+            assert all(
+                item["actual"] is False
+                for item in final["auto_updates"]["processes"]
+            )
+            audit_rows = [
+                json.loads(line)
+                for line in (
+                    runtime_dir / maintenance.POLICY_AUDIT_FILENAME
+                ).read_text().splitlines()
+                if line.strip()
+            ]
+            assert audit_rows[-1]["event"] == "master_resume_failed"
+        finally:
+            _restore_local_boundaries(old)
+
+
+def _assert_success_requires_persisted_runtime_readback() -> None:
+    from packages.application.registry_upload_http_entrypoint import (
+        _confirmed_auto_updates_update_payload,
+    )
+
+    paused = {
+        "revision": 2,
+        "master_desired": False,
+        "policy_fingerprint": "sha256:paused",
+        "unknown_processes": [],
+        "drift_processes": [],
+        "processes": [
+            {
+                "process_key": "warehouse_functional",
+                "desired": False,
+                "actual": False,
+            }
+        ],
+    }
+    confirmed = _confirmed_auto_updates_update_payload(
+        paused,
+        action="set_process",
+        desired=False,
+        expected_revision=1,
+        process_key="warehouse_functional",
+    )
+    assert confirmed["mutation"]["persisted"] is True
+    assert confirmed["mutation"]["runtime_readback_confirmed"] is True
+
+    failed_readback = copy.deepcopy(paused)
+    failed_readback.update(
+        {
+            "revision": 3,
+            "master_desired": True,
+            "drift_processes": ["warehouse_functional"],
+        }
+    )
+    try:
+        _confirmed_auto_updates_update_payload(
+            failed_readback,
+            action="set_master",
+            desired=True,
+            expected_revision=2,
+        )
+    except RuntimeError as exc:
+        assert "runtime_confirmed=False" in str(exc)
+    else:
+        raise AssertionError("successful write with failed readback must not succeed")
+
+    no_revision_advance = copy.deepcopy(paused)
+    no_revision_advance["revision"] = 1
+    try:
+        _confirmed_auto_updates_update_payload(
+            no_revision_advance,
+            action="set_process",
+            desired=False,
+            expected_revision=1,
+            process_key="warehouse_functional",
+        )
+    except RuntimeError as exc:
+        assert "revision_advanced=False" in str(exc)
+    else:
+        raise AssertionError("no-op mutation must not return success")
+
+
 def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_unknown_timer_fails_before_mutation()
     _assert_status_does_not_initialize_owner_policy()
     _assert_exact_policy_restore_and_revision_guards()
     _assert_unknown_policy_state_blocks_resume()
+    _assert_unsupported_enable_and_noop_are_preflighted()
+    _assert_failed_resume_stays_paused_and_audited()
+    _assert_success_requires_persisted_runtime_readback()
     print("business data maintenance smoke: ok")
     return 0
 
