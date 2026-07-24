@@ -205,6 +205,96 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(rating_publication["feedback_id"], "rating-ready")
         self.assertEqual(rating_publication["publication_key"], legacy_publication["publication_key"])
 
+    def test_publication_claim_uses_content_rating_buckets_before_rating_only(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="manual",
+            max_materialized_processing_jobs=20,
+            actor_id="admin",
+        )
+        content_specs = (
+            ("content-5", 5, "2026-07-25T10:00:00Z"),
+            ("content-2", 2, "2026-07-24T10:00:00Z"),
+            ("content-1", 1, "2026-07-20T10:00:00Z"),
+            ("content-4", 4, "2026-07-23T10:00:00Z"),
+            ("content-3", 3, "2026-07-22T10:00:00Z"),
+        )
+        for feedback_id, rating, created_at in content_specs:
+            row = feedback(feedback_id, text=f"Содержательный отзыв {rating}")
+            row["productValuation"] = rating
+            row["createdDate"] = created_at
+            self.repo.upsert_feedback(
+                row,
+                source_stream="archive",
+                run_kind="backfill",
+            )
+        self.repo.upsert_feedback(
+            self.empty_feedback("rating-only", created_at="2026-07-26T10:00:00Z"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+
+        expected_content = [f"content-{rating}" for rating in range(1, 6)]
+        for feedback_id in expected_content:
+            claimed = self.repo.claim_processing_job(worker_id="ai")
+            self.assertEqual(claimed["feedback_id"], feedback_id)
+            self.repo.settle_budget(
+                claimed["processing_key"],
+                actual_cost_usd="0.01",
+            )
+            self.repo.complete_generation(
+                claimed["processing_key"],
+                result=successful_result(),
+                worker_id="ai",
+            )
+
+        publication_order: list[str] = []
+        for feedback_id in expected_content:
+            publication = self.repo.claim_publication_job(worker_id="publication")
+            self.assertEqual(publication["action"], "write")
+            publication_order.append(str(publication["feedback_id"]))
+            started = self.repo.begin_publication_write(
+                publication["publication_key"],
+                worker_id="publication",
+            )
+            self.repo.record_publication_transport(
+                publication["publication_key"],
+                attempt_id=started["attempt_id"],
+                outcome="http_response",
+                http_status=204,
+                worker_id="publication",
+            )
+            readback = self.repo.claim_publication_job(worker_id="publication")
+            self.assertEqual(readback["action"], "readback")
+            self.assertEqual(readback["feedback_id"], feedback_id)
+            self.repo.record_publication_readback(
+                readback["publication_key"],
+                answer_text=readback["exact_reply"],
+                worker_id="publication",
+            )
+        self.assertEqual(publication_order, expected_content)
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        rating_job = self.repo.claim_processing_job(worker_id="ai")
+        self.assertEqual(rating_job["feedback_id"], "rating-only")
+        self.repo.complete_rating_only_template(
+            rating_job["processing_key"],
+            worker_id="ai",
+        )
+        rating_publication = self.repo.claim_publication_job(worker_id="publication")
+        self.assertEqual(rating_publication["feedback_id"], "rating-only")
+
     def test_off_and_emergency_force_off_block_new_write(self) -> None:
         self.approved()
         self.repo.update_settings(master_enabled=False, actor_id="admin")

@@ -12167,6 +12167,7 @@
       if (server.settingsLoading) return;
       server.settingsLoading = true;
       renderAutoanswersServer();
+      let externalRefreshEpoch = null;
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, {method: "GET", headers: {"Accept": "application/json"}});
         const payload = await readJsonResponse(response, "non-json autoanswers settings response");
@@ -12176,11 +12177,19 @@
         server.runtime = payload.runtime || null;
         server.reconciliation = payload.reconciliation || null;
         server.lifecycle = payload.lifecycle || null;
+        if (autoanswersLifecycleNeedsExternalRefresh(server.lifecycle)) {
+          externalRefreshEpoch = Number((server.settings || {}).policy_epoch || 0);
+        } else {
+          server.lifecyclePollSequence = Number(server.lifecyclePollSequence || 0) + 1;
+        }
       } catch (error) {
         server.error = String(error && error.message ? error.message : error);
       } finally {
         server.settingsLoading = false;
         renderAutoanswersServer();
+      }
+      if (externalRefreshEpoch !== null) {
+        refreshAutoanswersLifecycleAfterExternalChange(externalRefreshEpoch);
       }
     }
 
@@ -12262,6 +12271,49 @@
       server.error = "Autoanswers runtime не подтвердил свежий scheduler tick за ожидаемое время.";
       server.mutationStatus = "error";
       renderAutoanswersServer();
+    }
+
+    function autoanswersLifecycleNeedsExternalRefresh(lifecycle) {
+      const item = lifecycle || {};
+      const lifecycleState = String(item.lifecycle_state || "");
+      const drift = String(item.drift_status || "");
+      return item.desired === true && (
+        lifecycleState === "starting" ||
+        lifecycleState === "error" ||
+        drift === "drift" ||
+        drift === "blocked" ||
+        item.actual !== true
+      );
+    }
+
+    async function refreshAutoanswersLifecycleAfterExternalChange(policyEpoch) {
+      const server = state.feedbacks.server;
+      const sequence = Number(server.lifecyclePollSequence || 0) + 1;
+      server.lifecyclePollSequence = sequence;
+      // External recovery/deploy can change server truth while this tab stays
+      // open.  Keep this GET-only refresh bounded, visible-tab scoped and
+      // independent from the longer mutation confirmation poll above.
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await sleep(2000);
+        if (server.lifecyclePollSequence !== sequence) return;
+        if (document.hidden || state.feedbacks.activeSubsection !== "server-reviews") return;
+        try {
+          const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, {method: "GET", headers: {"Accept": "application/json"}});
+          const payload = await readJsonResponse(response, "non-json autoanswers lifecycle refresh response");
+          if (!response.ok) return;
+          if (Number((payload.settings || {}).policy_epoch || 0) !== Number(policyEpoch || 0)) return;
+          server.settings = payload.settings || null;
+          server.budget = payload.budget || null;
+          server.runtime = payload.runtime || null;
+          server.reconciliation = payload.reconciliation || null;
+          server.lifecycle = payload.lifecycle || null;
+          server.error = "";
+          renderAutoanswersServer();
+          if (!autoanswersLifecycleNeedsExternalRefresh(server.lifecycle)) return;
+        } catch (error) {
+          return;
+        }
+      }
     }
 
     async function saveAutoanswersMode() {

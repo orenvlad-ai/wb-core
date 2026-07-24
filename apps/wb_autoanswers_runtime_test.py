@@ -480,6 +480,208 @@ class RuntimeTest(unittest.TestCase):
             )
         self.assertEqual(rating_outcome["content_classification"], CONTENT_CLASS_RATING_ONLY)
 
+    def test_transition_ordinals_materialization_and_processing_share_rating_priority(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="manual",
+            max_materialized_processing_jobs=20,
+            actor_id="admin",
+        )
+        rows = (
+            self.classified_feedback(
+                "content-5-newest",
+                text="пять",
+                rating=5,
+                created_at="2026-07-24T12:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-1-old",
+                text="один старый",
+                rating=1,
+                created_at="2026-07-20T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-2",
+                text="два",
+                rating=2,
+                created_at="2026-07-23T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-1-new",
+                text="один новый",
+                rating=1,
+                created_at="2026-07-21T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-3",
+                text="три",
+                rating=3,
+                created_at="2026-07-22T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "content-4",
+                text="четыре",
+                rating=4,
+                created_at="2026-07-24T11:00:00Z",
+            ),
+            self.classified_feedback(
+                "rating-old",
+                rating=1,
+                created_at="2026-07-19T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "rating-new",
+                rating=5,
+                created_at="2026-07-25T10:00:00Z",
+            ),
+        )
+        for row in rows:
+            self.repo.upsert_feedback(
+                row,
+                source_stream="archive",
+                run_kind="backfill",
+            )
+        expected = [
+            "content-1-new",
+            "content-1-old",
+            "content-2",
+            "content-3",
+            "content-4",
+            "content-5-newest",
+            "rating-new",
+            "rating-old",
+        ]
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        sweep_id = applied["sweep"]["sweep_id"]
+        run_id = applied["sweep"]["transition_run_id"]
+        with sqlite3.connect(self.repo.db_path) as conn:
+            ordinal_order = [
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT feedback_id
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope
+                    WHERE sweep_id=?
+                    ORDER BY ordinal
+                    """,
+                    (sweep_id,),
+                ).fetchall()
+            ]
+        self.assertEqual(ordinal_order, expected)
+
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=1)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            first_materialized = conn.execute(
+                """
+                SELECT feedback_id
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                WHERE transition_run_id=?
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        self.assertEqual(first_materialized, expected[0])
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+
+        claimed_order: list[str] = []
+        for _feedback_id in expected[:6]:
+            claimed = self.repo.claim_processing_job(worker_id="worker")
+            self.assertIsNotNone(claimed)
+            claimed_order.append(str(claimed["feedback_id"]))
+            self.repo.settle_budget(
+                claimed["processing_key"],
+                actual_cost_usd="0.01",
+            )
+            self.repo.complete_generation(
+                claimed["processing_key"],
+                result=successful_result(),
+                worker_id="worker",
+            )
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        with self.repo.transaction() as conn:
+            content_key = str(
+                conn.execute(
+                    """
+                    SELECT processing_key
+                    FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                    WHERE feedback_id='content-5-newest'
+                    """
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET regeneration_required=1, media_uncertain=1,
+                    regeneration_reason='test_new_content_work'
+                WHERE processing_key=?
+                """,
+                (content_key,),
+            )
+        self.repo.request_regeneration(
+            content_key,
+            actor_id="reconcile",
+            trigger_source="policy_reconciliation",
+            transition_run_id=run_id,
+        )
+        preempting_content = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(preempting_content["feedback_id"], "content-5-newest")
+        self.repo.settle_budget(
+            preempting_content["processing_key"],
+            actual_cost_usd="0.01",
+        )
+        self.repo.complete_generation(
+            preempting_content["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        for _feedback_id in expected[6:]:
+            claimed = self.repo.claim_processing_job(worker_id="worker")
+            self.assertIsNotNone(claimed)
+            claimed_order.append(str(claimed["feedback_id"]))
+            self.repo.complete_rating_only_template(
+                claimed["processing_key"],
+                worker_id="worker",
+            )
+        self.assertEqual(claimed_order, expected)
+
+    def test_manual_jobs_keep_owner_triggered_newest_first_order(self) -> None:
+        self.enable("manual")
+        for row in (
+            self.classified_feedback(
+                "manual-rating-1-old",
+                text="старый ручной",
+                rating=1,
+                created_at="2026-07-20T10:00:00Z",
+            ),
+            self.classified_feedback(
+                "manual-rating-5-new",
+                text="новый ручной",
+                rating=5,
+                created_at="2026-07-21T10:00:00Z",
+            ),
+        ):
+            outcome = self.repo.upsert_feedback(
+                row,
+                source_stream="unanswered",
+                run_kind="steady",
+            )
+            self.repo.enqueue_manual_processing(
+                row["id"],
+                content_version=outcome["content_version"],
+                actor_id="reviewer",
+            )
+        claimed = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(claimed["feedback_id"], "manual-rating-5-new")
+
     def test_policy_epoch_preserves_completed_prefilter_skip_without_reclaim(self) -> None:
         self.enable("draft_only")
         self.insert_new("prefilter-skip")

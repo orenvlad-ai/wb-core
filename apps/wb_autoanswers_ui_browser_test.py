@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
+import json
 from pathlib import Path
 import unittest
 
@@ -84,6 +86,101 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 retry_delay_seconds=0,
             )
         self.assertEqual(exhausted.request.calls, 3)
+
+    def test_open_error_badge_refreshes_after_external_lifecycle_recovery(self) -> None:
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            repository = fixture.entrypoint.autoanswers_repository
+            repository.update_settings(
+                master_enabled=True,
+                mode="auto_all",
+                actor_id="local_operator",
+            )
+            base_payload = (
+                fixture.entrypoint.handle_sheet_feedbacks_autoanswers_settings_request()
+            )
+            error_payload = deepcopy(base_payload)
+            error_payload["lifecycle"] = {
+                "desired": True,
+                "actual": False,
+                "lifecycle_state": "error",
+                "drift_status": "blocked",
+                "stop_reason": "worker_error",
+                "last_error": "publication_already_exists",
+                "components": {
+                    "worker": {
+                        "desired": True,
+                        "actual": False,
+                        "drift_status": "blocked",
+                    },
+                    "readonly_sync": {
+                        "desired": True,
+                        "actual": True,
+                        "drift_status": "matched",
+                    },
+                },
+            }
+            running_payload = deepcopy(base_payload)
+            running_payload["lifecycle"] = {
+                "desired": True,
+                "actual": True,
+                "lifecycle_state": "running",
+                "drift_status": "matched",
+                "stop_reason": "",
+                "last_error": "",
+                "components": {
+                    "worker": {
+                        "desired": True,
+                        "actual": True,
+                        "drift_status": "matched",
+                    },
+                    "readonly_sync": {
+                        "desired": True,
+                        "actual": True,
+                        "drift_status": "matched",
+                    },
+                },
+                "runtime_schedule": {
+                    "last_scheduler_tick_at": "2026-07-25T10:00:00Z",
+                },
+            }
+            settings_requests = 0
+
+            def route_settings(route: object) -> None:
+                nonlocal settings_requests
+                settings_requests += 1
+                route.fulfill(
+                    status=200,
+                    content_type="application/json; charset=utf-8",
+                    body=(
+                        json.dumps(
+                            error_payload if settings_requests == 1 else running_payload,
+                            ensure_ascii=False,
+                        )
+                    ),
+                )
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
+                context.route(
+                    "**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
+                    route_settings,
+                )
+                page = context.new_page()
+                page.goto(
+                    base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks",
+                    wait_until="domcontentloaded",
+                )
+                status = page.locator("[data-autoanswers-master-status]")
+                status.wait_for()
+                self.assertEqual(status.inner_text(), "Остановлено из-за ошибки")
+                page.wait_for_function(
+                    """() => document.querySelector('[data-autoanswers-master-status]').textContent === 'Работает'""",
+                    timeout=7000,
+                )
+                self.assertGreaterEqual(settings_requests, 2)
+                browser.close()
 
     def test_technical_spoiler_names_not_run_checks_before_generation(self) -> None:
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
