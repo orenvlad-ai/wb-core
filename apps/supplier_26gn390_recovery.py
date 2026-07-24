@@ -30,6 +30,7 @@ from packages.application.own_product_capital import (  # noqa: E402
 from packages.application.warehouse_functional import (  # noqa: E402
     enqueue_warehouse_targeted_recalculation,
 )
+from apps.recovery_file_utils import file_sha256  # noqa: E402
 
 
 SHIPMENT_ID = "sup_b3070385b00b4eb680bd805d751d65be"
@@ -392,7 +393,7 @@ def apply_plan(
         "applied": True,
         "backup": {
             "path": str(backup_path),
-            "sha256": hashlib.sha256(backup_path.read_bytes()).hexdigest(),
+            "sha256": file_sha256(backup_path),
         },
         "targeted_recalculation": queue,
         "capital_reconciliation": capital_reconciliation,

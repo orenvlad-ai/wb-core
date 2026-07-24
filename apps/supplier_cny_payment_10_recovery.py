@@ -22,6 +22,7 @@ from packages.application.cny_ledger import CnyLedgerBlock  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from apps.recovery_file_utils import file_sha256  # noqa: E402
 
 
 DOCUMENT_ID = "cnydoc_40e1467235af48549f98e9f1ba93ac9f"
@@ -209,7 +210,7 @@ def apply_plan(
         "applied": True,
         "backup": {
             "path": str(backup_path),
-            "sha256": hashlib.sha256(backup_path.read_bytes()).hexdigest(),
+            "sha256": file_sha256(backup_path),
         },
         "correction": result,
         "post_apply": {
