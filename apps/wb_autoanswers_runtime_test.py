@@ -1055,12 +1055,39 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(before["monthly_actual_usd"], 0)
         plan = self.repo.budget_reconciliation_plan()
         self.assertEqual(plan["candidate_count"], 1)
+        self.assertEqual(plan["pre_change_digest"], plan["plan_fingerprint"])
+        self.assertEqual(
+            plan["expected_affected_records"],
+            {
+                "uncertainty_holds_inserted": 1,
+                "audit_events_appended": 1,
+                "runtime_state_rows_updated": 1,
+                "provider_calls_created": 0,
+                "cost_events_created": 0,
+                "wb_writes_created": 0,
+            },
+        )
+        self.assertEqual(
+            plan["non_target_invariants"],
+            {
+                "provider_calls_unchanged": True,
+                "cost_events_unchanged": True,
+                "wb_writes_unchanged": True,
+                "reservation_and_job_evidence_unchanged": True,
+            },
+        )
+        self.assertFalse(plan["reversibility"]["backup_required"])
         applied = self.repo.apply_budget_reconciliation(
             expected_fingerprint=plan["plan_fingerprint"],
             actor_id="operator",
         )
         self.assertEqual(applied["status"], "reconciled")
+        self.assertFalse(applied["idempotent"])
         self.assertEqual(applied["holds_appended"], 1)
+        self.assertEqual(
+            applied["affected_records"], plan["expected_affected_records"]
+        )
+        self.assertTrue(applied["non_target_invariants_preserved"])
         after = self.repo.budget_status()
         self.assertEqual(after["monthly_actual_usd"], 0)
         self.assertGreater(after["monthly_uncertainty_hold_usd"], 0)
@@ -1069,11 +1096,49 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(
             self.repo.budget_reconciliation_plan()["candidate_count"], 0
         )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            before_replay = conn.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_audit_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_cost_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_attempts)
+                """
+            ).fetchone()
+        replay = self.repo.apply_budget_reconciliation(
+            expected_fingerprint=plan["plan_fingerprint"],
+            actor_id="operator",
+        )
+        self.assertEqual(replay["status"], "already_reconciled")
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["holds_appended"], 0)
+        self.assertEqual(replay["previous_holds_appended"], 1)
+        self.assertTrue(replay["non_target_invariants_preserved"])
+        self.assertEqual(
+            sum(replay["affected_records"].values()),
+            0,
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            after_replay = conn.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_audit_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_cost_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events),
+                  (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_attempts)
+                """
+            ).fetchone()
+        self.assertEqual(after_replay, before_replay)
         with self.assertRaisesRegex(
             AutoanswersRuntimeError, "evidence changed"
         ):
             self.repo.apply_budget_reconciliation(
-                expected_fingerprint=plan["plan_fingerprint"],
+                expected_fingerprint="sha256:" + "0" * 64,
                 actor_id="operator",
             )
 
