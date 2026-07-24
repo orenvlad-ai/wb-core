@@ -2897,10 +2897,35 @@ class AutoanswersRepository:
             ),
             "holds": holds,
         }
+        plan_fingerprint = "sha256:" + sha256_text(canonical_json(identity))
         return {
             **identity,
-            "plan_fingerprint": "sha256:" + sha256_text(canonical_json(identity)),
+            "plan_fingerprint": plan_fingerprint,
+            "pre_change_digest": plan_fingerprint,
             "candidate_count": len(holds),
+            "expected_affected_records": {
+                "uncertainty_holds_inserted": len(holds),
+                "audit_events_appended": len(holds),
+                "runtime_state_rows_updated": 1 if holds else 0,
+                "provider_calls_created": 0,
+                "cost_events_created": 0,
+                "wb_writes_created": 0,
+            },
+            "non_target_invariants": {
+                "provider_calls_unchanged": True,
+                "cost_events_unchanged": True,
+                "wb_writes_unchanged": True,
+                "reservation_and_job_evidence_unchanged": True,
+            },
+            "reversibility": {
+                "kind": "append_only_conservative_accounting",
+                "backup_required": False,
+                "reason": (
+                    "The exact reservation/job evidence remains immutable; "
+                    "apply only appends conservative holds and audit, never "
+                    "deletes evidence or asserts actual provider cost."
+                ),
+            },
             "captured_at": iso_utc(self._now()),
             "runtime": {
                 "stop_reason": (
@@ -2917,6 +2942,71 @@ class AutoanswersRepository:
             },
         }
 
+    def _applied_budget_reconciliation_readback(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        expected_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """Return exact prior-apply proof only when no uncertainty remains."""
+
+        if self._budget_uncertainty_candidates(conn):
+            return None
+        runtime = conn.execute(
+            """
+            SELECT stop_reason
+            FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+            WHERE singleton=1
+            """
+        ).fetchone()
+        if (
+            runtime is not None
+            and str(runtime["stop_reason"] or "") == "budget_state_unknown"
+        ):
+            return None
+        rows = conn.execute(
+            """
+            SELECT aggregate_id,details_json,created_at
+            FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+            WHERE aggregate_type='budget_uncertainty'
+              AND event_type='conservative_uncertainty_hold_appended'
+            ORDER BY created_at,aggregate_id
+            """
+        ).fetchall()
+        matching: list[sqlite3.Row] = []
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"] or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(details, Mapping)
+                and str(details.get("plan_fingerprint") or "")
+                == expected_fingerprint
+            ):
+                matching.append(row)
+        if not matching:
+            return None
+        hold_ids = [str(row["aggregate_id"]) for row in matching]
+        placeholders = ",".join("?" for _ in hold_ids)
+        persisted_holds = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                WHERE hold_id IN ({placeholders})
+                """,
+                hold_ids,
+            ).fetchone()[0]
+        )
+        if persisted_holds != len(hold_ids):
+            return None
+        return {
+            "hold_count": len(hold_ids),
+            "hold_ids": hold_ids,
+            "confirmed_at": max(str(row["created_at"] or "") for row in matching),
+        }
+
     def apply_budget_reconciliation(
         self,
         *,
@@ -2929,7 +3019,33 @@ class AutoanswersRepository:
         if not actor:
             raise ValueError("actor_id is required")
         plan = self.budget_reconciliation_plan()
-        if str(plan["plan_fingerprint"]) != _clean_text(expected_fingerprint):
+        fingerprint = _clean_text(expected_fingerprint)
+        if str(plan["plan_fingerprint"]) != fingerprint:
+            with self.transaction() as conn:
+                replay = self._applied_budget_reconciliation_readback(
+                    conn,
+                    expected_fingerprint=fingerprint,
+                )
+            if replay is not None:
+                return {
+                    "status": "already_reconciled",
+                    "idempotent": True,
+                    "plan_fingerprint": fingerprint,
+                    "holds_appended": 0,
+                    "previous_holds_appended": int(replay["hold_count"]),
+                    "affected_records": {
+                        "uncertainty_holds_inserted": 0,
+                        "audit_events_appended": 0,
+                        "runtime_state_rows_updated": 0,
+                        "provider_calls_created": 0,
+                        "cost_events_created": 0,
+                        "wb_writes_created": 0,
+                    },
+                    "non_target_invariants_preserved": True,
+                    "prior_apply": replay,
+                    "budget": self.budget_status(),
+                    "readback": self.budget_reconciliation_status(),
+                }
             raise AutoanswersRuntimeError(
                 "budget reconciliation evidence changed; create a new plan",
                 code="budget_reconciliation_stale",
@@ -2993,7 +3109,7 @@ class AutoanswersRepository:
             current_fingerprint = "sha256:" + sha256_text(
                 canonical_json(identity)
             )
-            if current_fingerprint != _clean_text(expected_fingerprint):
+            if current_fingerprint != fingerprint:
                 raise AutoanswersRuntimeError(
                     "budget reconciliation evidence changed during apply",
                     code="budget_reconciliation_stale",
@@ -3056,7 +3172,7 @@ class AutoanswersRepository:
                         "amount_semantics": (
                             "conservative_cap_hold_not_actual_cost"
                         ),
-                        "plan_fingerprint": expected_fingerprint,
+                        "plan_fingerprint": fingerprint,
                     },
                     at=now,
                 )
@@ -3070,15 +3186,18 @@ class AutoanswersRepository:
                 conn,
                 None,
                 details={
-                    "budget_reconciliation_fingerprint": expected_fingerprint,
+                    "budget_reconciliation_fingerprint": fingerprint,
                     "conservative_holds_appended": len(current_holds),
                 },
                 at=now,
             )
         return {
             "status": "reconciled",
-            "plan_fingerprint": expected_fingerprint,
+            "idempotent": False,
+            "plan_fingerprint": fingerprint,
             "holds_appended": len(plan["holds"]),
+            "affected_records": dict(plan["expected_affected_records"]),
+            "non_target_invariants_preserved": True,
             "budget": self.budget_status(),
             "readback": self.budget_reconciliation_status(),
         }

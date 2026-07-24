@@ -132,6 +132,14 @@ Defaults are `$0.50/hour`, `$5/day`, `$50/month`, 20 paid reviews/hour, paid-rev
 
 The legacy incident's unsupported `$1.00` settlement is removed from confirmed actual by an append-only adjustment but remains displayed as `Legacy без usage` and conservatively held against the applicable caps. It is never silently relabelled as measured provider cost. A current provider-started crash boundary is reconciled only by `budget_reconciliation_v1`: the read-only plan binds the exact reservation/job evidence and maximum per-review reservation into a fingerprint; apply appends the conservative hold and audit, then clears `budget_state_unknown` only after readback proves no unresolved boundary. It never writes zero or guessed actual cost.
 
+The reconciliation plan also exposes its pre-change digest, exact affected-row
+counts and named non-target invariants for provider calls, cost events, WB
+writes and the immutable reservation/job evidence. Apply returns the actual
+affected counts and readback. Re-applying an already consumed
+exact fingerprint returns a confirmed idempotent no-op only when every
+fingerprint-bound hold and audit row still exists and no provider-cost
+uncertainty remains. A different or stale fingerprint still fails closed.
+
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
 
 Policy v3 classifies a current version as `content_bearing` when trimmed text, pros, cons, any non-empty tag, photo or video exists. Canonical media rows and `has_photo`/`has_video` are conservative positive evidence. Only a review with none of those surfaces and a rating 1–5 is `rating_only`; malformed or contradictory data is `indeterminate` and fails closed to review. True `rating_only` continues to use the unchanged owner-approved v2 template contract, costs `$0` and never invokes Node/OpenAI. The frozen v1.4.2 prefilter is not modified.
