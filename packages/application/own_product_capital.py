@@ -130,6 +130,102 @@ class OwnProductCapitalBlock:
                 (payment_id,),
             ).fetchone() is not None
 
+    def remove_supplier_payment(
+        self,
+        payment_id: str,
+        *,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        """Remove a derived payment layer while retaining its source document/audit.
+
+        This is the canonical compensation used when a CNY source document is
+        excluded or relinked.  It removes only derived capital rows and is safe
+        to repeat.
+        """
+
+        payment_id = _required_text(payment_id, "payment_id")
+        removed_layer = False
+        removed_events = 0
+        shipment_id = ""
+        with _connect(self.runtime.db_path) as conn:
+            _ensure_schema(conn)
+            _ensure_own_capital_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT shipment_id FROM sheet_vitrina_v1_own_capital_payment_layers WHERE payment_id = ?",
+                (payment_id,),
+            ).fetchone()
+            if existing is not None:
+                shipment_id = str(existing["shipment_id"] or "")
+                cursor = conn.execute(
+                    """
+                    DELETE FROM sheet_vitrina_v1_own_capital_events
+                    WHERE event_type = ?
+                      AND event_id LIKE ? ESCAPE '\\'
+                    """,
+                    (
+                        EVENT_SUPPLIER_PAYMENT,
+                        _literal_like_prefix(f"supplier_payment:{payment_id}:"),
+                    ),
+                )
+                removed_events = max(int(cursor.rowcount or 0), 0)
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_own_capital_payment_layers WHERE payment_id = ?",
+                    (payment_id,),
+                )
+                removed_layer = True
+                _rebase_supplier_payment_layers(conn, shipment_id)
+            conn.commit()
+        if recalculate and removed_layer:
+            self.recalculate()
+        return {
+            "status": "ok",
+            "payment_id": payment_id,
+            "shipment_id": shipment_id,
+            "removed": removed_layer,
+            "removed_event_count": removed_events,
+            "idempotent": not removed_layer,
+        }
+
+    def remove_financial_document_expenses(
+        self,
+        financial_document_id: str,
+        *,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        """Compensate derived capital events for an archived financial source."""
+
+        financial_document_id = _required_text(
+            financial_document_id, "financial_document_id"
+        )
+        removed_events = 0
+        with _connect(self.runtime.db_path) as conn:
+            _ensure_own_capital_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_own_capital_events
+                WHERE event_type = ?
+                  AND event_id LIKE ? ESCAPE '\\'
+                """,
+                (
+                    EVENT_COST_PAYMENT,
+                    _literal_like_prefix(
+                        f"cost_payment:financial_expense:{financial_document_id}:"
+                    ),
+                ),
+            )
+            removed_events = max(int(cursor.rowcount or 0), 0)
+            conn.commit()
+        if recalculate and removed_events:
+            self.recalculate()
+        return {
+            "status": "ok",
+            "financial_document_id": financial_document_id,
+            "removed_event_count": removed_events,
+            "idempotent": removed_events == 0,
+        }
+
     def has_cost_payment_event(self, document_id: str) -> bool:
         document_id = _required_text(document_id, "document_id")
         with _connect(self.runtime.db_path) as conn:
@@ -256,6 +352,7 @@ class OwnProductCapitalBlock:
                     now,
                 ),
             )
+            _rebase_supplier_payment_layers(conn, shipment_id)
             allocated = _allocate_payment(lines, paid_share=incremental_share, paid_rub=payment_rub)
             for index, line in enumerate(allocated, start=1):
                 self._insert_event(
@@ -2563,6 +2660,34 @@ class OwnProductCapitalBlock:
                 (f"blocker:{fingerprint}", code, source_identity, _json_dumps(dict(details)), self.timestamp_factory()),
             )
             conn.commit()
+
+
+def _rebase_supplier_payment_layers(conn: sqlite3.Connection, shipment_id: str) -> None:
+    normalized_id = str(shipment_id or "").strip()
+    if not normalized_id:
+        return
+    rows = conn.execute(
+        """
+        SELECT payment_id, invoice_total_cny, paid_cny
+        FROM sheet_vitrina_v1_own_capital_payment_layers
+        WHERE shipment_id = ?
+        ORDER BY effective_date ASC, created_at ASC, payment_id ASC
+        """,
+        (normalized_id,),
+    ).fetchall()
+    cumulative = ZERO
+    for row in rows:
+        invoice_total = _decimal(row["invoice_total_cny"])
+        cumulative += _decimal(row["paid_cny"])
+        cumulative_share = cumulative / invoice_total if invoice_total > ZERO else ZERO
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_own_capital_payment_layers
+            SET cumulative_paid_share = ?
+            WHERE payment_id = ?
+            """,
+            (_text_decimal(cumulative_share), str(row["payment_id"])),
+        )
 
 
 def _ensure_own_capital_schema(conn: sqlite3.Connection) -> None:

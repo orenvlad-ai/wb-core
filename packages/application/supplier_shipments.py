@@ -528,7 +528,11 @@ class SupplierShipmentsBlock:
             item.get("line_type") == LINE_TYPE_PRODUCT and not str(item.get("barcode") or "").strip()
             for item in existing.get("lines") or []
         )
-        if legacy_product_barcodes_missing and _payload_contains_explicit_lines(payload):
+        real_line_mutation = _payload_has_real_line_mutation(
+            payload,
+            existing_lines=existing.get("lines") or [],
+        )
+        if legacy_product_barcodes_missing and real_line_mutation:
             raise ValueError(
                 "legacy supplier shipment product lines do not have source-owned barcodes; "
                 "line edits are blocked until the invoice is reparsed"
@@ -707,6 +711,174 @@ class SupplierShipmentsBlock:
             "order_status вычисляется из фактических дат; ручной status-only PATCH не поддерживается."
         )
 
+    def preview_factual_dates(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(existing, shipment_id=shipment_id)
+        header = dict(existing.get("header") or {})
+        edited = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        old_shipment = str(header.get("actual_shipment_date") or "").strip()
+        old_acceptance = str(header.get("actual_ff_acceptance_date") or "").strip()
+        new_shipment = _resolve_optional_date_field(
+            payload, edited, header, "actual_shipment_date"
+        )
+        new_acceptance = _resolve_optional_date_field(
+            payload, edited, header, "actual_ff_acceptance_date"
+        )
+        validate_supplier_factual_dates(
+            actual_shipment_date=new_shipment,
+            actual_ff_acceptance_date=new_acceptance,
+            business_today=supplier_business_today(
+                timestamp=self.timestamp_factory()
+            ),
+            historical_status_exception=header.get("historical_status_exception"),
+        )
+        changes = []
+        if old_shipment != new_shipment:
+            changes.append(
+                {
+                    "field": "actual_shipment_date",
+                    "label": "Фактическая дата отгрузки",
+                    "old_value": old_shipment,
+                    "new_value": new_shipment,
+                }
+            )
+        if old_acceptance != new_acceptance:
+            changes.append(
+                {
+                    "field": "actual_ff_acceptance_date",
+                    "label": "Фактическая дата приёмки на ФФ",
+                    "old_value": old_acceptance,
+                    "new_value": new_acceptance,
+                }
+            )
+        if not changes:
+            raise ValueError("factual date preview has no changes")
+        token = "sfc_" + uuid4().hex
+        created_at = self.timestamp_factory()
+        expires_at = _supplier_confirmation_expiry(created_at, ttl_seconds)
+        revision = _supplier_confirmation_revision(
+            existing,
+            financial_documents=self.runtime.list_supplier_financial_documents(
+                shipment_id
+            ),
+            cny_documents=[
+                item
+                for item in self.runtime.list_cny_documents()
+                if str(item.get("source_order_id") or "") == shipment_id
+            ],
+        )
+        mutation_payload = {
+            key: value
+            for key, value in dict(payload).items()
+            if key not in {"confirmation_token", "lines"}
+        }
+        nested = mutation_payload.get("payload")
+        if isinstance(nested, Mapping):
+            mutation_payload["payload"] = {
+                key: value
+                for key, value in dict(nested).items()
+                if key != "lines"
+            }
+        self.runtime.save_supplier_confirmation_preview(
+            token=token,
+            confirmation_type="supplier_factual_dates",
+            supplier_order_id=shipment_id,
+            subject_id=shipment_id,
+            target_revision=revision,
+            source_sha256="",
+            payload={
+                "mutation_payload": mutation_payload,
+                "changes": changes,
+                "old_values": {
+                    "actual_shipment_date": old_shipment,
+                    "actual_ff_acceptance_date": old_acceptance,
+                },
+                "new_values": {
+                    "actual_shipment_date": new_shipment,
+                    "actual_ff_acceptance_date": new_acceptance,
+                },
+            },
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        acceptance_changed = any(
+            item["field"] == "actual_ff_acceptance_date" for item in changes
+        )
+        consequences = [
+            "Изменятся складские границы и fingerprints себестоимости.",
+            "Будет поставлен targeted functional replay.",
+        ]
+        if acceptance_changed:
+            consequences.extend(
+                [
+                    "Может быть создан идемпотентный приход на FF.",
+                    "Может быть создан cost layer и пересчитана себестоимость.",
+                    "Будут повторно проверены резервы WB.",
+                    "Полностью обеспеченные поставки могут быть списаны в FF → WB.",
+                ]
+            )
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_factual_dates_preview",
+            "status": "preview",
+            "preview_required": True,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "shipment_id": shipment_id,
+            "invoice_no": str(header.get("invoice_no") or ""),
+            "revision": revision,
+            "changes": changes,
+            "consequences": consequences,
+        }
+
+    def validate_factual_dates_confirmation(
+        self,
+        shipment_id: str,
+        token: str,
+    ) -> dict[str, Any]:
+        preview = self.runtime.load_supplier_confirmation_preview(token)
+        if preview is None:
+            raise ValueError("confirmation token is invalid")
+        if (
+            str(preview.get("confirmation_type") or "")
+            != "supplier_factual_dates"
+            or str(preview.get("supplier_order_id") or "") != shipment_id
+            or str(preview.get("subject_id") or "") != shipment_id
+        ):
+            raise ValueError("confirmation token does not match the shipment")
+        if preview.get("consumed_at"):
+            return preview
+        if _supplier_confirmation_is_expired(
+            str(preview.get("expires_at") or ""), self.timestamp_factory()
+        ):
+            raise ValueError("confirmation token expired; request a new preview")
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        revision = _supplier_confirmation_revision(
+            existing,
+            financial_documents=self.runtime.list_supplier_financial_documents(
+                shipment_id
+            ),
+            cny_documents=[
+                item
+                for item in self.runtime.list_cny_documents()
+                if str(item.get("source_order_id") or "") == shipment_id
+            ],
+        )
+        if revision != str(preview.get("target_revision") or ""):
+            raise ValueError(
+                "confirmation token is stale; shipment or cost dependencies changed"
+            )
+        return preview
+
     def factual_date_change_required(self, shipment_id: str, payload: Mapping[str, Any]) -> bool:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
@@ -719,6 +891,27 @@ class SupplierShipmentsBlock:
             "actual_shipment_date",
         )
         return desired != str(existing["header"].get("actual_shipment_date") or "").strip()
+
+    def factual_dates_change_required(
+        self, shipment_id: str, payload: Mapping[str, Any]
+    ) -> bool:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        edited_payload = _resolve_edited_payload(
+            payload, fallback=_detail_payload(existing)
+        )
+        header = dict(existing["header"])
+        return any(
+            _resolve_optional_date_field(
+                payload, edited_payload, header, field_name
+            )
+            != str(header.get(field_name) or "").strip()
+            for field_name in (
+                "actual_shipment_date",
+                "actual_ff_acceptance_date",
+            )
+        )
 
     def desired_actual_shipment_date(
         self,
@@ -740,17 +933,14 @@ class SupplierShipmentsBlock:
         self,
         shipment_id: str,
         payload: Mapping[str, Any],
+        *,
+        allow_actual_ff_acceptance_change: bool = False,
     ) -> bool:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(existing["header"])
         edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
-        edited_payload = _bind_source_owned_line_identity(
-            edited_payload,
-            trusted_payload=_detail_payload(existing),
-            context=f"saved supplier shipment {shipment_id}",
-        )
         shipment_date = _validate_iso_date(
             str(
                 payload.get("shipment_date")
@@ -771,11 +961,6 @@ class SupplierShipmentsBlock:
             header,
             "approx_yuan_rate",
         )
-        metadata, lines, _, _, _, _ = _normalize_edit_payload(
-            edited_payload,
-            shipment_date=shipment_date,
-            force_manual_override=False,
-        )
         header_fields = (
             "invoice_no",
             "invoice_date",
@@ -785,16 +970,28 @@ class SupplierShipmentsBlock:
             "customer_name",
             "currency",
         )
+        explicit_metadata = _payload_explicit_metadata(payload)
+        baseline_metadata = dict(
+            (_detail_payload(existing).get("metadata") or {})
+        )
         return bool(
             shipment_date != str(header.get("shipment_date") or "")
-            or acceptance != str(header.get("actual_ff_acceptance_date") or "").strip()
+            or (
+                not allow_actual_ff_acceptance_change
+                and acceptance
+                != str(header.get("actual_ff_acceptance_date") or "").strip()
+            )
             or _optional_number(approx_rate) != _optional_number(header.get("approx_yuan_rate"))
             or any(
-                str(metadata.get(field) or "") != str(header.get(field) or "")
+                field in explicit_metadata
+                and str(explicit_metadata.get(field) or "")
+                != str(baseline_metadata.get(field) or "")
                 for field in header_fields
             )
-            or [dict(item) for item in lines]
-            != [dict(item) for item in existing.get("lines") or []]
+            or _payload_has_real_line_mutation(
+                payload,
+                existing_lines=existing.get("lines") or [],
+            )
             or "contract_document_id" in payload
         )
 
@@ -2876,7 +3073,8 @@ def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str
     if raw is None:
         raw = payload.get("edited_payload")
     if isinstance(raw, Mapping):
-        resolved = deepcopy(dict(raw))
+        resolved = deepcopy(dict(fallback))
+        resolved.update(deepcopy(dict(raw)))
     else:
         resolved = deepcopy(dict(fallback))
     for key in ("metadata", "lines", "summary", "warnings", "errors"):
@@ -2896,6 +3094,162 @@ def _payload_contains_explicit_lines(payload: Mapping[str, Any]) -> bool:
         if isinstance(nested, Mapping) and "lines" in nested:
             return True
     return False
+
+
+def _payload_explicit_lines(payload: Mapping[str, Any]) -> list[Mapping[str, Any]] | None:
+    if "lines" in payload:
+        lines = payload.get("lines")
+        return lines if isinstance(lines, list) else []
+    for key in ("payload", "edited_payload"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping) and "lines" in nested:
+            lines = nested.get("lines")
+            return lines if isinstance(lines, list) else []
+    return None
+
+
+def _payload_explicit_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for candidate in (
+        payload,
+        payload.get("payload"),
+        payload.get("edited_payload"),
+    ):
+        if not isinstance(candidate, Mapping):
+            continue
+        metadata = candidate.get("metadata")
+        if isinstance(metadata, Mapping):
+            result.update(dict(metadata))
+        for field_name in (
+            "invoice_no",
+            "invoice_date",
+            "contract_no",
+            "contract_date",
+            "supplier_name",
+            "customer_name",
+            "currency",
+        ):
+            if field_name in candidate:
+                result[field_name] = candidate.get(field_name)
+    return result
+
+
+def _supplier_line_mutation_signature(line: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: line.get(key)
+        for key in (
+            "line_id",
+            "source_sheet",
+            "source_row",
+            "line_type",
+            "description",
+            "source_model",
+            "barcode",
+            "normalized_model",
+            "match_key",
+            "internal_nm_id",
+            "qty",
+            "unit_price",
+            "amount",
+            "currency",
+            "comment",
+            "manual_override",
+        )
+    }
+
+
+def _payload_has_real_line_mutation(
+    payload: Mapping[str, Any],
+    *,
+    existing_lines: Iterable[Mapping[str, Any]],
+) -> bool:
+    explicit = _payload_explicit_lines(payload)
+    if explicit is None:
+        return False
+    current = [
+        _supplier_line_mutation_signature(item)
+        for item in existing_lines
+        if isinstance(item, Mapping)
+    ]
+    candidate = [
+        _supplier_line_mutation_signature(item)
+        for item in explicit
+        if isinstance(item, Mapping)
+    ]
+    return candidate != current
+
+
+def _supplier_confirmation_timestamp(value: str) -> datetime:
+    normalized = str(value or "").strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _supplier_confirmation_expiry(created_at: str, ttl_seconds: int) -> str:
+    from datetime import timedelta
+
+    ttl = max(60, min(int(ttl_seconds or 900), 3600))
+    return (
+        _supplier_confirmation_timestamp(created_at) + timedelta(seconds=ttl)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _supplier_confirmation_is_expired(expires_at: str, now: str) -> bool:
+    return _supplier_confirmation_timestamp(now) >= _supplier_confirmation_timestamp(
+        expires_at
+    )
+
+
+def _supplier_confirmation_revision(
+    shipment: Mapping[str, Any],
+    *,
+    financial_documents: Iterable[Mapping[str, Any]],
+    cny_documents: Iterable[Mapping[str, Any]] = (),
+) -> str:
+    header = dict(shipment.get("header") or {})
+    material = {
+        "shipment": {
+            "shipment_id": str(header.get("shipment_id") or ""),
+            "updated_at": str(header.get("updated_at") or ""),
+            "actual_shipment_date": str(header.get("actual_shipment_date") or ""),
+            "actual_ff_acceptance_date": str(
+                header.get("actual_ff_acceptance_date") or ""
+            ),
+        },
+        "line_signature": [
+            _supplier_line_mutation_signature(item)
+            for item in shipment.get("lines") or []
+            if isinstance(item, Mapping)
+        ],
+        "financial_documents": [
+            {
+                "document_id": str(item.get("document_id") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+                "parse_status": str(item.get("parse_status") or ""),
+                "file_sha256": str(item.get("file_sha256") or ""),
+            }
+            for item in financial_documents
+        ],
+        "cny_documents": [
+            {
+                "document_id": str(item.get("document_id") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+                "status": str(item.get("status") or ""),
+                "source_order_id": str(item.get("source_order_id") or ""),
+                "file_sha256": str(item.get("file_sha256") or ""),
+            }
+            for item in cny_documents
+        ],
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
 
 
 def _bind_source_owned_line_identity(

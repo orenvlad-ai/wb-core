@@ -1769,8 +1769,8 @@ def _assert_registry_data_source_sections_smoke() -> None:
     if _registry_cell_display(registry, "fact_expenses", "expenses_completeness_status", "source_sections") != "Расходы не учтены полностью":
         raise AssertionError(f"expenses completeness default mismatch: {registry}")
     exact_cell = _registry_cell(registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections")
-    if exact_cell.get("status") != "incomplete":
-        raise AssertionError(f"exact cost must be yellow/incomplete by default when value exists: {exact_cell}")
+    if exact_cell.get("status") != "provisional":
+        raise AssertionError(f"exact cost must be provisional until canonical certification: {exact_cell}")
     complete_header = {**shipment["header"], "shipment_id": "source_sections_done", "expenses_complete": True}
     complete_registry = build_supplier_shipment_registry(
         [
@@ -1780,12 +1780,22 @@ def _assert_registry_data_source_sections_smoke() -> None:
                 "lines": [],
                 "documents": documents,
                 "expense_lines": [],
-                "summary": build_financial_summary(documents, [], shipment={"header": complete_header, "lines": []}),
+                "summary": {
+                    **build_financial_summary(documents, [], shipment={"header": complete_header, "lines": []}),
+                    "per_unit": {
+                        **build_financial_summary(
+                            documents,
+                            [],
+                            shipment={"header": complete_header, "lines": []},
+                        ).get("per_unit", {}),
+                        "exact_cost_status": "certified",
+                    },
+                },
             }
         ]
     )
-    if _registry_cell(complete_registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections_done").get("status") != "complete":
-        raise AssertionError(f"exact cost must be green/complete after persisted flag: {complete_registry}")
+    if _registry_cell(complete_registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections_done").get("status") != "certified":
+        raise AssertionError(f"exact cost must be green only after canonical certification: {complete_registry}")
     _assert_registry_normalized_quality_smoke()
 
 
@@ -2214,7 +2224,23 @@ def _assert_http_api_smoke() -> None:
             base_url = f"http://127.0.0.1:{config.port}"
             collection_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_financial/financial-documents"
             for filename in ("quote.pdf", "invoice-103.pdf", "invoice-113.pdf", "customs.pdf"):
-                status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic financial smoke\n", filename=filename)
+                preview_status, preview = _post_multipart(
+                    collection_url,
+                    ("%PDF-1.4\n% synthetic financial smoke " + filename + "\n").encode(),
+                    filename=filename,
+                )
+                if (
+                    preview_status != 200
+                    or not preview.get("confirmation_token")
+                    or preview.get("active_saved") is not False
+                ):
+                    raise AssertionError(
+                        f"financial preview failed for {filename}: {preview_status} {preview}"
+                    )
+                status, payload = _post_json(
+                    collection_url + "/confirm-upload",
+                    {"confirmation_token": preview["confirmation_token"]},
+                )
                 if status != 200 or not payload.get("document_id") or payload.get("parse_status") != "parsed":
                     raise AssertionError(f"financial upload failed for {filename}: {status} {payload}")
             list_status, listed = _get_json(collection_url)
@@ -2399,7 +2425,20 @@ def _assert_http_api_smoke() -> None:
             file_status, file_bytes, headers = _get_bytes(f"{collection_url}/{quote_document_id}/file")
             if file_status != 200 or b"synthetic financial smoke" not in file_bytes:
                 raise AssertionError(f"financial file download mismatch: {file_status} {headers}")
-            delete_status, delete_payload = _delete_json(f"{collection_url}/{quote_document_id}")
+            direct_delete_status, _ = _delete_json(f"{collection_url}/{quote_document_id}")
+            if direct_delete_status != 409:
+                raise AssertionError("direct financial DELETE must require confirmation")
+            delete_preview_status, delete_preview = _post_json(
+                f"{collection_url}/{quote_document_id}/delete-preview", {}
+            )
+            if delete_preview_status != 200 or not delete_preview.get("confirmation_token"):
+                raise AssertionError(
+                    f"financial delete preview failed: {delete_preview_status} {delete_preview}"
+                )
+            delete_status, delete_payload = _post_json(
+                f"{collection_url}/{quote_document_id}/delete-confirm",
+                {"confirmation_token": delete_preview["confirmation_token"]},
+            )
             if delete_status != 200 or delete_payload.get("deleted") is not False or delete_payload.get("archived") is not True or delete_payload.get("file_deleted") is not False:
                 raise AssertionError(f"financial archive failed: {delete_status} {delete_payload}")
             deleted_detail_status, deleted_detail = _get_json(f"{collection_url}/{quote_document_id}")
@@ -2408,31 +2447,48 @@ def _assert_http_api_smoke() -> None:
             deleted_list_status, after_delete = _get_json(collection_url)
             if (
                 deleted_list_status != 200
-                or len(after_delete.get("documents", [])) != 4
-                or len(after_delete.get("expense_lines", [])) != 14
+                or len(after_delete.get("documents", [])) != 3
+                or len(after_delete.get("archived_documents", [])) != 1
+                or len(after_delete.get("expense_lines", [])) != 5
                 or after_delete.get("summary", {}).get("quote", {}).get("logistics_usd") is not None
                 or after_delete.get("summary", {}).get("quote_invoice_match", {}).get("implied_rate") is not None
             ):
                 raise AssertionError(f"financial list after delete mismatch: {deleted_list_status} {after_delete}")
-            status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic financial smoke\n", filename="quote.pdf")
-            if status != 200 or payload.get("parse_status") not in {"parsed", "excluded"}:
+            preview_status, preview = _post_multipart(
+                collection_url,
+                b"%PDF-1.4\n% synthetic financial smoke quote.pdf\n",
+                filename="quote.pdf",
+            )
+            if preview_status != 200 or preview.get("duplicate_action") != "restore_excluded":
+                raise AssertionError(f"archived SHA must offer restore: {preview_status} {preview}")
+            status, payload = _post_json(
+                collection_url + "/confirm-upload",
+                {"confirmation_token": preview["confirmation_token"]},
+            )
+            if status != 200 or payload.get("duplicate_action") != "restored_excluded":
                 raise AssertionError(f"financial re-upload after archive failed: {status} {payload}")
             final_status, final_list = _get_json(collection_url)
             final_summary = final_list.get("summary") or {}
             if (
                 final_status != 200
-                or len(final_list.get("documents", [])) != 5
-                or len(final_list.get("expense_lines", [])) != 23
+                or len(final_list.get("documents", [])) != 4
+                or len(final_list.get("expense_lines", [])) != 14
                 or final_summary.get("quote", {}).get("logistics_usd") != 16151.0
                 or not _approx(final_summary.get("quote_invoice_match", {}).get("implied_rate"), 75.29, tolerance=0.01)
             ):
                 raise AssertionError(f"financial re-upload summary mismatch: {final_status} {final_list}")
-            packing_status, packing_payload = _post_multipart(
+            packing_preview_status, packing_preview = _post_multipart(
                 collection_url,
                 _packing_list_workbook_bytes(),
                 filename="packing-list.xlsx",
             )
+            packing_status, packing_payload = _post_json(
+                collection_url + "/confirm-upload",
+                {"confirmation_token": packing_preview.get("confirmation_token")},
+            )
             if (
+                packing_preview_status != 200
+                or
                 packing_status != 200
                 or packing_payload.get("document_type") != "packing_list"
                 or packing_payload.get("parse_status") != "parsed"
@@ -2443,8 +2499,8 @@ def _assert_http_api_smoke() -> None:
             packing_summary = (packed_list.get("summary") or {}).get("packing_list") or {}
             if (
                 packed_status != 200
-                or len(packed_list.get("documents", [])) != 6
-                or len(packed_list.get("expense_lines", [])) != 23
+                or len(packed_list.get("documents", [])) != 5
+                or len(packed_list.get("expense_lines", [])) != 14
                 or packing_summary.get("total_cartons") != 221.0
                 or packing_summary.get("total_quantity") != 55250.0
                 or packing_summary.get("total_gross_weight_kg") != 4680.45
@@ -2476,7 +2532,19 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"all-documents archive must warn about missing bank docs: {archive_manifest}")
 
             for filename in ("bank-control.pdf", "bank-transfer.pdf"):
-                status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic bank smoke\n", filename=filename)
+                preview_status, preview = _post_multipart(
+                    collection_url,
+                    ("%PDF-1.4\n% synthetic bank smoke " + filename + "\n").encode(),
+                    filename=filename,
+                )
+                status, payload = _post_json(
+                    collection_url + "/confirm-upload",
+                    {"confirmation_token": preview.get("confirmation_token")},
+                )
+                if preview_status != 200:
+                    raise AssertionError(
+                        f"bank document preview failed for {filename}: {preview_status} {preview}"
+                    )
                 if status != 200 or payload.get("parse_status") != "needs_review" or payload.get("order_match_status") != "mismatch":
                     raise AssertionError(f"bank document upload failed for {filename}: {status} {payload}")
                 if not any("другому заказу" in warning for warning in payload.get("warnings", [])):
@@ -2557,8 +2625,8 @@ def _assert_http_api_smoke() -> None:
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
-            if all_status != 200 or len(all_manifest.get("included", [])) != 10:
-                raise AssertionError(f"all-documents archive must retain active and archived audit docs: {all_status} {all_manifest}")
+            if all_status != 200 or len(all_manifest.get("included", [])) != 9:
+                raise AssertionError(f"all-documents package must contain active docs only: {all_status} {all_manifest}")
             for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "packing_list"):
                 if expected_type not in all_types:
                     raise AssertionError(f"all-documents archive missing {expected_type}: {all_manifest}")
@@ -2910,6 +2978,20 @@ def _patch_json(url: str, payload: Mapping[str, Any]) -> tuple[int, dict[str, An
         url,
         data=json.dumps(dict(payload)).encode("utf-8"),
         method="PATCH",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_request.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _post_json(url: str, payload: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(dict(payload)).encode("utf-8"),
+        method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
     try:

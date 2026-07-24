@@ -933,20 +933,20 @@ def main() -> None:
                 raise AssertionError("detail route must expose planned/fact shipment dates")
             if loaded_detail.get("product_lines", [{}])[0].get("price_conformity_checked_at") != "2026-05-30T08:00:00Z":
                 raise AssertionError("detail route must expose persisted price conformity metadata without recalculation")
-            future_shipment_status, future_shipment_payload = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            future_shipment_status, future_shipment_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_shipment_date": "2026-05-31"},
             )
             if future_shipment_status != 400 or "business today" not in str(future_shipment_payload.get("error", "")):
                 raise AssertionError(f"future shipment date must be rejected by API: {future_shipment_status} {future_shipment_payload}")
-            future_acceptance_status, future_acceptance_payload = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            future_acceptance_status, future_acceptance_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-31"},
             )
             if future_acceptance_status != 400 or "business today" not in str(future_acceptance_payload.get("error", "")):
                 raise AssertionError(f"future FF acceptance must be rejected by API: {future_acceptance_status} {future_acceptance_payload}")
-            early_acceptance_status, early_acceptance_payload = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            early_acceptance_status, early_acceptance_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-15"},
             )
             if early_acceptance_status != 400 or "раньше" not in str(early_acceptance_payload.get("error", "")):
@@ -1030,9 +1030,15 @@ def main() -> None:
                         raise RuntimeError("correction smoke hold timeout")
 
             entrypoint.supplier_shipment_factual_correction_block.failure_injector = hold_correction
-            correction_status, correction_accepted = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            correction_preview_status, correction_preview = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_shipment_date": "2026-05-17"},
+            )
+            if correction_preview_status != 200:
+                raise AssertionError(f"date correction preview failed: {correction_preview_status} {correction_preview}")
+            correction_status, correction_accepted = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/confirm",
+                {"confirmation_token": correction_preview["confirmation_token"]},
             )
             if correction_status != 202 or correction_accepted.get("status") != "accepted":
                 raise AssertionError(f"date correction must start one persisted job, got {correction_status} {correction_accepted}")
@@ -1044,9 +1050,15 @@ def main() -> None:
             running_correction = running_detail.get("factual_date_correction") or {}
             if running_detail_status != 200 or not running_correction.get("active"):
                 raise AssertionError(f"detail reload must expose active persisted correction: {running_detail}")
-            duplicate_status, duplicate_payload = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            duplicate_preview_status, duplicate_preview = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_shipment_date": "2026-05-17"},
+            )
+            if duplicate_preview_status != 200:
+                raise AssertionError(f"duplicate date preview failed: {duplicate_preview_status} {duplicate_preview}")
+            duplicate_status, duplicate_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/confirm",
+                {"confirmation_token": duplicate_preview["confirmation_token"]},
             )
             if (
                 duplicate_status != 202
@@ -1107,9 +1119,15 @@ def main() -> None:
             )
             if divergent_status != 400 or "вычисляется" not in str(divergent_payload.get("error", "")):
                 raise AssertionError(f"manual divergent status must be rejected, got {divergent_status} {divergent_payload}")
-            accepted_status, accepted_patched = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+            accepted_preview_status, accepted_preview = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-30"},
+            )
+            if accepted_preview_status != 200:
+                raise AssertionError(f"actual FF acceptance preview failed: {accepted_preview_status} {accepted_preview}")
+            accepted_status, accepted_patched = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/confirm",
+                {"confirmation_token": accepted_preview["confirmation_token"]},
             )
             if accepted_status != 200 or accepted_patched.get("order_status") != "accepted_ff":
                 raise AssertionError(f"actual FF acceptance patch must persist accepted_ff, got {accepted_status} {accepted_patched}")

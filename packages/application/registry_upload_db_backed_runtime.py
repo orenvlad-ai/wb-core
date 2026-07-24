@@ -4797,6 +4797,118 @@ class RegistryUploadDbBackedRuntime:
             raise ValueError(f"financial document was not saved: {document_id}")
         return loaded
 
+    def save_supplier_confirmation_preview(
+        self,
+        *,
+        token: str,
+        confirmation_type: str,
+        supplier_order_id: str,
+        subject_id: str,
+        target_revision: str,
+        source_sha256: str,
+        payload: Mapping[str, Any],
+        created_at: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        normalized_token = str(token or "").strip()
+        if not normalized_token:
+            raise ValueError("confirmation token is required")
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(expires_at, field_name="expires_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_confirmation_previews(
+                    token,confirmation_type,supplier_order_id,subject_id,
+                    target_revision,source_sha256,payload_json,created_at,expires_at,
+                    consumed_at,result_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,NULL,'{}')
+                """,
+                (
+                    normalized_token,
+                    str(confirmation_type or "").strip(),
+                    str(supplier_order_id or "").strip(),
+                    str(subject_id or "").strip(),
+                    str(target_revision or "").strip(),
+                    str(source_sha256 or "").strip(),
+                    json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True),
+                    created_at,
+                    expires_at,
+                ),
+            )
+            conn.commit()
+        loaded = self.load_supplier_confirmation_preview(normalized_token)
+        if loaded is None:
+            raise ValueError("confirmation preview was not saved")
+        return loaded
+
+    def load_supplier_confirmation_preview(self, token: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_supplier_confirmation_previews
+                WHERE token=?
+                """,
+                (str(token or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["payload"] = _loads_json_object(payload.pop("payload_json"))
+        payload["result"] = _loads_json_object(payload.pop("result_json"))
+        return payload
+
+    def complete_supplier_confirmation_preview(
+        self,
+        *,
+        token: str,
+        consumed_at: str,
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        _validate_timestamp(consumed_at, field_name="consumed_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT consumed_at,result_json
+                FROM sheet_vitrina_v1_supplier_confirmation_previews
+                WHERE token=?
+                """,
+                (str(token or "").strip(),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ValueError("confirmation token is invalid")
+            if str(row["consumed_at"] or "").strip():
+                conn.rollback()
+                loaded = self.load_supplier_confirmation_preview(token)
+                if loaded is None:
+                    raise ValueError("confirmation token is invalid")
+                return loaded
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_confirmation_previews
+                SET consumed_at=?,result_json=?
+                WHERE token=? AND consumed_at IS NULL
+                """,
+                (
+                    consumed_at,
+                    json.dumps(dict(result or {}), ensure_ascii=False, sort_keys=True),
+                    str(token or "").strip(),
+                ),
+            )
+            conn.commit()
+        loaded = self.load_supplier_confirmation_preview(token)
+        if loaded is None:
+            raise ValueError("confirmation token is invalid")
+        return loaded
+
     def list_supplier_financial_documents(self, supplier_order_id: str) -> list[dict[str, Any]]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
@@ -5086,6 +5198,7 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_cny_documents
@@ -9132,6 +9245,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines_by_order
         ON sheet_vitrina_v1_supplier_financial_expense_lines(supplier_order_id, financial_document_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_confirmation_previews (
+            token TEXT PRIMARY KEY,
+            confirmation_type TEXT NOT NULL,
+            supplier_order_id TEXT NOT NULL,
+            subject_id TEXT,
+            target_revision TEXT NOT NULL,
+            source_sha256 TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_confirmation_previews_by_target
+        ON sheet_vitrina_v1_supplier_confirmation_previews(
+            supplier_order_id,confirmation_type,created_at DESC
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layers (
             layer_id TEXT PRIMARY KEY,

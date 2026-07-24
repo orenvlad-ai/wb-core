@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
@@ -304,7 +304,7 @@ class SupplierFinancialDocumentsBlock:
         stored_documents = self.runtime.list_supplier_financial_documents(
             supplier_order_id
         )
-        documents = [
+        all_documents = [
             apply_supplier_order_document_match(self._with_download_path(item), shipment)
             for item in (
                 self._refresh_saved_document_parses(stored_documents)
@@ -312,12 +312,37 @@ class SupplierFinancialDocumentsBlock:
                 else stored_documents
             )
         ]
-        lines = self._with_cny_fee_equivalents(self.runtime.list_supplier_financial_expense_lines(supplier_order_id))
+        documents = [
+            item
+            for item in all_documents
+            if str(item.get("parse_status") or "")
+            != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ]
+        archived_documents = [
+            item
+            for item in all_documents
+            if str(item.get("parse_status") or "")
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ]
+        active_document_ids = {
+            str(item.get("document_id") or "") for item in documents
+        }
+        lines = self._with_cny_fee_equivalents(
+            [
+                item
+                for item in self.runtime.list_supplier_financial_expense_lines(
+                    supplier_order_id
+                )
+                if str(item.get("financial_document_id") or "")
+                in active_document_ids
+            ]
+        )
         return {
             "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
             "status": "ok",
             "supplier_order_id": supplier_order_id,
             "documents": documents,
+            "archived_documents": archived_documents,
             "expense_lines": lines,
             "summary": self._with_canonical_exact_cost(
                 supplier_order_id,
@@ -444,6 +469,506 @@ class SupplierFinancialDocumentsBlock:
             filename=filename,
             text_extractor=self.pdf_text_extractor,
         )
+
+    def preview_document_upload(
+        self,
+        supplier_order_id: str,
+        *,
+        file_bytes: bytes,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        manual_payment_date: str | None = None,
+        actor: str = "",
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Parse and stage a file without creating active accounting evidence."""
+
+        self._ensure_supplier_order(supplier_order_id)
+        if not file_bytes:
+            raise ValueError("financial document upload file is empty")
+        filename = _safe_filename(uploaded_filename or "financial-document.pdf")
+        if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
+            raise ValueError("financial document upload must be a PDF, XLS or XLSX file")
+        parsed = self.parse_document_preview(file_bytes, uploaded_filename=filename)
+        normalized = dict(parsed.get("normalized_parse") or {})
+        warnings = _string_list(parsed.get("warnings"))
+        errors = _string_list(parsed.get("errors"))
+        if (
+            str(normalized.get("document_type") or "")
+            == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
+            and not str(normalized.get("document_date") or "").strip()
+        ):
+            normalized_date = _optional_iso_date(manual_payment_date)
+            if not normalized_date:
+                return {
+                    "contract_name": "sheet_vitrina_v1_supplier_financial_document_preview",
+                    "status": "payment_date_required",
+                    "preview_required": True,
+                    "durable_saved": False,
+                    "active_saved": False,
+                    "manual_field": "payment_date",
+                    "message": "Дата платежа не распознана. Укажите и подтвердите дату платежа.",
+                    "normalized_parse": normalized,
+                    "warnings": warnings,
+                }
+            normalized["document_date"] = normalized_date
+        file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        all_documents = self.runtime.list_supplier_financial_documents(
+            supplier_order_id
+        )
+        exact_duplicates = [
+            item
+            for item in all_documents
+            if str(item.get("file_sha256") or "") == file_sha256
+        ]
+        semantic_key = _financial_document_semantic_key_from_parse(normalized)
+        semantic_duplicates = [
+            item
+            for item in all_documents
+            if str(item.get("file_sha256") or "") != file_sha256
+            and _financial_document_semantic_key(item) == semantic_key
+            and any(semantic_key)
+        ]
+        active_exact = next(
+            (
+                item
+                for item in exact_duplicates
+                if str(item.get("parse_status") or "")
+                != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+            ),
+            None,
+        )
+        excluded_exact = next(
+            (
+                item
+                for item in exact_duplicates
+                if str(item.get("parse_status") or "")
+                == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+            ),
+            None,
+        )
+        token = "sfc_" + uuid4().hex
+        created_at = self.timestamp_factory()
+        expires_at = _confirmation_expiry(created_at, ttl_seconds)
+        staging_dir = (
+            self.runtime.runtime_dir
+            / "supplier_financial_staging"
+            / token
+        )
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        staging_path = staging_dir / filename
+        staging_path.write_bytes(file_bytes)
+        target_revision = self._financial_target_revision(supplier_order_id)
+        preview_payload = {
+            "filename": filename,
+            "content_type": _financial_document_content_type(
+                filename, uploaded_content_type
+            ),
+            "staging_path": str(staging_path.relative_to(self.runtime.runtime_dir)),
+            "file_sha256": file_sha256,
+            "manual_payment_date": str(manual_payment_date or ""),
+            "actor": str(actor or ""),
+            "normalized_parse": normalized,
+            "warnings": warnings,
+            "errors": errors,
+            "active_exact_document_id": str(
+                (active_exact or {}).get("document_id") or ""
+            ),
+            "excluded_exact_document_id": str(
+                (excluded_exact or {}).get("document_id") or ""
+            ),
+            "semantic_duplicate_ids": [
+                str(item.get("document_id") or "") for item in semantic_duplicates
+            ],
+        }
+        self.runtime.save_supplier_confirmation_preview(
+            token=token,
+            confirmation_type="financial_document_upload",
+            supplier_order_id=supplier_order_id,
+            subject_id="",
+            target_revision=target_revision,
+            source_sha256=file_sha256,
+            payload=preview_payload,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        duplicate_action = (
+            "idempotent_active"
+            if active_exact
+            else "restore_excluded"
+            if excluded_exact
+            else "semantic_warning"
+            if semantic_duplicates
+            else "create"
+        )
+        duplicate_warnings = []
+        if active_exact:
+            duplicate_warnings.append(
+                "Файл с тем же SHA уже активен; новая строка создана не будет."
+            )
+        if excluded_exact:
+            duplicate_warnings.append(
+                "Файл с тем же SHA находится в архиве; будет предложено восстановление."
+            )
+        if semantic_duplicates:
+            duplicate_warnings.append(
+                "Найден вероятный дубликат с теми же типом, номером, датой, суммой и валютой."
+            )
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_financial_document_preview",
+            "status": "preview",
+            "preview_required": True,
+            "active_saved": False,
+            "expense_lines_created": 0,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "supplier_order_id": supplier_order_id,
+            "shipment": self._shipment_identity(supplier_order_id),
+            "document": _financial_document_preview_projection(
+                normalized,
+                filename=filename,
+                file_sha256=file_sha256,
+            ),
+            "warnings": _dedupe_strings([*warnings, *duplicate_warnings]),
+            "errors": errors,
+            "duplicate_action": duplicate_action,
+            "duplicates": [
+                _financial_document_duplicate_projection(item)
+                for item in [*exact_duplicates, *semantic_duplicates]
+            ],
+        }
+
+    def confirm_document_upload(
+        self,
+        supplier_order_id: str,
+        *,
+        confirmation_token: str,
+        allow_semantic_duplicate: bool = False,
+        duplicate_reason: str = "",
+        skip_target_revision_check: bool = False,
+    ) -> dict[str, Any]:
+        preview = self._validated_confirmation(
+            confirmation_token,
+            confirmation_type="financial_document_upload",
+            supplier_order_id=supplier_order_id,
+        )
+        if preview.get("consumed_at"):
+            return {**dict(preview.get("result") or {}), "idempotent": True}
+        data = dict(preview.get("payload") or {})
+        if (
+            not skip_target_revision_check
+            and preview.get("target_revision")
+            != self._financial_target_revision(supplier_order_id)
+        ):
+            raise ValueError(
+                "confirmation token is stale; shipment or document dependencies changed"
+            )
+        staging_path = self._resolve_runtime_file(str(data.get("staging_path") or ""))
+        file_bytes = staging_path.read_bytes()
+        if hashlib.sha256(file_bytes).hexdigest() != str(
+            preview.get("source_sha256") or ""
+        ):
+            raise ValueError("staged source SHA changed; request a new preview")
+        current_documents = self.runtime.list_supplier_financial_documents(
+            supplier_order_id
+        )
+        current_exact = [
+            item
+            for item in current_documents
+            if str(item.get("file_sha256") or "")
+            == str(preview.get("source_sha256") or "")
+        ]
+        active_exact_id = str(
+            next(
+                (
+                    item.get("document_id")
+                    for item in current_exact
+                    if str(item.get("parse_status") or "")
+                    != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+                ),
+                data.get("active_exact_document_id") or "",
+            )
+        )
+        excluded_exact_id = str(
+            next(
+                (
+                    item.get("document_id")
+                    for item in current_exact
+                    if str(item.get("parse_status") or "")
+                    == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+                ),
+                data.get("excluded_exact_document_id") or "",
+            )
+        )
+        semantic_key = _financial_document_semantic_key_from_parse(
+            dict(data.get("normalized_parse") or {})
+        )
+        semantic_ids = sorted(
+            {
+                *(
+                    str(item)
+                    for item in data.get("semantic_duplicate_ids") or []
+                ),
+                *(
+                    str(item.get("document_id") or "")
+                    for item in current_documents
+                    if str(item.get("file_sha256") or "")
+                    != str(preview.get("source_sha256") or "")
+                    and _financial_document_semantic_key(item) == semantic_key
+                    and any(semantic_key)
+                ),
+            }
+            - {""}
+        )
+        if semantic_ids and not active_exact_id and not excluded_exact_id:
+            if not allow_semantic_duplicate or not str(duplicate_reason or "").strip():
+                raise ValueError(
+                    "semantic duplicate requires explicit confirmation and a reason"
+                )
+        if active_exact_id:
+            result = self.get_document(supplier_order_id, active_exact_id)
+            result.update(
+                {
+                    "idempotent": True,
+                    "duplicate_action": "existing_active",
+                    "outcome": "already_present",
+                    "active_saved": False,
+                }
+            )
+        elif excluded_exact_id:
+            stored = self.runtime.load_supplier_financial_document(
+                supplier_order_id=supplier_order_id,
+                document_id=excluded_exact_id,
+            )
+            if stored is None:
+                raise ValueError("archived duplicate changed; request a new preview")
+            restored_status = _restored_parse_status(stored)
+            result = self.update_document_status(
+                supplier_order_id,
+                excluded_exact_id,
+                restored_status,
+            )
+            result.update(
+                {
+                    "idempotent": False,
+                    "duplicate_action": "restored_excluded",
+                    "outcome": "restored",
+                    "restored": True,
+                }
+            )
+        else:
+            if (
+                str((data.get("normalized_parse") or {}).get("document_type") or "")
+                == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+            ):
+                result = self.upload_bank_fee_statement_preview(
+                    supplier_order_id,
+                    file_bytes=file_bytes,
+                    uploaded_filename=str(data.get("filename") or ""),
+                    uploaded_content_type=str(data.get("content_type") or ""),
+                )
+            else:
+                result = self.upload_document(
+                    supplier_order_id,
+                    file_bytes=file_bytes,
+                    uploaded_filename=str(data.get("filename") or ""),
+                    uploaded_content_type=str(data.get("content_type") or ""),
+                    manual_payment_date=str(data.get("manual_payment_date") or "") or None,
+                    manual_payment_date_actor=str(data.get("actor") or ""),
+                )
+            result["duplicate_action"] = (
+                "explicit_semantic_duplicate" if semantic_ids else "created"
+            )
+            result["outcome"] = "created"
+            if semantic_ids:
+                result["duplicate_reason"] = str(duplicate_reason or "").strip()
+        result_document_id = str(result.get("document_id") or "")
+        readback = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=result_document_id,
+        )
+        if (
+            readback is None
+            or str(readback.get("supplier_order_id") or "") != supplier_order_id
+            or str(readback.get("parse_status") or "")
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ):
+            raise ValueError(
+                "financial document commit readback did not confirm the target shipment"
+            )
+        result.update(
+            {
+                "document_id": result_document_id,
+                "supplier_order_id": supplier_order_id,
+                "readback_confirmed": True,
+            }
+        )
+        completed = self.runtime.complete_supplier_confirmation_preview(
+            token=confirmation_token,
+            consumed_at=self.timestamp_factory(),
+            result=result,
+        )
+        return dict(completed.get("result") or result)
+
+    def preview_document_delete(
+        self,
+        supplier_order_id: str,
+        document_id: str,
+        *,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        self._ensure_supplier_order(supplier_order_id)
+        document = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if document is None:
+            raise ValueError(f"financial document not found: {document_id}")
+        if (
+            str(document.get("parse_status") or "")
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ):
+            raise ValueError("financial document is already archived")
+        token = "sfc_" + uuid4().hex
+        created_at = self.timestamp_factory()
+        expires_at = _confirmation_expiry(created_at, ttl_seconds)
+        revision = _financial_document_revision(document)
+        allocation = _document_allocated_amount(document)
+        self.runtime.save_supplier_confirmation_preview(
+            token=token,
+            confirmation_type="financial_document_delete",
+            supplier_order_id=supplier_order_id,
+            subject_id=document_id,
+            target_revision=revision,
+            source_sha256=str(document.get("file_sha256") or ""),
+            payload={"document_id": document_id, "allocated_amount_rub": allocation},
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_financial_document_delete_preview",
+            "status": "preview",
+            "preview_required": True,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "supplier_order_id": supplier_order_id,
+            "shipment": self._shipment_identity(supplier_order_id),
+            "document": _financial_document_duplicate_projection(document),
+            "allocated_amount_rub": allocation,
+            "warning": (
+                "Документ будет исключён из активных расходов; полнота расходов "
+                "будет сброшена и поставка поставлена в очередь пересчёта."
+            ),
+        }
+
+    def confirm_document_delete(
+        self,
+        supplier_order_id: str,
+        document_id: str,
+        *,
+        confirmation_token: str,
+    ) -> dict[str, Any]:
+        preview = self._validated_confirmation(
+            confirmation_token,
+            confirmation_type="financial_document_delete",
+            supplier_order_id=supplier_order_id,
+            subject_id=document_id,
+        )
+        if preview.get("consumed_at"):
+            return {**dict(preview.get("result") or {}), "idempotent": True}
+        document = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if document is None or _financial_document_revision(document) != str(
+            preview.get("target_revision") or ""
+        ):
+            raise ValueError("confirmation token is stale; document changed")
+        result = self.delete_document(supplier_order_id, document_id)
+        readback = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if (
+            readback is None
+            or str(readback.get("parse_status") or "")
+            != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ):
+            raise ValueError(
+                "financial document exclusion readback did not confirm archive status"
+            )
+        result.update(
+            {
+                "outcome": "excluded",
+                "readback_confirmed": True,
+                "supplier_order_id": supplier_order_id,
+            }
+        )
+        completed = self.runtime.complete_supplier_confirmation_preview(
+            token=confirmation_token,
+            consumed_at=self.timestamp_factory(),
+            result=result,
+        )
+        return dict(completed.get("result") or result)
+
+    def _validated_confirmation(
+        self,
+        token: str,
+        *,
+        confirmation_type: str,
+        supplier_order_id: str,
+        subject_id: str = "",
+    ) -> dict[str, Any]:
+        preview = self.runtime.load_supplier_confirmation_preview(token)
+        if preview is None:
+            raise ValueError("confirmation token is invalid")
+        if (
+            str(preview.get("confirmation_type") or "") != confirmation_type
+            or str(preview.get("supplier_order_id") or "") != supplier_order_id
+            or (
+                subject_id
+                and str(preview.get("subject_id") or "") != subject_id
+            )
+        ):
+            raise ValueError("confirmation token does not match the requested mutation")
+        if (
+            not preview.get("consumed_at")
+            and _confirmation_is_expired(
+                str(preview.get("expires_at") or ""), self.timestamp_factory()
+            )
+        ):
+            raise ValueError("confirmation token expired; request a new preview")
+        return preview
+
+    def _financial_target_revision(self, supplier_order_id: str) -> str:
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        documents = self.runtime.list_supplier_financial_documents(supplier_order_id)
+        material = {
+            "shipment_updated_at": str(
+                (shipment.get("header") or {}).get("updated_at") or ""
+            ),
+            "documents": [
+                {
+                    "document_id": str(item.get("document_id") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "parse_status": str(item.get("parse_status") or ""),
+                    "file_sha256": str(item.get("file_sha256") or ""),
+                }
+                for item in documents
+            ],
+        }
+        return "sha256:" + hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _shipment_identity(self, supplier_order_id: str) -> dict[str, Any]:
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        header = dict(shipment.get("header") or {})
+        return {
+            "shipment_id": supplier_order_id,
+            "invoice_no": str(header.get("invoice_no") or ""),
+            "revision": str(header.get("updated_at") or ""),
+        }
 
     def upload_bank_fee_statement_preview(
         self,
@@ -838,9 +1363,14 @@ class SupplierFinancialDocumentsBlock:
                 shipment=shipment,
             ),
         )
-        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
-            supplier_order_id
-        )
+        if normalized == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
+            payload["own_product_capital"] = (
+                self._remove_own_capital_expense_events(document_id)
+            )
+        else:
+            payload["own_product_capital"] = (
+                self._materialize_own_capital_expense_events(supplier_order_id)
+            )
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
             payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
                 supplier_order_id,
@@ -895,6 +1425,9 @@ class SupplierFinancialDocumentsBlock:
             )
             archived_cny_documents.append(str(saved_cny.get("document_id") or ""))
         payload["cny_documents_archived"] = archived_cny_documents
+        payload["own_product_capital"] = self._remove_own_capital_expense_events(
+            document_id
+        )
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
             payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
                 supplier_order_id,
@@ -913,6 +1446,16 @@ class SupplierFinancialDocumentsBlock:
             shipment_id=supplier_order_id,
             expenses_complete=False,
         )
+
+    def _remove_own_capital_expense_events(
+        self, financial_document_id: str
+    ) -> dict[str, Any]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        return OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).remove_financial_document_expenses(financial_document_id)
 
     def _enqueue_functional_recalculation(
         self,
@@ -1266,10 +1809,25 @@ class SupplierFinancialDocumentsBlock:
             if fallback_header is None:
                 raise ValueError(f"supplier shipment not found: {shipment_id}")
             detail = {"header": fallback_header, "lines": []}
-        documents = self._refresh_saved_document_parses(
-            self.runtime.list_supplier_financial_documents(normalized_shipment_id)
-        )
-        expense_lines = self.runtime.list_supplier_financial_expense_lines(normalized_shipment_id)
+        documents = [
+            item
+            for item in self._refresh_saved_document_parses(
+                self.runtime.list_supplier_financial_documents(normalized_shipment_id)
+            )
+            if str(item.get("parse_status") or "")
+            != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+        ]
+        active_document_ids = {
+            str(item.get("document_id") or "") for item in documents
+        }
+        expense_lines = [
+            item
+            for item in self.runtime.list_supplier_financial_expense_lines(
+                normalized_shipment_id
+            )
+            if str(item.get("financial_document_id") or "")
+            in active_document_ids
+        ]
         summary = self._with_canonical_exact_cost(
             normalized_shipment_id,
             build_financial_summary(documents, expense_lines, shipment=detail),
@@ -1281,8 +1839,17 @@ class SupplierFinancialDocumentsBlock:
                 runtime=self.runtime,
                 shipment_id=normalized_shipment_id,
             )
-        except Exception:
-            summary["functional_stage_costs"] = {}
+        except Exception as exc:
+            blocker = f"Не удалось прочитать active functional version: {exc}"
+            summary["functional_stage_costs"] = {
+                stage: {
+                    "status": "error",
+                    "average_unit_cost_rub": None,
+                    "certified": False,
+                    "blocker": blocker,
+                }
+                for stage in ("production", "china_to_ff")
+            }
         header = dict(detail.get("header") or fallback_header or {})
         if not header.get("shipment_id") and normalized_shipment_id:
             header["shipment_id"] = normalized_shipment_id
@@ -2775,8 +3342,25 @@ def _expenses_completeness_cell(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _exact_landed_cost_cell(context: Mapping[str, Any]) -> dict[str, Any]:
     cell = _registry_money(_summary_path(context, "per_unit", "exact_landed_cost_per_unit_rub"), "₽")
-    if cell.get("value") is not None:
-        cell["status"] = "complete" if _expenses_complete(context) else "incomplete"
+    canonical_status = str(
+        _summary_path(context, "per_unit", "exact_cost_status") or "unavailable"
+    )
+    if canonical_status == "ok":
+        canonical_status = "provisional"
+    if canonical_status == "unavailable":
+        cell = _registry_blank()
+    cell["status"] = canonical_status
+    blockers = _summary_path(context, "per_unit", "exact_cost_blockers")
+    warnings = _summary_path(context, "per_unit", "exact_cost_warnings")
+    if blockers:
+        cell["note"] = "; ".join(str(item) for item in blockers)
+    elif canonical_status == "provisional":
+        cell["note"] = (
+            "; ".join(str(item) for item in (warnings or []))
+            or "Ожидается functional replay и совпадение source/calculation fingerprints."
+        )
+    elif canonical_status == "certified":
+        cell["note"] = "Актуальные source/calculation fingerprints сертифицированы."
     return cell
 
 
@@ -2784,11 +3368,32 @@ def _functional_stage_cost_cell(context: Mapping[str, Any], stage: str) -> dict[
     state = _summary_path(context, "functional_stage_costs", stage)
     if not isinstance(state, Mapping):
         return _registry_blank()
+    stage_status = str(state.get("status") or "")
+    if stage_status == "not_applicable":
+        cell = _registry_cell(None, "Не применяется: поставка уже на ФФ")
+        cell["status"] = "not_applicable"
+        cell["note"] = str(state.get("reason") or cell["display"])
+        return cell
+    if stage_status in {"queued", "running"}:
+        cell = _registry_cell(None, "Ожидает пересчёта")
+        cell["status"] = stage_status
+        cell["note"] = str(state.get("reason") or "Targeted functional replay ещё не завершён.")
+        return cell
+    if stage_status in {"error", "stale", "unavailable"}:
+        blocker = str(state.get("blocker") or state.get("reason") or "Себестоимость стадии недоступна")
+        cell = _registry_cell(None, blocker)
+        cell["status"] = stage_status
+        cell["note"] = blocker
+        return cell
     cell = _registry_money(state.get("average_unit_cost_rub"), "₽")
     if cell.get("value") is not None:
-        cell["status"] = "complete" if bool(state.get("certified")) else "incomplete"
+        cell["status"] = "certified" if bool(state.get("certified")) else "provisional"
         cell["quality"] = ",".join(str(item) for item in state.get("quality") or [])
-        cell["note"] = "certified" if bool(state.get("certified")) else "provisional: Все расходы учтены не сертифицированы"
+        cell["note"] = (
+            "Актуальная functional version сертифицирована."
+            if bool(state.get("certified"))
+            else "Предварительно: active functional version ещё не сертифицирована."
+        )
     return cell
 
 
@@ -7337,6 +7942,164 @@ def _financial_document_content_type(filename: str, uploaded_content_type: str |
     if suffix == ".xlsx":
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     return FINANCIAL_DOCUMENT_CONTENT_TYPE
+
+
+def _confirmation_datetime(value: str) -> datetime:
+    normalized = str(value or "").strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _confirmation_expiry(created_at: str, ttl_seconds: int) -> str:
+    ttl = max(60, min(int(ttl_seconds or 900), 3600))
+    return (
+        _confirmation_datetime(created_at) + timedelta(seconds=ttl)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _confirmation_is_expired(expires_at: str, now: str) -> bool:
+    return _confirmation_datetime(now) >= _confirmation_datetime(expires_at)
+
+
+def _financial_document_semantic_key_from_parse(
+    normalized: Mapping[str, Any],
+) -> tuple[str, str, str, str, str]:
+    return (
+        str(normalized.get("document_type") or "").strip().lower(),
+        str(
+            normalized.get("document_number")
+            or normalized.get("invoice_number")
+            or normalized.get("declaration_number")
+            or normalized.get("document_title")
+            or ""
+        ).strip().lower(),
+        str(
+            normalized.get("document_date")
+            or normalized.get("invoice_date")
+            or normalized.get("quote_date")
+            or normalized.get("declaration_date")
+            or ""
+        ).strip(),
+        str(
+            _parse_decimal(
+                normalized.get("total_amount_rub")
+                if normalized.get("total_amount_rub") is not None
+                else normalized.get("total_amount")
+            )
+            or ""
+        ),
+        str(normalized.get("currency") or "").strip().upper(),
+    )
+
+
+def _financial_document_semantic_key(
+    document: Mapping[str, Any],
+) -> tuple[str, str, str, str, str]:
+    amount = (
+        document.get("total_amount_rub")
+        if document.get("total_amount_rub") is not None
+        else document.get("total_amount")
+    )
+    return (
+        str(document.get("document_type") or "").strip().lower(),
+        str(document.get("document_number") or "").strip().lower(),
+        str(document.get("document_date") or "").strip(),
+        str(_parse_decimal(amount) or ""),
+        str(document.get("currency") or "").strip().upper(),
+    )
+
+
+def _financial_document_preview_projection(
+    normalized: Mapping[str, Any],
+    *,
+    filename: str,
+    file_sha256: str,
+) -> dict[str, Any]:
+    semantic = _financial_document_semantic_key_from_parse(normalized)
+    return {
+        "document_type": semantic[0],
+        "document_number": semantic[1],
+        "document_date": semantic[2],
+        "vendor": str(
+            normalized.get("vendor") or normalized.get("bank") or ""
+        ),
+        "amount": (
+            normalized.get("total_amount_rub")
+            if normalized.get("total_amount_rub") is not None
+            else normalized.get("total_amount")
+        ),
+        "currency": str(normalized.get("currency") or ""),
+        "filename": filename,
+        "file_sha256": file_sha256,
+    }
+
+
+def _financial_document_duplicate_projection(
+    document: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "document_id": str(document.get("document_id") or ""),
+        "document_type": str(document.get("document_type") or ""),
+        "document_number": str(document.get("document_number") or ""),
+        "document_date": str(document.get("document_date") or ""),
+        "vendor": str(document.get("vendor") or ""),
+        "amount": (
+            document.get("total_amount_rub")
+            if document.get("total_amount_rub") is not None
+            else document.get("total_amount")
+        ),
+        "currency": str(document.get("currency") or ""),
+        "file_sha256": str(document.get("file_sha256") or ""),
+        "parse_status": str(document.get("parse_status") or ""),
+    }
+
+
+def _financial_document_revision(document: Mapping[str, Any]) -> str:
+    material = {
+        "document_id": str(document.get("document_id") or ""),
+        "updated_at": str(document.get("updated_at") or ""),
+        "parse_status": str(document.get("parse_status") or ""),
+        "file_sha256": str(document.get("file_sha256") or ""),
+        "expense_lines": [
+            {
+                "line_id": str(item.get("line_id") or ""),
+                "amount_rub": item.get("amount_rub"),
+                "status": str(item.get("status") or ""),
+            }
+            for item in document.get("expense_lines") or []
+        ],
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def _document_allocated_amount(document: Mapping[str, Any]) -> float:
+    return float(
+        sum(
+            (
+                _parse_decimal(item.get("amount_rub")) or Decimal("0")
+                for item in document.get("expense_lines") or []
+                if str(item.get("status") or EXPENSE_LINE_STATUS_PARSED)
+                in {EXPENSE_LINE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+            ),
+            Decimal("0"),
+        )
+    )
+
+
+def _restored_parse_status(document: Mapping[str, Any]) -> str:
+    if _string_list(document.get("errors")):
+        return FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR
+    if _string_list(document.get("warnings")):
+        return FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+    return FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED
 
 
 def _relative_to_runtime(runtime_dir: Path, target_path: Path) -> str:

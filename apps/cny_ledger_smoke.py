@@ -718,28 +718,70 @@ def _assert_http_routes_and_order_integration() -> None:
                 b"order-conversion-pdf",
                 filename="order-conversion.pdf",
             )
-            if order_conversion_status != 200 or order_conversion.get("source_order_id") != "http-order":
+            if (
+                order_conversion_status != 200
+                or order_conversion.get("duplicate_action") != "semantic_warning"
+            ):
                 raise AssertionError(f"order-context conversion upload changed: {order_conversion_status} {order_conversion}")
+            order_conversion_status, order_conversion = _post_json(
+                f"{base_url}{order_doc_path}/confirm-upload",
+                {
+                    "confirmation_token": order_conversion["confirmation_token"],
+                    "allow_semantic_duplicate": True,
+                    "duplicate_reason": "Smoke fixture intentionally uses a second source file",
+                },
+            )
+            if (
+                order_conversion_status != 200
+                or order_conversion.get("supplier_order_id") != "http-order"
+                or order_conversion.get("outcome") != "created"
+            ):
+                raise AssertionError(f"order-context conversion confirmation changed: {order_conversion_status} {order_conversion}")
             duplicate_status, duplicate_conversion = _post_multipart(
                 f"{base_url}{order_doc_path}",
                 b"order-conversion-pdf",
                 filename="order-conversion.pdf",
             )
-            if duplicate_status != 200 or not duplicate_conversion.get("idempotent"):
+            if (
+                duplicate_status != 200
+                or duplicate_conversion.get("duplicate_action") != "already_present"
+            ):
                 raise AssertionError(f"duplicate order conversion must be idempotent: {duplicate_status} {duplicate_conversion}")
+            duplicate_status, duplicate_conversion = _post_json(
+                f"{base_url}{order_doc_path}/confirm-upload",
+                {"confirmation_token": duplicate_conversion["confirmation_token"]},
+            )
+            if duplicate_status != 200 or duplicate_conversion.get("outcome") != "already_present":
+                raise AssertionError(f"duplicate order conversion confirmation must be idempotent: {duplicate_status} {duplicate_conversion}")
 
             payment_status, payment_payload = _post_multipart(
                 f"{base_url}{order_doc_path}",
                 b"payment-pdf",
                 filename="payment.pdf",
             )
-            if payment_status != 200 or payment_payload.get("document_type") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
+            if payment_status != 200 or payment_payload.get("duplicate_action") != "create":
                 raise AssertionError(f"supplier payment upload changed: {payment_status} {payment_payload}")
+            payment_status, payment_payload = _post_json(
+                f"{base_url}{order_doc_path}/confirm-upload",
+                {"confirmation_token": payment_payload["confirmation_token"]},
+            )
+            if (
+                payment_status != 200
+                or payment_payload.get("document_type") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                or payment_payload.get("outcome") != "created"
+            ):
+                raise AssertionError(f"supplier payment confirmation changed: {payment_status} {payment_payload}")
 
-            statement_status, statement_preview = _post_multipart(
+            statement_status, statement_stage = _post_multipart(
                 f"{base_url}{order_doc_path}",
                 b"bank-statement-pdf",
                 filename="bank-statement.pdf",
+            )
+            if statement_status != 200 or not statement_stage.get("confirmation_token"):
+                raise AssertionError(f"bank statement staging changed: {statement_status} {statement_stage}")
+            statement_status, statement_preview = _post_json(
+                f"{base_url}{order_doc_path}/confirm-upload",
+                {"confirmation_token": statement_stage["confirmation_token"]},
             )
             import_preview = statement_preview.get("import_preview") or {}
             if (
@@ -754,8 +796,17 @@ def _assert_http_routes_and_order_integration() -> None:
                 b"bank-statement-pdf",
                 filename="bank-statement.pdf",
             )
-            if duplicate_statement_status != 200 or not duplicate_statement.get("idempotent"):
+            if (
+                duplicate_statement_status != 200
+                or duplicate_statement.get("duplicate_action") != "idempotent_active"
+            ):
                 raise AssertionError(f"duplicate statement preview must be idempotent: {duplicate_statement_status} {duplicate_statement}")
+            duplicate_statement_status, duplicate_statement = _post_json(
+                f"{base_url}{order_doc_path}/confirm-upload",
+                {"confirmation_token": duplicate_statement["confirmation_token"]},
+            )
+            if duplicate_statement_status != 200 or not duplicate_statement.get("idempotent"):
+                raise AssertionError(f"duplicate statement confirmation must be idempotent: {duplicate_statement_status} {duplicate_statement}")
             before_confirm_lines = runtime.list_supplier_financial_expense_lines("http-order")
             if before_confirm_lines:
                 raise AssertionError(f"preview must not create expense lines before confirmation: {before_confirm_lines}")
@@ -845,8 +896,21 @@ def _assert_http_routes_and_order_integration() -> None:
                     "a legacy header quantity cannot replace missing canonical invoice SKU lines: "
                     f"{detail_status} {detail}"
                 )
-            delete_statement_status, delete_statement = _delete_json(
-                f"{base_url}{order_doc_path}/{statement_document_id}"
+            delete_statement_status, delete_statement_preview = _post_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}/delete-preview",
+                {},
+            )
+            if delete_statement_status != 200 or not delete_statement_preview.get("confirmation_token"):
+                raise AssertionError(
+                    f"bank statement delete preview changed: {delete_statement_status} {delete_statement_preview}"
+                )
+            delete_statement_status, delete_statement = _post_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}/delete-confirm",
+                {
+                    "confirmation_token": delete_statement_preview[
+                        "confirmation_token"
+                    ]
+                },
             )
             if (
                 delete_statement_status != 200

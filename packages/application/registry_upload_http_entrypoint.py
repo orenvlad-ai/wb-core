@@ -13,6 +13,7 @@ import zipfile
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import shlex
 import threading
@@ -196,6 +197,8 @@ from packages.contracts.supplier_financial_documents import (
 from packages.contracts.cny_ledger import (
     CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
     CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+    CNY_DOCUMENT_STATUS_EXCLUDED,
+    CNY_DOCUMENT_STATUS_POSTED,
     CNY_DOCUMENT_TYPE_BANK_FEE,
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
@@ -204,6 +207,63 @@ from packages.contracts.supplier_shipments import (
     TRADE_DOCUMENT_TYPE_CONTRACT,
     TRADE_DOCUMENT_TYPE_INVOICE,
 )
+
+
+def _timestamp_as_utc(value: str) -> datetime:
+    normalized = str(value or "").strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_semantic_number(value: Any) -> str:
+    normalized = str(value if value is not None else "").strip().replace(" ", "").replace(",", ".")
+    if not normalized:
+        return ""
+    try:
+        decimal_value = Decimal(normalized)
+    except InvalidOperation:
+        return normalized
+    text = format(decimal_value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _supplier_upload_preview_semantic_key(
+    preview: Mapping[str, Any],
+) -> tuple[str, str, str, str, str]:
+    normalized = dict((preview.get("payload") or {}).get("normalized_parse") or {})
+    return (
+        str(normalized.get("document_type") or "").strip().lower(),
+        str(
+            normalized.get("document_number")
+            or normalized.get("invoice_number")
+            or normalized.get("declaration_number")
+            or normalized.get("transfer_application_number")
+            or normalized.get("document_title")
+            or ""
+        ).strip().lower(),
+        str(
+            normalized.get("operation_date")
+            or normalized.get("document_date")
+            or normalized.get("invoice_date")
+            or normalized.get("quote_date")
+            or normalized.get("declaration_date")
+            or ""
+        ).strip(),
+        _canonical_semantic_number(
+            normalized.get("cny_amount")
+            or normalized.get("transfer_amount")
+            or normalized.get("total_amount_rub")
+            or normalized.get("total_amount")
+            or normalized.get("rub_amount")
+            or ""
+        ),
+        str(normalized.get("currency") or "").strip().upper(),
+    )
+
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
@@ -1018,6 +1078,7 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
+        self._supplier_confirmation_lock = threading.RLock()
         self.cny_ledger_block = CnyLedgerBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
@@ -3052,20 +3113,50 @@ class RegistryUploadHttpEntrypoint:
         *,
         actor: str = "operator",
         supplier_safe: bool = False,
+        confirmed_factual_dates: bool = False,
     ) -> dict[str, Any]:
         if supplier_safe:
             payload = self.supplier_shipments_block.sanitize_supplier_write_payload(payload)
+        if (
+            self.supplier_shipments_block.factual_dates_change_required(
+                shipment_id, payload
+            )
+            and not confirmed_factual_dates
+        ):
+            raise ValueError(
+                "Изменение фактической даты требует server-owned preview и confirmation token."
+            )
         if self.supplier_shipments_block.factual_date_change_required(shipment_id, payload):
+            existing = self.runtime.load_supplier_shipment(shipment_id) or {}
+            existing_header = dict(existing.get("header") or {})
+            nested = payload.get("payload")
+            correction_payload = {
+                "actual_shipment_date": self.supplier_shipments_block.desired_actual_shipment_date(
+                    shipment_id, payload
+                )
+            }
+            desired_acceptance = str(
+                payload.get("actual_ff_acceptance_date")
+                if "actual_ff_acceptance_date" in payload
+                else (
+                    nested.get("actual_ff_acceptance_date")
+                    if isinstance(nested, Mapping)
+                    and "actual_ff_acceptance_date" in nested
+                    else existing_header.get("actual_ff_acceptance_date")
+                )
+                or ""
+            ).strip()
             if self.supplier_shipments_block.factual_date_correction_has_other_changes(
                 shipment_id,
                 payload,
+                allow_actual_ff_acceptance_change=True,
             ):
                 raise ValueError(
                     "Коррекцию фактической даты отгрузки нужно сохранить отдельно от других изменений карточки."
                 )
             new_value = self.supplier_shipments_block.desired_actual_shipment_date(
                 shipment_id,
-                payload,
+                correction_payload,
             )
             correction = self.supplier_shipment_factual_correction_block.create_job(
                 shipment_id=shipment_id,
@@ -3086,12 +3177,26 @@ class RegistryUploadHttpEntrypoint:
                 }
                 return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
             correction_id = str(correction["correction_id"])
-            job = self.operator_jobs.start(
-                operation="supplier_factual_date_correction",
-                runner=lambda emit: self.supplier_shipment_factual_correction_block.run_job(
+            def run_confirmed_factual_dates(emit: Any) -> dict[str, Any]:
+                result = self.supplier_shipment_factual_correction_block.run_job(
                     correction_id,
                     emit,
-                ),
+                )
+                if desired_acceptance != str(
+                    existing_header.get("actual_ff_acceptance_date") or ""
+                ).strip():
+                    result = {
+                        **result,
+                        "acceptance_update": self.supplier_shipments_block.update_shipment(
+                            shipment_id,
+                            {"actual_ff_acceptance_date": desired_acceptance},
+                        ),
+                    }
+                return result
+
+            job = self.operator_jobs.start(
+                operation="supplier_factual_date_correction",
+                runner=run_confirmed_factual_dates,
             )
             response = {
                 "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
@@ -3103,6 +3208,61 @@ class RegistryUploadHttpEntrypoint:
         if supplier_safe:
             return self.supplier_shipments_block.update_shipment_supplier_safe(shipment_id, payload)
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
+
+    def handle_supplier_factual_dates_preview_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.supplier_shipments_block.preview_factual_dates(
+            shipment_id, payload
+        )
+
+    def handle_supplier_factual_dates_confirm_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        with self._supplier_confirmation_lock:
+            return self._handle_supplier_factual_dates_confirm_request(
+                shipment_id,
+                payload,
+                actor=actor,
+            )
+
+    def _handle_supplier_factual_dates_confirm_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        token = str(payload.get("confirmation_token") or "").strip()
+        if not token:
+            raise ValueError("confirmation_token is required")
+        preview = self.supplier_shipments_block.validate_factual_dates_confirmation(
+            shipment_id, token
+        )
+        if preview.get("consumed_at"):
+            return {**dict(preview.get("result") or {}), "idempotent": True}
+        mutation_payload = dict(
+            (preview.get("payload") or {}).get("mutation_payload") or {}
+        )
+        result = self.handle_supplier_shipments_patch_request(
+            shipment_id,
+            mutation_payload,
+            actor=actor,
+            supplier_safe=False,
+            confirmed_factual_dates=True,
+        )
+        completed = self.runtime.complete_supplier_confirmation_preview(
+            token=token,
+            consumed_at=self.activated_at_factory(),
+            result=result,
+        )
+        return dict(completed.get("result") or result)
 
     def handle_supplier_shipment_factual_correction_request(
         self,
@@ -3236,21 +3396,86 @@ class RegistryUploadHttpEntrypoint:
             refresh_saved_parses=refresh_saved_parses,
         )
         financial_documents = [
-            apply_supplier_order_document_match(dict(item), shipment)
+            {
+                **apply_supplier_order_document_match(dict(item), shipment),
+                "document_origin": "operator",
+                "document_action": {
+                    "enabled": True,
+                    "kind": "audited_exclusion",
+                    "label": "Исключить документ",
+                    "reason": "",
+                },
+            }
             for item in financial_payload.get("documents") or []
         ]
         financial_document_ids = {str(item.get("document_id") or "") for item in financial_documents if str(item.get("document_id") or "")}
         cny_status = self.cny_ledger_block.get_status()
         cny_documents = [
-            self._supplier_order_cny_document_row(item)
+            {
+                **self._supplier_order_cny_document_row(item),
+                "document_origin": "operator",
+                "document_action": {
+                    "enabled": not bool(
+                        str(item.get("linked_financial_document_id") or "").strip()
+                    ),
+                    "kind": "audited_exclusion",
+                    "label": "Исключить документ",
+                    "reason": (
+                        ""
+                        if not str(item.get("linked_financial_document_id") or "").strip()
+                        else "Документ создан из финансового источника; исключите исходный финансовый документ."
+                    ),
+                },
+            }
             for item in cny_status.get("documents") or []
             if str(item.get("source_order_id") or "") == str(shipment_id or "")
+            and str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
             and str(item.get("linked_financial_document_id") or "").strip() not in financial_document_ids
         ]
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
             financial_documents=financial_documents,
         )
+        checklist = [
+            {
+                **item,
+                "document_origin": (
+                    "operator"
+                    if str(item.get("document_id") or "")
+                    in financial_document_ids
+                    else "system"
+                ),
+                "document_action": {
+                    "enabled": (
+                        str(item.get("document_id") or "")
+                        in financial_document_ids
+                    ),
+                    "kind": (
+                        "audited_exclusion"
+                        if str(item.get("document_id") or "")
+                        in financial_document_ids
+                        else "none"
+                    ),
+                    "label": (
+                        "Исключить документ"
+                        if str(item.get("document_id") or "")
+                        in financial_document_ids
+                        else "Системный документ"
+                    ),
+                    "reason": (
+                        ""
+                        if str(item.get("document_id") or "")
+                        in financial_document_ids
+                        else (
+                            "Системный документ управляется из карточки поставки."
+                            if item.get("is_uploaded")
+                            else "Документ ещё не загружен."
+                        )
+                    ),
+                },
+            }
+            for item in checklist
+        ]
         canonical_breakdown = dict(shipment.get("supplier_cost_breakdown") or {})
         checklist = attach_supplier_document_expense_allocations(checklist, canonical_breakdown)
         cny_documents = attach_supplier_document_expense_allocations(cny_documents, canonical_breakdown)
@@ -3267,6 +3492,20 @@ class RegistryUploadHttpEntrypoint:
             "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
             "required_documents": [*checklist, *cny_documents],
             "documents": [*financial_documents, *cny_documents],
+            "archived_documents": [
+                *list(financial_payload.get("archived_documents") or []),
+                *[
+                    {
+                        **self._supplier_order_cny_document_row(item),
+                        "document_origin": "operator",
+                        "archived": True,
+                    }
+                    for item in cny_status.get("documents") or []
+                    if str(item.get("source_order_id") or "") == str(shipment_id or "")
+                    and str(item.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED
+                    and not str(item.get("linked_financial_document_id") or "").strip()
+                ],
+            ],
             "expense_lines": list(financial_payload.get("expense_lines") or []),
             "summary": financial_payload.get("summary") or {},
             "package_downloads": {
@@ -3354,37 +3593,594 @@ class RegistryUploadHttpEntrypoint:
             )
             preview_type = str((preview.get("normalized_parse") or {}).get("document_type") or "")
             if preview_type in {CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:
-                return self.cny_ledger_block.upload_document(
+                return self._preview_supplier_cny_document_upload(
+                    shipment_id=shipment_id,
                     file_bytes=file_bytes,
-                    uploaded_filename=uploaded_filename,
-                    uploaded_content_type=uploaded_content_type,
-                    source=CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
-                    source_order_id=shipment_id,
-                    context_order_id=shipment_id,
-                    reject_unsupported=True,
-                    manual_payment_date=str(upload_fields.get("payment_date") or "") or None,
-                    manual_payment_date_actor=actor,
+                    uploaded_filename=str(uploaded_filename or ""),
+                    uploaded_content_type=str(uploaded_content_type or ""),
+                    preview=preview,
+                    payment_date=str(upload_fields.get("payment_date") or ""),
+                    actor=actor,
                 )
-        financial_preview = self.supplier_financial_documents_block.parse_document_preview(
-            file_bytes,
-            uploaded_filename=uploaded_filename,
-        )
-        financial_preview_type = str((financial_preview.get("normalized_parse") or {}).get("document_type") or "")
-        if financial_preview_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
-            return self.supplier_financial_documents_block.upload_bank_fee_statement_preview(
-                shipment_id,
-                file_bytes=file_bytes,
-                uploaded_filename=uploaded_filename,
-                uploaded_content_type=uploaded_content_type,
-            )
-        return self.supplier_financial_documents_block.upload_document(
+        return self.supplier_financial_documents_block.preview_document_upload(
             shipment_id,
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
             manual_payment_date=str(upload_fields.get("payment_date") or "") or None,
-            manual_payment_date_actor=actor,
+            actor=actor,
         )
+
+    def handle_supplier_financial_documents_confirm_upload_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        with self._supplier_confirmation_lock:
+            return self._handle_supplier_financial_documents_confirm_upload_request(
+                shipment_id,
+                payload,
+            )
+
+    def _handle_supplier_financial_documents_confirm_upload_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        batch_tokens = [
+            str(item or "").strip()
+            for item in payload.get("confirmation_tokens") or []
+            if str(item or "").strip()
+        ]
+        if batch_tokens:
+            previews = []
+            for token in batch_tokens:
+                preview = self.runtime.load_supplier_confirmation_preview(token)
+                if (
+                    preview is None
+                    or str(preview.get("supplier_order_id") or "") != shipment_id
+                    or str(preview.get("confirmation_type") or "")
+                    not in {
+                        "financial_document_upload",
+                        "supplier_cny_document_upload",
+                    }
+                ):
+                    raise ValueError(
+                        "batch confirmation token does not match the target shipment"
+                    )
+                previews.append(preview)
+            for preview in previews:
+                if preview.get("consumed_at"):
+                    continue
+                if _timestamp_as_utc(
+                    str(preview.get("expires_at") or "")
+                ) <= _timestamp_as_utc(self.activated_at_factory()):
+                    raise ValueError(
+                        "batch confirmation token expired; request new previews"
+                    )
+                confirmation_type = str(preview.get("confirmation_type") or "")
+                current_revision = (
+                    self._supplier_cny_target_revision(shipment_id)
+                    if confirmation_type == "supplier_cny_document_upload"
+                    else self.supplier_financial_documents_block._financial_target_revision(
+                        shipment_id
+                    )
+                )
+                if str(preview.get("target_revision") or "") != current_revision:
+                    raise ValueError(
+                        "batch confirmation token is stale; request new previews"
+                    )
+            semantic_keys: dict[tuple[str, str, str, str, str], set[str]] = {}
+            for preview in previews:
+                key = _supplier_upload_preview_semantic_key(preview)
+                if any(key):
+                    semantic_keys.setdefault(key, set()).add(
+                        str(preview.get("source_sha256") or "")
+                    )
+            has_cross_file_semantic_duplicate = any(
+                len(source_hashes) > 1
+                for source_hashes in semantic_keys.values()
+            )
+            if has_cross_file_semantic_duplicate and (
+                not bool(payload.get("allow_semantic_duplicate"))
+                or not str(payload.get("duplicate_reason") or "").strip()
+            ):
+                raise ValueError(
+                    "batch contains probable semantic duplicates; explicit reason is required"
+                )
+            results = [
+                self._confirm_supplier_upload_token(
+                    shipment_id=shipment_id,
+                    confirmation_token=token,
+                    payload=payload,
+                    skip_target_revision_check=True,
+                )
+                for token in batch_tokens
+            ]
+            return {
+                "contract_name": "sheet_vitrina_v1_supplier_financial_document_batch_commit",
+                "status": "ok",
+                "outcome": "batch_confirmed",
+                "supplier_order_id": shipment_id,
+                "document_ids": [
+                    str(item.get("document_id") or "") for item in results
+                ],
+                "results": results,
+                "readback_confirmed": all(
+                    bool(item.get("readback_confirmed")) for item in results
+                ),
+            }
+        token = str(payload.get("confirmation_token") or "")
+        return self._confirm_supplier_upload_token(
+            shipment_id=shipment_id,
+            confirmation_token=token,
+            payload=payload,
+        )
+
+    def _confirm_supplier_upload_token(
+        self,
+        *,
+        shipment_id: str,
+        confirmation_token: str,
+        payload: Mapping[str, Any],
+        skip_target_revision_check: bool = False,
+    ) -> dict[str, Any]:
+        stored_preview = self.runtime.load_supplier_confirmation_preview(
+            confirmation_token
+        )
+        if (
+            stored_preview is not None
+            and str(stored_preview.get("confirmation_type") or "")
+            == "supplier_cny_document_upload"
+        ):
+            return self._confirm_supplier_cny_document_upload(
+                shipment_id=shipment_id,
+                confirmation_token=confirmation_token,
+                allow_relink=bool(payload.get("allow_relink")),
+                allow_semantic_duplicate=bool(
+                    payload.get("allow_semantic_duplicate")
+                ),
+                duplicate_reason=str(payload.get("duplicate_reason") or ""),
+                skip_target_revision_check=skip_target_revision_check,
+            )
+        return self.supplier_financial_documents_block.confirm_document_upload(
+            shipment_id,
+            confirmation_token=confirmation_token,
+            allow_semantic_duplicate=bool(
+                payload.get("allow_semantic_duplicate")
+            ),
+            duplicate_reason=str(payload.get("duplicate_reason") or ""),
+            skip_target_revision_check=skip_target_revision_check,
+        )
+
+    def _preview_supplier_cny_document_upload(
+        self,
+        *,
+        shipment_id: str,
+        file_bytes: bytes,
+        uploaded_filename: str,
+        uploaded_content_type: str,
+        preview: Mapping[str, Any],
+        payment_date: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        normalized = dict(preview.get("normalized_parse") or {})
+        if not str(
+            normalized.get("operation_date")
+            or normalized.get("document_date")
+            or ""
+        ).strip() and not payment_date:
+            return {
+                "contract_name": "sheet_vitrina_v1_supplier_financial_document_preview",
+                "status": "payment_date_required",
+                "preview_required": True,
+                "durable_saved": False,
+                "active_saved": False,
+                "manual_field": "payment_date",
+                "message": "Дата платежа не распознана. Укажите и подтвердите дату платежа.",
+                "normalized_parse": normalized,
+                "warnings": list(preview.get("warnings") or []),
+            }
+        token = "sfc_" + uuid4().hex
+        filename = Path(uploaded_filename or "cny-document.pdf").name
+        staging_dir = self.runtime.runtime_dir / "supplier_financial_staging" / token
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        staging_path = staging_dir / filename
+        staging_path.write_bytes(file_bytes)
+        now = self.activated_at_factory()
+        expires_at = (
+            _timestamp_as_utc(now) + timedelta(minutes=15)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        source_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        target_revision = self._supplier_cny_target_revision(shipment_id)
+        self.runtime.save_supplier_confirmation_preview(
+            token=token,
+            confirmation_type="supplier_cny_document_upload",
+            supplier_order_id=shipment_id,
+            subject_id="",
+            target_revision=target_revision,
+            source_sha256=source_sha256,
+            payload={
+                "filename": filename,
+                "content_type": uploaded_content_type,
+                "staging_path": str(
+                    staging_path.relative_to(self.runtime.runtime_dir)
+                ),
+                "payment_date": payment_date,
+                "actor": actor,
+                "normalized_parse": normalized,
+            },
+            created_at=now,
+            expires_at=expires_at,
+        )
+        all_documents = list(self.runtime.list_cny_documents())
+        exact_duplicates = [
+            item
+            for item in all_documents
+            if str(item.get("file_sha256") or "") == source_sha256
+        ]
+        exact_duplicate = exact_duplicates[0] if exact_duplicates else None
+        duplicate_action = "create"
+        if exact_duplicate is not None:
+            duplicate_shipment_id = str(
+                exact_duplicate.get("source_order_id") or ""
+            ).strip()
+            duplicate_is_excluded = (
+                str(exact_duplicate.get("status") or "")
+                == CNY_DOCUMENT_STATUS_EXCLUDED
+            )
+            if duplicate_is_excluded:
+                duplicate_action = (
+                    "restore"
+                    if duplicate_shipment_id == shipment_id
+                    else "restore_relink"
+                )
+            elif duplicate_shipment_id == shipment_id:
+                duplicate_action = "already_present"
+            else:
+                duplicate_action = "conflict_other_shipment"
+
+        semantic_key = (
+            str(normalized.get("document_type") or ""),
+            str(
+                normalized.get("document_number")
+                or normalized.get("transfer_application_number")
+                or ""
+            ).strip().lower(),
+            str(
+                normalized.get("operation_date")
+                or normalized.get("document_date")
+                or payment_date
+                or ""
+            ),
+            _canonical_semantic_number(
+                normalized.get("cny_amount")
+                or normalized.get("transfer_amount")
+                or normalized.get("rub_amount")
+                or ""
+            ),
+            str(normalized.get("currency") or "").upper(),
+        )
+        semantic_duplicates = []
+        if exact_duplicate is None:
+            for item in all_documents:
+                parsed = dict(item.get("parsed_payload") or {})
+                item_key = (
+                    str(item.get("document_type") or ""),
+                    str(
+                        item.get("document_number")
+                        or parsed.get("document_number")
+                        or parsed.get("transfer_application_number")
+                        or ""
+                    ).strip().lower(),
+                    str(
+                        item.get("operation_date")
+                        or parsed.get("operation_date")
+                        or parsed.get("document_date")
+                        or ""
+                    ),
+                    _canonical_semantic_number(
+                        item.get("cny_amount")
+                        or parsed.get("cny_amount")
+                        or parsed.get("transfer_amount")
+                        or item.get("rub_amount")
+                        or ""
+                    ),
+                    str(item.get("currency") or parsed.get("currency") or "").upper(),
+                )
+                if item_key == semantic_key:
+                    semantic_duplicates.append(item)
+            if semantic_duplicates:
+                duplicate_action = "semantic_warning"
+
+        duplicate_rows = [
+            {
+                "document_id": str(item.get("document_id") or ""),
+                "supplier_order_id": str(item.get("source_order_id") or ""),
+                "shipment": (
+                    self.supplier_financial_documents_block._shipment_identity(
+                        str(item.get("source_order_id") or "")
+                    )
+                    if str(item.get("source_order_id") or "")
+                    else {}
+                ),
+                "status": str(item.get("status") or ""),
+                "file_sha256": str(item.get("file_sha256") or ""),
+                "document_number": str(item.get("document_number") or ""),
+                "operation_date": str(item.get("operation_date") or ""),
+                "amount": item.get("cny_amount") or item.get("rub_amount"),
+                "currency": str(item.get("currency") or ""),
+            }
+            for item in [*exact_duplicates, *semantic_duplicates]
+        ]
+        warning_by_action = {
+            "already_present": "Тот же файл уже активен в этой поставке; будет возвращена существующая строка.",
+            "conflict_other_shipment": "Тот же файл уже активен в другой поставке. Требуется явный перенос.",
+            "restore": "Тот же файл находится в архиве этой поставки; будет предложено восстановление.",
+            "restore_relink": "Тот же файл находится в архиве другой поставки; требуется явное восстановление с переносом.",
+            "semantic_warning": "Реквизиты совпадают с другим документом при отличающемся SHA; вероятный дубликат.",
+        }
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_financial_document_preview",
+            "status": "preview",
+            "preview_required": True,
+            "active_saved": False,
+            "expense_lines_created": 0,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "supplier_order_id": shipment_id,
+            "shipment": self.supplier_financial_documents_block._shipment_identity(
+                shipment_id
+            ),
+            "document": {
+                "document_type": str(normalized.get("document_type") or ""),
+                "document_number": str(normalized.get("document_number") or ""),
+                "document_date": str(
+                    normalized.get("operation_date")
+                    or normalized.get("document_date")
+                    or payment_date
+                ),
+                "vendor": str(
+                    normalized.get("vendor")
+                    or normalized.get("beneficiary_customer")
+                    or normalized.get("bank")
+                    or ""
+                ),
+                "amount": normalized.get("cny_amount")
+                or normalized.get("transfer_amount")
+                or normalized.get("rub_amount"),
+                "currency": str(normalized.get("currency") or ""),
+                "filename": filename,
+                "file_sha256": source_sha256,
+            },
+            "warnings": [
+                *list(preview.get("warnings") or []),
+                *(
+                    [warning_by_action[duplicate_action]]
+                    if duplicate_action in warning_by_action
+                    else []
+                ),
+            ],
+            "errors": list(preview.get("errors") or []),
+            "duplicate_action": duplicate_action,
+            "outcome": (
+                "conflict_other_shipment"
+                if duplicate_action == "conflict_other_shipment"
+                else ""
+            ),
+            "duplicates": duplicate_rows,
+        }
+
+    def _confirm_supplier_cny_document_upload(
+        self,
+        *,
+        shipment_id: str,
+        confirmation_token: str,
+        allow_relink: bool = False,
+        allow_semantic_duplicate: bool = False,
+        duplicate_reason: str = "",
+        skip_target_revision_check: bool = False,
+    ) -> dict[str, Any]:
+        preview = self.runtime.load_supplier_confirmation_preview(
+            confirmation_token
+        )
+        if (
+            preview is None
+            or str(preview.get("supplier_order_id") or "") != shipment_id
+            or str(preview.get("confirmation_type") or "")
+            != "supplier_cny_document_upload"
+        ):
+            raise ValueError("confirmation token does not match CNY upload")
+        if preview.get("consumed_at"):
+            return {**dict(preview.get("result") or {}), "idempotent": True}
+        if _timestamp_as_utc(str(preview.get("expires_at") or "")) <= _timestamp_as_utc(
+            self.activated_at_factory()
+        ):
+            raise ValueError("confirmation token expired; request a new preview")
+        if (
+            not skip_target_revision_check
+            and str(preview.get("target_revision") or "")
+            != self._supplier_cny_target_revision(shipment_id)
+        ):
+            raise ValueError("confirmation token is stale; CNY dependencies changed")
+        data = dict(preview.get("payload") or {})
+        staging_path = self.runtime.runtime_dir / str(data.get("staging_path") or "")
+        file_bytes = staging_path.read_bytes()
+        if hashlib.sha256(file_bytes).hexdigest() != str(
+            preview.get("source_sha256") or ""
+        ):
+            raise ValueError("staged source SHA changed; request a new preview")
+        source_sha256 = str(preview.get("source_sha256") or "")
+        parsed = self.cny_ledger_block.parse_document_preview(
+            file_bytes,
+            uploaded_filename=str(data.get("filename") or ""),
+        )
+        normalized = dict(parsed.get("normalized_parse") or {})
+        exact_duplicates = [
+            item
+            for item in self.runtime.list_cny_documents()
+            if str(item.get("file_sha256") or "") == source_sha256
+        ]
+        existing = exact_duplicates[0] if exact_duplicates else None
+        if existing is not None:
+            existing_id = str(existing.get("document_id") or "")
+            existing_shipment_id = str(
+                existing.get("source_order_id") or ""
+            ).strip()
+            is_excluded = (
+                str(existing.get("status") or "")
+                == CNY_DOCUMENT_STATUS_EXCLUDED
+            )
+            if existing_shipment_id == shipment_id and not is_excluded:
+                replay = self.cny_ledger_block.replay_ledger(
+                    reason="idempotent_supplier_document_upload"
+                )
+                result = {
+                    **existing,
+                    "outcome": "already_present",
+                    "supplier_order_id": shipment_id,
+                    "idempotent": True,
+                    "replay": replay.get("replay") or replay,
+                }
+            elif is_excluded:
+                if existing_shipment_id != shipment_id and not allow_relink:
+                    raise ValueError(
+                        "same SHA is archived in another shipment; explicit relink confirmation is required"
+                    )
+                result = self.cny_ledger_block.restore_document(
+                    existing_id,
+                    target_shipment_id=shipment_id,
+                )
+            else:
+                if not allow_relink:
+                    raise ValueError(
+                        "same SHA is active in another shipment; explicit relink confirmation is required"
+                    )
+                result = self.cny_ledger_block.relink_document(
+                    existing_id,
+                    target_shipment_id=shipment_id,
+                )
+        else:
+            semantic_matches = []
+            semantic_key = (
+                str(normalized.get("document_type") or ""),
+                str(
+                    normalized.get("document_number")
+                    or normalized.get("transfer_application_number")
+                    or ""
+                ).strip().lower(),
+                str(
+                    normalized.get("operation_date")
+                    or normalized.get("document_date")
+                    or data.get("payment_date")
+                    or ""
+                ),
+                _canonical_semantic_number(
+                    normalized.get("cny_amount")
+                    or normalized.get("transfer_amount")
+                    or normalized.get("rub_amount")
+                    or ""
+                ),
+                str(normalized.get("currency") or "").upper(),
+            )
+            for item in self.runtime.list_cny_documents():
+                item_parse = dict(item.get("parsed_payload") or {})
+                item_key = (
+                    str(item.get("document_type") or ""),
+                    str(
+                        item.get("document_number")
+                        or item_parse.get("document_number")
+                        or item_parse.get("transfer_application_number")
+                        or ""
+                    ).strip().lower(),
+                    str(
+                        item.get("operation_date")
+                        or item_parse.get("operation_date")
+                        or item_parse.get("document_date")
+                        or ""
+                    ),
+                    _canonical_semantic_number(
+                        item.get("cny_amount")
+                        or item_parse.get("cny_amount")
+                        or item_parse.get("transfer_amount")
+                        or item.get("rub_amount")
+                        or ""
+                    ),
+                    str(
+                        item.get("currency")
+                        or item_parse.get("currency")
+                        or ""
+                    ).upper(),
+                )
+                if item_key == semantic_key:
+                    semantic_matches.append(item)
+            if semantic_matches and (
+                not allow_semantic_duplicate
+                or not str(duplicate_reason or "").strip()
+            ):
+                raise ValueError(
+                    "probable semantic duplicate requires explicit confirmation and reason"
+                )
+            result = self.cny_ledger_block.upload_document(
+                file_bytes=file_bytes,
+                uploaded_filename=str(data.get("filename") or ""),
+                uploaded_content_type=str(data.get("content_type") or ""),
+                source=CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+                source_order_id=shipment_id,
+                context_order_id=shipment_id,
+                reject_unsupported=True,
+                manual_payment_date=str(data.get("payment_date") or "") or None,
+                manual_payment_date_actor=str(data.get("actor") or ""),
+            )
+            result = {
+                **result,
+                "outcome": "created",
+                "supplier_order_id": shipment_id,
+                "duplicate_reason": str(duplicate_reason or "").strip(),
+            }
+        result_document_id = str(result.get("document_id") or "")
+        readback = self.runtime.load_cny_document(result_document_id)
+        if (
+            readback is None
+            or str(readback.get("source_order_id") or "") != shipment_id
+            or str(readback.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED
+        ):
+            raise ValueError(
+                "CNY document commit readback did not confirm the target shipment"
+            )
+        result = {
+            **result,
+            "document_id": result_document_id,
+            "supplier_order_id": shipment_id,
+            "readback_confirmed": True,
+        }
+        completed = self.runtime.complete_supplier_confirmation_preview(
+            token=confirmation_token,
+            consumed_at=self.activated_at_factory(),
+            result=result,
+        )
+        return dict(completed.get("result") or result)
+
+    def _supplier_cny_target_revision(self, shipment_id: str) -> str:
+        shipment = self.runtime.load_supplier_shipment(shipment_id) or {}
+        material = {
+            "shipment_updated_at": str(
+                (shipment.get("header") or {}).get("updated_at") or ""
+            ),
+            "documents": [
+                {
+                    "document_id": str(item.get("document_id") or ""),
+                    "source_order_id": str(item.get("source_order_id") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "status": str(item.get("status") or ""),
+                    "file_sha256": str(item.get("file_sha256") or ""),
+                }
+                for item in self.runtime.list_cny_documents()
+            ],
+        }
+        return "sha256:" + hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def handle_supplier_financial_document_confirm_import_request(
         self,
@@ -3427,7 +4223,12 @@ class RegistryUploadHttpEntrypoint:
             "document_id": str(document.get("document_id") or ""),
             "document_number": str(document.get("document_number") or parsed.get("document_number") or ""),
             "document_date": str(document.get("operation_date") or parsed.get("document_date") or ""),
-            "counterparty": str(parsed.get("bank") or parsed.get("vendor") or ""),
+            "counterparty": str(
+                parsed.get("vendor")
+                or parsed.get("beneficiary_customer")
+                or parsed.get("bank")
+                or ""
+            ),
             "amount": amount,
             "currency": currency,
             "download_path": str(document.get("download_path") or ""),
@@ -3462,9 +4263,166 @@ class RegistryUploadHttpEntrypoint:
             result["cny_replay"] = replay.get("replay") or replay
         return result
 
-    def handle_supplier_financial_document_delete_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
-        payload = self.supplier_financial_documents_block.delete_document(shipment_id, document_id)
-        if payload.get("cny_documents_archived"):
+    def handle_supplier_financial_document_delete_preview_request(
+        self,
+        shipment_id: str,
+        document_id: str,
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        cny_document = self.runtime.load_cny_document(document_id)
+        if cny_document is not None:
+            if str(cny_document.get("source_order_id") or "") != shipment_id:
+                raise ValueError("CNY document does not belong to this shipment")
+            if (
+                str(cny_document.get("status") or "")
+                == CNY_DOCUMENT_STATUS_EXCLUDED
+            ):
+                raise ValueError("CNY document is already archived")
+            linked_financial_id = str(
+                cny_document.get("linked_financial_document_id") or ""
+            ).strip()
+            if linked_financial_id:
+                raise ValueError(
+                    "CNY document is system-derived; exclude its source financial document "
+                    + linked_financial_id
+                )
+            token = "sfc_" + uuid4().hex
+            now = self.activated_at_factory()
+            expires_at = (
+                _timestamp_as_utc(now) + timedelta(minutes=10)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            revision = self._supplier_cny_target_revision(shipment_id)
+            operations = [
+                dict(item)
+                for item in self.runtime.list_cny_ledger_operations()
+                if str(item.get("source_document_id") or "") == document_id
+            ]
+            self.runtime.save_supplier_confirmation_preview(
+                token=token,
+                confirmation_type="supplier_cny_document_delete",
+                supplier_order_id=shipment_id,
+                subject_id=document_id,
+                target_revision=revision,
+                source_sha256=str(cny_document.get("file_sha256") or ""),
+                payload={
+                    "actor": actor,
+                    "operation_ids": [
+                        str(item.get("operation_id") or "") for item in operations
+                    ],
+                },
+                created_at=now,
+                expires_at=expires_at,
+            )
+            return {
+                "contract_name": "sheet_vitrina_v1_supplier_cny_document_delete_preview",
+                "status": "preview",
+                "confirmation_token": token,
+                "expires_at": expires_at,
+                "supplier_order_id": shipment_id,
+                "shipment": self.supplier_financial_documents_block._shipment_identity(
+                    shipment_id
+                ),
+                "document": self._supplier_order_cny_document_row(cny_document),
+                "linked_operations": operations,
+                "linked_operation_count": len(operations),
+                "warning": (
+                    "Документ будет архивирован, исключён из CNY-ledger и капитала; "
+                    "полнота расходов будет сброшена и запущен targeted replay."
+                ),
+            }
+        return self.supplier_financial_documents_block.preview_document_delete(
+            shipment_id, document_id
+        )
+
+    def handle_supplier_financial_document_delete_request(
+        self,
+        shipment_id: str,
+        document_id: str,
+        confirmation_token: str,
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        with self._supplier_confirmation_lock:
+            return self._handle_supplier_financial_document_delete_request(
+                shipment_id,
+                document_id,
+                confirmation_token,
+                actor=actor,
+            )
+
+    def _handle_supplier_financial_document_delete_request(
+        self,
+        shipment_id: str,
+        document_id: str,
+        confirmation_token: str,
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        preview = self.runtime.load_supplier_confirmation_preview(
+            confirmation_token
+        )
+        if (
+            preview is not None
+            and str(preview.get("confirmation_type") or "")
+            == "supplier_cny_document_delete"
+        ):
+            if (
+                str(preview.get("supplier_order_id") or "") != shipment_id
+                or str(preview.get("subject_id") or "") != document_id
+            ):
+                raise ValueError("confirmation token does not match CNY document")
+            if preview.get("consumed_at"):
+                return {**dict(preview.get("result") or {}), "idempotent": True}
+            if _timestamp_as_utc(
+                str(preview.get("expires_at") or "")
+            ) <= _timestamp_as_utc(self.activated_at_factory()):
+                raise ValueError(
+                    "confirmation token expired; request a new delete preview"
+                )
+            if str(preview.get("target_revision") or "") != (
+                self._supplier_cny_target_revision(shipment_id)
+            ):
+                raise ValueError(
+                    "confirmation token is stale; CNY dependencies changed"
+                )
+            payload = self.cny_ledger_block.delete_document(document_id)
+            readback = self.runtime.load_cny_document(document_id)
+            active_operations = [
+                item
+                for item in self.runtime.list_cny_ledger_operations()
+                if str(item.get("source_document_id") or "") == document_id
+            ]
+            if (
+                readback is None
+                or str(readback.get("status") or "")
+                != CNY_DOCUMENT_STATUS_EXCLUDED
+                or active_operations
+            ):
+                raise ValueError(
+                    "CNY exclusion readback did not confirm removal from active calculations"
+                )
+            payload = {
+                **payload,
+                "outcome": "excluded",
+                "supplier_order_id": shipment_id,
+                "document_id": document_id,
+                "actor": actor
+                or str((preview.get("payload") or {}).get("actor") or ""),
+                "readback_confirmed": True,
+            }
+            completed = self.runtime.complete_supplier_confirmation_preview(
+                token=confirmation_token,
+                consumed_at=self.activated_at_factory(),
+                result=payload,
+            )
+            return dict(completed.get("result") or payload)
+        payload = self.supplier_financial_documents_block.confirm_document_delete(
+            shipment_id,
+            document_id,
+            confirmation_token=confirmation_token,
+        )
+        if payload.get("cny_documents_archived") and not payload.get("idempotent"):
             replay = self.cny_ledger_block.replay_ledger(reason="supplier_financial_document_archive")
             payload["cny_replay"] = replay.get("replay") or replay
         return payload

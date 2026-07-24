@@ -647,6 +647,25 @@ def main() -> None:
                 frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
                 frame.locator("#saveShipmentButton").evaluate("(button) => { button.click(); button.click(); }")
                 expect(frame.locator("#saveShipmentButton")).to_be_disabled()
+                expect(frame.locator("#systemModal")).to_be_visible()
+                expect(frame.locator("#systemModalTitle")).to_have_text("Подтвердить фактические даты")
+                expect(frame.locator("#systemModalBody")).to_contain_text("26GN390")
+                expect(frame.locator("#systemModalBody")).to_contain_text("Фактическая дата отгрузки")
+                modal_style = frame.locator(".system-modal-card").evaluate(
+                    """(node) => {
+                        const styles = getComputedStyle(node);
+                        return { background: styles.backgroundColor, width: node.getBoundingClientRect().width };
+                    }"""
+                )
+                if modal_style["background"] in {"rgba(0, 0, 0, 0)", "transparent"}:
+                    raise AssertionError(f"confirmation modal must be opaque: {modal_style}")
+                frame.locator("#systemModal").press("Escape")
+                expect(frame.locator("#systemModal")).to_be_hidden()
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-17")
+                frame.locator("#saveShipmentButton").click()
+                expect(frame.locator("#systemModal")).to_be_visible()
+                expect(frame.locator("#systemModalCancel")).to_be_focused()
+                frame.locator("#systemModalConfirm").evaluate("(button) => { button.click(); button.click(); }")
                 expect(frame.locator("#cardMessage")).to_contain_text(
                     re.compile(r"Сохраняем изменение|Пересчитываем зависимые данные|Проверяем результат"),
                     timeout=5000,
@@ -664,6 +683,18 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_role("tab", name="Состав поставки").click()
+                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-18")
+                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("2026-05-20")
+                frame.locator("#saveShipmentButton").click()
+                expect(frame.locator("#systemModalBody")).to_contain_text(
+                    "Фактическая дата отгрузки"
+                )
+                expect(frame.locator("#systemModalBody")).to_contain_text(
+                    "Фактическая дата приёмки на ФФ"
+                )
+                frame.locator("#systemModalCancel").click()
+                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
+                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("")
                 frame.get_by_label("Плановая дата отгрузки").fill("2026-05-18")
                 frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-18")
                 dirty_date_cost_cell = frame.locator("#productLines .line-cost-cell").first
@@ -680,16 +711,46 @@ def main() -> None:
                 original_qty = float(dirty_qty.input_value())
                 dirty_qty.fill(str(original_qty + 1))
                 _seed_first_supplier_cny_failure(runtime)
+                _seed_first_supplier_cny_document(runtime, entrypoint)
                 frame.get_by_role("tab", name="Документы").click()
                 expense_row = frame.locator(
                     "#financialDocumentsRows tr[data-financial-document-row]",
                     has_text="BROWSER-EXPENSE",
                 ).first
                 expect(expense_row).to_be_visible(timeout=5000)
-                page.once("dialog", lambda dialog: dialog.accept())
                 expense_row.locator("[data-delete-financial-document]").click()
+                expect(frame.locator("#systemModalTitle")).to_have_text("Исключить финансовый документ")
+                expect(frame.locator("#systemModalBody")).to_contain_text("BROWSER-EXPENSE")
+                frame.locator("#systemModalCancel").click()
+                expect(expense_row).to_be_visible()
+                expense_row.locator("[data-delete-financial-document]").click()
+                expect(frame.locator("#systemModal")).to_be_visible()
+                frame.locator("#systemModalConfirm").click()
                 expect(frame.locator("#financialDocumentsMessage")).to_contain_text(
-                    "Документ удалён.", timeout=5000
+                    "перенесён в архив", timeout=5000
+                )
+                expect(frame.locator("#financialArchive")).to_be_visible()
+                expect(frame.locator("#financialArchiveRows")).to_contain_text("BROWSER-EXPENSE")
+                cny_row = frame.locator(
+                    "#financialDocumentsRows tr",
+                    has_text="CNY-BROWSER-10",
+                ).first
+                expect(cny_row).to_be_visible()
+                expect(cny_row).to_contain_text("Пользовательский")
+                expect(cny_row.locator("[data-delete-financial-document]")).to_be_visible()
+                cny_row.locator("[data-delete-financial-document]").click()
+                expect(frame.locator("#systemModalBody")).to_contain_text(
+                    "Связанных CNY-ledger операций: 1"
+                )
+                frame.locator("#systemModalCancel").click()
+                expect(cny_row).to_be_visible()
+                cny_row.locator("[data-delete-financial-document]").click()
+                frame.locator("#systemModalConfirm").click()
+                expect(frame.locator("#financialDocumentsRows")).not_to_contain_text(
+                    "CNY-BROWSER-10", timeout=5000
+                )
+                expect(frame.locator("#financialArchiveRows")).to_contain_text(
+                    "CNY-BROWSER-10"
                 )
                 dirty_exact_cost_tile = frame.locator(
                     "#financialSummaryGroups .total", has_text="Себестоимость на единицу товара"
@@ -1350,6 +1411,65 @@ def _seed_first_supplier_exact_cny_cost(runtime: RegistryUploadDbBackedRuntime, 
             }
         ]
     )
+
+
+def _seed_first_supplier_cny_document(
+    runtime: RegistryUploadDbBackedRuntime,
+    entrypoint: RegistryUploadHttpEntrypoint,
+) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed CNY document without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    entrypoint.cny_ledger_block.create_opening_balance(
+        {
+            "operation_date": "2026-05-01",
+            "cny_amount": "1000",
+            "average_rate": "12",
+        }
+    )
+    runtime.save_cny_document(
+        {
+            "document_id": f"cnydoc_{shipment_id}_browser_payment",
+            "document_type": "supplier_cny_payment",
+            "source": "supplier_order",
+            "source_order_id": shipment_id,
+            "context_order_id": shipment_id,
+            "linked_financial_document_id": "",
+            "original_filename": "browser-payment.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "browser-payment-sha",
+            "natural_key": f"supplier_cny_payment:browser:{shipment_id}",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "created_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "operation_date": "2026-05-20",
+            "operation_datetime": "2026-05-20T08:00:00Z",
+            "status": "posted",
+            "document_number": "CNY-BROWSER-10",
+            "currency": "CNY",
+            "rub_amount": "",
+            "cny_amount": "100",
+            "bank_rate": "",
+            "parsed_payload": {
+                "document_type": "supplier_cny_payment",
+                "document_number": "CNY-BROWSER-10",
+                "document_date": "2026-05-20",
+                "operation_date": "2026-05-20",
+                "operation_datetime": "2026-05-20T08:00:00Z",
+                "currency": "CNY",
+                "cny_amount": "100",
+                "vendor": "Browser CNY Supplier",
+                "payment_date_provenance": {"source": "parsed_document"},
+            },
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [],
+            "errors": [],
+        }
+    )
+    entrypoint.cny_ledger_block.replay_ledger(reason="browser_smoke_seed")
 
 
 def _seed_first_supplier_cny_failure(runtime: RegistryUploadDbBackedRuntime) -> None:

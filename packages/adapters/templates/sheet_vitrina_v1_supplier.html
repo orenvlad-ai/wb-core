@@ -149,6 +149,44 @@
     .finance-upload-progress .error { color: var(--danger); }
     .finance-upload-progress .success { color: var(--success); }
     .finance-upload-progress .warning { color: var(--warning); }
+    .system-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(3, 5, 10, 0.88);
+      backdrop-filter: blur(8px);
+    }
+    .system-modal-backdrop[hidden] { display: none; }
+    .system-modal-card {
+      width: min(680px, 100%);
+      max-height: min(84vh, 760px);
+      overflow: auto;
+      border: 1px solid rgba(167, 139, 250, 0.48);
+      border-radius: 12px;
+      padding: 22px;
+      background: #11141d;
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.72);
+    }
+    .system-modal-card h2 { margin-bottom: 14px; }
+    .system-modal-body { display: grid; gap: 10px; color: var(--text); }
+    .system-modal-body p, .system-modal-body ul { margin: 0; color: var(--muted); }
+    .system-modal-body strong { color: var(--text); }
+    .system-modal-body textarea { width: 100%; min-height: 82px; }
+    .system-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    @media (max-width: 620px) {
+      .system-modal-backdrop { padding: 10px; align-items: end; }
+      .system-modal-card { max-height: 92vh; padding: 17px; }
+      .system-modal-actions { display: grid; grid-template-columns: 1fr; }
+      .system-modal-actions button { width: 100%; }
+    }
     .registry-wrap, .line-wrap { width: 100%; max-width: 100%; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .registry-wrap, .line-wrap { background: rgba(16, 19, 27, 0.48); }
     table { width: 100%; border-collapse: collapse; min-width: 1180px; }
@@ -682,6 +720,10 @@
               <tbody id="financialDocumentsRows"></tbody>
             </table>
           </div>
+          <details id="financialArchive" style="margin-top: 14px;" hidden>
+            <summary>Архив документов</summary>
+            <div id="financialArchiveRows" class="finance-summary-stack" style="margin-top: 10px;"></div>
+          </details>
 
           <h3 style="margin-top: 18px;">Распознанные поля</h3>
           <div id="financialRecognizedFields" class="finance-fields"></div>
@@ -711,6 +753,17 @@
       </section>
     </div>
   </main>
+
+  <div id="systemModal" class="system-modal-backdrop" hidden>
+    <section class="system-modal-card" role="dialog" aria-modal="true" aria-labelledby="systemModalTitle">
+      <h2 id="systemModalTitle">Подтверждение</h2>
+      <div id="systemModalBody" class="system-modal-body"></div>
+      <div class="system-modal-actions">
+        <button id="systemModalCancel" type="button">Отменить</button>
+        <button id="systemModalConfirm" class="primary" type="button">Подтвердить</button>
+      </div>
+    </section>
+  </div>
 
   <script id="sheet-vitrina-v1-supplier-config" type="application/json">__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__</script>
   <script>
@@ -788,6 +841,13 @@
       const financialExpenseRows = document.getElementById("financialExpenseRows");
       const financialWarnings = document.getElementById("financialWarnings");
       const financialSummaryGroups = document.getElementById("financialSummaryGroups");
+      const financialArchive = document.getElementById("financialArchive");
+      const financialArchiveRows = document.getElementById("financialArchiveRows");
+      const systemModal = document.getElementById("systemModal");
+      const systemModalTitle = document.getElementById("systemModalTitle");
+      const systemModalBody = document.getElementById("systemModalBody");
+      const systemModalCancel = document.getElementById("systemModalCancel");
+      const systemModalConfirm = document.getElementById("systemModalConfirm");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
           const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
           const moneyFormatter = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -849,6 +909,7 @@
       let orderRequiredDocuments = [];
       let orderDocumentPackageDownloads = {};
       let financialDocuments = [];
+      let archivedFinancialDocuments = [];
       let financialExpenseLines = [];
       let financialSummary = null;
       let pendingBankFeePreview = null;
@@ -858,6 +919,69 @@
       let saveRequestInFlight = false;
       let factualCorrectionInFlight = false;
       let packageDownloadInFlight = "";
+      let systemModalResolver = null;
+      let systemModalPreviousFocus = null;
+
+      function closeSystemModal(result) {
+        if (systemModal.hidden) return;
+        const reasonInput = systemModalBody.querySelector("[data-confirmation-reason]");
+        const payload = {
+          confirmed: Boolean(result),
+          reason: reasonInput ? String(reasonInput.value || "").trim() : ""
+        };
+        systemModal.hidden = true;
+        const resolver = systemModalResolver;
+        systemModalResolver = null;
+        if (systemModalPreviousFocus && typeof systemModalPreviousFocus.focus === "function") {
+          systemModalPreviousFocus.focus();
+        }
+        systemModalPreviousFocus = null;
+        if (resolver) resolver(payload);
+      }
+
+      function openSystemModal(options) {
+        if (systemModalResolver) closeSystemModal(false);
+        systemModalPreviousFocus = document.activeElement;
+        systemModalTitle.textContent = options.title || "Подтверждение";
+        systemModalBody.innerHTML = options.bodyHtml || "";
+        systemModalConfirm.textContent = options.confirmLabel || "Подтвердить";
+        systemModalConfirm.classList.toggle("danger", Boolean(options.danger));
+        systemModalConfirm.disabled = false;
+        systemModal.hidden = false;
+        window.setTimeout(() => systemModalCancel.focus(), 0);
+        return new Promise((resolve) => { systemModalResolver = resolve; });
+      }
+
+      systemModalCancel.addEventListener("click", () => closeSystemModal(false));
+      systemModalConfirm.addEventListener("click", () => {
+        const requiredReason = systemModalBody.querySelector("[data-confirmation-reason][required]");
+        if (requiredReason && !String(requiredReason.value || "").trim()) {
+          requiredReason.focus();
+          return;
+        }
+        systemModalConfirm.disabled = true;
+        closeSystemModal(true);
+      });
+      systemModal.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeSystemModal(false);
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = Array.from(systemModal.querySelectorAll("button, textarea, input, select, a[href]"))
+          .filter((item) => !item.disabled && !item.hidden);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
 
       actualShipmentDateInput.max = String(config.business_today || "");
       actualFfAcceptanceDateInput.max = String(config.business_today || "");
@@ -901,10 +1025,13 @@
             bank_transfer_application: "Заявление на перевод ВТБ / платёжка",
             bank_fee_statement: "Банковская выписка для комиссий",
             bank_fee: "Комиссия банка CNY",
+            supplier_cny_payment: "Оплата поставщику CNY",
+            cny_conversion_purchase: "Конвертация RUB → CNY",
             packing_list: "Packing list / Упаковочный лист"
           };
           const orderDocumentStatusLabels = {
             uploaded: "Загружен",
+            posted: "Загружен",
             missing: "Не загружен",
             needs_review: "Проверить",
             error: "Ошибка"
@@ -1890,6 +2017,7 @@
         orderRequiredDocuments = [];
         orderDocumentPackageDownloads = {};
         financialDocuments = [];
+        archivedFinancialDocuments = [];
         financialExpenseLines = [];
         financialSummary = null;
         pendingBankFeePreview = null;
@@ -1933,6 +2061,7 @@
           orderRequiredDocuments = Array.isArray(payload.required_documents) ? payload.required_documents : [];
           orderDocumentPackageDownloads = payload.package_downloads || {};
           financialDocuments = Array.isArray(payload.documents) ? payload.documents : [];
+          archivedFinancialDocuments = Array.isArray(payload.archived_documents) ? payload.archived_documents : [];
           financialExpenseLines = Array.isArray(payload.expense_lines) ? payload.expense_lines : [];
           financialSummary = payload.summary || null;
           if (options && options.selectedDocumentId) {
@@ -1954,6 +2083,7 @@
         renderFinancialSummary();
         renderFinancialWarnings();
         renderFinancialDocumentRows();
+        renderFinancialArchive();
         renderFinancialSelectedDocument();
         updateTotalsAndState();
       }
@@ -2254,14 +2384,28 @@
         financialDocumentsRows.innerHTML = rows.map((document) => {
           const selected = document.document_id === selectedFinancialDocumentId;
           const canSelect = document.source === "financial_document" && document.document_id;
+          const action = document.document_action || {};
+          const operatorDocument = document.document_origin === "operator"
+            || document.source === "financial_document"
+            || document.source === "cny_document";
+          const canExclude = Boolean(document.document_id) && (
+            action.enabled === true
+            || (!document.document_action && operatorDocument)
+          );
+          const actionReason = String(action.reason || "");
           const amount = document.amount != null ? formatAmount(document.amount, document.currency) : "-";
           const file = document.download_path
             ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>Скачать</a>'
             : '<span class="muted-dash">-</span>';
           const warning = (Array.isArray(document.warnings) && document.warnings.length) ? document.warnings[0] : "";
-          const deleteButton = canSelect
-            ? '<button class="danger compact" type="button" data-delete-financial-document="' + escapeHtml(document.document_id || "") + '" title="Удалить документ" aria-label="Удалить документ">&times;</button>'
-            : "";
+          const deleteButton = canExclude
+            ? '<button class="danger compact" type="button" data-delete-financial-document="' + escapeHtml(document.document_id || "") + '" title="' + escapeHtml(action.label || "Исключить документ") + '" aria-label="' + escapeHtml(action.label || "Исключить документ") + '">&times;</button>'
+            : '<button class="compact" type="button" disabled title="' + escapeHtml(actionReason || "Действие недоступно") + '" aria-label="' + escapeHtml(actionReason || "Действие недоступно") + '">&times;</button>';
+          const originBadge = document.document_origin === "operator" || (
+            !document.document_origin && operatorDocument
+          )
+            ? '<span class="badge">Пользовательский</span>'
+            : '<span class="badge">Системный</span>';
           const status = document.status || (document.is_uploaded ? "uploaded" : "missing");
           const rowClass = [
             selected ? "finance-row-selected" : "",
@@ -2270,7 +2414,7 @@
           ].filter(Boolean).join(" ");
           return [
             '<tr data-financial-document-row="' + escapeHtml(canSelect ? (document.document_id || "") : "") + '"' + (rowClass ? ' class="' + escapeHtml(rowClass) + '"' : "") + '>',
-            '<td>' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</td>',
+            '<td>' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '<br>' + originBadge + '</td>',
             '<td><span class="badge ' + financialStatusTone(status) + '">' + escapeHtml(document.status_label || orderDocumentStatusLabels[status] || status || "-") + '</span></td>',
             '<td>' + renderExpenseAllocation(document.expense_allocation) + '</td>',
             '<td>' + escapeHtml(document.document_number || "-") + '</td>',
@@ -2285,7 +2429,7 @@
         }).join("");
         Array.from(financialDocumentsRows.querySelectorAll("[data-financial-document-row]")).forEach((row) => {
           row.addEventListener("click", (event) => {
-            if (event.target && event.target.closest("[data-download], [data-delete-financial-document]")) {
+            if (event.target && event.target.closest("[data-download], [data-delete-financial-document], button[disabled]")) {
               event.stopPropagation();
               return;
             }
@@ -2306,8 +2450,27 @@
         if (financialDocumentColumnPreference) financialDocumentColumnPreference.apply();
       }
 
+      function renderFinancialArchive() {
+        financialArchive.hidden = !archivedFinancialDocuments.length;
+        financialArchiveRows.innerHTML = archivedFinancialDocuments.map((item) => (
+          '<div class="finance-summary-card">'
+          + '<strong>' + escapeHtml(financialDocumentTypeLabels[item.document_type] || item.document_type || "Документ") + '</strong>'
+          + '<p>№' + escapeHtml(item.document_number || "—")
+          + ' · ' + escapeHtml(item.document_date || "—")
+          + ' · ' + escapeHtml(item.vendor || item.counterparty || "—")
+          + ' · ' + escapeHtml(formatAmount(
+            item.total_amount_rub != null
+              ? item.total_amount_rub
+              : (item.total_amount != null ? item.total_amount : item.amount),
+            item.currency || "RUB"
+          ))
+          + '</p><p>Архивирован; не участвует в расходах, needs-review и расчётах.</p>'
+          + '</div>'
+        )).join("");
+      }
+
       function financialStatusTone(status) {
-        if (status === "parsed" || status === "confirmed" || status === "uploaded") {
+        if (status === "parsed" || status === "confirmed" || status === "uploaded" || status === "posted") {
           return "success";
         }
         if (status === "parse_error" || status === "error" || status === "missing") {
@@ -2583,7 +2746,9 @@
         let uploadedCount = 0;
         let errorCount = 0;
         let lastDocumentId = "";
-        setMessage(financialDocumentsMessage, "Загружаем документы...", "");
+        const previews = [];
+        const confirmedResults = [];
+        setMessage(financialDocumentsMessage, "Распознаём документы без активного сохранения...", "");
         try {
           for (let index = 0; index < files.length; index += 1) {
             const file = files[index];
@@ -2621,17 +2786,14 @@
                   headers: { Accept: "application/json" }
                 });
               }
-              uploadedCount += 1;
-              lastDocumentId = payload.document_id || lastDocumentId;
-              if (payload.preview_required) {
-                pendingBankFeePreview = payload;
-                renderBankFeePreview();
+              if (!payload.confirmation_token) {
+                throw new Error(payload.message || "Сервер не выдал confirmation token");
               }
-              const statusLabel = financialStatusLabels[payload.parse_status] || payload.parse_status || "Загружен";
+              previews.push(payload);
               progress[index] = {
                 name: file.name,
-                status: payload.preview_required ? "Preview" : statusLabel,
-                tone: payload.parse_status === "parse_error" ? "error" : (payload.parse_status === "needs_review" ? "warning" : "success")
+                status: "Preview готов",
+                tone: (payload.warnings || []).length ? "warning" : "success"
               };
             } catch (error) {
               errorCount += 1;
@@ -2639,14 +2801,123 @@
             }
             renderFinancialUploadProgress(progress);
           }
-          await loadFinancialDocuments(lastDocumentId ? { selectedDocumentId: lastDocumentId } : undefined);
-          await refreshCurrentShipmentCostProof();
+          if (previews.length) {
+            const previewSemanticCounts = new Map();
+            previews.forEach((item) => {
+              const document = item.document || {};
+              const key = JSON.stringify([
+                document.document_type || "",
+                document.document_number || "",
+                document.document_date || "",
+                document.amount == null ? "" : String(document.amount),
+                document.currency || ""
+              ]);
+              if (key !== '["","","","",""]') {
+                previewSemanticCounts.set(key, (previewSemanticCounts.get(key) || 0) + 1);
+              }
+            });
+            const requiresReason = previews.some((item) => item.duplicate_action === "semantic_warning")
+              || Array.from(previewSemanticCounts.values()).some((count) => count > 1);
+            const requiresRelink = previews.some((item) => (
+              item.duplicate_action === "conflict_other_shipment"
+              || item.duplicate_action === "restore_relink"
+            ));
+            const rows = previews.map((item) => {
+              const document = item.document || {};
+              const duplicateText = (item.warnings || []).join("; ");
+              const duplicateLocations = (item.duplicates || []).map((duplicate) => {
+                const shipment = duplicate.shipment || {};
+                return [
+                  shipment.invoice_no ? ("invoice " + shipment.invoice_no) : "",
+                  duplicate.supplier_order_id || "",
+                  duplicate.status || ""
+                ].filter(Boolean).join(" · ");
+              }).filter(Boolean).join("; ");
+              return '<li><strong>' + escapeHtml(document.filename || "Документ") + '</strong>'
+                + '<br>' + escapeHtml([
+                  financialDocumentTypeLabels[document.document_type] || document.document_type,
+                  document.document_number ? ("№" + document.document_number) : "",
+                  document.document_date,
+                  document.vendor,
+                  formatAmount(document.amount, document.currency)
+                ].filter(Boolean).join(" · "))
+                + (duplicateText ? '<br><span class="message warning">' + escapeHtml(duplicateText) + '</span>' : "")
+                + (duplicateLocations ? '<br><span>Найдено: ' + escapeHtml(duplicateLocations) + '</span>' : "")
+                + '</li>';
+            }).join("");
+            const decision = await openSystemModal({
+              title: "Подтвердить добавление документов",
+              confirmLabel: requiresRelink ? "Перенести в эту поставку" : "Подтвердить добавление",
+              bodyHtml: '<p>Поставка <strong>' + escapeHtml((previews[0].shipment || {}).invoice_no || currentShipment.invoice_no || "")
+                + '</strong> · ' + escapeHtml(currentShipment.shipment_id) + '</p>'
+                + '<p>Файлов: <strong>' + String(previews.length) + '</strong></p><ul>' + rows + '</ul>'
+                + (requiresRelink
+                  ? '<p class="message warning">Перенос атомарно уберёт прежнюю активную связь, перенесёт CNY-ledger/капитал и запустит пересчёт обеих поставок. Двойная сумма не создаётся.</p>'
+                  : "")
+                + (requiresReason
+                  ? '<label>Причина сохранения вероятного дубликата<textarea data-confirmation-reason required></textarea></label>'
+                  : "")
+            });
+            if (!decision.confirmed) {
+              setMessage(financialDocumentsMessage, "Добавление отменено; активные документы и расходы не изменены.", "");
+              return;
+            }
+            const batchPayload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id) + "/confirm-upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                confirmation_tokens: previews.map((item) => item.confirmation_token),
+                allow_relink: requiresRelink,
+                allow_semantic_duplicate: requiresReason,
+                duplicate_reason: decision.reason
+              })
+            });
+            const batchResults = Array.isArray(batchPayload.results)
+              ? batchPayload.results
+              : [batchPayload];
+            for (const result of batchResults) {
+              if (!result.readback_confirmed) {
+                throw new Error("Сервер не подтвердил документ в целевой поставке");
+              }
+              uploadedCount += 1;
+              confirmedResults.push(result);
+              lastDocumentId = result.document_id || lastDocumentId;
+              if (result.preview_required && result.document_id) {
+                pendingBankFeePreview = result;
+                renderBankFeePreview();
+              }
+            }
+            await loadFinancialDocuments(lastDocumentId ? { selectedDocumentId: lastDocumentId } : undefined);
+            confirmedResults.forEach((result) => {
+              if (!financialDocuments.some((document) => (
+                document.document_id === result.document_id
+              ))) {
+                throw new Error(
+                  "Readback не нашёл документ " + String(result.document_id || "") + " в активном списке целевой поставки"
+                );
+              }
+            });
+            await refreshCurrentShipmentCostProof();
+          }
           if (errorCount) {
             setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " успешно, " + String(errorCount) + " с ошибкой.", "error");
           } else if (pendingBankFeePreview) {
             setMessage(financialDocumentsMessage, "Проверьте найденные комиссии перед импортом.", "warning");
           } else {
-            setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " документ(ов).", "success");
+            const outcomes = confirmedResults.map((item) => String(item.outcome || "created"));
+            const labels = {
+              created: "создан",
+              already_present: "уже загружен",
+              restored: "восстановлен",
+              relinked: "перенесён"
+            };
+            const outcomeText = outcomes.map((outcome) => labels[outcome] || outcome).join(", ");
+            setMessage(
+              financialDocumentsMessage,
+              "Подтверждено сервером: " + String(uploadedCount) + " документ(ов)"
+                + (outcomeText ? " · " + outcomeText : "") + ".",
+              "success"
+            );
           }
         } finally {
           addFinancialDocumentButton.disabled = false;
@@ -2659,21 +2930,54 @@
           setMessage(financialDocumentsMessage, "Документ не выбран.", "error");
           return;
         }
-        if (!window.confirm("Удалить документ заказа? Это действие нельзя отменить.")) {
-          return;
-        }
-        setMessage(financialDocumentsMessage, "Удаляем документ...", "");
+        setMessage(financialDocumentsMessage, "Готовим безопасное исключение документа...", "");
         try {
-          await fetchJson(financialDocumentPath(currentShipment.shipment_id, documentId), {
-            method: "DELETE",
-            headers: { Accept: "application/json" }
+          const preview = await fetchJson(financialDocumentPath(currentShipment.shipment_id, documentId) + "/delete-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: "{}"
           });
+          const document = preview.document || {};
+          const decision = await openSystemModal({
+            title: "Исключить финансовый документ",
+            confirmLabel: "Подтвердить удаление",
+            danger: true,
+            bodyHtml: '<p><strong>' + escapeHtml(financialDocumentTypeLabels[document.document_type] || document.document_type || "Документ") + '</strong></p>'
+              + '<p>№' + escapeHtml(document.document_number || "—")
+              + ' · ' + escapeHtml(document.document_date || "—")
+              + ' · ' + escapeHtml(document.vendor || document.counterparty || "—") + '</p>'
+              + '<p>Сумма: <strong>' + escapeHtml(formatAmount(
+                document.amount != null
+                  ? document.amount
+                  : (document.total_amount_rub != null ? document.total_amount_rub : document.total_amount),
+                document.currency || "RUB"
+              )) + '</strong></p>'
+              + '<p>Поставка: ' + escapeHtml((preview.shipment || {}).invoice_no || "")
+              + ' · ' + escapeHtml(currentShipment.shipment_id) + '</p>'
+              + '<p>Распределено: <strong>' + escapeHtml(formatAmount(preview.allocated_amount_rub, "RUB")) + '</strong></p>'
+              + (preview.linked_operation_count != null
+                ? '<p>Связанных CNY-ledger операций: <strong>' + escapeHtml(String(preview.linked_operation_count)) + '</strong></p>'
+                : "")
+              + '<p>' + escapeHtml(preview.warning || "") + '</p>'
+          });
+          if (!decision.confirmed) {
+            setMessage(financialDocumentsMessage, "Удаление отменено; расчёты не изменены.", "");
+            return;
+          }
+          const result = await fetchJson(financialDocumentPath(currentShipment.shipment_id, documentId) + "/delete-confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ confirmation_token: preview.confirmation_token })
+          });
+          if (result.readback_confirmed === false) {
+            throw new Error("Сервер не подтвердил исключение документа");
+          }
           if (selectedFinancialDocumentId === documentId) {
             selectedFinancialDocumentId = "";
           }
           await loadFinancialDocuments();
           await refreshCurrentShipmentCostProof();
-          setMessage(financialDocumentsMessage, "Документ удалён.", "success");
+          setMessage(financialDocumentsMessage, "Документ перенесён в архив и исключён из активных расходов.", "success");
         } catch (error) {
           setMessage(financialDocumentsMessage, error.message, "error");
         }
@@ -2947,23 +3251,30 @@
         return line;
       }
 
-      function readCurrentPayload() {
+      function readCurrentPayload(options) {
         syncLinesFromInputs();
         const metadata = {};
         metaInputs.forEach((input) => {
           metadata[input.dataset.metaField] = input.value.trim();
         });
-        return {
+        const result = {
           shipment_date: shipmentDateInput.value,
           planned_shipment_date: shipmentDateInput.value,
           actual_shipment_date: actualShipmentDateInput.value,
           actual_ff_acceptance_date: actualFfAcceptanceDateInput.value,
           approx_yuan_rate: approxYuanRateInput.value.trim(),
           metadata,
-          lines: (currentShipment && currentShipment.lines) || [],
           warnings: (currentShipment && currentShipment.warnings) || [],
           errors: (currentShipment && currentShipment.errors) || []
         };
+        if (!options || options.includeLines !== false) {
+          result.lines = (currentShipment && currentShipment.lines) || [];
+        }
+        return result;
+      }
+
+      function hasExplicitLineMutation() {
+        return Boolean(shipmentCard.querySelector("tr[data-line-kind][data-dirty='1']"));
       }
 
       function updateTotalsAndState() {
@@ -3142,17 +3453,63 @@
             currentUploadId = "";
           } else {
             const shipmentId = currentShipment.shipment_id;
-            const response = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json", Accept: "application/json" },
-              body: JSON.stringify({
-                shipment_date: payload.shipment_date,
-                actual_shipment_date: payload.actual_shipment_date,
-                actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
-                approx_yuan_rate: payload.approx_yuan_rate,
-                payload
-              })
-            });
+            const headerOnly = !hasExplicitLineMutation();
+            const mutationPayload = {
+              shipment_date: payload.shipment_date,
+              actual_shipment_date: payload.actual_shipment_date,
+              actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
+              approx_yuan_rate: payload.approx_yuan_rate,
+              payload: headerOnly ? readCurrentPayload({ includeLines: false }) : payload
+            };
+            const factualDatesChanged = (
+              String(payload.actual_shipment_date || "") !== String(currentShipment.actual_shipment_date || "")
+              || String(payload.actual_ff_acceptance_date || "") !== String(currentShipment.actual_ff_acceptance_date || "")
+            );
+            let response;
+            if (factualDatesChanged) {
+              const preview = await fetchJson(
+                shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/factual-dates/preview",
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Accept: "application/json" },
+                  body: JSON.stringify(mutationPayload)
+                }
+              );
+              const changes = (preview.changes || []).map((item) => (
+                '<li><strong>' + escapeHtml(item.label || item.field)
+                + '</strong>: ' + escapeHtml(item.old_value || "не задана")
+                + ' → ' + escapeHtml(item.new_value || "не задана") + '</li>'
+              )).join("");
+              const consequences = (preview.consequences || []).map((item) => (
+                '<li>' + escapeHtml(item) + '</li>'
+              )).join("");
+              const decision = await openSystemModal({
+                title: "Подтвердить фактические даты",
+                confirmLabel: "Подтвердить и сохранить",
+                bodyHtml: '<p>Invoice: <strong>' + escapeHtml(preview.invoice_no || "—")
+                  + '</strong><br>Shipment ID: <strong>' + escapeHtml(preview.shipment_id || shipmentId) + '</strong></p>'
+                  + '<ul>' + changes + '</ul>'
+                  + '<p><strong>Складские и стоимостные последствия</strong></p><ul>' + consequences + '</ul>'
+              });
+              if (!decision.confirmed) {
+                setMessage(cardMessage, "Сохранение отменено; складские и стоимостные данные не изменены.", "");
+                return;
+              }
+              response = await fetchJson(
+                shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/factual-dates/confirm",
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Accept: "application/json" },
+                  body: JSON.stringify({ confirmation_token: preview.confirmation_token })
+                }
+              );
+            } else {
+              response = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json", Accept: "application/json" },
+                body: JSON.stringify(mutationPayload)
+              });
+            }
             if (response.status === "accepted" && response.correction) {
               saveRequestInFlight = false;
               await pollFactualDateCorrection(shipmentId, response.correction);

@@ -44,6 +44,7 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_operations"
   - "sheet_vitrina_v1_ff_stock_operation_lines"
   - "sheet_vitrina_v1_supplier_shipment_factual_corrections"
+  - "sheet_vitrina_v1_supplier_confirmation_previews"
 related_endpoints:
   - "GET /sheet-vitrina-v1/supplier"
   - "GET /sheet-vitrina-v1/settings"
@@ -54,6 +55,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/factual-dates/preview"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/factual-dates/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/factual-date-correction"
   - "DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch"
@@ -68,10 +71,12 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/documents/accounting-package.zip"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/confirm-upload"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/confirm-import"
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
-  - "DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/delete-preview"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/delete-confirm"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file"
   - "GET /v1/sheet-vitrina-v1/supply/cny-account"
   - "POST /v1/sheet-vitrina-v1/supply/cny-account/documents"
@@ -108,6 +113,12 @@ related_runners:
   - "apps/supplier_shipment_factual_date_correction_smoke.py"
   - "apps/supplier_financial_document_chain_confirmation_smoke.py"
   - "apps/supplier_financial_documents_smoke.py"
+  - "apps/supplier_confirmation_flows_smoke.py"
+  - "apps/supplier_cny_document_correction_smoke.py"
+  - "apps/supplier_26gn390_recovery.py"
+  - "apps/supplier_26gn390_recovery_smoke.py"
+  - "apps/supplier_cny_payment_10_recovery.py"
+  - "apps/supplier_cny_payment_10_recovery_smoke.py"
   - "apps/supplier_order_packages_smoke.py"
   - "apps/supplier_expense_allocation_smoke.py"
   - "apps/our_wb_costs_smoke.py"
@@ -398,3 +409,13 @@ Refreshing the proof after a financial-document action merges only the returned 
 Supplier shipment product lines are an authoritative allocation boundary for module 45. Create/update is atomic: every product row must resolve deterministically to an authoritative nmID and contain positive quantity, unit price and line amount. Any unmatched/ambiguous/invalid row rejects the whole file; no pseudo-SKU, partial save or discretionary money allocation is allowed.
 
 The first posted CNY supplier payment activates the full physical invoice composition; every posted payment and related bank fee allocates capital across all product lines by invoice value. Paid-equivalent quantity remains diagnostic audit only. Actual shipment and FF acceptance dates create persisted stage boundaries; upload time and planned dates do not. Expense lines enter landed cost only when both parent document and line have eligible `parsed`/`confirmed` state; informational/needs-review/failed/duplicate/unmatched/excluded documents do not. Direct-RUB bank-fee rows use their own operation date, while CNY fees remain owned by the CNY ledger. The parent `Комиссии банка` UI row shows the sum of eligible child expenses rather than `—`; expanded detail exposes source, RUB/CNY amount and CNY-ledger operation/rate provenance. Every allocation carries document/line provenance plus deterministic dedupe. A cost-affecting source change/archive resets `expenses_complete` and queues targeted replay; setting it true only certifies an exact fingerprint. Details are in modules 45 and 48.
+
+# 19. Confirmation, archive and supplier-document correction contract
+
+- Header-only shipment changes omit `lines`. Compatibility payloads that repeat every persisted line unchanged are also treated as header-only; legacy lines without a source-owned barcode remain field-for-field unchanged. A real legacy composition edit remains blocked by the barcode-identity guard.
+- Any change of `actual_shipment_date` or `actual_ff_acceptance_date` requires `factual-dates/preview` followed by `factual-dates/confirm`. The server token binds shipment ID, current header/line/document revision, old/new values and consequences, expires, is single-use and becomes stale when dependencies change. Preview/cancel creates no shipment, audit, FF receipt/layer or replay mutation.
+- Supplier financial/CNY uploads are parse-and-stage first. Preview creates no active document, expense line, ledger operation, completeness reset or replay request. Confirm requires the exact staged SHA and current target revision, then performs server readback before returning one of `created`, `already_present`, `restored` or `relinked`. Multi-file confirmation validates the complete token set before committing and returns one exact result per file.
+- Same SHA in another shipment is `conflict_other_shipment`, never generic success. Explicit relink moves the one existing CNY document, rebuilds its one ledger/capital chain, resets certification for old and new shipments and queues one combined targeted request. Parsed payment evidence never silently replaces the shipment from the request route.
+- Every operator-owned active financial or CNY row has an exclusion action. System rows render a disabled action with a reason. Exclusion is audited archive, not physical deletion: active projection, needs-review and active expense/CNY/capital participation disappear; source file and audit remain. Linked derived CNY rows direct the operator to their source financial document.
+- Active and archived projections are separate. `excluded` never maps to `needs_review`, and archived expense lines are not included in active summaries. Exact SHA restore reuses the archived document; a semantic match with another SHA requires an explicit warning, confirmation and reason.
+- Exact cost presentation uses canonical `exact_cost_status`: `certified` is green, `provisional` is yellow with its precise reason, and `unavailable` suppresses the number and shows blockers. `expenses_complete` alone never makes cost green. Stage cost shows only a fingerprint-valid current active functional version; queued/running replay is `Ожидает пересчёта`, errors show the blocker, stale numbers are hidden, and a shipment that left the stage shows neutral `Не применяется`.
