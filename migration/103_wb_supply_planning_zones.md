@@ -134,7 +134,12 @@ confidence достоверных наблюдений; отсутствие н�
 Historical boolean `exclude_elektrostal_stock=true` читается только как
 compatibility evidence для `warehouseID=120762`. Current payload использует
 общий multi-select `excluded_wb_warehouse_ids` с stable numeric identity и
-применяет его одинаково в factory-order и WB regional calculations. Selector
+применяет его одинаково в factory-order, WB regional calculations и read-only
+`Подобрать склады WB`: backend исключает эти IDs до ranking,
+warehouse-specific probes и operator handoff. Если после исключений не осталось
+допустимых вариантов, API возвращает controlled
+`no_eligible_storage_warehouse_after_exclusions`, а не исключённый склад.
+Selector
 показывает только склады с ненулевым physical/in-way contour в свежем complete
 official snapshot, но исключает из формул только physical stock, уже входивший
 в соответствующую действующую формулу. Selected ID сохраняется, если склад
@@ -143,6 +148,12 @@ Result pins IDs, snapshot date/fingerprint and actual/excluded/effective
 reconciliation by `warehouseID + nmID`. WB regional exclusion happens before
 planning-zone aggregation and never removes demand history or changes the
 destination registry.
+
+`warehouseID=0` отображается как `Остальные — служебная группа WB`: это
+агрегированные остатки без привязки WB к конкретному складу. Группа может
+участвовать в stock reconciliation по текущему canonical contract, но всегда
+имеет `destination_eligible=false` и никогда не попадает в planning candidates,
+ranking, recommendation или download/operator handoff.
 
 If WB, catalog or coefficient evidence is unavailable, the picker fails closed
 with controlled blockers and does not alter the calculation.  If a release

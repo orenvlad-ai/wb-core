@@ -8791,15 +8791,22 @@
         });
         excludedWbWarehouseIds.forEach((warehouseId) => {
           if (!optionsById.has(warehouseId)) {
+            const isServiceGroup = warehouseId === 0;
             optionsById.set(warehouseId, {
               warehouse_id: warehouseId,
-              warehouse_name: "warehouseId " + warehouseId,
+              warehouse_name: isServiceGroup
+                ? "Остальные — служебная группа WB"
+                : "warehouseId " + warehouseId,
               stock_quantity: 0,
               in_way_to_client: 0,
               in_way_from_client: 0,
               total_contour: 0,
               temporarily_missing: true,
-              message: "Склад временно отсутствует в текущем снимке"
+              destination_eligible: !isServiceGroup,
+              service_group: isServiceGroup,
+              message: isServiceGroup
+                ? "Агрегированные остатки, которые WB не привязал к конкретному складу"
+                : "Склад временно отсутствует в текущем снимке"
             });
           }
         });
@@ -8815,7 +8822,10 @@
               const warehouseId = Number(item.warehouse_id);
               const temporarilyMissing = Boolean(item.temporarily_missing);
               const main = String(item.warehouse_name || "Склад") + " · warehouseID " + warehouseId;
-              const sub = temporarilyMissing
+              const serviceMessage = String(item.message || "").trim();
+              const sub = serviceMessage
+                ? serviceMessage
+                : temporarilyMissing
                 ? "Склад временно отсутствует в текущем снимке"
                 : [
                     "Остаток: " + formatWbNumber(item.stock_quantity),
@@ -9156,7 +9166,8 @@
             calculation_id: calculationId,
             package_type: "box",
             only_same_district: true,
-            include_transit: false
+            include_transit: false,
+            excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
           })
         });
         const payload = await readJson(response);
