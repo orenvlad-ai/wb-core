@@ -60,7 +60,7 @@ from packages.contracts.wb_autoanswers import (
 )
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_DAILY_CAP_USD = Decimal("5.00")
 DEFAULT_MONTHLY_CAP_USD = Decimal("50.00")
 DEFAULT_HOURLY_CAP_USD = Decimal("0.50")
@@ -78,7 +78,7 @@ RATING_ONLY_TEMPLATE_POLICY_VERSION = "owner-policy-2026-07-21-v2"
 DEFAULT_LEASE_SECONDS = 300
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v5"
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v6"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -548,7 +548,7 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v5(conn)
+            self._migrate_schema_v6(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
                 (SCHEMA_VERSION, iso_utc(self._now())),
@@ -1190,6 +1190,34 @@ class AutoanswersRepository:
                 "UPDATE sheet_vitrina_v1_wb_autoanswers_settings SET policy_version=?, updated_at=? WHERE singleton=1",
                 (DEFAULT_POLICY_VERSION, iso_utc()),
             )
+
+    @staticmethod
+    def _migrate_schema_v6(conn: sqlite3.Connection) -> None:
+        """Add immutable conservative holds for provider-cost uncertainty."""
+
+        AutoanswersRepository._migrate_schema_v5(conn)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(
+                hold_id TEXT PRIMARY KEY,
+                processing_key TEXT NOT NULL
+                    REFERENCES sheet_vitrina_v1_wb_autoanswer_jobs(processing_key),
+                transition_run_id TEXT,
+                upper_bound_usd TEXT NOT NULL,
+                effective_at TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(processing_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_budget_uncertainty_effective
+            ON sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(
+                effective_at,
+                transition_run_id
+            );
+            """
+        )
 
     def settings(self) -> AutoanswersSettings:
         with closing(self._connect()) as conn:
@@ -1931,9 +1959,13 @@ class AutoanswersRepository:
                      WHERE transition_run_id=?) AS actual,
                     (SELECT COALESCE(SUM(CASE WHEN status='reserved' THEN CAST(reserved_usd AS REAL) ELSE 0 END),0)
                      FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
-                     WHERE transition_run_id=?) AS reserved
+                     WHERE transition_run_id=?) AS reserved,
+                    (SELECT COALESCE(SUM(CAST(upper_bound_usd AS REAL)),0)
+                     FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                     WHERE transition_run_id=?) AS uncertainty
                 """,
                 (
+                    str(sweep["transition_run_id"]) if sweep is not None else "",
                     str(sweep["transition_run_id"]) if sweep is not None else "",
                     str(sweep["transition_run_id"]) if sweep is not None else "",
                     str(sweep["transition_run_id"]) if sweep is not None else "",
@@ -2193,6 +2225,7 @@ class AutoanswersRepository:
             "transition_run_id": str(sweep["transition_run_id"]) if sweep is not None else None,
             "run_actual_usd": float(run_spend["actual"] or 0),
             "run_active_reserved_usd": float(run_spend["reserved"] or 0),
+            "run_uncertainty_hold_usd": float(run_spend["uncertainty"] or 0),
             "throughput_last_hour": throughput,
             "eta_hours": eta,
             "stop_reason": stop_reason or "no_eligible_jobs",
@@ -2787,6 +2820,296 @@ class AutoanswersRepository:
         month = day[:7]
         return day, month
 
+    @staticmethod
+    def _budget_uncertainty_candidates(
+        conn: sqlite3.Connection,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT
+                r.processing_key,
+                r.transition_run_id,
+                r.provider_call_started_at,
+                r.released_reason,
+                r.created_at AS reservation_created_at,
+                r.updated_at AS reservation_updated_at,
+                j.last_error_code,
+                j.attempts
+            FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+            JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+              ON j.processing_key=r.processing_key
+            WHERE r.provider_call_started_at IS NOT NULL
+              AND r.status='released'
+              AND CAST(COALESCE(r.actual_cost_usd,'0') AS REAL)=0
+              AND (
+                    j.last_error_code IN ('node_timeout','node_invalid_json')
+                    OR j.last_error_code LIKE 'node_process_exit_%'
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_cost_events c
+                    WHERE c.processing_key=r.processing_key
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events f
+                    WHERE f.processing_key=r.processing_key
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                    WHERE h.processing_key=r.processing_key
+                  )
+            ORDER BY r.provider_call_started_at,r.processing_key
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def budget_reconciliation_plan(self) -> dict[str, Any]:
+        """Build an exact read-only plan for unknown provider-cost boundaries."""
+
+        settings = self.settings()
+        with closing(self._connect()) as conn:
+            candidates = self._budget_uncertainty_candidates(conn)
+            runtime = conn.execute(
+                """
+                SELECT stop_reason,stop_details_json,updated_at
+                FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+                WHERE singleton=1
+                """
+            ).fetchone()
+        upper_bound = _money(settings.max_reservation_per_review_usd)
+        holds = [
+            {
+                **candidate,
+                "upper_bound_usd": str(upper_bound),
+                "upper_bound_kind": "conservative_contract_hold_not_actual_cost",
+                "effective_at": str(candidate["provider_call_started_at"]),
+            }
+            for candidate in candidates
+        ]
+        identity = {
+            "contract": "wb_autoanswers_budget_reconciliation_v1",
+            "policy_epoch": int(settings.policy_epoch),
+            "max_reservation_per_review_usd": str(upper_bound),
+            "runtime_stop_reason": (
+                str(runtime["stop_reason"] or "") if runtime is not None else ""
+            ),
+            "holds": holds,
+        }
+        return {
+            **identity,
+            "plan_fingerprint": "sha256:" + sha256_text(canonical_json(identity)),
+            "candidate_count": len(holds),
+            "captured_at": iso_utc(self._now()),
+            "runtime": {
+                "stop_reason": (
+                    str(runtime["stop_reason"] or "") if runtime is not None else ""
+                ),
+                "stop_details": (
+                    json.loads(str(runtime["stop_details_json"] or "{}"))
+                    if runtime is not None
+                    else {}
+                ),
+                "updated_at": (
+                    str(runtime["updated_at"] or "") if runtime is not None else ""
+                ),
+            },
+        }
+
+    def apply_budget_reconciliation(
+        self,
+        *,
+        expected_fingerprint: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Append conservative holds; never label an unknown amount as spend."""
+
+        actor = _clean_text(actor_id)
+        if not actor:
+            raise ValueError("actor_id is required")
+        plan = self.budget_reconciliation_plan()
+        if str(plan["plan_fingerprint"]) != _clean_text(expected_fingerprint):
+            raise AutoanswersRuntimeError(
+                "budget reconciliation evidence changed; create a new plan",
+                code="budget_reconciliation_stale",
+            )
+        if not int(plan["candidate_count"]):
+            raise AutoanswersRuntimeError(
+                "budget reconciliation has no unresolved provider boundary",
+                code="budget_reconciliation_evidence_missing",
+            )
+        if str(plan["runtime"].get("stop_reason") or "") != "budget_state_unknown":
+            raise AutoanswersRuntimeError(
+                "budget reconciliation cannot clear a different runtime stop reason",
+                code="budget_reconciliation_stop_reason_changed",
+            )
+        now = self._now()
+        with self.transaction() as conn:
+            current = self._budget_uncertainty_candidates(conn)
+            current_settings = conn.execute(
+                """
+                SELECT policy_epoch,max_reservation_per_review_usd
+                FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1
+                """
+            ).fetchone()
+            current_runtime = conn.execute(
+                """
+                SELECT stop_reason
+                FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1
+                """
+            ).fetchone()
+            if current_settings is None:
+                raise AutoanswersRuntimeError(
+                    "Autoanswers settings are missing",
+                    code="settings_missing",
+                )
+            current_holds = [
+                {
+                    **candidate,
+                    "upper_bound_usd": str(
+                        _money(current_settings["max_reservation_per_review_usd"])
+                    ),
+                    "upper_bound_kind": (
+                        "conservative_contract_hold_not_actual_cost"
+                    ),
+                    "effective_at": str(candidate["provider_call_started_at"]),
+                }
+                for candidate in current
+            ]
+            identity = {
+                "contract": "wb_autoanswers_budget_reconciliation_v1",
+                "policy_epoch": int(current_settings["policy_epoch"]),
+                "max_reservation_per_review_usd": str(
+                    _money(current_settings["max_reservation_per_review_usd"])
+                ),
+                "runtime_stop_reason": (
+                    str(current_runtime["stop_reason"] or "")
+                    if current_runtime is not None
+                    else ""
+                ),
+                "holds": current_holds,
+            }
+            current_fingerprint = "sha256:" + sha256_text(
+                canonical_json(identity)
+            )
+            if current_fingerprint != _clean_text(expected_fingerprint):
+                raise AutoanswersRuntimeError(
+                    "budget reconciliation evidence changed during apply",
+                    code="budget_reconciliation_stale",
+                )
+            if (
+                current_runtime is None
+                or str(current_runtime["stop_reason"] or "")
+                != "budget_state_unknown"
+            ):
+                raise AutoanswersRuntimeError(
+                    "budget reconciliation runtime stop reason changed during apply",
+                    code="budget_reconciliation_stop_reason_changed",
+                )
+            for hold in current_holds:
+                hold_id = "uncertainty:" + sha256_text(
+                    f"{hold['processing_key']}:{hold['provider_call_started_at']}"
+                )
+                evidence = {
+                    key: hold.get(key)
+                    for key in (
+                        "provider_call_started_at",
+                        "released_reason",
+                        "reservation_created_at",
+                        "reservation_updated_at",
+                        "last_error_code",
+                        "attempts",
+                        "upper_bound_kind",
+                    )
+                }
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(
+                        hold_id,processing_key,transition_run_id,upper_bound_usd,
+                        effective_at,reason,evidence_json,created_by,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        hold_id,
+                        hold["processing_key"],
+                        hold["transition_run_id"],
+                        hold["upper_bound_usd"],
+                        hold["effective_at"],
+                        "provider_boundary_without_usage_readback",
+                        canonical_json(evidence),
+                        actor,
+                        iso_utc(now),
+                    ),
+                )
+                self._audit(
+                    conn,
+                    aggregate_type="budget_uncertainty",
+                    aggregate_id=hold_id,
+                    event_type="conservative_uncertainty_hold_appended",
+                    actor_type="operator",
+                    actor_id=actor,
+                    details={
+                        "processing_key": hold["processing_key"],
+                        "transition_run_id": hold["transition_run_id"],
+                        "upper_bound_usd": hold["upper_bound_usd"],
+                        "amount_semantics": (
+                            "conservative_cap_hold_not_actual_cost"
+                        ),
+                        "plan_fingerprint": expected_fingerprint,
+                    },
+                    at=now,
+                )
+            unresolved = self._budget_uncertainty_candidates(conn)
+            if unresolved:
+                raise AutoanswersRuntimeError(
+                    "budget uncertainty remains after reconciliation",
+                    code="budget_reconciliation_incomplete",
+                )
+            self._set_stop_reason(
+                conn,
+                None,
+                details={
+                    "budget_reconciliation_fingerprint": expected_fingerprint,
+                    "conservative_holds_appended": len(current_holds),
+                },
+                at=now,
+            )
+        return {
+            "status": "reconciled",
+            "plan_fingerprint": expected_fingerprint,
+            "holds_appended": len(plan["holds"]),
+            "budget": self.budget_status(),
+            "readback": self.budget_reconciliation_status(),
+        }
+
+    def budget_reconciliation_status(self) -> dict[str, Any]:
+        with closing(self._connect()) as conn:
+            holds = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT hold_id,processing_key,transition_run_id,
+                           upper_bound_usd,effective_at,reason,created_by,created_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                    ORDER BY effective_at,hold_id
+                    """
+                ).fetchall()
+            ]
+            unresolved = self._budget_uncertainty_candidates(conn)
+            runtime = conn.execute(
+                "SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
+            ).fetchone()
+        return {
+            "contract": "wb_autoanswers_budget_reconciliation_v1",
+            "holds": holds,
+            "hold_count": len(holds),
+            "unresolved_count": len(unresolved),
+            "stop_reason": str(runtime["stop_reason"] or "") if runtime else "",
+            "confirmed": not unresolved
+            and (runtime is None or str(runtime["stop_reason"] or "") != "budget_state_unknown"),
+        }
+
     def budget_status(self) -> dict[str, Any]:
         settings = self.settings()
         now = self._now()
@@ -2843,6 +3166,22 @@ class AutoanswersRepository:
                 """,
                 (day, month, hour_start, hour_start),
             ).fetchone()
+            uncertainty = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN substr(effective_at,1,10)=? THEN upper_bound_usd ELSE 0 END),0) AS daily_hold,
+                    COALESCE(SUM(CASE WHEN substr(effective_at,1,7)=? THEN upper_bound_usd ELSE 0 END),0) AS monthly_hold,
+                    COALESCE(SUM(CASE WHEN effective_at>=? THEN upper_bound_usd ELSE 0 END),0) AS hourly_hold,
+                    COALESCE(SUM(upper_bound_usd),0) AS all_hold,
+                    COUNT(*) AS hold_count,
+                    MAX(created_at) AS last_hold_at
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                """,
+                (day, month, hour_start),
+            ).fetchone()
+            unresolved_uncertainty = len(
+                self._budget_uncertainty_candidates(conn)
+            )
             latest = conn.execute(
                 """
                 SELECT MAX(updated_at) FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
@@ -2858,9 +3197,15 @@ class AutoanswersRepository:
         daily_unverified = _money(adjustments["daily_unverified"])
         monthly_unverified = _money(adjustments["monthly_unverified"])
         hourly_unverified = _money(adjustments["hourly_unverified"])
+        daily_uncertainty = _money(uncertainty["daily_hold"])
+        monthly_uncertainty = _money(uncertainty["monthly_hold"])
+        hourly_uncertainty = _money(uncertainty["hourly_hold"])
         daily = daily_actual + daily_unverified + active_reserved
         monthly = monthly_actual + monthly_unverified + active_reserved
         hourly = hourly_actual + hourly_unverified + active_reserved
+        daily += daily_uncertainty
+        monthly += monthly_uncertainty
+        hourly += hourly_uncertainty
         daily_cap = _money(settings.daily_cap_usd)
         monthly_cap = _money(settings.monthly_cap_usd)
         hourly_cap = _money(settings.hourly_cap_usd)
@@ -2876,6 +3221,21 @@ class AutoanswersRepository:
             "hourly_unverified_legacy_usd": float(hourly_unverified),
             "daily_unverified_legacy_usd": float(daily_unverified),
             "monthly_unverified_legacy_usd": float(monthly_unverified),
+            "hourly_uncertainty_hold_usd": float(hourly_uncertainty),
+            "daily_uncertainty_hold_usd": float(daily_uncertainty),
+            "monthly_uncertainty_hold_usd": float(monthly_uncertainty),
+            "all_time_uncertainty_hold_usd": float(
+                _money(uncertainty["all_hold"])
+            ),
+            "uncertainty_hold_count": int(uncertainty["hold_count"] or 0),
+            "unresolved_uncertainty_count": unresolved_uncertainty,
+            "budget_state": (
+                "unknown"
+                if unresolved_uncertainty
+                else "conservative_unverified"
+                if int(uncertainty["hold_count"] or 0)
+                else "confirmed"
+            ),
             "hourly_cap_usd": float(hourly_cap),
             "daily_cap_usd": float(daily_cap),
             "monthly_cap_usd": float(monthly_cap),
@@ -2887,7 +3247,7 @@ class AutoanswersRepository:
             "warning_ratio": float(ratio),
             "warning": hourly >= hourly_cap * ratio or daily >= daily_cap * ratio or monthly >= monthly_cap * ratio,
             "hard_cap_reached": hourly >= hourly_cap or daily >= daily_cap or monthly >= monthly_cap,
-            "updated_at": max(str(latest or ""), str(archived["last_cost_at"] or ""), str(failed["last_cost_at"] or ""), str(adjustments["last_adjustment_at"] or "")) or None,
+            "updated_at": max(str(latest or ""), str(archived["last_cost_at"] or ""), str(failed["last_cost_at"] or ""), str(adjustments["last_adjustment_at"] or ""), str(uncertainty["last_hold_at"] or "")) or None,
         }
 
     def _set_stop_reason(
@@ -3023,10 +3383,20 @@ class AutoanswersRepository:
             """,
             (day, month, hour_start, day, month, hour_start),
         ).fetchone()
+        uncertainty = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN substr(effective_at,1,10)=? THEN upper_bound_usd ELSE 0 END),0) AS daily_total,
+                COALESCE(SUM(CASE WHEN substr(effective_at,1,7)=? THEN upper_bound_usd ELSE 0 END),0) AS monthly_total,
+                COALESCE(SUM(CASE WHEN effective_at>=? THEN upper_bound_usd ELSE 0 END),0) AS hourly_total
+            FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+            """,
+            (day, month, hour_start),
+        ).fetchone()
         reservation = _money(settings.max_reservation_per_review_usd)
-        hourly_total = _money(totals["hourly_total"]) + _money(archived["hourly_total"]) + _money(failed["hourly_total"]) + _money(adjustments["hourly_total"]) + _money(adjustments["hourly_unverified"])
-        daily_total = _money(totals["daily_total"]) + _money(archived["daily_total"]) + _money(failed["daily_total"]) + _money(adjustments["daily_total"]) + _money(adjustments["daily_unverified"])
-        monthly_total = _money(totals["monthly_total"]) + _money(archived["monthly_total"]) + _money(failed["monthly_total"]) + _money(adjustments["monthly_total"]) + _money(adjustments["monthly_unverified"])
+        hourly_total = _money(totals["hourly_total"]) + _money(archived["hourly_total"]) + _money(failed["hourly_total"]) + _money(adjustments["hourly_total"]) + _money(adjustments["hourly_unverified"]) + _money(uncertainty["hourly_total"])
+        daily_total = _money(totals["daily_total"]) + _money(archived["daily_total"]) + _money(failed["daily_total"]) + _money(adjustments["daily_total"]) + _money(adjustments["daily_unverified"]) + _money(uncertainty["daily_total"])
+        monthly_total = _money(totals["monthly_total"]) + _money(archived["monthly_total"]) + _money(failed["monthly_total"]) + _money(adjustments["monthly_total"]) + _money(adjustments["monthly_unverified"]) + _money(uncertainty["monthly_total"])
         if hourly_total + reservation > _money(settings.hourly_cap_usd):
             self._set_stop_reason(conn, "hourly_budget_reached", at=at)
             return "hourly_budget_reached"
@@ -3067,7 +3437,17 @@ class AutoanswersRepository:
                 """,
                 (transition_run_id,),
             ).fetchone()
-            if sweep["run_max_usd"] is not None and _money(run["actual"]) + _money(failed_run["actual"]) + _money(run["reserved"]) + reservation > _money(sweep["run_max_usd"]):
+            uncertain_run = _money(
+                conn.execute(
+                    """
+                    SELECT COALESCE(SUM(upper_bound_usd),0)
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                    WHERE transition_run_id=?
+                    """,
+                    (transition_run_id,),
+                ).fetchone()[0]
+            )
+            if sweep["run_max_usd"] is not None and _money(run["actual"]) + _money(failed_run["actual"]) + _money(run["reserved"]) + uncertain_run + reservation > _money(sweep["run_max_usd"]):
                 self._set_stop_reason(conn, "run_budget_reached", details={"transition_run_id": transition_run_id}, at=at)
                 return "run_budget_reached"
             if sweep["run_max_paid_reviews"] is not None and int(run["paid"] or 0) + int(failed_run["paid"] or 0) >= int(sweep["run_max_paid_reviews"]):
@@ -4015,7 +4395,7 @@ class AutoanswersRepository:
                 conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
-                    SET actual_cost_usd=0, reserved_usd=0, status='released',
+                    SET reserved_usd=0, status='released',
                         expires_at=NULL, released_reason='terminal_error_without_usage', updated_at=?
                     WHERE processing_key=?
                     """,
@@ -5768,7 +6148,17 @@ class AutoanswersRepository:
                 """,
                 (str(sweep["transition_run_id"] or sweep["sweep_id"]),),
             ).fetchone()
-            if sweep["run_max_usd"] is not None and _money(run_usage["actual"]) + _money(failed_run_usage["actual"]) + _money(run_usage["reserved"]) + _money(settings.max_reservation_per_review_usd) > _money(sweep["run_max_usd"]):
+            uncertainty_run_usage = _money(
+                conn.execute(
+                    """
+                    SELECT COALESCE(SUM(upper_bound_usd),0)
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                    WHERE transition_run_id=?
+                    """,
+                    (str(sweep["transition_run_id"] or sweep["sweep_id"]),),
+                ).fetchone()[0]
+            )
+            if sweep["run_max_usd"] is not None and _money(run_usage["actual"]) + _money(failed_run_usage["actual"]) + _money(run_usage["reserved"]) + uncertainty_run_usage + _money(settings.max_reservation_per_review_usd) > _money(sweep["run_max_usd"]):
                 paid_blocked = True
                 pause_reason = "run_budget_reached"
             if sweep["run_max_paid_reviews"] is not None and int(run_usage["paid"] or 0) + int(failed_run_usage["paid"] or 0) >= int(sweep["run_max_paid_reviews"]):
@@ -6730,6 +7120,21 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_failed_cost_events(
 );
 CREATE INDEX IF NOT EXISTS idx_sv1_failed_cost_incurred
 ON sheet_vitrina_v1_wb_autoanswers_failed_cost_events(incurred_at, transition_run_id);
+
+CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(
+    hold_id TEXT PRIMARY KEY,
+    processing_key TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswer_jobs(processing_key),
+    transition_run_id TEXT,
+    upper_bound_usd TEXT NOT NULL,
+    effective_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(processing_key)
+);
+CREATE INDEX IF NOT EXISTS idx_sv1_budget_uncertainty_effective
+ON sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(effective_at, transition_run_id);
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(
     sweep_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),

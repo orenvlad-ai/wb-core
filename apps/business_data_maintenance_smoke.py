@@ -95,6 +95,7 @@ class FakeSchedules:
             "spp_status": {"status": "ready", "job": None},
         }
         self.disable_calls = 0
+        self.legacy_restore_calls = 0
 
     def read_all(self) -> dict[str, dict[str, Any]]:
         return copy.deepcopy(self.payloads)
@@ -102,12 +103,8 @@ class FakeSchedules:
     def disable_all(self, current: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         assert (current.get("web_vitrina") or {}).get("schedule_policy", {}).get("mode") == "interval"
         self.disable_calls += 1
-        self.payloads["web_vitrina"]["schedule_policy"] = {"mode": "manual", "interval_hours": None}
-        for item in self.payloads["web_vitrina"]["schedules"]:
-            item["enabled"] = False
-        for item in self.payloads["feedback_complaints"]["schedules"]:
-            item["enabled"] = False
-        self.payloads["spp"]["schedule"]["enabled"] = False
+        # The master hold owns execution; feature schedule JSON is immutable
+        # desired state and must not be rewritten.
         return self.read_all()
 
     def restore_selected(
@@ -116,18 +113,16 @@ class FakeSchedules:
         *,
         desired: Mapping[str, bool],
     ) -> dict[str, dict[str, Any]]:
+        assert dict(baseline)
+        assert dict(desired)
+        return self.read_all()
+
+    def restore_legacy_hold(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        self.legacy_restore_calls += 1
         self.payloads = copy.deepcopy(dict(baseline))
-        for item in self.payloads["web_vitrina"]["schedules"]:
-            item["enabled"] = bool(item.get("enabled")) and bool(
-                desired.get("vitrina_refresh")
-            )
-        for item in self.payloads["feedback_complaints"]["schedules"]:
-            item["enabled"] = bool(item.get("enabled")) and bool(
-                desired.get("feedback_complaints")
-            )
-        self.payloads["spp"]["schedule"]["enabled"] = bool(
-            self.payloads["spp"]["schedule"].get("enabled")
-        ) and bool(desired.get("spp_test"))
         return self.read_all()
 
 
@@ -169,12 +164,16 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
             _restore_local_boundaries(old)
         assert result["status"] == "held"
         assert result["quiet"] is True
-        assert systemd.mutations == list(maintenance.CORE_TIMER_UNITS)
+        assert systemd.mutations == [
+            "wb-core-autoanswers-worker.timer",
+            "wb-core-autoanswers-readonly-sync.timer",
+            *maintenance.CORE_TIMER_UNITS,
+        ]
         assert schedules.disable_calls == 1
-        assert result["runtime_schedules"]["web_vitrina"]["schedule_policy"]["mode"] == "manual"
-        assert result["runtime_schedules"]["web_vitrina"]["enabled_ids"] == []
-        assert result["runtime_schedules"]["feedback_complaints"]["enabled_ids"] == []
-        assert result["runtime_schedules"]["spp"]["enabled"] is False
+        assert result["runtime_schedules"]["web_vitrina"]["schedule_policy"]["mode"] == "interval"
+        assert result["runtime_schedules"]["web_vitrina"]["enabled_ids"]
+        assert result["runtime_schedules"]["feedback_complaints"]["enabled_ids"]
+        assert result["runtime_schedules"]["spp"]["enabled"] is True
         state_path = runtime_dir / maintenance.STATE_FILENAME
         audit_path = runtime_dir / maintenance.AUDIT_FILENAME
         assert state_path.stat().st_mode & 0o777 == 0o600
@@ -261,6 +260,7 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
         _warehouse_baseline(runtime_dir)
         systemd = FakeSystemd()
         schedules = FakeSchedules()
+        schedules.payloads["spp"]["schedule"]["enabled"] = False
         old = _with_quiet_local_boundaries()
         try:
             maintenance.maintenance_hold(
@@ -271,16 +271,8 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
             )
             policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
             assert policy["processes"]["warehouse_functional"]["desired"] is True
-            assert policy["processes"]["autoanswers_readonly"]["desired"] is False
-            assert policy["processes"]["autoanswers_worker"]["desired"] is False
-            policy = maintenance.update_process_desired_state(
-                runtime_dir,
-                process_key="spp_test",
-                desired=False,
-                expected_revision=int(policy["revision"]),
-                actor="smoke",
-                reason="intentionally off",
-            )
+            assert "autoanswers_readonly" not in policy["processes"]
+            assert "autoanswers_worker" not in policy["processes"]
 
             def restore_warehouse(_: Path) -> dict[str, Any]:
                 systemd.enable_now("wb-core-warehouse-functional-sync.timer")
@@ -304,7 +296,8 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
             assert rows["warehouse_functional"]["actual"] is True
             assert rows["spp_test"]["desired"] is False
             assert rows["spp_test"]["actual"] is False
-            assert rows["autoanswers_worker"]["actual"] is False
+            assert rows["autoanswers"]["actual"] is False
+            assert rows["autoanswers"]["component_states"]["readonly_sync"]["actual"] is True
             repeated = maintenance.maintenance_restore(
                 runtime_dir,
                 systemd=systemd,
@@ -334,8 +327,8 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
             try:
                 maintenance.update_process_desired_state(
                     runtime_dir,
-                    process_key="spp_test",
-                    desired=True,
+                    process_key="wb_finance_weekly",
+                    desired=False,
                     expected_revision=1,
                     actor="smoke",
                     reason="stale",
@@ -382,6 +375,61 @@ def _assert_unknown_policy_state_blocks_resume() -> None:
             _restore_local_boundaries(old)
 
 
+def _assert_policy_v1_hold_restores_exact_feature_schedules_once() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        exact_baseline = schedules.read_all()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            policy_path = runtime_dir / maintenance.POLICY_FILENAME
+            policy = json.loads(policy_path.read_text())
+            policy["schema_version"] = "auto_updates_owner_policy_v1"
+            policy_path.write_text(json.dumps(policy))
+
+            schedules.payloads["web_vitrina"]["schedule_policy"] = {
+                "mode": "manual",
+                "interval_hours": None,
+            }
+            for row in schedules.payloads["web_vitrina"]["schedules"]:
+                row["enabled"] = False
+            for row in schedules.payloads["feedback_complaints"]["schedules"]:
+                row["enabled"] = False
+            schedules.payloads["spp"]["schedule"]["enabled"] = False
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now("wb-core-warehouse-functional-sync.timer")
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                expected_revision=int(policy["revision"]),
+                warehouse_restore=restore_warehouse,
+            )
+        finally:
+            _restore_local_boundaries(old)
+        assert restored["status"] == "restored"
+        assert schedules.legacy_restore_calls == 1
+        assert schedules.payloads == exact_baseline
+        migrated = json.loads(policy_path.read_text())
+        assert migrated["schema_version"] == maintenance.POLICY_SCHEMA_VERSION
+        assert "autoanswers_readonly" not in migrated["processes"]
+        assert "autoanswers_worker" not in migrated["processes"]
+
+
 def _assert_unsupported_enable_and_noop_are_preflighted() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -404,14 +452,15 @@ def _assert_unsupported_enable_and_noop_are_preflighted() -> None:
             before_audit = audit_path.read_bytes()
             policy = json.loads(before_policy)
             revision = int(policy["revision"])
-            for desired, expected_text in (
-                (True, "отдельный Autoanswers lifecycle"),
-                (False, "no-op desired state"),
+            for process_key, desired, expected_text in (
+                ("autoanswers", True, "monitoring-only"),
+                ("spp_test", False, "monitoring-only"),
+                ("warehouse_functional", True, "no-op desired state"),
             ):
                 try:
                     maintenance.update_process_desired_state(
                         runtime_dir,
-                        process_key="autoanswers_readonly",
+                        process_key=process_key,
                         desired=desired,
                         expected_revision=revision,
                         actor="smoke",
@@ -436,7 +485,7 @@ def _assert_unsupported_enable_and_noop_are_preflighted() -> None:
             try:
                 maintenance.update_process_desired_state(
                     runtime_dir,
-                    process_key="spp_test",
+                    process_key="wb_finance_weekly",
                     desired=False,
                     expected_revision=revision,
                     actor="concurrent-smoke",
@@ -541,6 +590,7 @@ def _assert_success_requires_persisted_runtime_readback() -> None:
     )
     assert confirmed["mutation"]["persisted"] is True
     assert confirmed["mutation"]["runtime_readback_confirmed"] is True
+    assert confirmed["mutation"]["lifecycle_readback_confirmed"] is True
 
     failed_readback = copy.deepcopy(paused)
     failed_readback.update(
@@ -558,7 +608,7 @@ def _assert_success_requires_persisted_runtime_readback() -> None:
             expected_revision=2,
         )
     except RuntimeError as exc:
-        assert "runtime_confirmed=False" in str(exc)
+        assert "lifecycle_readback_confirmed=False" in str(exc)
     else:
         raise AssertionError("successful write with failed readback must not succeed")
 
@@ -584,6 +634,7 @@ def main() -> int:
     _assert_status_does_not_initialize_owner_policy()
     _assert_exact_policy_restore_and_revision_guards()
     _assert_unknown_policy_state_blocks_resume()
+    _assert_policy_v1_hold_restores_exact_feature_schedules_once()
     _assert_unsupported_enable_and_noop_are_preflighted()
     _assert_failed_resume_stays_paused_and_audited()
     _assert_success_requires_persisted_runtime_readback()

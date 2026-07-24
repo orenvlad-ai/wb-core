@@ -14,6 +14,7 @@ import unittest
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
+    SCHEMA_VERSION,
     classify_feedback_content,
     content_version_hash,
     wb_observation_hash,
@@ -209,7 +210,11 @@ class RuntimeTest(unittest.TestCase):
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
-            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v5").glob("*.sqlite3"))
+            backups = list(
+                (
+                    runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+                ).glob("*.sqlite3")
+            )
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
@@ -219,7 +224,15 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v5").glob("*.sqlite3"))),
+                len(
+                    list(
+                        (
+                            runtime_dir
+                            / "backups"
+                            / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+                        ).glob("*.sqlite3")
+                    )
+                ),
                 1,
             )
             evidence = AutoanswersRepository(
@@ -244,7 +257,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5);
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5,6);
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -1016,6 +1029,88 @@ class RuntimeTest(unittest.TestCase):
         self.assertGreater(self.repo.settings().policy_epoch, previous)
         self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
         self.assertEqual(self.repo.get_feedback("old-policy")["ai_jobs"][0]["state"], "queued")
+
+    def test_budget_uncertainty_reconciliation_appends_hold_without_fake_spend(self) -> None:
+        self.enable("manual")
+        self.insert_new("unknown-provider-cost")
+        job = self.repo.enqueue_manual_processing(
+            "unknown-provider-cost",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        claimed = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(claimed["processing_key"], job["processing_key"])
+        self.repo.mark_provider_call_started(
+            job["processing_key"], worker_id="worker"
+        )
+        self.repo.record_processing_retry(
+            job["processing_key"],
+            error_code="node_process_exit_1",
+            retry_after_seconds=60,
+            worker_id="worker",
+        )
+
+        before = self.repo.budget_status()
+        self.assertEqual(before["budget_state"], "unknown")
+        self.assertEqual(before["monthly_actual_usd"], 0)
+        plan = self.repo.budget_reconciliation_plan()
+        self.assertEqual(plan["candidate_count"], 1)
+        applied = self.repo.apply_budget_reconciliation(
+            expected_fingerprint=plan["plan_fingerprint"],
+            actor_id="operator",
+        )
+        self.assertEqual(applied["status"], "reconciled")
+        self.assertEqual(applied["holds_appended"], 1)
+        after = self.repo.budget_status()
+        self.assertEqual(after["monthly_actual_usd"], 0)
+        self.assertGreater(after["monthly_uncertainty_hold_usd"], 0)
+        self.assertEqual(after["budget_state"], "conservative_unverified")
+        self.assertTrue(self.repo.budget_reconciliation_status()["confirmed"])
+        self.assertEqual(
+            self.repo.budget_reconciliation_plan()["candidate_count"], 0
+        )
+        with self.assertRaisesRegex(
+            AutoanswersRuntimeError, "evidence changed"
+        ):
+            self.repo.apply_budget_reconciliation(
+                expected_fingerprint=plan["plan_fingerprint"],
+                actor_id="operator",
+            )
+
+    def test_budget_reconciliation_does_not_clear_an_unrelated_stop_reason(self) -> None:
+        self.enable("manual")
+        self.insert_new("unknown-provider-cost-with-quota-stop")
+        job = self.repo.enqueue_manual_processing(
+            "unknown-provider-cost-with-quota-stop",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.mark_provider_call_started(
+            job["processing_key"], worker_id="worker"
+        )
+        self.repo.record_processing_retry(
+            job["processing_key"],
+            error_code="node_process_exit_1",
+            retry_after_seconds=60,
+            worker_id="worker",
+        )
+        with self.repo.transaction() as conn:
+            self.repo._set_stop_reason(
+                conn,
+                "openai_quota_exhausted",
+                details={"source": "test"},
+                at=self.clock(),
+            )
+        plan = self.repo.budget_reconciliation_plan()
+        self.assertEqual(plan["candidate_count"], 1)
+        with self.assertRaisesRegex(
+            AutoanswersRuntimeError, "different runtime stop reason"
+        ):
+            self.repo.apply_budget_reconciliation(
+                expected_fingerprint=plan["plan_fingerprint"],
+                actor_id="operator",
+            )
 
 
 if __name__ == "__main__":

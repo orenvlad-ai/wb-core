@@ -53,8 +53,8 @@
     },
     {
       "name": "wb-core-sheet-vitrina-refresh.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-sheet-vitrina-closure-retry.service",
@@ -63,8 +63,8 @@
     },
     {
       "name": "wb-core-sheet-vitrina-closure-retry.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-feedbacks-auto-complaints-tick.service",
@@ -73,8 +73,8 @@
     },
     {
       "name": "wb-core-feedbacks-auto-complaints-tick.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-spp-tester-schedule-tick.service",
@@ -83,8 +83,8 @@
     },
     {
       "name": "wb-core-spp-tester-schedule-tick.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-wb-finance-weekly.service",
@@ -93,8 +93,8 @@
     },
     {
       "name": "wb-core-wb-finance-weekly.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-warehouse-functional-sync.service",

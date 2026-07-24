@@ -731,38 +731,8 @@ class _EntrypointMaintenanceSchedules:
         self,
         current: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, dict[str, Any]]:
-        web = dict(current.get("web_vitrina") or {})
-        web_policy = dict(web.get("schedule_policy") or {})
-        web_policy.update({"mode": "manual", "interval_hours": None})
-        self.entrypoint.handle_sheet_web_vitrina_auto_schedules_save_request(
-            {
-                "schedule_policy": web_policy,
-                "schedules": [
-                    {**dict(item), "enabled": False}
-                    for item in (
-                        web.get("schedules") or web.get("effective_schedules") or []
-                    )
-                    if isinstance(item, Mapping)
-                ],
-            }
-        )
-        feedback = dict(current.get("feedback_complaints") or {})
-        self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(
-            {
-                "schedules": [
-                    {**dict(item), "enabled": False}
-                    for item in feedback.get("schedules", [])
-                    if isinstance(item, Mapping)
-                ]
-            }
-        )
-        spp = dict(current.get("spp") or {})
-        spp_schedule = dict(spp.get("schedule") or {})
-        spp_schedule["enabled"] = False
-        self.entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
-            {"schedule": spp_schedule},
-            actor="auto_updates_control_plane",
-        )
+        # The master hold owns execution through timers/lifecycles.  Runtime
+        # schedule JSON remains the authoritative feature intent.
         return self.read_all()
 
     def restore_selected(
@@ -771,44 +741,44 @@ class _EntrypointMaintenanceSchedules:
         *,
         desired: Mapping[str, bool],
     ) -> dict[str, dict[str, Any]]:
+        # Resume reads feature-owned desired state; it never rewrites it.
+        return self.read_all()
+
+    def restore_legacy_hold(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Restore exact feature schedules rewritten by a policy-v1 hold."""
+
         web = dict(baseline.get("web_vitrina") or {})
-        web_policy = dict(web.get("schedule_policy") or {})
-        web_schedules = [
-            {
-                **dict(item),
-                "enabled": bool(item.get("enabled"))
-                and bool(desired.get("vitrina_refresh")),
-            }
-            for item in (web.get("schedules") or web.get("effective_schedules") or [])
-            if isinstance(item, Mapping)
-        ]
-        if not bool(desired.get("vitrina_refresh")):
-            web_policy.update({"mode": "manual", "interval_hours": None})
         self.entrypoint.handle_sheet_web_vitrina_auto_schedules_save_request(
-            {"schedule_policy": web_policy, "schedules": web_schedules}
+            {
+                "schedule_policy": dict(web.get("schedule_policy") or {}),
+                "schedules": [
+                    dict(item)
+                    for item in (
+                        web.get("schedules")
+                        or web.get("effective_schedules")
+                        or []
+                    )
+                    if isinstance(item, Mapping)
+                ],
+            }
         )
         feedback = dict(baseline.get("feedback_complaints") or {})
         self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(
             {
                 "schedules": [
-                    {
-                        **dict(item),
-                        "enabled": bool(item.get("enabled"))
-                        and bool(desired.get("feedback_complaints")),
-                    }
+                    dict(item)
                     for item in feedback.get("schedules", [])
                     if isinstance(item, Mapping)
                 ]
             }
         )
         spp = dict(baseline.get("spp") or {})
-        spp_schedule = dict(spp.get("schedule") or {})
-        spp_schedule["enabled"] = bool(spp_schedule.get("enabled")) and bool(
-            desired.get("spp_test")
-        )
         self.entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
-            {"schedule": spp_schedule},
-            actor="auto_updates_control_plane",
+            {"schedule": dict(spp.get("schedule") or {})},
+            actor="auto_updates_policy_v1_migration",
         )
         return self.read_all()
 
@@ -848,7 +818,15 @@ def _confirmed_auto_updates_update_payload(
             and bool(selected.get("desired")) == bool(desired)
         )
     if master_desired:
-        runtime_confirmed = (
+        pending_processes = [
+            str(item.get("process_key") or "")
+            for item in processes
+            if item.get("desired") is True
+            and item.get("actual") is False
+            and str(item.get("lifecycle_state") or "") == "starting"
+            and str(item.get("drift_status") or "") == "matched"
+        ]
+        runtime_confirmed = not pending_processes and (
             not payload.get("unknown_processes")
             and not payload.get("drift_processes")
             and all(
@@ -857,23 +835,40 @@ def _confirmed_auto_updates_update_payload(
                 for item in processes
             )
         )
+        lifecycle_readback_confirmed = (
+            not payload.get("unknown_processes")
+            and not payload.get("drift_processes")
+            and all(
+                isinstance(item.get("desired"), bool)
+                and (
+                    bool(item.get("actual")) == bool(item.get("desired"))
+                    or str(item.get("process_key") or "") in pending_processes
+                )
+                for item in processes
+            )
+        )
     else:
+        pending_processes = []
         runtime_confirmed = all(not bool(item.get("actual")) for item in processes)
+        lifecycle_readback_confirmed = runtime_confirmed
     revision_advanced = revision > int(expected_revision)
-    if not persisted or not runtime_confirmed or not revision_advanced:
+    if not persisted or not lifecycle_readback_confirmed or not revision_advanced:
         raise RuntimeError(
             "auto-updates mutation readback not confirmed: "
-            f"persisted={persisted}, runtime_confirmed={runtime_confirmed}, "
+            f"persisted={persisted}, lifecycle_readback_confirmed="
+            f"{lifecycle_readback_confirmed}, "
             f"revision_advanced={revision_advanced}"
         )
     payload["mutation"] = {
-        "status": "confirmed",
+        "status": "pending" if pending_processes else "confirmed",
         "action": action,
         "desired": bool(desired),
         "process_key": str(process_key),
         "expected_revision": int(expected_revision),
         "persisted": True,
-        "runtime_readback_confirmed": True,
+        "runtime_readback_confirmed": bool(runtime_confirmed),
+        "lifecycle_readback_confirmed": True,
+        "pending_processes": pending_processes,
         "confirmed_revision": revision,
         "policy_fingerprint": str(payload.get("policy_fingerprint") or ""),
         "readback_captured_at": str(payload.get("captured_at") or ""),
@@ -898,6 +893,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         autoanswers_repository: AutoanswersRepository | None = None,
+        autoanswers_lifecycle: Any | None = None,
         autoanswers_node_bridge: NodeAutoanswersBridge | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
@@ -955,6 +951,7 @@ class RegistryUploadHttpEntrypoint:
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
         )
+        self.autoanswers_lifecycle = autoanswers_lifecycle
         self.autoanswers_node_bridge = autoanswers_node_bridge or NodeAutoanswersBridge()
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
             runtime_dir=self.runtime.runtime_dir,
@@ -1501,6 +1498,94 @@ class RegistryUploadHttpEntrypoint:
             "feedback": payload,
         }
 
+    def _autoanswers_master_suspension(
+        self,
+        *,
+        require_confirmed: bool,
+    ) -> tuple[bool, dict[str, Any]]:
+        from apps.business_data_maintenance import POLICY_FILENAME
+
+        path = self.runtime.runtime_dir / POLICY_FILENAME
+        if not path.is_file():
+            if require_confirmed:
+                raise AutoanswersRuntimeError(
+                    "global auto-updates owner policy is not confirmed",
+                    code="master_policy_unconfirmed",
+                )
+            return True, {"confirmed": False, "revision": 0}
+        try:
+            policy = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            if require_confirmed:
+                raise AutoanswersRuntimeError(
+                    "global auto-updates owner policy cannot be read",
+                    code="master_policy_unconfirmed",
+                ) from exc
+            return True, {"confirmed": False, "revision": 0, "error": str(exc)}
+        if not isinstance(policy, Mapping) or "master_desired" not in policy:
+            if require_confirmed:
+                raise AutoanswersRuntimeError(
+                    "global auto-updates owner policy is incomplete",
+                    code="master_policy_unconfirmed",
+                )
+            return True, {"confirmed": False, "revision": 0}
+        return not bool(policy.get("master_desired")), {
+            "confirmed": True,
+            "revision": int(policy.get("revision") or 0),
+            "master_desired": bool(policy.get("master_desired")),
+        }
+
+    def _autoanswers_lifecycle_controller(self) -> Any:
+        if self.autoanswers_lifecycle is None:
+            from packages.application.wb_autoanswers_lifecycle import (
+                AutoanswersLifecycle,
+            )
+
+            self.autoanswers_lifecycle = AutoanswersLifecycle(
+                runtime_dir=self.runtime.runtime_dir,
+                repository=self.autoanswers_repository,
+                now_factory=self.now_factory,
+            )
+        return self.autoanswers_lifecycle
+
+    def _autoanswers_lifecycle_readback(self) -> dict[str, Any]:
+        suspended, master = self._autoanswers_master_suspension(
+            require_confirmed=False
+        )
+        try:
+            readback = dict(
+                self._autoanswers_lifecycle_controller().status(
+                    suspended_by_master=suspended
+                )
+            )
+        except Exception as exc:
+            return {
+                "process_key": "autoanswers",
+                "control_owner": "feature",
+                "control_location": "Отзывы → Отзывы",
+                "control_capability": "monitor",
+                "desired_source": "autoanswers_feature_settings",
+                "actual": False,
+                "lifecycle_state": "unconfirmed",
+                "drift_status": "unknown",
+                "suspended_by_master": suspended,
+                "last_error": str(exc),
+                "component_states": {},
+                "components": {},
+                "master_policy": master,
+            }
+        readback["master_policy"] = master
+        if not bool(master.get("confirmed")):
+            readback.update(
+                {
+                    "actual": False,
+                    "lifecycle_state": "unconfirmed",
+                    "drift_status": "unknown",
+                    "last_error": "global auto-updates owner policy is not confirmed",
+                }
+            )
+        return readback
+
     def handle_sheet_feedbacks_autoanswers_settings_request(self) -> dict[str, Any]:
         settings = self.autoanswers_repository.settings()
         return {
@@ -1511,12 +1596,29 @@ class RegistryUploadHttpEntrypoint:
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),
             "reconciliation": self.autoanswers_repository.reconciliation_status(),
+            "lifecycle": self._autoanswers_lifecycle_readback(),
         }
 
     def handle_sheet_feedbacks_autoanswers_settings_update_request(
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
+        current = self.autoanswers_repository.settings()
+        if isinstance(payload.get("expected_policy_epoch"), bool):
+            raise ValueError("expected_policy_epoch must be an integer")
+        try:
+            expected_policy_epoch = int(payload.get("expected_policy_epoch"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_policy_epoch must be an integer") from exc
+        if expected_policy_epoch != int(current.policy_epoch):
+            raise AutoanswersRuntimeError(
+                "Autoanswers settings changed; reload before applying",
+                code="policy_epoch_stale",
+            )
+        suspended_by_master, master_policy = self._autoanswers_master_suspension(
+            require_confirmed=True
+        )
         selector_state = str(payload.get("selector_state") or "").strip()
+        reconciliation: Mapping[str, Any] | None = None
         if selector_state:
             if selector_state != "off" and selector_state not in AUTOANSWER_MODES:
                 raise ValueError("unsupported autoanswers selector state")
@@ -1527,15 +1629,46 @@ class RegistryUploadHttpEntrypoint:
                     preview_id=str(payload.get("preview_id") or "") or None,
                 )
                 settings = transition["settings"]
-                return {
-                    "settings": asdict(settings),
-                    "budget": self.autoanswers_repository.budget_status(),
-                    "selector_state": settings.mode if settings.master_enabled else "off",
-                    "runtime": self.autoanswers_repository.operational_status(),
-                    "reconciliation": transition["sweep"],
-                }
-            master_enabled: bool | None = selector_state != "off"
-            mode: str | None = None if selector_state == "off" else selector_state
+                reconciliation = transition["sweep"]
+                if not reconciliation or not str(
+                    reconciliation.get("transition_run_id") or ""
+                ):
+                    raise AutoanswersRuntimeError(
+                        "transition run readback is missing",
+                        code="transition_run_unconfirmed",
+                    )
+                if (
+                    reconciliation.get("run_max_usd") in {None, ""}
+                    and reconciliation.get("run_max_paid_reviews") in {None, ""}
+                ):
+                    raise AutoanswersRuntimeError(
+                        "transition run cap readback is missing",
+                        code="run_cap_unconfirmed",
+                    )
+            else:
+                master_enabled: bool | None = selector_state != "off"
+                mode: str | None = None if selector_state == "off" else selector_state
+                settings = self.autoanswers_repository.update_settings(
+                    master_enabled=master_enabled,
+                    mode=mode,
+                    daily_cap_usd=payload.get("daily_cap_usd"),
+                    monthly_cap_usd=payload.get("monthly_cap_usd"),
+                    hourly_cap_usd=payload.get("hourly_cap_usd"),
+                    max_paid_reviews_per_hour=payload.get(
+                        "max_paid_reviews_per_hour"
+                    ),
+                    global_paid_review_concurrency=payload.get(
+                        "global_paid_review_concurrency"
+                    ),
+                    max_inflight_role_calls=payload.get(
+                        "max_inflight_role_calls"
+                    ),
+                    max_materialized_processing_jobs=payload.get(
+                        "max_materialized_processing_jobs"
+                    ),
+                    warning_ratio=payload.get("warning_ratio"),
+                    actor_id=actor_id,
+                )
         else:
             master_enabled = payload.get("master_enabled") if "master_enabled" in payload else None
             mode = str(payload["mode"]) if "mode" in payload else None
@@ -1544,25 +1677,60 @@ class RegistryUploadHttpEntrypoint:
                     "automated mode changes require a confirmed transition preview",
                     code="transition_preview_required",
                 )
-        settings = self.autoanswers_repository.update_settings(
-            master_enabled=master_enabled,
-            mode=mode,
-            daily_cap_usd=payload.get("daily_cap_usd"),
-            monthly_cap_usd=payload.get("monthly_cap_usd"),
-            hourly_cap_usd=payload.get("hourly_cap_usd"),
-            max_paid_reviews_per_hour=payload.get("max_paid_reviews_per_hour"),
-            global_paid_review_concurrency=payload.get("global_paid_review_concurrency"),
-            max_inflight_role_calls=payload.get("max_inflight_role_calls"),
-            max_materialized_processing_jobs=payload.get("max_materialized_processing_jobs"),
-            warning_ratio=payload.get("warning_ratio"),
-            actor_id=actor_id,
+            settings = self.autoanswers_repository.update_settings(
+                master_enabled=master_enabled,
+                mode=mode,
+                daily_cap_usd=payload.get("daily_cap_usd"),
+                monthly_cap_usd=payload.get("monthly_cap_usd"),
+                hourly_cap_usd=payload.get("hourly_cap_usd"),
+                max_paid_reviews_per_hour=payload.get("max_paid_reviews_per_hour"),
+                global_paid_review_concurrency=payload.get("global_paid_review_concurrency"),
+                max_inflight_role_calls=payload.get("max_inflight_role_calls"),
+                max_materialized_processing_jobs=payload.get("max_materialized_processing_jobs"),
+                warning_ratio=payload.get("warning_ratio"),
+                actor_id=actor_id,
+            )
+        if reconciliation is None:
+            reconciliation = self.autoanswers_repository.reconciliation_status()
+        try:
+            lifecycle = dict(
+                self._autoanswers_lifecycle_controller().reconcile(
+                    suspended_by_master=suspended_by_master,
+                    actor=actor_id,
+                    reason="feature-owned Autoanswers settings mutation",
+                    transition_run_id=(
+                        str(reconciliation.get("transition_run_id") or "")
+                        if reconciliation
+                        else None
+                    ),
+                )
+            )
+        except Exception as exc:
+            raise AutoanswersRuntimeError(
+                "Autoanswers settings were saved, but runtime lifecycle failed: "
+                + str(exc),
+                code="lifecycle_reconciliation_failed",
+            ) from exc
+        lifecycle["master_policy"] = master_policy
+        if str(lifecycle.get("drift_status") or "") in {"drift", "unknown"}:
+            raise AutoanswersRuntimeError(
+                "Autoanswers lifecycle readback did not confirm timer state",
+                code="lifecycle_readback_unconfirmed",
+            )
+        mutation_status = (
+            "confirmed"
+            if str(lifecycle.get("lifecycle_state") or "")
+            in {"running", "off", "suspended_by_master"}
+            else "pending"
         )
         return {
             "settings": asdict(settings),
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),
-            "reconciliation": self.autoanswers_repository.reconciliation_status(),
+            "reconciliation": reconciliation,
+            "lifecycle": lifecycle,
+            "mutation_status": mutation_status,
         }
 
     def handle_sheet_feedbacks_autoanswers_transition_preview_request(
@@ -1916,7 +2084,6 @@ class RegistryUploadHttpEntrypoint:
         actor: str,
     ) -> dict[str, Any]:
         from apps.business_data_maintenance import (
-            FORCE_OFF_TIMER_UNITS,
             SystemdClient,
             maintenance_hold,
             maintenance_restore,
@@ -1963,6 +2130,14 @@ class RegistryUploadHttpEntrypoint:
             if current_process is None:
                 raise ValueError(f"unknown auto-update process key: {process_key}")
             if (
+                str(current_process.get("control_capability") or "manage")
+                != "manage"
+            ):
+                raise RuntimeError(
+                    f"{process_key} is monitoring-only in Settings; manage it in "
+                    + str(current_process.get("control_location") or "its feature section")
+                )
+            if (
                 isinstance(current_process.get("desired"), bool)
                 and bool(current_process.get("desired")) == bool(desired)
             ):
@@ -1988,8 +2163,6 @@ class RegistryUploadHttpEntrypoint:
                     self.runtime.runtime_dir,
                     disable_timer=True,
                 )
-                for unit in FORCE_OFF_TIMER_UNITS:
-                    systemd.disable_now(unit)
                 held = maintenance_hold(
                     self.runtime.runtime_dir,
                     systemd=systemd,
@@ -2051,8 +2224,6 @@ class RegistryUploadHttpEntrypoint:
                     self.runtime.runtime_dir,
                     disable_timer=True,
                 )
-                for unit in FORCE_OFF_TIMER_UNITS:
-                    systemd.disable_now(unit)
                 held = maintenance_hold(
                     self.runtime.runtime_dir,
                     systemd=systemd,

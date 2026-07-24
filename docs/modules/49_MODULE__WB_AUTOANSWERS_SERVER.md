@@ -2,12 +2,12 @@
 title: "WB Autoanswers Server v1"
 doc_id: "49_MODULE__WB_AUTOANSWERS_SERVER"
 doc_type: "module"
-status: "manual_content_priority_release_candidate"
+status: "feature_owned_lifecycle"
 purpose: "Server-native synchronization, frozen AI drafting and readback-confirmed WB answer publication"
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Production remains manual. Schema v5 and policy v3 add canonical content classification, a strict content-first barrier across every automatic claim stage, immutable bounded-run membership and four exact progress counters in two visual cards."
+update_note: "Schema v6 adds a feature-owned readonly/worker lifecycle, actual-runtime UI readback and conservative append-only reconciliation for unknown provider-cost boundaries. Mode/run/cap truth remains in the existing Autoanswers SQLite contract."
 ---
 
 # WB Autoanswers Server v1
@@ -28,7 +28,13 @@ WB Feedbacks GET
   -> mandatory feedback-detail GET readback
 ```
 
-Production is `master_enabled=true`, `mode=manual`, `WB_AUTOANSWERS_FORCE_OFF=false`. Manual steady sync creates no AI jobs. Only an explicit per-review action can enqueue generation; only a separate confirmed action can enqueue publication. Make, Telegram, WB answer PATCH, inline HTTP-to-WB write, and any silent rewrite of frozen prompts/contracts/guards/golden/fallbacks remain absent.
+Feature settings are the sole owner of the persisted business mode; the generic
+auto-updates owner policy is not an Autoanswers intent source. `WB_AUTOANSWERS_FORCE_OFF=true`
+still has the highest emergency priority. In `manual`, steady sync creates no
+automatic AI jobs: only an explicit per-review action can enqueue generation and
+only a separately confirmed action can enqueue publication. Make, Telegram, WB
+answer PATCH, inline HTTP-to-WB write, and any silent rewrite of frozen
+prompts/contracts/guards/golden/fallbacks remain absent.
 
 Frozen identity:
 
@@ -52,7 +58,9 @@ Frozen identity:
 | Processing/publication workers | `packages/application/wb_autoanswers_worker.py`, `wb_autoanswers_publication.py` |
 | Bounded coordinator tick | `packages/application/wb_autoanswers_coordinator.py` |
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
-| Lifecycle/current-schema backup gate | `apps/wb_autoanswers_activation.py` |
+| Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
+| Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
+| Incident evidence and budget reconciliation | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
 | Backend/UI | `registry_upload_http_entrypoint.py`, `sheet_vitrina_v1_web_vitrina.html` |
 
@@ -65,7 +73,11 @@ All schema changes are additive in the existing runtime SQLite database. The can
 - content-class/date indexes used by preview, reconciliation, processing and publication ordering;
 - conservative v2-result quarantine when old `rating_only_template` evidence no longer satisfies the v3 classification.
 
-Schema v4 fields retained by v5 include:
+Schema v6 retains the v5 classification and immutable membership model and adds
+append-only `budget_uncertainty_holds`. A hold is a conservative cap reservation,
+not asserted actual spend. It is created only from an exact dry-run fingerprint
+when local evidence proves that a provider call started but no usage/cost
+readback exists. Schema v4 fields retained by v6 include:
 
 - `policy_epoch` to settings, processing jobs and publication jobs;
 - media preview metadata and media processing version;
@@ -88,11 +100,23 @@ Initial history begins at `2026-01-01`. Answered, unanswered and archive streams
 
 The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has highest priority:
 
-- `off`: sync/UI/readback continue; new AI claims and new WB writes stop;
-- `manual`: no background AI generation; explicit generate/regenerate/review/publish only;
+- `off`: readonly sync/UI/readback continue; worker timer, new AI claims and new WB writes stop;
+- `manual`: readonly sync and worker run, but only explicit generate/regenerate/review/publish jobs are serviced;
 - `draft_only`: eligible scoped reviews receive reusable drafts, never publication;
 - `auto_safe`: only `public_only`, `wb_return`, `wb_support` and the exact owner-approved `rating_only_template` may auto-publish;
 - `auto_all`: every route that passes all hard gates may publish, except `seller_chat`, fallback, unsafe, stale, external-answer or media-uncertain results.
+
+The dedicated lifecycle maps those modes to two components. Readonly sync is
+enabled for every mode except a global master pause; the worker is enabled for
+`manual`, `draft_only`, `auto_safe` and `auto_all`. The global master is a
+cross-system suspension only: it disables both actual components while
+preserving feature intent, and resume reconciles the latest feature mode rather
+than a stale generic desired flag. A mutation is not confirmed by the SQLite
+mode write alone. It must read back settings, required `policy_epoch`, exact
+transition run and run cap, timer enabled/active states and absence of lifecycle
+drift. Until the first post-request scheduler tick the operational state is
+`starting`; after the grace interval a stale tick is `worker_unavailable`, not
+healthy.
 
 Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot. Reviews observed after preview remain outside that run and require a new preview. Apply creates a new `policy_epoch`, transition run and resumable lazy sweep. Replaying the same consumed preview is an exact no-op; a fresh owner-confirmed capped preview creates a new run even when the selected automatic mode is unchanged.
 
@@ -106,7 +130,7 @@ Current valid drafts are reused, in-flight jobs are not duplicated, stale result
 
 Defaults are `$0.50/hour`, `$5/day`, `$50/month`, 20 paid reviews/hour, paid-review concurrency 1, in-flight role-call concurrency 1, queue depth 5 and a `$0.10` atomic review reservation after removal of repeated media bytes. `BEGIN IMMEDIATE` makes reservation/claim concurrency-safe. Actual settled usage plus archived regeneration/failed-call cost and append-only corrections is retained per review. The reservation records the provider-call boundary: retry, timeout, terminal failure and lease loss release unused capacity, while a lease lost after provider entry latches paid processing fail-closed as `budget_state_unknown` until cost reconciliation.
 
-The legacy incident's unsupported `$1.00` settlement is removed from confirmed actual by an append-only adjustment but remains displayed as `Legacy без usage` and conservatively held against the applicable caps. It is never silently relabelled as measured provider cost.
+The legacy incident's unsupported `$1.00` settlement is removed from confirmed actual by an append-only adjustment but remains displayed as `Legacy без usage` and conservatively held against the applicable caps. It is never silently relabelled as measured provider cost. A current provider-started crash boundary is reconciled only by `budget_reconciliation_v1`: the read-only plan binds the exact reservation/job evidence and maximum per-review reservation into a fingerprint; apply appends the conservative hold and audit, then clears `budget_state_unknown` only after readback proves no unresolved boundary. It never writes zero or guessed actual cost.
 
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
 
@@ -130,9 +154,17 @@ Exact publication evidence is committed before transport. Every HTTP success/err
 
 ## UI and API
 
-Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v3`; local list/filter/detail/settings expose the canonical classification and exact all/content progress counters. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
+Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v3`; local list/filter/detail/settings expose the canonical classification, exact all/content progress counters and server-owned lifecycle. Settings POST requires `expected_policy_epoch`; automated apply additionally requires its preview. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
 
 The first `Отзывы → Отзывы` screen reads SQLite immediately, defaults to 50 rows and uses server pagination/filters, including `Без ответа Wildberries`, server-side `Ответ системы` states and `content_bearing`/`rating_only`/`indeterminate` classification. Table system replies remain in a fixed-height dark internal scroller with a copy-only button. Missing replies have a compact neutral state. The obsolete independent `Исторический backlog` control is hidden and disabled; its legacy backend routes fail closed so it cannot bypass the capped preview-bound transition action.
+
+The same screen is the only Autoanswers enable/disable surface and shows an
+actual-runtime indicator: selected mode, readonly sync, worker, scheduler-tick
+freshness, transition run, stop/pause reason, last error and budget state. It
+cannot render a green full-mode state when a timer is inactive, the tick is
+stale, lifecycle drift exists or budget truth is unknown. `Настройки →
+Автообновления` exposes the same server-owned fields as a monitoring-only card
+and has no Autoanswers individual mutation control.
 
 Detail keeps only rating/date, review, non-empty pros/cons/tags, product identity, customer media, WB answer, AI reply, friendly status and actions visible. Routes, raw states, case code, attempts, cost, warnings, contracts, guards, media uncertainty, hashes, idempotency and audit are in closed-by-default `Техническая информация`. Before generation the same technical fields remain named explicitly with a `не запускался` state, rather than disappearing or implying a passed check. The full-width reply textarea auto-grows on render, generation, input and detail refresh. Desktop and 390px narrow behavior are browser-tested.
 
@@ -146,11 +178,11 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 ## Deploy, verification and rollback
 
-Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing production manual state and all owner-published data/audit remain unchanged.
+Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing feature mode, `policy_epoch`, transition run, immutable membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries.
 
-Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v5 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v6 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
-After that current v5 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v5 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
+After that current v6 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v6 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
 
 Required local checks:
 
@@ -163,6 +195,7 @@ PYTHONPATH=. python3 -m unittest \
   apps.wb_autoanswers_media_worker_test \
   apps.wb_autoanswers_publication_test \
   apps.wb_autoanswers_http_ui_test \
+  apps.wb_autoanswers_lifecycle_test \
   apps.wb_autoanswers_readonly_test \
   apps.wb_autoanswers_release_safety_test \
   apps.wb_autoanswers_incident_regression_test \
@@ -170,8 +203,16 @@ PYTHONPATH=. python3 -m unittest \
 python3 -m compileall -q apps packages
 ```
 
-Production acceptance keeps effective manual, performs one GET/media-only `manual-media-canary`, then read-only authenticated UI Flow. Detail media starts loading when its card opens; the flow waits for successful image decoding and records only redacted private-asset HTTP/MIME evidence. It must prove a real photo, real video preview/frames, compact/narrow UI, zero 5xx/page/console errors, zero claimable background AI jobs and zero new publication attempts. It must not click generation/regeneration/publication or switch into an automated mode.
+Production acceptance preserves the already confirmed feature intent and exact
+transition run/cap. After deploy it reconciles any `budget_state_unknown`,
+resumes through the dedicated lifecycle, proves both component readbacks and a
+fresh scheduler tick, then observes ordinary queue movement without synthetic
+OpenAI/WB writes. Authenticated UI Flow covers Settings monitoring/ownership and
+the actual indicator in `Отзывы → Отзывы`, with compact/narrow/dark render and
+zero 5xx/page/console errors. Any publication proof comes only from normal
+policy-allowed flow and mandatory WB readback.
 
-Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v5 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
+Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v6 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 
-After acceptance the sole owner step is to open a new automated-mode transition preview and inspect exact scope, `content_bearing`/`rating_only` distribution, estimated cost, ETA and run cap without confirming the run.
+No migration or acceptance step creates a replacement transition preview/run
+when the current run is valid. A new preview is an explicit future owner action.

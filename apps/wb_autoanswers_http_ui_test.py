@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.message import Message
 import io
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -22,6 +23,51 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.wb_autoanswers_node_bridge import NodeBoundaryError
 from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
 from apps.wb_autoanswers_runtime_test import feedback
+
+
+class FakeAutoanswersLifecycle:
+    def __init__(self, repository: object) -> None:
+        self.repository = repository
+
+    def status(self, *, suspended_by_master: bool) -> dict:
+        settings = self.repository.settings()
+        mode = settings.mode if settings.master_enabled else "off"
+        active = not suspended_by_master and mode != "off"
+        return {
+            "process_key": "autoanswers",
+            "business_mode": mode,
+            "actual": False,
+            "lifecycle_state": (
+                "suspended_by_master"
+                if suspended_by_master
+                else "off"
+                if mode == "off"
+                else "starting"
+            ),
+            "drift_status": "matched",
+            "suspended_by_master": suspended_by_master,
+            "components": {
+                "readonly_sync": {
+                    "desired": not suspended_by_master,
+                    "actual": not suspended_by_master,
+                    "drift_status": "matched",
+                },
+                "worker": {
+                    "desired": active,
+                    "actual": active,
+                    "drift_status": "matched",
+                },
+            },
+            "budget_state": "confirmed",
+            "transition_run_id": (
+                self.repository.reconciliation_status() or {}
+            ).get("transition_run_id"),
+        }
+
+    def reconcile(self, **kwargs: object) -> dict:
+        return self.status(
+            suspended_by_master=bool(kwargs.get("suspended_by_master"))
+        )
 
 
 class LegacyFeedbacksBlock:
@@ -65,6 +111,13 @@ class HttpUiTest(unittest.TestCase):
             feedbacks_block=LegacyFeedbacksBlock(),
             now_factory=lambda: datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
         )
+        (Path(self.temp.name) / ".auto-updates-policy.json").write_text(
+            json.dumps({"master_desired": True, "revision": 1}),
+            encoding="utf-8",
+        )
+        self.app.autoanswers_lifecycle = FakeAutoanswersLifecycle(
+            self.app.autoanswers_repository
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -96,12 +149,22 @@ class HttpUiTest(unittest.TestCase):
 
     def test_five_state_selector_maps_atomically_to_master_and_mode(self) -> None:
         manual = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
-            {"selector_state": "manual"}, actor_id="admin"
+            {
+                "selector_state": "manual",
+                "expected_policy_epoch": 0,
+                "daily_cap_usd": "7.00",
+            },
+            actor_id="admin",
         )
         self.assertEqual(manual["selector_state"], "manual")
         self.assertTrue(manual["settings"]["master_enabled"])
+        self.assertEqual(manual["settings"]["daily_cap_usd"], 7.0)
         off = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
-            {"selector_state": "off"}, actor_id="admin"
+            {
+                "selector_state": "off",
+                "expected_policy_epoch": manual["settings"]["policy_epoch"],
+            },
+            actor_id="admin",
         )
         self.assertEqual(off["selector_state"], "off")
         self.assertFalse(off["settings"]["master_enabled"])
@@ -109,7 +172,12 @@ class HttpUiTest(unittest.TestCase):
             {"selector_state": "draft_only", "run_max_usd": "0.50"}, actor_id="admin"
         )
         draft = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
-            {"selector_state": "draft_only", "preview_id": preview["preview_id"]}, actor_id="admin"
+            {
+                "selector_state": "draft_only",
+                "preview_id": preview["preview_id"],
+                "expected_policy_epoch": off["settings"]["policy_epoch"],
+            },
+            actor_id="admin",
         )
         self.assertEqual(draft["selector_state"], "draft_only")
         self.assertEqual(draft["settings"]["mode"], "draft_only")
@@ -217,12 +285,17 @@ class HttpUiTest(unittest.TestCase):
         self.assertNotIn("/private/runtime", redacted)
 
     def test_automated_mode_requires_bound_transition_preview(self) -> None:
-        self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
-            {"selector_state": "manual"}, actor_id="admin"
+        manual = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {"selector_state": "manual", "expected_policy_epoch": 0},
+            actor_id="admin",
         )
         with self.assertRaisesRegex(AutoanswersRuntimeError, "preview"):
             self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
-                {"selector_state": "auto_safe"}, actor_id="admin"
+                {
+                    "selector_state": "auto_safe",
+                    "expected_policy_epoch": manual["settings"]["policy_epoch"],
+                },
+                actor_id="admin",
             )
 
     def test_autoanswers_mutations_require_csrf_marker_and_same_origin(self) -> None:

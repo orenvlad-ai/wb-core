@@ -118,11 +118,14 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertEqual(unforced_ui_args.expected_state, "off-unforced")
         timer_args = hosted.build_arg_parser().parse_args(["autoanswers-readonly-timer", "enable"])
         self.assertIs(timer_args.handler, hosted.run_autoanswers_readonly_timer_command)
-        lifecycle_args = hosted.build_arg_parser().parse_args(
-            ["autoanswers-lifecycle", "activate-manual"]
-        )
-        self.assertIs(lifecycle_args.handler, hosted.run_autoanswers_lifecycle_command)
-        self.assertEqual(lifecycle_args.action, "activate-manual")
+        for lifecycle_action in ("status", "reconcile", "suspend"):
+            lifecycle_args = hosted.build_arg_parser().parse_args(
+                ["autoanswers-lifecycle", lifecycle_action]
+            )
+            self.assertIs(
+                lifecycle_args.handler, hosted.run_autoanswers_lifecycle_command
+            )
+            self.assertEqual(lifecycle_args.action, lifecycle_action)
 
     def test_remote_readonly_command_reasserts_force_off_and_has_no_write_worker(self) -> None:
         target = hosted.load_hosted_runtime_target(TARGET)
@@ -202,46 +205,38 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("_create_current_compressed_schema_backup", activation_source)
         self.assertIn('not bool(locked_before.get("autoanswers_initialized"))', activation_source)
 
-    def test_manual_activation_uses_get_only_canary_before_enabling_worker_timer(self) -> None:
+    def test_feature_lifecycle_reconcile_is_the_only_remote_timer_owner(self) -> None:
         original = hosted.load_hosted_runtime_target(TARGET)
         target = replace(
             original,
             runtime_env={**original.runtime_env, "WB_AUTOANSWERS_FORCE_OFF": "false"},
         )
-        runtime = {
-            "settings": {
-                "master_enabled": True,
-                "force_off": False,
-                "effective_enabled": True,
-                "mode": "manual",
+        lifecycle = {
+            "process_key": "autoanswers",
+            "business_mode": "manual",
+            "lifecycle_state": "starting",
+            "drift_status": "matched",
+            "components": {
+                "readonly_sync": {"desired": True, "actual": True},
+                "worker": {"desired": True, "actual": True},
             },
-            "ai_jobs": {},
-            "publication_jobs": {},
         }
-        stdout = "\n".join(
-            (
-                json.dumps({"status": "activated", "runtime": runtime}),
-                json.dumps({"status": "passed", "operation": "manual-canary", "runtime": runtime}),
-                json.dumps({"status": "ready", "runtime": runtime}),
-                "enabled",
-                "active",
-            )
-        )
+        stdout = json.dumps({"status": "reconciled", "lifecycle": lifecycle})
         captured: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             captured.append(command)
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-        with patch.object(hosted, "_current_live_publication_invariant_blockers", return_value=[]), patch.object(
-            hosted.subprocess, "run", side_effect=fake_run
-        ):
-            result = hosted._run_remote_autoanswers_lifecycle(target, action="activate-manual")
-        self.assertEqual(result["status"], "ok")
+        with patch.object(hosted.subprocess, "run", side_effect=fake_run):
+            result = hosted._run_remote_autoanswers_lifecycle(
+                target, action="reconcile"
+            )
+        self.assertEqual(result["status"], "reconciled")
         command = " ".join(captured[0])
-        self.assertIn("wb_autoanswers_readonly.py --operation manual-canary", command)
-        self.assertNotIn("systemctl start wb-core-autoanswers-worker.service", command)
-        self.assertIn("systemctl enable --now wb-core-autoanswers-worker.timer", command)
+        self.assertIn("apps/wb_autoanswers_lifecycle.py reconcile", command)
+        self.assertNotIn("systemctl enable", command)
+        self.assertNotIn("wb_autoanswers_worker.py", command)
 
 
 if __name__ == "__main__":

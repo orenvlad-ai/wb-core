@@ -303,17 +303,16 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
     from playwright.sync_api import sync_playwright
 
     process_specs = [
-        ("vitrina_refresh", "Обновление Витрины", True),
-        ("vitrina_closure_retry", "Закрытие и повтор закрытия данных Витрины", True),
-        ("warehouse_functional", "Склады и себестоимость", True),
-        ("wb_finance_weekly", "Финансовый отчёт WB", True),
-        ("feedback_complaints", "Авто-жалобы", True),
-        ("spp_test", "Автоматический тест СПП", False),
-        ("autoanswers_readonly", "Autoanswers read-only sync", False),
-        ("autoanswers_worker", "Autoanswers worker", False),
+        ("vitrina_refresh", "Обновление Витрины", True, "manage", "Настройки → Автообновления"),
+        ("vitrina_closure_retry", "Закрытие и повтор закрытия данных Витрины", True, "manage", "Настройки → Автообновления"),
+        ("warehouse_functional", "Склады и себестоимость", True, "manage", "Настройки → Автообновления"),
+        ("wb_finance_weekly", "Финансовый отчёт WB", True, "manage", "Настройки → Автообновления"),
+        ("feedback_complaints", "Авто-жалобы", True, "monitor", "Отзывы → Авто-жалобы"),
+        ("spp_test", "Автоматический тест СПП", False, "monitor", "Цены → Тест СПП"),
+        ("autoanswers", "Autoanswers", True, "monitor", "Отзывы → Отзывы"),
     ]
     auto_payload = {
-        "schema_version": "auto_updates_owner_policy_v1",
+        "schema_version": "auto_updates_owner_policy_v2",
         "master_desired": False,
         "revision": 1,
         "policy_fingerprint": "sha256:browser-fixture",
@@ -322,14 +321,20 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
         "reason": "browser fixture",
         "overall_status": "Общая пауза включена",
         "unknown_processes": [],
-        "drift_processes": [key for key, _, desired in process_specs if desired],
+        "drift_processes": [],
         "processes": [
             {
                 "process_key": key,
                 "display_name": label,
                 "desired": desired,
                 "actual": False,
-                "drift_status": "drift" if desired else "matched",
+                "lifecycle_state": "suspended_by_master" if desired else "off",
+                "drift_status": "matched",
+                "suspended_by_master": True,
+                "control_capability": capability,
+                "control_owner": "settings" if capability == "manage" else "feature",
+                "control_location": location,
+                "desired_source": "auto_updates_owner_policy" if capability == "manage" else key + "_feature_settings",
                 "last_run": "2026-07-23T10:00:00Z",
                 "last_success": "2026-07-23T10:00:00Z",
                 "next_run": "",
@@ -337,14 +342,8 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 "runtime_schedule": {},
                 "timer": {"properties": {}},
                 "provenance": "proven",
-                "can_enable": not key.startswith("autoanswers_"),
-                "enable_blocker": (
-                    "Включение требует отдельного Autoanswers lifecycle contract."
-                    if key.startswith("autoanswers_")
-                    else ""
-                ),
             }
-            for key, label, desired in process_specs
+            for key, label, desired, capability, location in process_specs
         ],
     }
     auto_current = json.loads(json.dumps(auto_payload))
@@ -409,24 +408,23 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                         for process in changed["processes"]:
                             process["actual"] = bool(process["desired"])
                             process["drift_status"] = "matched"
+                            process["lifecycle_state"] = "running" if process["desired"] else "off"
+                            process["suspended_by_master"] = False
                         changed["drift_processes"] = []
                         changed["overall_status"] = "Часть обновлений выключена"
                     else:
                         for process in changed["processes"]:
                             process["actual"] = False
-                            process["drift_status"] = (
-                                "drift" if process["desired"] else "matched"
-                            )
-                        changed["drift_processes"] = [
-                            process["process_key"]
-                            for process in changed["processes"]
-                            if process["desired"]
-                        ]
+                            process["drift_status"] = "matched"
+                            process["lifecycle_state"] = "suspended_by_master" if process["desired"] else "off"
+                            process["suspended_by_master"] = True
+                        changed["drift_processes"] = []
                         changed["overall_status"] = "Общая пауза включена"
                     changed["mutation"] = {
                         "status": "confirmed",
                         "persisted": True,
                         "runtime_readback_confirmed": True,
+                        "lifecycle_readback_confirmed": True,
                     }
                     auto_current.clear()
                     auto_current.update(changed)
@@ -536,9 +534,29 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             )
             surface.locator('[data-settings-group-button="auto-updates"]').click()
             surface.locator('[data-auto-update-process="warehouse_functional"]').wait_for()
+            surface.locator("[data-vitrina-schedule-editor]").wait_for()
+            surface.locator(
+                "[data-vitrina-schedule-editor] thead th"
+            ).nth(6).wait_for()
             _assert(
-                surface.locator("[data-auto-update-process]").count() == 8,
-                "auto-updates page must show only eight real allowlisted processes",
+                surface.locator("[data-auto-update-process]").count() == 7,
+                "auto-updates page must show only seven logical real processes",
+            )
+            _assert(
+                surface.locator("[data-vitrina-schedule-editor]").count() == 1
+                and surface.locator("[data-vitrina-schedule-policy]").count() == 1
+                and surface.locator("[data-vitrina-schedule-save]").count() == 1,
+                "Settings must contain the sole complete Vitrina schedule editor",
+            )
+            vitrina_editor_text = surface.locator(
+                "[data-vitrina-schedule-editor]"
+            ).inner_text()
+            normalized_vitrina_editor_text = vitrina_editor_text.casefold()
+            _assert(
+                "следующий" in normalized_vitrina_editor_text
+                and "последний успех" in normalized_vitrina_editor_text,
+                "Vitrina Settings card must expose runtime schedule readback; "
+                f"text={vitrina_editor_text!r}",
             )
             _assert(not auto_posts, "opening Auto-updates must be read-only")
             _assert(
@@ -555,19 +573,29 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             )
             _assert(
                 surface.locator(
-                    '[data-auto-update-toggle="autoanswers_readonly"]'
-                ).is_disabled()
+                    '[data-auto-update-toggle="autoanswers"]'
+                ).count() == 0
                 and surface.locator(
-                    '[data-auto-update-toggle="autoanswers_worker"]'
-                ).is_disabled(),
-                "Autoanswers ON must be blocked before any owner-policy mutation",
+                    '[data-auto-update-toggle="feedback_complaints"]'
+                ).count() == 0
+                and surface.locator(
+                    '[data-auto-update-toggle="spp_test"]'
+                ).count() == 0,
+                "feature-owned processes must have no Settings mutation controls",
             )
             _assert(
-                "отдельного Autoanswers lifecycle"
+                "Только мониторинг"
                 in surface.locator(
-                    '[data-auto-update-process="autoanswers_readonly"]'
+                    '[data-auto-update-process="autoanswers"]'
                 ).inner_text(),
-                "dedicated lifecycle blocker must be visible",
+                "Autoanswers monitoring card must name its non-manage capability",
+            )
+            _assert(
+                "Отзывы → Отзывы"
+                in surface.locator(
+                    '[data-auto-update-process="autoanswers"]'
+                ).inner_text(),
+                "Autoanswers monitoring card must name its feature control location",
             )
             surface.locator(
                 '[data-auto-update-toggle="warehouse_functional"]'
@@ -639,6 +667,12 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                     "element => element.scrollWidth <= element.clientWidth + 1"
                 ),
                 "Auto-updates cards must not be clipped at narrow width",
+            )
+            _assert(
+                surface.locator("[data-vitrina-schedule-editor]").evaluate(
+                    "element => element.getBoundingClientRect().width > 0"
+                ),
+                "Vitrina schedule editor must remain visible at narrow width",
             )
             dark_background = surface.locator(
                 '[data-auto-update-process="warehouse_functional"]'

@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
 SCHEMA_VERSION = "business_data_maintenance_v1"
 STATE_FILENAME = ".business-data-maintenance.json"
 AUDIT_FILENAME = ".business-data-maintenance-audit.jsonl"
-POLICY_SCHEMA_VERSION = "auto_updates_owner_policy_v1"
+POLICY_SCHEMA_VERSION = "auto_updates_owner_policy_v2"
 POLICY_FILENAME = ".auto-updates-policy.json"
 POLICY_AUDIT_FILENAME = ".auto-updates-policy-audit.jsonl"
 WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
@@ -87,53 +88,69 @@ PROCESS_SPECS: tuple[dict[str, Any], ...] = (
         "display_name": "Обновление Витрины",
         "timer": "wb-core-sheet-vitrina-refresh.timer",
         "schedule": "web_vitrina",
+        "control_owner": "settings",
+        "control_location": "Настройки → Автообновления",
+        "control_capability": "manage",
+        "desired_source": "auto_updates_owner_policy",
     },
     {
         "key": "vitrina_closure_retry",
         "display_name": "Закрытие и повтор закрытия данных Витрины",
         "timer": "wb-core-sheet-vitrina-closure-retry.timer",
+        "control_owner": "settings",
+        "control_location": "Настройки → Автообновления",
+        "control_capability": "manage",
+        "desired_source": "auto_updates_owner_policy",
     },
     {
         "key": "warehouse_functional",
         "display_name": "Склады и себестоимость",
         "timer": "wb-core-warehouse-functional-sync.timer",
+        "control_owner": "settings",
+        "control_location": "Настройки → Автообновления",
+        "control_capability": "manage",
+        "desired_source": "auto_updates_owner_policy",
     },
     {
         "key": "wb_finance_weekly",
         "display_name": "Финансовый отчёт WB",
         "timer": "wb-core-wb-finance-weekly.timer",
+        "control_owner": "settings",
+        "control_location": "Настройки → Автообновления",
+        "control_capability": "manage",
+        "desired_source": "auto_updates_owner_policy",
     },
     {
         "key": "feedback_complaints",
         "display_name": "Авто-жалобы",
         "timer": "wb-core-feedbacks-auto-complaints-tick.timer",
         "schedule": "feedback_complaints",
+        "control_owner": "feature",
+        "control_location": "Отзывы → Авто-жалобы",
+        "control_capability": "monitor",
+        "desired_source": "feedback_complaints_schedule",
     },
     {
         "key": "spp_test",
         "display_name": "Автоматический тест СПП",
         "timer": "wb-core-spp-tester-schedule-tick.timer",
         "schedule": "spp",
+        "control_owner": "feature",
+        "control_location": "Цены → Тест СПП",
+        "control_capability": "monitor",
+        "desired_source": "spp_test_schedule",
     },
     {
-        "key": "autoanswers_readonly",
-        "display_name": "Autoanswers read-only sync",
-        "timer": "wb-core-autoanswers-readonly-sync.timer",
-        "can_enable": False,
-        "enable_blocker": (
-            "Autoanswers read-only sync включается только через отдельный "
-            "Autoanswers lifecycle contract."
-        ),
-    },
-    {
-        "key": "autoanswers_worker",
-        "display_name": "Autoanswers worker",
-        "timer": "wb-core-autoanswers-worker.timer",
-        "can_enable": False,
-        "enable_blocker": (
-            "Autoanswers worker включается только через отдельный "
-            "Autoanswers lifecycle contract."
-        ),
+        "key": "autoanswers",
+        "display_name": "Autoanswers",
+        "components": {
+            "readonly_sync": "wb-core-autoanswers-readonly-sync.timer",
+            "worker": "wb-core-autoanswers-worker.timer",
+        },
+        "control_owner": "feature",
+        "control_location": "Отзывы → Отзывы",
+        "control_capability": "monitor",
+        "desired_source": "autoanswers_feature_settings",
     },
 )
 
@@ -255,31 +272,8 @@ class RuntimeScheduleClient:
         }
 
     def disable_all(self, current: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-        web = dict(current.get("web_vitrina") or {})
-        web_policy = dict(web.get("schedule_policy") or {})
-        web_policy.update({"mode": "manual", "interval_hours": None})
-        web_schedules = [
-            {**dict(item), "enabled": False}
-            for item in (web.get("schedules") or web.get("effective_schedules") or [])
-            if isinstance(item, Mapping)
-        ]
-        self._request(
-            WEB_SCHEDULE_PATH,
-            {"schedule_policy": web_policy, "schedules": web_schedules},
-        )
-
-        feedback = dict(current.get("feedback_complaints") or {})
-        feedback_schedules = [
-            {**dict(item), "enabled": False}
-            for item in feedback.get("schedules", [])
-            if isinstance(item, Mapping)
-        ]
-        self._request(FEEDBACK_SCHEDULE_PATH, {"schedules": feedback_schedules})
-
-        spp = dict(current.get("spp") or {})
-        spp_schedule = dict(spp.get("schedule") or {})
-        spp_schedule["enabled"] = False
-        self._request(SPP_SCHEDULE_PATH, {"schedule": spp_schedule})
+        # A global hold owns execution, not feature/configuration intent.
+        # Disabling timers is sufficient; runtime JSON schedules remain exact.
         return self.read_all()
 
     def restore_selected(
@@ -288,41 +282,47 @@ class RuntimeScheduleClient:
         *,
         desired: Mapping[str, bool],
     ) -> dict[str, dict[str, Any]]:
+        # Schedule configuration is never rewritten by master resume.
+        return self.read_all()
+
+    def restore_legacy_hold(
+        self,
+        baseline: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Undo the one-time v1 hold that rewrote feature schedule JSON."""
+
         web = dict(baseline.get("web_vitrina") or {})
-        web_policy = dict(web.get("schedule_policy") or {})
-        web_schedules = [
-            {
-                **dict(item),
-                "enabled": bool(item.get("enabled")) and bool(desired.get("vitrina_refresh")),
-            }
-            for item in (web.get("schedules") or web.get("effective_schedules") or [])
-            if isinstance(item, Mapping)
-        ]
-        if not bool(desired.get("vitrina_refresh")):
-            web_policy.update({"mode": "manual", "interval_hours": None})
         self._request(
             WEB_SCHEDULE_PATH,
-            {"schedule_policy": web_policy, "schedules": web_schedules},
-        )
-
-        feedback = dict(baseline.get("feedback_complaints") or {})
-        feedback_schedules = [
             {
-                **dict(item),
-                "enabled": bool(item.get("enabled"))
-                and bool(desired.get("feedback_complaints")),
-            }
-            for item in feedback.get("schedules", [])
-            if isinstance(item, Mapping)
-        ]
-        self._request(FEEDBACK_SCHEDULE_PATH, {"schedules": feedback_schedules})
-
-        spp = dict(baseline.get("spp") or {})
-        spp_schedule = dict(spp.get("schedule") or {})
-        spp_schedule["enabled"] = (
-            bool(spp_schedule.get("enabled")) and bool(desired.get("spp_test"))
+                "schedule_policy": dict(web.get("schedule_policy") or {}),
+                "schedules": [
+                    dict(item)
+                    for item in (
+                        web.get("schedules")
+                        or web.get("effective_schedules")
+                        or []
+                    )
+                    if isinstance(item, Mapping)
+                ],
+            },
         )
-        self._request(SPP_SCHEDULE_PATH, {"schedule": spp_schedule})
+        feedback = dict(baseline.get("feedback_complaints") or {})
+        self._request(
+            FEEDBACK_SCHEDULE_PATH,
+            {
+                "schedules": [
+                    dict(item)
+                    for item in feedback.get("schedules", [])
+                    if isinstance(item, Mapping)
+                ]
+            },
+        )
+        spp = dict(baseline.get("spp") or {})
+        self._request(
+            SPP_SCHEDULE_PATH,
+            {"schedule": dict(spp.get("schedule") or {})},
+        )
         return self.read_all()
 
 
@@ -512,6 +512,8 @@ def _initial_owner_policy(runtime_dir: Path) -> dict[str, Any]:
     )
     processes: dict[str, dict[str, Any]] = {}
     for spec in PROCESS_SPECS:
+        if spec.get("control_capability") != "manage":
+            continue
         timer = str(spec["timer"])
         timer_evidence = dict(baseline_timers.get(timer) or {})
         evidence_source = "business_data_maintenance.baseline"
@@ -600,9 +602,18 @@ def _initial_owner_policy(runtime_dir: Path) -> dict[str, Any]:
 
 
 def load_or_initialize_owner_policy(runtime_dir: Path) -> dict[str, Any]:
-    return _load_json_object(runtime_dir / POLICY_FILENAME) or _initial_owner_policy(
+    policy = _load_json_object(runtime_dir / POLICY_FILENAME) or _initial_owner_policy(
         runtime_dir
     )
+    processes = dict(policy.get("processes") or {})
+    policy = dict(policy)
+    policy["schema_version"] = POLICY_SCHEMA_VERSION
+    policy["processes"] = {
+        str(spec["key"]): dict(processes.get(str(spec["key"])) or {})
+        for spec in PROCESS_SPECS
+        if spec.get("control_capability") == "manage"
+    }
+    return policy
 
 
 def update_process_desired_state(
@@ -615,6 +626,11 @@ def update_process_desired_state(
     reason: str,
 ) -> dict[str, Any]:
     spec = _process_spec(process_key)
+    if str(spec.get("control_capability") or "") != "manage":
+        raise RuntimeError(
+            f"{process_key} is monitoring-only in Settings; manage it in "
+            f"{spec.get('control_location')}"
+        )
     policy = load_or_initialize_owner_policy(runtime_dir)
     if int(policy.get("revision") or 0) != int(expected_revision):
         raise RuntimeError(
@@ -624,8 +640,6 @@ def update_process_desired_state(
     processes = dict(policy.get("processes") or {})
     process = dict(processes.get(process_key) or {})
     before = process.get("desired")
-    if bool(desired) and spec.get("can_enable") is False:
-        raise RuntimeError(str(spec.get("enable_blocker") or "process enable is blocked"))
     if before is not None and bool(before) == bool(desired):
         raise RuntimeError(
             f"no-op desired state for {process_key}: already "
@@ -674,61 +688,423 @@ def update_process_desired_state(
     return policy
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _autoanswers_feature_state(runtime_dir: Path) -> dict[str, Any]:
+    database = runtime_dir / "registry_upload_runtime.sqlite3"
+    if not database.is_file():
+        return {
+            "mode": "unknown",
+            "policy_epoch": None,
+            "transition_run_id": None,
+            "last_scheduler_tick_at": None,
+            "last_sync_at": None,
+            "stop_reason": "settings_missing",
+        }
+    with sqlite3.connect(
+        f"file:{database.resolve()}?mode=ro",
+        uri=True,
+        timeout=10,
+    ) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required = {
+            "sheet_vitrina_v1_wb_autoanswers_settings",
+            "sheet_vitrina_v1_wb_autoanswers_runtime_state",
+            "sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps",
+            "sheet_vitrina_v1_wb_sync_state",
+        }
+        missing = sorted(required - tables)
+        if missing:
+            return {
+                "mode": "unknown",
+                "policy_epoch": None,
+                "transition_run_id": None,
+                "last_scheduler_tick_at": None,
+                "last_sync_at": None,
+                "stop_reason": "settings_missing",
+                "last_error": "missing Autoanswers tables: " + ",".join(missing),
+            }
+        settings = conn.execute(
+            """
+            SELECT master_enabled,mode,policy_epoch
+            FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1
+            """
+        ).fetchone()
+        runtime = conn.execute(
+            """
+            SELECT stop_reason,last_scheduler_tick_at,last_successful_ai_call_at,
+                   last_confirmed_publication_at
+            FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1
+            """
+        ).fetchone()
+        sweep = conn.execute(
+            """
+            SELECT transition_run_id,run_max_usd,run_max_paid_reviews
+            FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+            ORDER BY created_at DESC LIMIT 1
+            """
+        ).fetchone()
+        last_sync = conn.execute(
+            "SELECT MAX(last_success_at) FROM sheet_vitrina_v1_wb_sync_state"
+        ).fetchone()[0]
+    lifecycle = _load_json_object(runtime_dir / ".wb-autoanswers-lifecycle.json") or {}
+    return {
+        "mode": (
+            str(settings["mode"])
+            if settings is not None and bool(settings["master_enabled"])
+            else "off"
+        ),
+        "policy_epoch": (
+            int(settings["policy_epoch"]) if settings is not None else None
+        ),
+        "transition_run_id": (
+            str(sweep["transition_run_id"]) if sweep is not None else None
+        ),
+        "run_max_usd": sweep["run_max_usd"] if sweep is not None else None,
+        "run_max_paid_reviews": (
+            sweep["run_max_paid_reviews"] if sweep is not None else None
+        ),
+        "last_scheduler_tick_at": (
+            str(runtime["last_scheduler_tick_at"]) if runtime is not None else None
+        ),
+        "last_successful_ai_call_at": (
+            str(runtime["last_successful_ai_call_at"])
+            if runtime is not None
+            else None
+        ),
+        "last_confirmed_publication_at": (
+            str(runtime["last_confirmed_publication_at"])
+            if runtime is not None
+            else None
+        ),
+        "last_sync_at": str(last_sync) if last_sync else None,
+        "stop_reason": str(runtime["stop_reason"] or "") if runtime is not None else "",
+        "lifecycle": lifecycle,
+    }
+
+
+def _autoanswers_process_actual_state(
+    *,
+    status: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    runtime_dir: Path,
+    spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    feature = _autoanswers_feature_state(runtime_dir)
+    mode = str(feature.get("mode") or "unknown")
+    feature_desired: bool | None = None if mode == "unknown" else mode != "off"
+    suspended = not bool(policy.get("master_desired"))
+    components: dict[str, Any] = {}
+    for component_key, timer_unit in dict(spec.get("components") or {}).items():
+        timer = dict((status.get("timers") or {}).get(str(timer_unit)) or {})
+        service_unit = str(timer_unit).removesuffix(".timer") + ".service"
+        service = dict((status.get("services") or {}).get(service_unit) or {})
+        timer_on = (
+            str(timer.get("is_enabled") or "") == "enabled"
+            and str(timer.get("is_active") or "") == "active"
+        )
+        desired = bool(
+            not suspended
+            and (
+                str(component_key) == "readonly_sync"
+                or mode in {"manual", "draft_only", "auto_safe", "auto_all"}
+            )
+        )
+        timer_properties = dict(timer.get("properties") or {})
+        service_properties = dict(service.get("properties") or {})
+        result = str(service_properties.get("Result") or "success")
+        components[str(component_key)] = {
+            "component_key": str(component_key),
+            "desired": desired,
+            "actual": timer_on,
+            "drift_status": "matched" if desired == timer_on else "drift",
+            "timer": timer,
+            "service": service,
+            "last_run": str(timer_properties.get("LastTriggerUSec") or ""),
+            "last_success": (
+                str(timer_properties.get("LastTriggerUSec") or "")
+                if result == "success"
+                else ""
+            ),
+            "next_run": str(
+                timer_properties.get("NextElapseUSecRealtime") or ""
+            ),
+            "last_error": "" if result == "success" else result,
+        }
+    drift_components = [
+        key
+        for key, value in components.items()
+        if value.get("drift_status") != "matched"
+    ]
+    lifecycle = dict(feature.get("lifecycle") or {})
+    lifecycle_identity_matches = bool(
+        lifecycle
+        and str(lifecycle.get("requested_mode") or "") == mode
+        and int(
+            lifecycle.get("policy_epoch")
+            if lifecycle.get("policy_epoch") is not None
+            else -1
+        )
+        == int(
+            feature.get("policy_epoch")
+            if feature.get("policy_epoch") is not None
+            else -2
+        )
+        and bool(lifecycle.get("suspended_by_master")) == suspended
+        and (
+            mode not in {"draft_only", "auto_safe", "auto_all"}
+            or str(lifecycle.get("transition_run_id") or "")
+            == str(feature.get("transition_run_id") or "")
+        )
+    )
+    requested_at = _parse_timestamp(lifecycle.get("requested_at"))
+    last_tick = _parse_timestamp(feature.get("last_scheduler_tick_at"))
+    now = datetime.now(timezone.utc)
+    fresh_tick = bool(
+        mode in {"manual", "draft_only", "auto_safe", "auto_all"}
+        and last_tick is not None
+        and last_tick >= now - timedelta(minutes=3)
+        and (requested_at is None or last_tick >= requested_at)
+    )
+    stop_reason = str(feature.get("stop_reason") or "")
+    if (
+        mode in {"draft_only", "auto_safe", "auto_all"}
+        and (
+            not str(feature.get("transition_run_id") or "")
+            or (
+                feature.get("run_max_usd") in {None, ""}
+                and feature.get("run_max_paid_reviews") in {None, ""}
+            )
+        )
+    ):
+        stop_reason = "run_cap_missing"
+    if (
+        mode in {"manual", "draft_only", "auto_safe", "auto_all"}
+        and not fresh_tick
+        and (
+            requested_at is None
+            or requested_at <= now - timedelta(minutes=3)
+        )
+    ):
+        stop_reason = "worker_unavailable"
+    blocking = stop_reason in {
+        "budget_state_unknown",
+        "openai_quota_exhausted",
+        "run_cap_missing",
+        "worker_unavailable",
+        "worker_error",
+    }
+    if suspended:
+        lifecycle_state = (
+            "error"
+            if drift_components
+            else "suspended_by_master"
+            if lifecycle_identity_matches
+            else "unconfirmed"
+        )
+    elif drift_components:
+        lifecycle_state = "error"
+    elif not lifecycle_identity_matches:
+        lifecycle_state = "unconfirmed"
+    elif mode == "off":
+        lifecycle_state = "off"
+    elif blocking:
+        lifecycle_state = "error"
+    elif fresh_tick:
+        lifecycle_state = "running"
+    else:
+        lifecycle_state = "starting"
+    worker = dict(components.get("worker") or {})
+    readonly = dict(components.get("readonly_sync") or {})
+    actual = bool(
+        not suspended
+        and mode != "off"
+        and not drift_components
+        and lifecycle_identity_matches
+        and fresh_tick
+        and not blocking
+    )
+    last_error = str(
+        lifecycle.get("last_error") or feature.get("last_error") or ""
+    )
+    if blocking and not last_error:
+        last_error = stop_reason
+    if not lifecycle_identity_matches and not last_error:
+        last_error = "persisted lifecycle identity is not confirmed"
+    return {
+        "process_key": "autoanswers",
+        "display_name": str(spec["display_name"]),
+        "control_owner": str(spec["control_owner"]),
+        "control_location": str(spec["control_location"]),
+        "control_capability": "monitor",
+        "desired_source": str(spec["desired_source"]),
+        "desired": feature_desired,
+        "business_mode": mode,
+        "actual": actual,
+        "lifecycle_state": lifecycle_state,
+        "last_run": str(worker.get("last_run") or readonly.get("last_run") or ""),
+        "last_success": str(
+            worker.get("last_success") or readonly.get("last_success") or ""
+        ),
+        "next_run": str(worker.get("next_run") or readonly.get("next_run") or ""),
+        "last_error": last_error,
+        "runtime_schedule": {
+            "policy_epoch": feature.get("policy_epoch"),
+            "transition_run_id": feature.get("transition_run_id"),
+            "last_scheduler_tick_at": feature.get("last_scheduler_tick_at"),
+            "last_sync_at": feature.get("last_sync_at"),
+            "last_successful_ai_call_at": feature.get(
+                "last_successful_ai_call_at"
+            ),
+            "last_confirmed_publication_at": feature.get(
+                "last_confirmed_publication_at"
+            ),
+        },
+        "drift_status": (
+            "drift"
+            if drift_components
+            else "unknown"
+            if not lifecycle_identity_matches
+            else "matched"
+            if suspended
+            else "blocked"
+            if blocking
+            else "matched"
+        ),
+        "suspended_by_master": suspended,
+        "component_states": components,
+        "components": components,
+        "stop_reason": stop_reason,
+        "budget_state": (
+            "unknown"
+            if str(feature.get("stop_reason") or "") == "budget_state_unknown"
+            else "confirmed"
+        ),
+        "fresh_scheduler_tick": fresh_tick,
+        "provenance": "feature_settings+systemd+lifecycle",
+    }
+
+
 def _process_actual_state(
     spec: Mapping[str, Any],
     *,
     status: Mapping[str, Any],
     policy: Mapping[str, Any],
+    runtime_dir: Path,
 ) -> dict[str, Any]:
+    if str(spec.get("key") or "") == "autoanswers":
+        return _autoanswers_process_actual_state(
+            status=status,
+            policy=policy,
+            runtime_dir=runtime_dir,
+            spec=spec,
+        )
     timer = dict((status.get("timers") or {}).get(str(spec["timer"])) or {})
+    service_unit = str(spec["timer"]).removesuffix(".timer") + ".service"
+    service = dict((status.get("services") or {}).get(service_unit) or {})
     schedule_key = str(spec.get("schedule") or "")
     schedule = dict((status.get("runtime_schedules") or {}).get(schedule_key) or {})
     timer_on = (
         str(timer.get("is_enabled") or "") == "enabled"
         and str(timer.get("is_active") or "") == "active"
     )
-    actual = timer_on
-    if schedule_key == "web_vitrina":
-        actual = timer_on and bool(schedule.get("enabled_ids"))
-    elif schedule_key == "feedback_complaints":
+    capability = str(spec.get("control_capability") or "manage")
+    process = dict((policy.get("processes") or {}).get(str(spec["key"])) or {})
+    if capability == "monitor" and schedule_key == "feedback_complaints":
+        desired: bool | None = bool(schedule.get("enabled_ids"))
+    elif capability == "monitor" and schedule_key == "spp":
+        desired = bool(schedule.get("enabled"))
+    else:
+        desired = process.get("desired")
+    suspended = not bool(policy.get("master_desired"))
+    if schedule_key == "feedback_complaints":
         actual = timer_on and bool(schedule.get("enabled_ids"))
     elif schedule_key == "spp":
         actual = timer_on and bool(schedule.get("enabled"))
-    process = dict((policy.get("processes") or {}).get(str(spec["key"])) or {})
-    desired = process.get("desired")
+    else:
+        actual = timer_on
+    effective_timer_desired = (
+        None if desired is None else bool(desired) and not suspended
+    )
     drift = (
         "unknown"
-        if desired is None
+        if effective_timer_desired is None
         else "matched"
-        if bool(desired) == bool(actual)
+        if bool(effective_timer_desired) == bool(timer_on)
         else "drift"
     )
     properties = dict(timer.get("properties") or {})
+    service_properties = dict(service.get("properties") or {})
+    result = str(service_properties.get("Result") or "success")
     return {
         "process_key": spec["key"],
         "display_name": spec["display_name"],
+        "control_owner": str(spec.get("control_owner") or "settings"),
+        "control_location": str(
+            spec.get("control_location") or "Настройки → Автообновления"
+        ),
+        "control_capability": capability,
+        "desired_source": str(
+            spec.get("desired_source") or "auto_updates_owner_policy"
+        ),
         "desired": desired,
         "actual": bool(actual),
+        "lifecycle_state": (
+            "suspended_by_master"
+            if suspended and drift == "matched"
+            else "unconfirmed"
+            if drift == "unknown"
+            else "running"
+            if actual
+            else "off"
+            if desired is False
+            else "error"
+        ),
         "drift_status": drift,
-        "can_enable": bool(spec.get("can_enable", True)),
-        "enable_blocker": str(spec.get("enable_blocker") or ""),
+        "suspended_by_master": suspended,
         "timer": timer,
+        "service": service,
+        "component_states": {
+            "timer": {
+                "desired": effective_timer_desired,
+                "actual": timer_on,
+                "timer": timer,
+                "service": service,
+            }
+        },
         "runtime_schedule": schedule,
         "last_run": str(properties.get("LastTriggerUSec") or ""),
         "last_success": (
             str(properties.get("LastTriggerUSec") or "")
-            if str(properties.get("Result") or "success") == "success"
+            if result == "success"
             else ""
         ),
         "next_run": str(properties.get("NextElapseUSecRealtime") or ""),
-        "last_error": (
-            ""
-            if str(properties.get("Result") or "success") == "success"
-            else str(properties.get("Result") or "unknown")
-        ),
+        "last_error": "" if result == "success" else result,
         "schedule": schedule,
         "fingerprint": process.get("fingerprint"),
-        "provenance": process.get("provenance"),
+        "provenance": (
+            process.get("provenance")
+            if capability == "manage"
+            else str(spec.get("desired_source") or "feature")
+        ),
     }
 
 
@@ -739,7 +1115,12 @@ def owner_policy_readback(
 ) -> dict[str, Any]:
     policy = load_or_initialize_owner_policy(runtime_dir)
     processes = [
-        _process_actual_state(spec, status=status, policy=policy)
+        _process_actual_state(
+            spec,
+            status=status,
+            policy=policy,
+            runtime_dir=runtime_dir,
+        )
         for spec in PROCESS_SPECS
     ]
     unknown = [item["process_key"] for item in processes if item["desired"] is None]
@@ -850,12 +1231,11 @@ def maintenance_status(
         state["is_active"] in QUIESCENT_SERVICE_STATES
         for state in service_states.values()
     )
+    # A cross-writer hold owns execution only.  Canonical schedule JSON is
+    # feature intent and must remain byte-for-byte meaningful across pause.
     runtime_quiet = (
-        not runtime["web_vitrina"]["enabled_ids"]
-        and not runtime["web_vitrina"]["active"]
-        and not runtime["feedback_complaints"]["enabled_ids"]
+        not runtime["web_vitrina"]["active"]
         and not runtime["feedback_complaints"]["active_runs"]
-        and runtime["spp"]["enabled"] is False
         and runtime["spp"]["active_job"] is None
     )
     locks_quiet = (
@@ -916,6 +1296,7 @@ def maintenance_hold(
     actor: str = "business_data_maintenance",
     reason: str = "canonical cross-writer hold",
     expected_revision: int | None = None,
+    autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
     prepared = maintenance_prepare(
         runtime_dir,
@@ -925,6 +1306,7 @@ def maintenance_hold(
         actor=actor,
         reason=reason,
         expected_revision=expected_revision,
+        autoanswers_reconcile=autoanswers_reconcile,
     )
     if prepared.get("quiet"):
         state_path = runtime_dir / STATE_FILENAME
@@ -956,6 +1338,32 @@ def maintenance_hold(
     return {**current, "status": "held", "idempotent": False}
 
 
+def _reconcile_autoanswers_lifecycle(
+    runtime_dir: Path,
+    *,
+    suspended_by_master: bool,
+    actor: str,
+    reason: str,
+    systemd: SystemdClient,
+) -> dict[str, Any]:
+    from packages.application.wb_autoanswers_lifecycle import AutoanswersLifecycle
+    from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+
+    repository = AutoanswersRepository(runtime_dir=runtime_dir)
+    return AutoanswersLifecycle(
+        runtime_dir=runtime_dir,
+        repository=repository,
+        systemd=systemd,
+    ).reconcile(
+        suspended_by_master=suspended_by_master,
+        actor=actor,
+        reason=reason,
+        transition_run_id=(repository.reconciliation_status() or {}).get(
+            "transition_run_id"
+        ),
+    )
+
+
 def maintenance_restore(
     runtime_dir: Path,
     *,
@@ -966,36 +1374,55 @@ def maintenance_restore(
     reason: str = "bounded recovery completed",
     expected_revision: int | None = None,
     warehouse_restore: Any | None = None,
+    autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
+    raw_policy = _load_json_object(runtime_dir / POLICY_FILENAME) or {}
+    restore_legacy_schedule_hold = (
+        str(raw_policy.get("schema_version") or "")
+        == "auto_updates_owner_policy_v1"
+    )
     policy = load_or_initialize_owner_policy(runtime_dir)
     revision = int(policy.get("revision") or 0)
     if expected_revision is not None and revision != int(expected_revision):
         raise RuntimeError(
             f"stale policy revision: expected {expected_revision}, current {revision}"
         )
+    preflight = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    preflight_readback = owner_policy_readback(runtime_dir, status=preflight)
     desired = {
-        key: value.get("desired")
-        for key, value in dict(policy.get("processes") or {}).items()
-        if isinstance(value, Mapping)
+        str(item.get("process_key") or ""): item.get("desired")
+        for item in preflight_readback.get("processes", [])
+        if isinstance(item, Mapping)
     }
+    schedule_baseline = dict(policy.get("runtime_schedule_baseline") or {})
+    if restore_legacy_schedule_hold:
+        # Policy-v1 hold rewrote feature schedule JSON to disabled. Recover
+        # those feature-owned desired values from its exact pre-hold baseline,
+        # not from the intentionally disabled post-hold files.
+        feedback_baseline = dict(
+            schedule_baseline.get("feedback_complaints") or {}
+        )
+        desired["feedback_complaints"] = any(
+            bool(item.get("enabled"))
+            for item in feedback_baseline.get("schedules", [])
+            if isinstance(item, Mapping)
+        )
+        spp_baseline = dict(schedule_baseline.get("spp") or {})
+        desired["spp_test"] = bool(
+            (spp_baseline.get("schedule") or {}).get("enabled")
+        )
     unknown = sorted(key for key, value in desired.items() if value is None)
     if unknown:
         raise RuntimeError(
             "unsafe resume blocked by unknown intended process states: "
             + ",".join(unknown)
         )
-    if bool(desired.get("autoanswers_readonly")) or bool(
-        desired.get("autoanswers_worker")
-    ):
-        raise RuntimeError(
-            "Autoanswers ON requires its dedicated lifecycle contract; owner policy remains fail-closed"
-        )
-    before = maintenance_status(
-        runtime_dir,
-        systemd=systemd,
-        schedules=schedules,
-        proc_root=proc_root,
-    )
+    before = preflight
     if bool(policy.get("master_desired")):
         readback = owner_policy_readback(runtime_dir, status=before)
         if not readback["unknown_processes"] and not readback["drift_processes"]:
@@ -1026,14 +1453,18 @@ def maintenance_restore(
         raise RuntimeError("maintenance/shared lock is still held")
     if not before["quiet"]:
         raise RuntimeError("business-data maintenance is not quiet before resume")
-    schedule_baseline = dict(policy.get("runtime_schedule_baseline") or {})
     try:
-        schedules.restore_selected(
-            schedule_baseline,
-            desired={key: bool(value) for key, value in desired.items()},
-        )
+        if restore_legacy_schedule_hold:
+            schedules.restore_legacy_hold(schedule_baseline)
+        else:
+            schedules.restore_selected(
+                schedule_baseline,
+                desired={key: bool(value) for key, value in desired.items()},
+            )
         for spec in PROCESS_SPECS:
             key = str(spec["key"])
+            if key == "autoanswers":
+                continue
             unit = str(spec["timer"])
             if key == "warehouse_functional":
                 continue
@@ -1054,9 +1485,32 @@ def maintenance_restore(
                 raise RuntimeError("warehouse timer restore did not return restored status")
         else:
             systemd.disable_now("wb-core-warehouse-functional-sync.timer")
+        reconcile_autoanswers = (
+            autoanswers_reconcile or _reconcile_autoanswers_lifecycle
+        )
+        reconcile_autoanswers(
+            runtime_dir,
+            suspended_by_master=False,
+            actor=actor,
+            reason=reason,
+            systemd=systemd,
+        )
     except Exception as exc:
-        for unit in ALL_BUSINESS_TIMER_UNITS:
+        for unit in CORE_TIMER_UNITS + (
+            "wb-core-warehouse-functional-sync.timer",
+        ):
             systemd.disable_now(unit)
+        try:
+            (autoanswers_reconcile or _reconcile_autoanswers_lifecycle)(
+                runtime_dir,
+                suspended_by_master=True,
+                actor=actor,
+                reason="fail-closed after master resume failure",
+                systemd=systemd,
+            )
+        except Exception:
+            systemd.disable_now("wb-core-autoanswers-worker.timer")
+            systemd.disable_now("wb-core-autoanswers-readonly-sync.timer")
         schedules.disable_all(schedules.read_all())
         _append_audit_0600(
             runtime_dir / POLICY_AUDIT_FILENAME,
@@ -1080,13 +1534,31 @@ def maintenance_restore(
     preview_policy = dict(policy)
     preview_policy["master_desired"] = True
     actual = [
-        _process_actual_state(spec, status=after, policy=preview_policy)
+        _process_actual_state(
+            spec,
+            status=after,
+            policy=preview_policy,
+            runtime_dir=runtime_dir,
+        )
         for spec in PROCESS_SPECS
     ]
     drift = [item["process_key"] for item in actual if item["drift_status"] != "matched"]
     if drift:
-        for unit in ALL_BUSINESS_TIMER_UNITS:
+        for unit in CORE_TIMER_UNITS + (
+            "wb-core-warehouse-functional-sync.timer",
+        ):
             systemd.disable_now(unit)
+        try:
+            (autoanswers_reconcile or _reconcile_autoanswers_lifecycle)(
+                runtime_dir,
+                suspended_by_master=True,
+                actor=actor,
+                reason="fail-closed after post-resume drift",
+                systemd=systemd,
+            )
+        except Exception:
+            systemd.disable_now("wb-core-autoanswers-worker.timer")
+            systemd.disable_now("wb-core-autoanswers-readonly-sync.timer")
         schedules.disable_all(schedules.read_all())
         raise RuntimeError("post-resume desired/actual drift: " + ",".join(drift))
     policy.update(
@@ -1165,6 +1637,7 @@ def maintenance_prepare(
     actor: str = "business_data_maintenance",
     reason: str = "canonical cross-writer hold",
     expected_revision: int | None = None,
+    autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
     audit_path = runtime_dir / AUDIT_FILENAME
@@ -1203,6 +1676,13 @@ def maintenance_prepare(
         pre_hold_readback=before,
     )
 
+    (autoanswers_reconcile or _reconcile_autoanswers_lifecycle)(
+        runtime_dir,
+        suspended_by_master=True,
+        actor=actor,
+        reason=reason,
+        systemd=systemd,
+    )
     for unit in CORE_TIMER_UNITS:
         systemd.disable_now(unit)
     schedules.disable_all(before_payloads)

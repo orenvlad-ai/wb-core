@@ -169,6 +169,17 @@
     .auto-update-meta dt { color: var(--muted); }
     .auto-update-meta dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
     .auto-update-toggle { min-width: 124px; }
+    .auto-update-control-location { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .vitrina-schedule-editor { display: grid; gap: 10px; margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .vitrina-schedule-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .vitrina-schedule-toolbar label { display: grid; gap: 5px; min-width: 210px; color: var(--muted); font-size: 12px; font-weight: 800; }
+    .vitrina-schedule-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .vitrina-schedule-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .vitrina-schedule-table { min-width: 920px; table-layout: auto; }
+    .vitrina-schedule-table th, .vitrina-schedule-table td { padding: 7px 8px; font-size: 12px; white-space: nowrap; }
+    .vitrina-schedule-table input[type="checkbox"] { width: 18px; min-height: 18px; }
+    .vitrina-schedule-table input[type="time"] { width: 108px; }
+    .vitrina-schedule-message { margin: 0; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
@@ -179,6 +190,7 @@
       .auto-updates-master, .auto-updates-grid { grid-template-columns: 1fr; }
       .auto-update-card-header { display: grid; }
       .auto-update-meta { grid-template-columns: 1fr; }
+      .vitrina-schedule-toolbar, .vitrina-schedule-actions { display: grid; grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -545,6 +557,9 @@
       const calculationParametersPath = config.calculation_parameters_path;
       const calculationParametersPreviewPath = config.calculation_parameters_preview_path;
       const autoUpdatesPath = config.auto_updates_path;
+      const vitrinaAutoSchedulesPath = config.auto_schedules_path;
+      const vitrinaAutoSchedulesRunNowPath = config.auto_schedules_run_now_path;
+      const sheetJobPath = config.job_path;
       const canManageUsers = config.can_manage_users !== false;
       const rowsBody = document.getElementById("nomenclatureRows");
       const message = document.getElementById("nomenclatureMessage");
@@ -647,6 +662,24 @@
       let users = [];
       let calculationPreviewFingerprint = "";
       let autoUpdatesState = null;
+      let vitrinaScheduleState = {
+        loading: false,
+        saving: false,
+        loaded: false,
+        schedules: [],
+        effectiveSchedules: [],
+        schedulePolicy: {mode: "manual", interval_hours: null},
+        intervalOptions: [],
+        canEditRuntime: false,
+        runNowSupported: false,
+        timezone: "Asia/Yekaterinburg",
+        nextAutoRunAt: "",
+        lastAutoRunAt: "",
+        lastAutoSuccessAt: "",
+        lastAutoStatus: "",
+        message: "",
+        error: ""
+      };
       let availableSections = [
         {section_id: "vitrina", label: "Витрина"},
         {section_id: "supply", label: "Поставки"},
@@ -750,6 +783,7 @@
         }
         if (requested === "auto-updates") {
           loadAutoUpdates();
+          loadVitrinaSchedules();
         }
       }
 
@@ -2170,14 +2204,168 @@
           wb_finance_weekly: "Плановая загрузка финансового отчёта WB.",
           feedback_complaints: "Создание разрешённых жалоб по owner schedule.",
           spp_test: "Автоматическая проверка СПП по отдельному расписанию.",
-          autoanswers_readonly: "Read-only получение данных для Autoanswers.",
-          autoanswers_worker: "Обработка разрешённой очереди Autoanswers."
+          autoanswers: "Read-only синхронизация и worker Autoanswers под единым feature lifecycle."
         })[processKey] || "Repo-owned runtime process.";
       }
 
       function autoUpdateValue(value) {
-        const text = String(value == null || value === "" ? "—" : value);
+        const normalized = value && typeof value === "object" ? JSON.stringify(value) : value;
+        const text = String(normalized == null || normalized === "" ? "—" : normalized);
         return text.length > 280 ? text.slice(0, 277) + "..." : text;
+      }
+
+      function autoUpdateLifecycleLabel(process) {
+        const state = String(process && process.lifecycle_state || "");
+        if (state === "running" && process.actual === true) return "Работает";
+        if (state === "starting") return "Запускается";
+        if (state === "suspended_by_master" || process.suspended_by_master) return "Общая пауза";
+        if (state === "off") return "Выключено";
+        if (state === "error") return "Остановлено из-за ошибки";
+        return "Состояние не подтверждено";
+      }
+
+      function normalizeVitrinaSchedulePolicy(policy) {
+        const mode = String(policy && policy.mode || "").toLowerCase() === "interval" ? "interval" : "manual";
+        const rawHours = Number.parseInt(String(policy && policy.interval_hours || ""), 10);
+        return {
+          mode,
+          interval_hours: mode === "interval" && [3, 4, 6].includes(rawHours) ? rawHours : (mode === "interval" ? 4 : null),
+          window_start_hhmm: "10:00",
+          window_end_hhmm: "22:00",
+          timezone: "Asia/Yekaterinburg"
+        };
+      }
+
+      function vitrinaScheduleSelectorValue(policy) {
+        const normalized = normalizeVitrinaSchedulePolicy(policy);
+        return normalized.mode === "interval" ? "interval:" + normalized.interval_hours : "manual";
+      }
+
+      function formatAutoScheduleTimestamp(value) {
+        if (!value) return "—";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return String(value);
+        return new Intl.DateTimeFormat("ru-RU", {
+          dateStyle: "short",
+          timeStyle: "short",
+          timeZone: vitrinaScheduleState.timezone || "Asia/Yekaterinburg"
+        }).format(parsed);
+      }
+
+      function applyVitrinaSchedulePayload(payload) {
+        vitrinaScheduleState.schedules = Array.isArray(payload && payload.schedules) ? payload.schedules : [];
+        vitrinaScheduleState.effectiveSchedules = Array.isArray(payload && payload.effective_schedules)
+          ? payload.effective_schedules : vitrinaScheduleState.schedules;
+        vitrinaScheduleState.schedulePolicy = normalizeVitrinaSchedulePolicy(payload && payload.schedule_policy);
+        vitrinaScheduleState.intervalOptions = Array.isArray(payload && payload.interval_options) ? payload.interval_options : [];
+        vitrinaScheduleState.canEditRuntime = Boolean(payload && payload.can_edit_runtime);
+        vitrinaScheduleState.runNowSupported = Boolean(payload && payload.run_now_supported);
+        vitrinaScheduleState.timezone = String(payload && payload.timezone || "Asia/Yekaterinburg");
+        vitrinaScheduleState.nextAutoRunAt = String(payload && payload.next_auto_run_at || "");
+        vitrinaScheduleState.lastAutoRunAt = String(payload && (payload.last_auto_run_at || payload.last_auto_run_time) || "");
+        vitrinaScheduleState.lastAutoSuccessAt = String(payload && (payload.last_auto_success_at || payload.last_successful_auto_update_at) || "");
+        vitrinaScheduleState.lastAutoStatus = String(payload && (payload.last_auto_run_status_label || payload.last_auto_run_status) || "");
+        vitrinaScheduleState.message = String(payload && (payload.blocker || payload.message || payload.trigger_description) || "");
+        vitrinaScheduleState.error = "";
+        vitrinaScheduleState.loaded = true;
+      }
+
+      function vitrinaScheduleEditorHtml() {
+        const model = vitrinaScheduleState;
+        const policy = normalizeVitrinaSchedulePolicy(model.schedulePolicy);
+        const interval = policy.mode === "interval";
+        const rows = interval ? (model.effectiveSchedules || []) : (model.schedules || []);
+        const intervalOptions = (model.intervalOptions.length ? model.intervalOptions : [
+          {interval_hours: 3}, {interval_hours: 4}, {interval_hours: 6}
+        ]).map((option) => {
+          const hours = [3, 4, 6].includes(Number(option.interval_hours)) ? Number(option.interval_hours) : 4;
+          return '<option value="interval:' + hours + '"' + (policy.interval_hours === hours ? " selected" : "") + '>Каждые ' + hours + (hours === 6 ? " часов" : " часа") + '</option>';
+        }).join("");
+        const tableRows = model.loading
+          ? '<tr><td colspan="7">Расписание загружается…</td></tr>'
+          : rows.length ? rows.map((schedule) => {
+              const id = String(schedule.id || "");
+              const editable = !interval && model.canEditRuntime && schedule.editable !== false;
+              const canRun = model.runNowSupported && schedule.can_run_now !== false;
+              return '<tr>' +
+                '<td><input type="checkbox" data-vitrina-schedule-id="' + escapeHtml(id) + '" data-vitrina-schedule-field="enabled"' + (schedule.enabled ? " checked" : "") + (editable ? "" : " disabled") + '></td>' +
+                '<td><input type="time" value="' + escapeHtml(schedule.local_time_hhmm || "12:00") + '" data-vitrina-schedule-id="' + escapeHtml(id) + '" data-vitrina-schedule-field="local_time_hhmm"' + (editable ? "" : " disabled") + '></td>' +
+                '<td>' + escapeHtml(formatAutoScheduleTimestamp(schedule.next_run_at)) + '</td>' +
+                '<td>' + escapeHtml(formatAutoScheduleTimestamp(schedule.last_run_at)) + '</td>' +
+                '<td>' + escapeHtml(formatAutoScheduleTimestamp(schedule.last_success_at)) + '</td>' +
+                '<td>' + escapeHtml(schedule.last_status_label || schedule.last_status || schedule.status || (schedule.enabled ? "active" : "disabled")) + '</td>' +
+                '<td><button type="button" data-vitrina-schedule-run="' + escapeHtml(id) + '"' + (canRun ? "" : " disabled") + '>Запустить</button> ' +
+                '<button type="button" data-vitrina-schedule-delete="' + escapeHtml(id) + '"' + (editable ? "" : " disabled") + '>Удалить</button></td></tr>';
+            }).join("")
+          : '<tr><td colspan="7">Строк расписания нет.</td></tr>';
+        const message = model.error || model.message || [
+          model.lastAutoStatus ? "Статус: " + model.lastAutoStatus : "",
+          model.lastAutoRunAt ? "последний запуск " + formatAutoScheduleTimestamp(model.lastAutoRunAt) : "",
+          model.lastAutoSuccessAt ? "последний успех " + formatAutoScheduleTimestamp(model.lastAutoSuccessAt) : "",
+          model.nextAutoRunAt ? "следующий " + formatAutoScheduleTimestamp(model.nextAutoRunAt) : ""
+        ].filter(Boolean).join(" · ");
+        return '<section class="vitrina-schedule-editor" data-vitrina-schedule-editor>' +
+          '<div class="vitrina-schedule-toolbar"><label>Настройка расписания<select data-vitrina-schedule-policy' + (model.canEditRuntime ? "" : " disabled") + '>' +
+          '<option value="manual"' + (interval ? "" : " selected") + '>Ручные настройки</option>' + intervalOptions + '</select></label>' +
+          '<div class="vitrina-schedule-actions"><button type="button" data-vitrina-schedule-add' + ((!model.canEditRuntime || interval) ? " disabled" : "") + '>Добавить строку</button>' +
+          '<button class="primary" type="button" data-vitrina-schedule-save' + ((!model.canEditRuntime || model.saving) ? " disabled" : "") + '>' + (model.saving ? "Сохраняем…" : "Сохранить расписание") + '</button></div></div>' +
+          (interval ? '<p class="message">Окно: 10:00–22:00, Asia/Yekaterinburg. Строки рассчитываются canonical backend.</p>' : "") +
+          '<div class="vitrina-schedule-table-wrap"><table class="vitrina-schedule-table"><thead><tr><th>Вкл.</th><th>Время</th><th>Следующий</th><th>Последний запуск</th><th>Последний успех</th><th>Статус</th><th>Действия</th></tr></thead><tbody>' +
+          tableRows + '</tbody></table></div><p class="vitrina-schedule-message message ' + (model.error ? "error" : "") + '">' + escapeHtml(message || "Canonical runtime расписание Витрины.") + '</p></section>';
+      }
+
+      function bindVitrinaScheduleEditor() {
+        const editor = autoUpdatesRows.querySelector("[data-vitrina-schedule-editor]");
+        if (!editor) return;
+        const policy = editor.querySelector("[data-vitrina-schedule-policy]");
+        if (policy) policy.addEventListener("change", () => {
+          const value = String(policy.value || "manual");
+          vitrinaScheduleState.schedulePolicy = normalizeVitrinaSchedulePolicy(
+            value.startsWith("interval:")
+              ? {mode: "interval", interval_hours: Number(value.split(":")[1])}
+              : {mode: "manual", interval_hours: null}
+          );
+          renderAutoUpdates(autoUpdatesState);
+        });
+        const add = editor.querySelector("[data-vitrina-schedule-add]");
+        if (add) add.addEventListener("click", () => {
+          vitrinaScheduleState.schedules = vitrinaScheduleState.schedules.concat([{
+            id: "requested_" + Date.now().toString(36),
+            enabled: false,
+            local_time_hhmm: "12:00",
+            timezone: "Asia/Yekaterinburg",
+            editable: true,
+            status: "staged"
+          }]);
+          renderAutoUpdates(autoUpdatesState);
+        });
+        const save = editor.querySelector("[data-vitrina-schedule-save]");
+        if (save) save.addEventListener("click", saveVitrinaSchedules);
+        editor.addEventListener("click", (event) => {
+          const run = event.target.closest("[data-vitrina-schedule-run]");
+          if (run) {
+            runVitrinaScheduleNow(String(run.dataset.vitrinaScheduleRun || ""));
+            return;
+          }
+          const remove = event.target.closest("[data-vitrina-schedule-delete]");
+          if (remove) {
+            const id = String(remove.dataset.vitrinaScheduleDelete || "");
+            vitrinaScheduleState.schedules = vitrinaScheduleState.schedules.filter((item) => String(item.id || "") !== id);
+            renderAutoUpdates(autoUpdatesState);
+          }
+        });
+        editor.addEventListener("change", (event) => {
+          const input = event.target.closest("[data-vitrina-schedule-field]");
+          if (!input) return;
+          const id = String(input.dataset.vitrinaScheduleId || "");
+          const field = String(input.dataset.vitrinaScheduleField || "");
+          vitrinaScheduleState.schedules = vitrinaScheduleState.schedules.map((item) => {
+            if (String(item.id || "") !== id) return item;
+            return Object.assign({}, item, {
+              [field]: field === "enabled" ? Boolean(input.checked) : String(input.value || "")
+            });
+          });
+        });
       }
 
       function renderAutoUpdates(payload) {
@@ -2196,38 +2384,49 @@
         autoUpdatesMasterButton.disabled = !autoUpdatesState.revision;
         autoUpdatesRows.innerHTML = processes.length ? processes.map((process) => {
           const desiredKnown = typeof process.desired === "boolean";
-          const canEnable = process.can_enable !== false;
-          const enablingBlocked = desiredKnown && !process.desired && !canEnable;
+          const canManage = String(process.control_capability || "manage") === "manage";
           const desiredText = desiredKnown ? (process.desired ? "Desired: ON" : "Desired: OFF") : "Desired: UNKNOWN";
-          const actualText = process.actual ? "Actual: работает" : "Actual: остановлено";
+          const actualText = "Actual: " + autoUpdateLifecycleLabel(process);
           const futureText = !masterDesired
             ? (process.desired ? "Будет включено после снятия общей паузы" : "Останется выключено")
             : (process.drift_status === "matched" ? "Desired и actual совпадают" : "Есть расхождение desired/actual");
           const timer = process.timer || {};
           const properties = timer.properties || {};
           const schedule = process.runtime_schedule || {};
+          const components = process.component_states || process.components || {};
+          const componentsText = Object.keys(components).map((key) => {
+            const component = components[key] || {};
+            return key + ": desired=" + autoUpdateValue(component.desired) + ", actual=" + autoUpdateValue(component.actual);
+          }).join(" · ");
+          const control = canManage
+            ? '<button class="auto-update-toggle" type="button" data-auto-update-toggle="' + escapeHtml(process.process_key) + '"' +
+              (!desiredKnown ? " disabled" : "") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button>'
+            : '<span class="pill">Только мониторинг</span>';
           return '<article class="auto-update-card" data-auto-update-process="' + escapeHtml(process.process_key) + '">' +
             '<div class="auto-update-card-header"><div><h3>' + escapeHtml(process.display_name) + '</h3>' +
             '<p class="muted">' + escapeHtml(autoUpdateDescription(process.process_key)) + '</p></div>' +
-            '<button class="auto-update-toggle" type="button" data-auto-update-toggle="' + escapeHtml(process.process_key) + '"' +
-            ((!desiredKnown || enablingBlocked) ? " disabled" : "") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button></div>' +
+            control + '</div>' +
             '<div class="auto-update-statuses"><span class="pill">' + escapeHtml(desiredText) + '</span>' +
             '<span class="pill ' + (process.actual ? "success" : "warning") + '">' + escapeHtml(actualText) + '</span>' +
             '<span class="pill ' + (process.drift_status === "matched" ? "success" : "warning") + '">' + escapeHtml(process.drift_status || "unknown") + '</span></div>' +
             '<p class="message ' + (process.drift_status === "matched" || !masterDesired ? "" : "warning") + '">' + escapeHtml(futureText) + '</p>' +
-            (enablingBlocked ? '<p class="message warning">' + escapeHtml(process.enable_blocker || "Включение требует отдельного безопасного lifecycle.") + '</p>' : "") +
+            (!canManage ? '<div class="auto-update-control-location"><span class="message">Управление: ' + escapeHtml(process.control_location || "функциональный раздел") + '.</span><a class="button-link" href="' + escapeHtml(config.vitrina_path || "/sheet-vitrina-v1/vitrina") + '">Открыть функциональный раздел</a></div>' : "") +
             '<dl class="auto-update-meta">' +
+            '<dt>Владелец</dt><dd>' + escapeHtml(autoUpdateValue(process.control_owner)) + '</dd>' +
+            '<dt>Источник desired</dt><dd>' + escapeHtml(autoUpdateValue(process.desired_source)) + '</dd>' +
             '<dt>Последний запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.last_run)) + '</dd>' +
             '<dt>Последний успешный</dt><dd>' + escapeHtml(autoUpdateValue(process.last_success)) + '</dd>' +
             '<dt>Следующий запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.next_run)) + '</dd>' +
             '<dt>Последняя ошибка</dt><dd>' + escapeHtml(autoUpdateValue(process.last_error)) + '</dd>' +
             '<dt>Расписание</dt><dd>' + escapeHtml(autoUpdateValue(schedule.schedule || schedule.enabled_ids || properties.NextElapseUSecRealtime || "repo-owned timer")) + '</dd>' +
+            '<dt>Компоненты</dt><dd>' + escapeHtml(autoUpdateValue(componentsText)) + '</dd>' +
             '<dt>Evidence</dt><dd>' + escapeHtml(autoUpdateValue(process.provenance)) + '</dd>' +
-            '</dl></article>';
+            '</dl>' + (process.process_key === "vitrina_refresh" ? vitrinaScheduleEditorHtml() : "") + '</article>';
         }).join("") : '<p class="message warning">Canonical owner policy не вернула allowlisted процессы.</p>';
         Array.from(autoUpdatesRows.querySelectorAll("[data-auto-update-toggle]")).forEach((button) => {
           button.addEventListener("click", () => updateAutoUpdateProcess(button.dataset.autoUpdateToggle));
         });
+        bindVitrinaScheduleEditor();
         autoUpdatesTechnicalDetails.textContent = JSON.stringify({
           schema_version: autoUpdatesState.schema_version,
           revision: autoUpdatesState.revision,
@@ -2238,6 +2437,88 @@
           unknown_processes: autoUpdatesState.unknown_processes || [],
           drift_processes: autoUpdatesState.drift_processes || []
         }, null, 2);
+      }
+
+      async function loadVitrinaSchedules() {
+        if (!vitrinaAutoSchedulesPath || vitrinaScheduleState.loading) return;
+        vitrinaScheduleState.loading = true;
+        vitrinaScheduleState.error = "";
+        if (autoUpdatesState) renderAutoUpdates(autoUpdatesState);
+        try {
+          const payload = await fetchJson(vitrinaAutoSchedulesPath, {
+            headers: {Accept: "application/json"}
+          });
+          applyVitrinaSchedulePayload(payload);
+        } catch (error) {
+          vitrinaScheduleState.error = error && error.message ? error.message : String(error);
+        } finally {
+          vitrinaScheduleState.loading = false;
+          if (autoUpdatesState) renderAutoUpdates(autoUpdatesState);
+        }
+      }
+
+      async function saveVitrinaSchedules() {
+        if (!vitrinaAutoSchedulesPath || vitrinaScheduleState.saving) return;
+        vitrinaScheduleState.saving = true;
+        vitrinaScheduleState.error = "";
+        renderAutoUpdates(autoUpdatesState);
+        try {
+          const policy = normalizeVitrinaSchedulePolicy(vitrinaScheduleState.schedulePolicy);
+          const payload = await fetchJson(vitrinaAutoSchedulesPath, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
+            body: JSON.stringify({
+              schedule_policy: policy,
+              schedules: policy.mode === "manual" ? vitrinaScheduleState.schedules : []
+            })
+          });
+          applyVitrinaSchedulePayload(payload);
+          vitrinaScheduleState.message = "Расписание сохранено в canonical runtime JSON.";
+        } catch (error) {
+          vitrinaScheduleState.error = error && error.message ? error.message : String(error);
+        } finally {
+          vitrinaScheduleState.saving = false;
+          renderAutoUpdates(autoUpdatesState);
+        }
+      }
+
+      async function pollVitrinaScheduleJob(path) {
+        const resolvedPath = String(path || "");
+        if (!resolvedPath) return null;
+        for (let attempt = 0; attempt < 300; attempt += 1) {
+          const payload = await fetchJson(resolvedPath, {headers: {Accept: "application/json"}});
+          if (!["queued", "running"].includes(String(payload.status || ""))) return payload;
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
+        throw new Error("Запуск не завершился в bounded wait.");
+      }
+
+      async function runVitrinaScheduleNow(scheduleId) {
+        if (!vitrinaAutoSchedulesRunNowPath || vitrinaScheduleState.saving) return;
+        vitrinaScheduleState.saving = true;
+        vitrinaScheduleState.error = "";
+        vitrinaScheduleState.message = "Запускаем canonical full refresh…";
+        renderAutoUpdates(autoUpdatesState);
+        try {
+          const accepted = await fetchJson(vitrinaAutoSchedulesRunNowPath, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
+            body: JSON.stringify({schedule_id: scheduleId})
+          });
+          const jobPath = String(accepted.job_path || (accepted.job_id && sheetJobPath
+            ? sheetJobPath + "?job_id=" + encodeURIComponent(accepted.job_id) : ""));
+          const finalJob = await pollVitrinaScheduleJob(jobPath);
+          if (finalJob && finalJob.status !== "success") {
+            throw new Error(finalJob.error || finalJob.status || "canonical refresh failed");
+          }
+          vitrinaScheduleState.message = "Запуск завершён успешно.";
+          await loadVitrinaSchedules();
+        } catch (error) {
+          vitrinaScheduleState.error = error && error.message ? error.message : String(error);
+        } finally {
+          vitrinaScheduleState.saving = false;
+          renderAutoUpdates(autoUpdatesState);
+        }
       }
 
       async function readAutoUpdatesStatus() {
@@ -2275,8 +2556,12 @@
             body: JSON.stringify(body)
           });
           const mutation = payload && payload.mutation;
-          if (!mutation || mutation.status !== "confirmed" || mutation.persisted !== true || mutation.runtime_readback_confirmed !== true) {
-            throw new Error("Backend не подтвердил persisted mutation и runtime readback.");
+          const mutationAccepted = mutation
+            && ["confirmed", "pending"].includes(String(mutation.status || ""))
+            && mutation.persisted === true
+            && mutation.lifecycle_readback_confirmed === true;
+          if (!mutationAccepted) {
+            throw new Error("Backend не подтвердил persisted mutation и lifecycle readback.");
           }
           const readback = await readAutoUpdatesStatus();
           const sameRevision = Number(readback.revision || 0) === Number(payload.revision || 0);
@@ -2307,8 +2592,14 @@
               "Изменение было принято, но повторный runtime readback не подтвердил сохранённое состояние."
             );
           }
-          autoUpdatesMessage.textContent = "Изменение сохранено и подтверждено повторным runtime readback.";
-          autoUpdatesMessage.className = "message success";
+          if (mutation.status === "pending") {
+            autoUpdatesMessage.textContent = "Настройки сохранены; runtime запускается. Actual подтвердится после свежего scheduler tick.";
+            autoUpdatesMessage.className = "message warning";
+            window.setTimeout(() => loadAutoUpdates(), 3000);
+          } else {
+            autoUpdatesMessage.textContent = "Изменение сохранено и подтверждено повторным runtime readback.";
+            autoUpdatesMessage.className = "message success";
+          }
         } catch (error) {
           const actionError = error && error.message ? error.message : String(error);
           let readbackError = "";
@@ -2473,7 +2764,10 @@
       reloadCalculationButton.addEventListener("click", loadCalculationParameters);
       previewCalculationButton.addEventListener("click", previewCalculationParameters);
       saveCalculationButton.addEventListener("click", saveCalculationParameters);
-      reloadAutoUpdatesButton.addEventListener("click", loadAutoUpdates);
+      reloadAutoUpdatesButton.addEventListener("click", () => {
+        loadAutoUpdates();
+        loadVitrinaSchedules();
+      });
       autoUpdatesMasterButton.addEventListener("click", updateAutoUpdatesMaster);
       document.addEventListener("click", () => closeAccessPickers());
       document.addEventListener("keydown", (event) => {
