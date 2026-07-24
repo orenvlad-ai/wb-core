@@ -149,6 +149,13 @@ only rows already misclassified as `reservation_missing` when an earlier
 publication are all proven. Dry-run is query-only and exact-row/fingerprint
 bound; apply uses `BEGIN IMMEDIATE`, restores only the job projection, appends
 audit, preserves all financial/provider/WB evidence and repeats as a no-op.
+If that incident already latched `worker_error`, the separate
+`prefilter_skip_latch_recovery_v1` phase releases only that exact
+`reservation_missing` latch after the projection restore audit, zero active
+reservations, zero processing jobs and zero unresolved provider uncertainty
+are all read back. It has its own dry-run/fingerprint/apply/readback contract,
+changes one runtime-state row plus one audit event, and preserves provider,
+cost and WB evidence.
 
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
 

@@ -15,8 +15,11 @@ import unittest
 
 from apps.wb_autoanswers_prefilter_skip_recovery import (
     _open_ro,
+    apply_latch_plan,
     apply_plan,
+    build_latch_plan,
     build_plan,
+    latch_readback,
     readback,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
@@ -275,6 +278,87 @@ class PrefilterSkipRecoveryTest(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["candidate_count"], 1)
         self.assertTrue(payload["coverage_confirmed"])
+
+    def test_release_worker_latch_after_exact_projection_recovery(self) -> None:
+        with closing(_open_ro(self.runtime_dir)) as conn:
+            source_plan = build_plan(
+                conn,
+                transition_run_id="incident-run",
+                expected_rows=1,
+            )
+        source_fingerprint = str(source_plan["plan_fingerprint"])
+        apply_plan(
+            self.runtime_dir,
+            transition_run_id="incident-run",
+            expected_rows=1,
+            expected_fingerprint=source_fingerprint,
+            actor="test",
+        )
+        with self.repo.transaction() as conn:
+            self.repo._set_stop_reason(
+                conn,
+                "worker_error",
+                details={"code": "reservation_missing"},
+                at=self.now,
+            )
+        with closing(_open_ro(self.runtime_dir)) as conn:
+            latch_plan = build_latch_plan(
+                conn,
+                transition_run_id="incident-run",
+                expected_rows=1,
+                source_fingerprint=source_fingerprint,
+            )
+        self.assertTrue(latch_plan["release_eligible"])
+        self.assertEqual(latch_plan["unresolved_uncertainty"], 0)
+        self.assertEqual(latch_plan["active_reservations"], 0)
+        self.assertEqual(
+            latch_plan["expected_affected_records"],
+            {
+                "runtime_state_rows_updated": 1,
+                "audit_events_appended": 1,
+                "reservations_updated": 0,
+                "provider_calls_created": 0,
+                "cost_events_created": 0,
+                "wb_writes_created": 0,
+            },
+        )
+
+        applied = apply_latch_plan(
+            self.runtime_dir,
+            transition_run_id="incident-run",
+            expected_rows=1,
+            source_fingerprint=source_fingerprint,
+            expected_fingerprint=latch_plan["plan_fingerprint"],
+            actor="test",
+        )
+        self.assertEqual(applied["status"], "reconciled")
+        self.assertTrue(applied["non_target_invariants_preserved"])
+        self.assertEqual(
+            applied["non_target_readback"]["before"],
+            applied["non_target_readback"]["after"],
+        )
+
+        replay = apply_latch_plan(
+            self.runtime_dir,
+            transition_run_id="incident-run",
+            expected_rows=1,
+            source_fingerprint=source_fingerprint,
+            expected_fingerprint=latch_plan["plan_fingerprint"],
+            actor="test",
+        )
+        self.assertEqual(replay["status"], "already_reconciled")
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(sum(replay["affected_records"].values()), 0)
+        self.assertEqual(
+            latch_readback(
+                self.runtime_dir,
+                transition_run_id="incident-run",
+                expected_rows=1,
+                source_fingerprint=source_fingerprint,
+            )["status"],
+            "confirmed",
+        )
+        self.assertEqual(self.repo.progress_status()["stop_reason"], "worker_unavailable")
 
     def test_queued_invalid_reclaim_is_restored_without_provider_mutation(self) -> None:
         with self.repo.transaction() as conn:

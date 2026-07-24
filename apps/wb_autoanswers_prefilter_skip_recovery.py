@@ -32,6 +32,8 @@ from packages.application.wb_autoanswers_runtime import (
 DATABASE_FILENAME = "registry_upload_runtime.sqlite3"
 CONTRACT = "wb_autoanswers_prefilter_skip_recovery_v1"
 RESTORE_EVENT = "prefilter_skip_state_restored"
+LATCH_CONTRACT = "wb_autoanswers_prefilter_skip_latch_recovery_v1"
+LATCH_EVENT = "prefilter_skip_worker_latch_released"
 
 
 def _canonical(value: Any) -> str:
@@ -569,18 +571,423 @@ def readback(
     }
 
 
+def _unresolved_uncertainty_count(conn: sqlite3.Connection) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+            JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+              ON j.processing_key=r.processing_key
+            WHERE r.provider_call_started_at IS NOT NULL
+              AND r.status='released'
+              AND CAST(COALESCE(r.actual_cost_usd,'0') AS REAL)=0
+              AND (
+                    j.last_error_code IN ('node_timeout','node_invalid_json')
+                    OR j.last_error_code LIKE 'node_process_exit_%'
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_cost_events c
+                    WHERE c.processing_key=r.processing_key
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events f
+                    WHERE f.processing_key=r.processing_key
+                  )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                    WHERE h.processing_key=r.processing_key
+                  )
+            """
+        ).fetchone()[0]
+    )
+
+
+def build_latch_plan(
+    conn: sqlite3.Connection,
+    *,
+    transition_run_id: str,
+    expected_rows: int,
+    source_fingerprint: str,
+) -> dict[str, Any]:
+    restored_keys = _prior_apply(
+        conn,
+        transition_run_id=transition_run_id,
+        fingerprint=source_fingerprint,
+    )
+    remaining_candidates = _candidate_rows(
+        conn,
+        transition_run_id=transition_run_id,
+    )
+    runtime = conn.execute(
+        """
+        SELECT stop_reason,stop_details_json
+        FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+        WHERE singleton=1
+        """
+    ).fetchone()
+    stop_details_json = (
+        str(runtime["stop_details_json"] or "{}") if runtime is not None else "{}"
+    )
+    try:
+        stop_details = json.loads(stop_details_json)
+    except (TypeError, ValueError):
+        stop_details = {}
+    if not isinstance(stop_details, Mapping):
+        stop_details = {}
+    active_reservations = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+            WHERE status='reserved'
+            """
+        ).fetchone()[0]
+    )
+    processing_jobs = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sheet_vitrina_v1_wb_autoanswer_jobs
+            WHERE state='processing'
+            """
+        ).fetchone()[0]
+    )
+    unresolved_uncertainty = _unresolved_uncertainty_count(conn)
+    stop_reason = str(runtime["stop_reason"] or "") if runtime is not None else ""
+    stop_code = str(stop_details.get("code") or "")
+    release_eligible = bool(
+        len(restored_keys) == int(expected_rows)
+        and not remaining_candidates
+        and stop_reason == "worker_error"
+        and stop_code == "reservation_missing"
+        and active_reservations == 0
+        and processing_jobs == 0
+        and unresolved_uncertainty == 0
+    )
+    non_target_snapshot = _non_target_counts(conn)
+    identity = {
+        "contract": LATCH_CONTRACT,
+        "transition_run_id": transition_run_id,
+        "expected_rows": int(expected_rows),
+        "source_recovery_fingerprint": source_fingerprint,
+        "restored_processing_keys": restored_keys,
+        "remaining_candidates": len(remaining_candidates),
+        "runtime": {
+            "stop_reason": stop_reason,
+            "stop_code": stop_code,
+            "stop_details_json": stop_details_json,
+        },
+        "active_reservations": active_reservations,
+        "processing_jobs": processing_jobs,
+        "unresolved_uncertainty": unresolved_uncertainty,
+        "non_target_snapshot": non_target_snapshot,
+    }
+    digest = _fingerprint(identity)
+    return {
+        **identity,
+        "captured_at": _utc_now(),
+        "release_eligible": release_eligible,
+        "plan_fingerprint": digest,
+        "pre_change_digest": digest,
+        "expected_affected_records": {
+            "runtime_state_rows_updated": 1 if release_eligible else 0,
+            "audit_events_appended": 1 if release_eligible else 0,
+            "reservations_updated": 0,
+            "provider_calls_created": 0,
+            "cost_events_created": 0,
+            "wb_writes_created": 0,
+        },
+        "non_target_invariants": {
+            "restored_job_and_reservation_evidence_unchanged": True,
+            "provider_calls_unchanged": True,
+            "cost_events_unchanged": True,
+            "uncertainty_holds_unchanged": True,
+            "publication_jobs_and_writes_unchanged": True,
+        },
+        "reversibility": {
+            "kind": "evidence_bound_runtime_latch_release_with_append_only_audit",
+            "backup_required": False,
+            "reason": (
+                "The repaired jobs, settled reservations and restore audit "
+                "remain immutable evidence; any later worker failure "
+                "naturally latches the runtime again."
+            ),
+        },
+    }
+
+
+def _prior_latch_apply(
+    conn: sqlite3.Connection,
+    *,
+    transition_run_id: str,
+    fingerprint: str,
+    source_fingerprint: str,
+    expected_rows: int,
+) -> bool:
+    rows = conn.execute(
+        """
+        SELECT details_json
+        FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+        WHERE aggregate_type='runtime_state' AND aggregate_id='singleton'
+          AND event_type=?
+        ORDER BY created_at,event_id
+        """,
+        (LATCH_EVENT,),
+    ).fetchall()
+    matched = False
+    for row in rows:
+        details = _details(row)
+        if (
+            str(details.get("plan_fingerprint") or "") == fingerprint
+            and str(details.get("source_recovery_fingerprint") or "")
+            == source_fingerprint
+            and str(details.get("transition_run_id") or "") == transition_run_id
+            and int(details.get("restored_rows") or 0) == int(expected_rows)
+        ):
+            matched = True
+    if not matched:
+        return False
+    runtime = conn.execute(
+        """
+        SELECT stop_reason
+        FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+        WHERE singleton=1
+        """
+    ).fetchone()
+    return bool(
+        runtime is not None
+        and not str(runtime["stop_reason"] or "")
+        and len(
+            _prior_apply(
+                conn,
+                transition_run_id=transition_run_id,
+                fingerprint=source_fingerprint,
+            )
+        )
+        == int(expected_rows)
+        and not _candidate_rows(conn, transition_run_id=transition_run_id)
+        and _unresolved_uncertainty_count(conn) == 0
+    )
+
+
+def apply_latch_plan(
+    runtime_dir: Path,
+    *,
+    transition_run_id: str,
+    expected_rows: int,
+    source_fingerprint: str,
+    expected_fingerprint: str,
+    actor: str,
+) -> dict[str, Any]:
+    if expected_rows <= 0:
+        raise ValueError("latch recovery requires positive expected rows")
+    if not source_fingerprint.strip() or not expected_fingerprint.strip():
+        raise ValueError("latch recovery requires source and plan fingerprints")
+    if not actor.strip():
+        raise ValueError("latch recovery requires a non-empty actor")
+    conn = _open_rw(runtime_dir)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        plan = build_latch_plan(
+            conn,
+            transition_run_id=transition_run_id,
+            expected_rows=expected_rows,
+            source_fingerprint=source_fingerprint,
+        )
+        if str(plan["plan_fingerprint"]) != expected_fingerprint:
+            if _prior_latch_apply(
+                conn,
+                transition_run_id=transition_run_id,
+                fingerprint=expected_fingerprint,
+                source_fingerprint=source_fingerprint,
+                expected_rows=expected_rows,
+            ):
+                conn.rollback()
+                return {
+                    "status": "already_reconciled",
+                    "idempotent": True,
+                    "plan_fingerprint": expected_fingerprint,
+                    "affected_records": {
+                        key: 0
+                        for key in plan["expected_affected_records"]
+                    },
+                    "non_target_invariants_preserved": True,
+                }
+            raise RuntimeError(
+                "prefilter skip latch evidence changed; create a new plan"
+            )
+        if not plan["release_eligible"]:
+            raise RuntimeError("prefilter skip worker latch is not release eligible")
+        now = _utc_now()
+        non_target_before = dict(plan["non_target_snapshot"])
+        runtime = dict(plan["runtime"])
+        next_details = _canonical(
+            {
+                "prefilter_skip_recovery_fingerprint": source_fingerprint,
+                "worker_latch_release_fingerprint": expected_fingerprint,
+            }
+        )
+        cursor = conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_wb_autoanswers_runtime_state
+            SET stop_reason=NULL,stop_details_json=?,updated_at=?
+            WHERE singleton=1 AND stop_reason=?
+              AND stop_details_json=?
+            """,
+            (
+                next_details,
+                now,
+                runtime["stop_reason"],
+                runtime["stop_details_json"],
+            ),
+        )
+        if int(cursor.rowcount or 0) != 1:
+            raise RuntimeError("prefilter skip latch affected-row mismatch")
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_wb_autoanswers_audit_events(
+              event_id,aggregate_type,aggregate_id,event_type,
+              previous_state,next_state,actor_type,actor_id,bundle_version,
+              evaluation_signature,details_json,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                uuid4().hex,
+                "runtime_state",
+                "singleton",
+                LATCH_EVENT,
+                "worker_error",
+                "ready",
+                "operator",
+                actor,
+                PROMPT_BUNDLE_VERSION,
+                EVALUATION_SIGNATURE,
+                _canonical(
+                    {
+                        "plan_fingerprint": expected_fingerprint,
+                        "source_recovery_fingerprint": source_fingerprint,
+                        "transition_run_id": transition_run_id,
+                        "restored_rows": int(expected_rows),
+                        "source_error": "reservation_missing",
+                    }
+                ),
+                now,
+            ),
+        )
+        non_target_after = _non_target_counts(conn)
+        if non_target_after != non_target_before:
+            raise RuntimeError(
+                "prefilter skip latch recovery changed non-target evidence"
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    with closing(_open_ro(runtime_dir)) as readback_conn:
+        confirmed = _prior_latch_apply(
+            readback_conn,
+            transition_run_id=transition_run_id,
+            fingerprint=expected_fingerprint,
+            source_fingerprint=source_fingerprint,
+            expected_rows=expected_rows,
+        )
+    if not confirmed:
+        raise RuntimeError("prefilter skip latch recovery readback failed")
+    return {
+        "status": "reconciled",
+        "idempotent": False,
+        "plan_fingerprint": expected_fingerprint,
+        "affected_records": dict(plan["expected_affected_records"]),
+        "non_target_invariants_preserved": True,
+        "non_target_readback": {
+            "before": non_target_before,
+            "after": non_target_after,
+        },
+        "runtime_stop_reason": "",
+    }
+
+
+def latch_readback(
+    runtime_dir: Path,
+    *,
+    transition_run_id: str,
+    expected_rows: int,
+    source_fingerprint: str,
+) -> dict[str, Any]:
+    with closing(_open_ro(runtime_dir)) as conn:
+        rows = conn.execute(
+            """
+            SELECT details_json,created_at
+            FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+            WHERE aggregate_type='runtime_state' AND aggregate_id='singleton'
+              AND event_type=?
+            ORDER BY created_at,event_id
+            """,
+            (LATCH_EVENT,),
+        ).fetchall()
+        evidence = []
+        for row in rows:
+            details = _details(row)
+            if (
+                str(details.get("source_recovery_fingerprint") or "")
+                == source_fingerprint
+                and str(details.get("transition_run_id") or "")
+                == transition_run_id
+            ):
+                evidence.append(
+                    {
+                        "plan_fingerprint": str(
+                            details.get("plan_fingerprint") or ""
+                        ),
+                        "created_at": str(row["created_at"] or ""),
+                    }
+                )
+        confirmed = bool(
+            len(evidence) == 1
+            and _prior_latch_apply(
+                conn,
+                transition_run_id=transition_run_id,
+                fingerprint=evidence[0]["plan_fingerprint"],
+                source_fingerprint=source_fingerprint,
+                expected_rows=expected_rows,
+            )
+        )
+    return {
+        "status": "confirmed" if confirmed else "pending",
+        "transition_run_id": transition_run_id,
+        "expected_rows": int(expected_rows),
+        "source_recovery_fingerprint": source_fingerprint,
+        "runtime_stop_reason": "" if confirmed else "unconfirmed",
+        "release_audit": evidence,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
         nargs="?",
-        choices=("dry-run", "apply", "readback"),
+        choices=(
+            "dry-run",
+            "apply",
+            "readback",
+            "release-dry-run",
+            "release-apply",
+            "release-readback",
+        ),
         default="dry-run",
     )
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--transition-run-id", required=True)
     parser.add_argument("--expected-rows", type=int, required=True)
     parser.add_argument("--fingerprint", default="")
+    parser.add_argument("--source-fingerprint", default="")
     parser.add_argument("--actor", default="repo_owned_cli")
     args = parser.parse_args()
     runtime_dir = args.runtime_dir.expanduser().resolve()
@@ -603,11 +1010,43 @@ def main() -> int:
             expected_fingerprint=str(args.fingerprint),
             actor=str(args.actor),
         )
-    else:
+    elif args.action == "readback":
         result = readback(
             runtime_dir,
             transition_run_id=str(args.transition_run_id),
             expected_rows=int(args.expected_rows),
+        )
+    elif args.action == "release-dry-run":
+        if not str(args.source_fingerprint or "").strip():
+            raise ValueError("release dry-run requires --source-fingerprint")
+        with closing(_open_ro(runtime_dir)) as conn:
+            result = build_latch_plan(
+                conn,
+                transition_run_id=str(args.transition_run_id),
+                expected_rows=int(args.expected_rows),
+                source_fingerprint=str(args.source_fingerprint),
+            )
+    elif args.action == "release-apply":
+        if not str(args.source_fingerprint or "").strip():
+            raise ValueError("release apply requires --source-fingerprint")
+        if not str(args.fingerprint or "").strip():
+            raise ValueError("release apply requires --fingerprint")
+        result = apply_latch_plan(
+            runtime_dir,
+            transition_run_id=str(args.transition_run_id),
+            expected_rows=int(args.expected_rows),
+            source_fingerprint=str(args.source_fingerprint),
+            expected_fingerprint=str(args.fingerprint),
+            actor=str(args.actor),
+        )
+    else:
+        if not str(args.source_fingerprint or "").strip():
+            raise ValueError("release readback requires --source-fingerprint")
+        result = latch_readback(
+            runtime_dir,
+            transition_run_id=str(args.transition_run_id),
+            expected_rows=int(args.expected_rows),
+            source_fingerprint=str(args.source_fingerprint),
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0

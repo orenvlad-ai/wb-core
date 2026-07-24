@@ -2278,12 +2278,20 @@ def _run_remote_autoanswers_prefilter_skip_recovery(
     transition_run_id: str,
     expected_rows: int,
     fingerprint: str = "",
+    source_fingerprint: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target,
         action=f"autoanswers-prefilter-skip-recovery-{action}",
     )
-    if action not in {"dry-run", "apply", "readback"}:
+    if action not in {
+        "dry-run",
+        "apply",
+        "readback",
+        "release-dry-run",
+        "release-apply",
+        "release-readback",
+    }:
         raise ValueError(
             f"unsupported Autoanswers prefilter skip recovery action: {action}"
         )
@@ -2291,7 +2299,7 @@ def _run_remote_autoanswers_prefilter_skip_recovery(
         raise ValueError("prefilter skip recovery requires --transition-run-id")
     if expected_rows <= 0:
         raise ValueError("prefilter skip recovery requires positive --expected-rows")
-    if action == "apply":
+    if action in {"apply", "release-apply"}:
         _ensure_target_allows_mutation(
             target,
             action="autoanswers-prefilter-skip-recovery-apply",
@@ -2299,6 +2307,10 @@ def _run_remote_autoanswers_prefilter_skip_recovery(
         )
         if not fingerprint:
             raise ValueError("prefilter skip recovery apply requires --fingerprint")
+    if action.startswith("release-") and not source_fingerprint:
+        raise ValueError(
+            "prefilter skip latch recovery requires --source-fingerprint"
+        )
     runtime_dir = str(
         target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
     ).strip()
@@ -2320,6 +2332,24 @@ def _run_remote_autoanswers_prefilter_skip_recovery(
                 fingerprint,
                 "--actor",
                 "release-train",
+            ]
+        )
+    elif action == "release-apply":
+        command.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--source-fingerprint",
+                source_fingerprint,
+                "--actor",
+                "release-train",
+            ]
+        )
+    elif action.startswith("release-"):
+        command.extend(
+            [
+                "--source-fingerprint",
+                source_fingerprint,
             ]
         )
     shell = (
@@ -2367,6 +2397,7 @@ def run_autoanswers_prefilter_skip_recovery_command(
         transition_run_id=str(args.transition_run_id or ""),
         expected_rows=int(args.expected_rows),
         fingerprint=str(args.fingerprint or ""),
+        source_fingerprint=str(args.source_fingerprint or ""),
     )
     _print_json({"target_id": target.target_id, "result": payload})
     return 0
@@ -3853,7 +3884,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_prefilter_skip_recovery.add_argument(
         "action",
         nargs="?",
-        choices=("dry-run", "apply", "readback"),
+        choices=(
+            "dry-run",
+            "apply",
+            "readback",
+            "release-dry-run",
+            "release-apply",
+            "release-readback",
+        ),
         default="dry-run",
     )
     autoanswers_prefilter_skip_recovery.add_argument(
@@ -3867,6 +3905,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     autoanswers_prefilter_skip_recovery.add_argument(
         "--fingerprint",
+        default="",
+    )
+    autoanswers_prefilter_skip_recovery.add_argument(
+        "--source-fingerprint",
         default="",
     )
     autoanswers_prefilter_skip_recovery.set_defaults(
