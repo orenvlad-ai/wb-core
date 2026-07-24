@@ -7,8 +7,8 @@
 - Git-tracked code и current `origin/main` — code truth для текущей реализации;
 - `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*` — authoritative documentation truth;
 - GitHub — truth для branch, commit, PR, checks, review и merge;
-- WebCore Data MCP — read-only источник наблюдаемого production-состояния, диагностики и бизнес-метрик;
-- production server — canonical deploy/runtime boundary;
+- production server и его current server-owned stores/documents — canonical deploy/runtime и production-data boundary;
+- WebCore Data MCP — архивный read-only compatibility contour, не normal source/acquisition path и не обязательная capability;
 - legacy artifacts, старые чаты, вложения и прежние project instructions — только migration evidence и do-not-lose constraints, но не current truth.
 
 Рабочая ветка показывает proposed change, но не заменяет current `origin/main` до review и merge. Runtime-наблюдение не заменяет versioned code или contracts.
@@ -32,6 +32,10 @@ Authoritative docs должны описывать текущую реализа
 
 Отчёт агента, старый чат или вложение не заменяют такую проверку. Если repository/GitHub либо другой необходимый authoritative source недоступен, нельзя уверенно заявлять current state: должен быть возвращён точный blocker.
 
+Технический путь, записанный в task prompt, также не заменяет current protocol. Название connector/tool/server/storage, конкретный access path или запрет canonical server-side read считаются гипотезой автора prompt и повторно проверяются по repository truth, даже если записаны как команда. Пользовательским ограничением является только отдельно и явно выраженное пользователем требование. Поэтому устаревший prompt с обязательным MCP не создаёт blocker и не отменяет canonical production read path.
+
+Новый prompt для Codex описывает цель, необходимые данные, read-only или mutation boundary, ожидаемый результат и acceptance/closure criteria. Он не называет WebCore Data MCP и не выбирает за Codex server/runtime/storage/access mechanism. Для однозначного provenance prompt фиксирует: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
+
 ## Production Runtime Boundary
 
 Production server является единственной canonical границей deploy и runtime execution:
@@ -42,7 +46,9 @@ Production server является единственной canonical грани
 - secrets, session state, production DB dumps и credential-bearing artifacts не попадают в Git, docs, logs или PR;
 - repo хранит config shape, non-secret defaults, contracts и deployment artifacts, а environment-specific secrets остаются вне Git.
 
-WebCore Data MCP остаётся строго read-only. Его данные пригодны для диагностики, freshness checks и бизнес-метрик, но не дают права изменять production и не становятся code truth.
+Для production evidence/data Codex сначала определяет current active target, runtime и конкретный source по code и authoritative docs, выполняет фактический production preflight и использует штатный SSH-доступ к canonical server. Production stores читаются query-only (`mode=ro` + `PRAGMA query_only=ON` для SQLite либо эквивалентная гарантия), server-owned documents — только bounded read по текущему contract. Никакие service changes, deploy, upstream sync или production writes этим не разрешаются.
+
+Blocker допустим только после фактической попытки canonical server-side preflight/read и точной ошибки доступа либо доказанного отсутствия необходимых данных. Недоступность архивного WebCore Data MCP blocker не образует. Сохранившийся MCP implementation/runtime может использоваться только как явно заданный compatibility/archival evidence contour; он не становится code truth, не выбирается как normal path и не даёт права изменять production.
 
 ## Schema, Config И Data Truth
 

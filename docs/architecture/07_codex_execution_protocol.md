@@ -12,6 +12,24 @@ Codex ведёт задачу автономно до проверяемого �
 
 Старые project packs, prompt footer templates и прежние служебные mode-строки не требуются. Новый task prompt по возможности начинается явной строкой класса из корневого `AGENTS.md`; её отсутствие запускает deterministic auto-classification, а не блокирующий запрос пользователю.
 
+## Prompt Contract И Technical Path Revalidation
+
+ChatGPT/куратор формирует prompt вокруг результата: цель, необходимые данные, read-only/mutation boundaries, итоговый artifact/answer, acceptance и closure. Он не называет WebCore Data MCP, не назначает connector/server/runtime/storage/SSH alias и не запрещает canonical server-side read, если пользователь сам отдельно и явно не установил такое ограничение. Каждый сформированный prompt содержит provenance-правило:
+
+`Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
+
+Codex до выполнения повторно проверяет предложенный технический путь по current `origin/main`, `AGENTS.md`, релевантным authoritative docs и code truth. Tool/source/path из prompt остаётся технической гипотезой автора prompt даже при повелительной формулировке. Только отдельное явное требование самого пользователя становится binding constraint. Поэтому старый prompt с обязательным MCP или запретом server-side access без отдельного пользовательского требования игнорируется в этой части и не создаёт blocker.
+
+Если нужны production evidence/data, normal acquisition path:
+
+1. определить current active production target, runtime и concrete stores/documents по code и authoritative docs;
+2. выполнить фактический `PRODUCTION_READ_PREFLIGHT`, включая штатный SSH connectivity к canonical target и доступность exact source;
+3. читать production stores query-only (`mode=ro` + `PRAGMA query_only=ON` для SQLite или эквивалентный read-only режим) и bounded server-owned documents по их current contract;
+4. не менять services, schedules, runtime files/data, upstream systems или production config и не раскрывать secrets/raw dumps;
+5. объявлять blocker только после точной ошибки canonical access/preflight либо доказанного отсутствия необходимых данных.
+
+Архивный WebCore Data MCP не является normal execution path, не упоминается в новых prompts и не требуется как fallback/preflight. Его отсутствие всегда non-blocking.
+
 ## Task Class И Execution Contour
 
 Task class и execution contour ортогональны:
@@ -65,7 +83,7 @@ Task class и task continuity определяются независимо. Mac
 
 Preflight не является единым глобальным барьером. Канонические фазы из `apps/github_release_train_spec.py` упорядочиваются по зависимостям, даже если prompt перечисляет production preflight первым:
 
-1. `REPOSITORY_PREFLIGHT` проверяет repository/worktree, `AGENTS.md`, architecture/runners, локальные зависимости, test infrastructure и при необходимости GitHub baseline. Production credentials/database, WebCore Data MCP, browser session, manifests и backup здесь не нужны.
+1. `REPOSITORY_PREFLIGHT` проверяет repository/worktree, `AGENTS.md`, architecture/runners, локальные зависимости, test infrastructure и при необходимости GitHub baseline. Production credentials/database, архивный WebCore Data MCP, browser session, manifests и backup здесь не нужны.
 2. Repository implementation/validation/runner preparation, branch/PR, CI и review выполняются до максимально возможного безопасного состояния.
 3. `PRODUCTION_READ_PREFLIGHT` выполняется только непосредственно перед чтением конкретного production evidence и проверяет только фактически нужный read-only source/capability.
 4. `PRODUCTION_MUTATION_PREFLIGHT` выполняется только непосредственно перед apply и проверяет exact scope, dry-run/coverage, manifest/digests, backup/restore readiness, expected affected entities, non-target invariants, authorization, exact deployed runner/version и reconciliation path.
@@ -75,7 +93,7 @@ Preflight не является единым глобальным барьеро
 
 Phase context входит в тот же Goal disposition contract через `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`, `user_intervention_required`. Недоступная будущая capability при оставшейся безопасной работе даёт `CONTINUE_SAFE_PHASES`; `AWAIT_PHASE_CAPABILITY` допустим только у непосредственной phase boundary, когда safe phases завершены, фактический preflight приложен, repo-owned remediation отсутствует/исчерпана и требуется точное human-only действие. Общий `EXTERNAL_BLOCKER` при `safe_phases_remaining` конструктивно запрещён.
 
-WebCore Data MCP — только read-only allowlist, а не универсальный production-доступ. Перед его требованием агент сопоставляет конкретную capability с allowlist: наличие MCP не доказывает arbitrary SQL, production filesystem, raw exports, manifests/digests, backup или backfill; отсутствие MCP не мешает фазам, которым он не нужен. Evidence извлекается соответствующим типу данных canonical repo-owned способом; mutation через MCP запрещена. Нельзя просить подключить MCP, если требуемая capability всё равно не входит в allowlist.
+Production evidence извлекается через canonical server-side read path, а конкретные target/runtime/store/document определяются из current repo/docs truth, не из prompt. Архивный MCP не проверяется и не запрашивается как prerequisite/fallback: его отсутствие не влияет ни на одну phase и не может дать `AWAIT_PHASE_CAPABILITY`, `EXTERNAL_BLOCKER` или `TERMINAL_FAILURE`. Сохранившийся compatibility implementation остаётся read-only; mutation через него запрещена.
 
 Будущий production-data runner создаётся в репозитории и до production gate тестируется на fixtures/mocks. Его обязательный contract: dry-run по умолчанию, отдельный explicit apply flag, bounded scope, machine-readable manifest, pre-change digest, backup/evidence, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и server-only drift production mutation не выполняют.
 
@@ -91,7 +109,7 @@ WebCore Data MCP — только read-only allowlist, а не универса�
 - closure criteria;
 - применимый execution-контур.
 
-Routine-шаги, уже определённые `AGENTS.md` и authoritative docs, не нужно подробно повторять в prompt.
+Для data/artifact-задачи prompt называет нужные данные и read-only boundary, но не выбирает MCP, server, connector или storage. Routine-шаги и technical path, уже определённые `AGENTS.md` и authoritative docs, не нужно подробно повторять в prompt.
 
 Перед repo-changing изменениями:
 
@@ -386,6 +404,8 @@ Authoritative docs живут в:
 - внешний сервис недоступен и безопасные retries/диагностика исчерпаны;
 - repository evidence действительно конфликтует и выбор изменит requested scope;
 - необходима новая authority для production mutation или materially different action.
+
+Для production read первые два условия требуют фактической проверки current canonical target, штатного SSH и exact store/document access. Непроверенное предположение, обязательность из старого prompt и недоступность архивного MCP недостаточны.
 
 Финал при blocker содержит точную ошибку/ограничение, сохранённое состояние и один минимальный ручной шаг.
 
