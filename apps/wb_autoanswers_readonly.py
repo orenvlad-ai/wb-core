@@ -279,9 +279,12 @@ def run_operation(
                     error_code=f"readonly_steady_{type(exc).__name__}",
                 )
             raise
-        after = repository.operational_status()
-        if _sum_counts(after["ai_jobs"]) != before_ai or _sum_counts(after["publication_jobs"]) != before_publication:
-            raise RuntimeError("force-off steady sync created AI or publication jobs")
+        # Each sync tick reports its own causal enqueue count above.  Do not
+        # compare store-wide queue totals here: the feature worker shares this
+        # database and can legitimately advance AI/publication jobs while the
+        # GET-only timer is fetching WB pages.  The runner remains force-off,
+        # has no provider/writer imports, and fails immediately if either of
+        # its own ticks reports an enqueue.
         return {
             "status": "passed",
             "operation": operation,
