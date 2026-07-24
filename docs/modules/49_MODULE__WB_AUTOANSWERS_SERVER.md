@@ -118,6 +118,12 @@ drift. Until the first post-request scheduler tick the operational state is
 `starting`; after the grace interval a stale tick is `worker_unavailable`, not
 healthy.
 
+The force-off readonly runner proves its own safety from the causal `enqueued=0`
+result of every sync tick plus its provider/writer-free import boundary. It does
+not compare store-wide AI/publication queue totals, because the independently
+scheduled worker can legitimately advance those shared queues during the same
+GET window; that concurrent progress is not attributed to the readonly sync.
+
 Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot. Reviews observed after preview remain outside that run and require a new preview. Apply creates a new `policy_epoch`, transition run and resumable lazy sweep. Replaying the same consumed preview is an exact no-op; a fresh owner-confirmed capped preview creates a new run even when the selected automatic mode is unchanged.
 
 Every automatic stage uses the same strict ordering: `content_bearing` before `rating_only`; within a class `created_at_wb DESC`, falling back to `first_seen_at DESC`, then `feedback_id DESC`. This governs snapshot ordinals, reconciliation, lazy materialization, processing/retry/expired-lease claims, ready-result reuse, publication enqueue and publication claims. Rating does not participate. Explicit manual work retains its separate owner-triggered semantics.

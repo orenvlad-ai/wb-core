@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -155,6 +156,20 @@ class ReadonlyRunnerTest(unittest.TestCase):
         self.assertEqual(len(result["sync"]), 2)
         self.assertEqual(result["runtime"]["ai_jobs"], {})
         self.assertEqual(result["runtime"]["publication_jobs"], {})
+
+    def test_steady_sync_does_not_attribute_concurrent_worker_progress_to_itself(self) -> None:
+        before = self.repo.operational_status()
+        after = deepcopy(before)
+        after["ai_jobs"] = {"succeeded": 1}
+        after["publication_jobs"] = {"confirmed": 1}
+        with patch.object(
+            self.repo,
+            "operational_status",
+            side_effect=(before, after, after),
+        ):
+            result = self.run_case("steady")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual([item["enqueued"] for item in result["sync"]], [0, 0])
 
     def test_readonly_sync_remains_allowed_when_feature_mode_is_on(self) -> None:
         self.env.pop("WB_AUTOANSWERS_FORCE_OFF")
