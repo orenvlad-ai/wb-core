@@ -75,17 +75,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_plan(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
+    source_runtime_dir = runtime.runtime_dir.resolve()
     with TemporaryDirectory(prefix="supplier-26gn527-readonly-") as temp_dir:
         snapshot_runtime = RegistryUploadDbBackedRuntime(
             runtime_dir=Path(temp_dir) / "runtime"
         )
         snapshot_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         _readonly_sqlite_copy(runtime.db_path, snapshot_runtime.db_path)
-        return _build_plan_from_snapshot(snapshot_runtime)
+        return _build_plan_from_snapshot(
+            snapshot_runtime,
+            source_runtime_dir=source_runtime_dir,
+        )
 
 
 def _build_plan_from_snapshot(
     runtime: RegistryUploadDbBackedRuntime,
+    *,
+    source_runtime_dir: Path,
 ) -> dict[str, Any]:
     shipment = runtime.load_supplier_shipment(SHIPMENT_ID) or {}
     header = dict(shipment.get("header") or {})
@@ -101,7 +107,7 @@ def _build_plan_from_snapshot(
         raise ValueError("diagnosed source statement SHA changed")
     if str(source.get("parse_status") or "") != "excluded":
         raise ValueError("diagnosed misclassified source must remain archived")
-    source_path = Path(str(source.get("stored_file_path") or ""))
+    source_path = _resolve_source_file_path(source_runtime_dir, source)
     if not source_path.is_file() or file_sha256(source_path) != SOURCE_SHA256:
         raise ValueError("diagnosed source file is missing or changed")
 
@@ -298,7 +304,7 @@ def _apply_plan_locked(
         supplier_order_id=SHIPMENT_ID,
         document_id=SOURCE_DOCUMENT_ID,
     ) or {}
-    source_path = Path(str(source.get("stored_file_path") or ""))
+    source_path = _resolve_source_file_path(runtime.runtime_dir, source)
     document_id = ""
     preview: dict[str, Any] = {}
     created_document_path: Path | None = None
@@ -466,6 +472,24 @@ def _source_digest(runtime: RegistryUploadDbBackedRuntime) -> str:
             ).fetchall()
         ]
     return "sha256:" + _hash(rows)
+
+
+def _resolve_source_file_path(
+    source_runtime_dir: Path,
+    source: Mapping[str, Any],
+) -> Path:
+    runtime_root = Path(source_runtime_dir).resolve()
+    stored = Path(str(source.get("stored_file_path") or "").strip())
+    if not str(stored):
+        raise ValueError("diagnosed source file path is missing")
+    resolved = (
+        stored.resolve()
+        if stored.is_absolute()
+        else (runtime_root / stored).resolve()
+    )
+    if resolved != runtime_root and runtime_root not in resolved.parents:
+        raise ValueError("diagnosed source file escapes canonical runtime")
+    return resolved
 
 
 def _readonly_sqlite_copy(source: Path, target: Path) -> None:
