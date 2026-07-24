@@ -44,6 +44,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _counted_cny_operation,
     _current_snapshot_effective_date,
     _daily_wb_cost_row,
+    _ff_operation_replay_sort_key,
     _fingerprint,
     _functional_local_source_view,
     _guarded_local_sources,
@@ -108,6 +109,7 @@ def main() -> None:
     _test_financial_document_eligibility()
     _test_discrepancy_pool()
     _test_cutover_ff_debit_coverage()
+    _test_equal_timestamp_ff_receipt_ordering()
     _test_frozen_cost_map()
     _test_nomenclature_purchase_price_source()
     _test_historical_wb_projection()
@@ -1058,6 +1060,37 @@ def _test_cutover_ff_debit_coverage() -> None:
         _assert("without FF debit" in str(exc), "missing post-checkpoint FF debit blocks cutover")
     else:
         raise AssertionError("uncovered post-checkpoint WB supply must block cutover")
+
+
+def _test_equal_timestamp_ff_receipt_ordering() -> None:
+    created_at = "2026-07-24T10:27:06Z"
+    outbound = {
+        "operation_id": "ffso_97c4851b77cb4d4ab023",
+        "operation_type": "auto_writeoff",
+        "source_type": "wb_supply",
+        "created_at": created_at,
+    }
+    supplier_receipt = {
+        "operation_id": "ffso_bd364f578e80429c999f",
+        "operation_type": "auto_receipt",
+        "source_type": "supplier_shipment",
+        "created_at": created_at,
+    }
+    ordered = sorted(
+        [outbound, supplier_receipt],
+        key=_ff_operation_replay_sort_key,
+    )
+    _assert(
+        [item["operation_id"] for item in ordered]
+        == ["ffso_bd364f578e80429c999f", "ffso_97c4851b77cb4d4ab023"],
+        "same-second supplier receipt creates the FF cost pool before outbound",
+    )
+    later_receipt = {**supplier_receipt, "created_at": "2026-07-24T10:27:07Z"}
+    _assert(
+        sorted([outbound, later_receipt], key=_ff_operation_replay_sort_key)[0]
+        == outbound,
+        "semantic priority never reorders distinct operation timestamps",
+    )
 
 
 def _test_frozen_cost_map() -> None:
