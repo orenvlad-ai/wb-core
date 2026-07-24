@@ -119,11 +119,21 @@ PROCESS_SPECS: tuple[dict[str, Any], ...] = (
         "key": "autoanswers_readonly",
         "display_name": "Autoanswers read-only sync",
         "timer": "wb-core-autoanswers-readonly-sync.timer",
+        "can_enable": False,
+        "enable_blocker": (
+            "Autoanswers read-only sync включается только через отдельный "
+            "Autoanswers lifecycle contract."
+        ),
     },
     {
         "key": "autoanswers_worker",
         "display_name": "Autoanswers worker",
         "timer": "wb-core-autoanswers-worker.timer",
+        "can_enable": False,
+        "enable_blocker": (
+            "Autoanswers worker включается только через отдельный "
+            "Autoanswers lifecycle contract."
+        ),
     },
 )
 
@@ -604,7 +614,7 @@ def update_process_desired_state(
     actor: str,
     reason: str,
 ) -> dict[str, Any]:
-    _process_spec(process_key)
+    spec = _process_spec(process_key)
     policy = load_or_initialize_owner_policy(runtime_dir)
     if int(policy.get("revision") or 0) != int(expected_revision):
         raise RuntimeError(
@@ -614,6 +624,13 @@ def update_process_desired_state(
     processes = dict(policy.get("processes") or {})
     process = dict(processes.get(process_key) or {})
     before = process.get("desired")
+    if bool(desired) and spec.get("can_enable") is False:
+        raise RuntimeError(str(spec.get("enable_blocker") or "process enable is blocked"))
+    if before is not None and bool(before) == bool(desired):
+        raise RuntimeError(
+            f"no-op desired state for {process_key}: already "
+            f"{'ON' if bool(desired) else 'OFF'}"
+        )
     process.update(
         {
             "desired": bool(desired),
@@ -693,6 +710,8 @@ def _process_actual_state(
         "desired": desired,
         "actual": bool(actual),
         "drift_status": drift,
+        "can_enable": bool(spec.get("can_enable", True)),
+        "enable_blocker": str(spec.get("enable_blocker") or ""),
         "timer": timer,
         "runtime_schedule": schedule,
         "last_run": str(properties.get("LastTriggerUSec") or ""),
@@ -745,6 +764,7 @@ def owner_policy_readback(
         "revision": int(policy.get("revision") or 0),
         "policy_fingerprint": str(policy.get("policy_fingerprint") or ""),
         "changed_at": str(policy.get("changed_at") or ""),
+        "captured_at": str(status.get("captured_at") or ""),
         "actor": str(policy.get("actor") or ""),
         "reason": str(policy.get("reason") or ""),
         "overall_status": overall,

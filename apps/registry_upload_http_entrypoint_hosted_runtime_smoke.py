@@ -503,6 +503,77 @@ def main() -> None:
         raise AssertionError(
             "business-data restore must expose exact optimistic policy revision"
         )
+    business_set_process_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "business-data-maintenance",
+            "set-process",
+            "--process-key",
+            "autoanswers_worker",
+            "--desired",
+            "off",
+            "--expected-revision",
+            "13",
+            "--actor",
+            "incident_recovery",
+            "--reason",
+            "restore owner intended OFF state",
+        ]
+    )
+    if (
+        business_set_process_args.action != "set-process"
+        or business_set_process_args.process_key != "autoanswers_worker"
+        or business_set_process_args.desired != "off"
+        or business_set_process_args.expected_revision != 13
+    ):
+        raise AssertionError(
+            "hosted runner must expose audited exact-revision process recovery"
+        )
+    set_process_payload = {
+        "status": "updated",
+        "auto_updates": {
+            "revision": 14,
+            "processes": [
+                {
+                    "process_key": "autoanswers_worker",
+                    "desired": False,
+                    "actual": False,
+                }
+            ],
+        },
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(set_process_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess, "run", return_value=completed
+    ) as run_mock:
+        hosted_runtime._run_remote_business_data_maintenance_runner(
+            active_target,
+            action="set-process",
+            process_key="autoanswers_worker",
+            desired="off",
+            expected_revision=13,
+            actor="incident_recovery",
+            reason="restore owner intended OFF state",
+        )
+    set_process_command = " ".join(run_mock.call_args.args[0])
+    for expected_token in (
+        "set-process",
+        "--process-key",
+        "autoanswers_worker",
+        "--desired",
+        "off",
+        "--expected-revision",
+        "13",
+    ):
+        if expected_token not in set_process_command:
+            raise AssertionError(
+                f"hosted set-process command lost {expected_token}: "
+                f"{set_process_command}"
+            )
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"
         plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")

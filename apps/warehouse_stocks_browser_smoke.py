@@ -9,6 +9,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 from tempfile import TemporaryDirectory
@@ -336,11 +337,19 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 "runtime_schedule": {},
                 "timer": {"properties": {}},
                 "provenance": "proven",
+                "can_enable": not key.startswith("autoanswers_"),
+                "enable_blocker": (
+                    "Включение требует отдельного Autoanswers lifecycle contract."
+                    if key.startswith("autoanswers_")
+                    else ""
+                ),
             }
             for key, label, desired in process_specs
         ],
     }
+    auto_current = json.loads(json.dumps(auto_payload))
     auto_posts: list[dict[str, object]] = []
+    auto_mode: dict[str, object] = {"next": "", "stale": None}
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -355,24 +364,94 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 if request.method == "POST":
                     body = request.post_data_json
                     auto_posts.append(body)
-                    changed = json.loads(json.dumps(auto_payload))
-                    changed["revision"] = 2
-                    for process in changed["processes"]:
-                        if process["process_key"] == body.get("process_key"):
-                            process["desired"] = body.get("desired")
+                    if auto_mode["next"] == "backend_failure":
+                        auto_mode["next"] = ""
+                        route.fulfill(
+                            status=409,
+                            content_type="application/json",
+                            body=json.dumps(
+                                {
+                                    "error": "synthetic backend failure",
+                                    "code": "auto_updates_action_blocked",
+                                }
+                            ),
+                        )
+                        return
+                    if (
+                        body.get("action") == "set_master"
+                        and bool(body.get("desired"))
+                        == bool(auto_current["master_desired"])
+                    ):
+                        route.fulfill(
+                            status=409,
+                            content_type="application/json",
+                            body=json.dumps(
+                                {
+                                    "error": "no-op master state",
+                                    "code": "auto_updates_no_change",
+                                }
+                            ),
+                        )
+                        return
+                    before = json.loads(json.dumps(auto_current))
+                    changed = json.loads(json.dumps(auto_current))
+                    changed["revision"] = int(changed["revision"]) + 1
+                    changed["policy_fingerprint"] = (
+                        "sha256:browser-fixture-" + str(changed["revision"])
+                    )
+                    if body.get("action") == "set_process":
+                        for process in changed["processes"]:
+                            if process["process_key"] == body.get("process_key"):
+                                process["desired"] = body.get("desired")
+                    elif body.get("action") == "set_master":
+                        changed["master_desired"] = bool(body.get("desired"))
+                    if changed["master_desired"]:
+                        for process in changed["processes"]:
+                            process["actual"] = bool(process["desired"])
+                            process["drift_status"] = "matched"
+                        changed["drift_processes"] = []
+                        changed["overall_status"] = "Часть обновлений выключена"
+                    else:
+                        for process in changed["processes"]:
+                            process["actual"] = False
                             process["drift_status"] = (
-                                "drift" if body.get("desired") else "matched"
+                                "drift" if process["desired"] else "matched"
                             )
+                        changed["drift_processes"] = [
+                            process["process_key"]
+                            for process in changed["processes"]
+                            if process["desired"]
+                        ]
+                        changed["overall_status"] = "Общая пауза включена"
+                    changed["mutation"] = {
+                        "status": "confirmed",
+                        "persisted": True,
+                        "runtime_readback_confirmed": True,
+                    }
+                    auto_current.clear()
+                    auto_current.update(changed)
+                    auto_current.pop("mutation", None)
+                    if auto_mode["next"] == "stale_readback":
+                        auto_mode["next"] = "serve_stale_once"
+                        auto_mode["stale"] = before
                     route.fulfill(
                         status=200,
                         content_type="application/json",
                         body=json.dumps(changed, ensure_ascii=False),
                     )
                     return
+                if auto_mode["next"] == "serve_stale_once":
+                    auto_mode["next"] = ""
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(auto_mode["stale"], ensure_ascii=False),
+                    )
+                    return
                 route.fulfill(
                     status=200,
                     content_type="application/json",
-                    body=json.dumps(auto_payload, ensure_ascii=False),
+                    body=json.dumps(auto_current, ensure_ascii=False),
                 )
 
             page.route(
@@ -474,20 +553,85 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 ).inner_text(),
                 "individual desired ON must remain visible while master is OFF",
             )
+            _assert(
+                surface.locator(
+                    '[data-auto-update-toggle="autoanswers_readonly"]'
+                ).is_disabled()
+                and surface.locator(
+                    '[data-auto-update-toggle="autoanswers_worker"]'
+                ).is_disabled(),
+                "Autoanswers ON must be blocked before any owner-policy mutation",
+            )
+            _assert(
+                "отдельного Autoanswers lifecycle"
+                in surface.locator(
+                    '[data-auto-update-process="autoanswers_readonly"]'
+                ).inner_text(),
+                "dedicated lifecycle blocker must be visible",
+            )
             surface.locator(
-                '[data-auto-update-toggle="autoanswers_readonly"]'
+                '[data-auto-update-toggle="warehouse_functional"]'
             ).click()
             surface.locator("#autoUpdatesMessage").get_by_text(
-                "Owner policy сохранена; actual state прочитан повторно.",
+                "Изменение сохранено и подтверждено повторным runtime readback.",
                 exact=True,
             ).wait_for()
             _assert(
                 auto_posts
                 and auto_posts[-1]["action"] == "set_process"
-                and auto_posts[-1]["process_key"] == "autoanswers_readonly"
-                and auto_posts[-1]["desired"] is True
+                and auto_posts[-1]["process_key"] == "warehouse_functional"
+                and auto_posts[-1]["desired"] is False
                 and auto_posts[-1]["expected_revision"] == 1,
                 f"individual toggle must use optimistic audited policy payload: {auto_posts}",
+            )
+            page.on("dialog", lambda dialog: dialog.accept())
+            auto_mode["next"] = "backend_failure"
+            surface.locator("#autoUpdatesMasterButton").click()
+            surface.locator("#autoUpdatesMessage").get_by_text(
+                re.compile("Не применено: synthetic backend failure.*Фактическое состояние перечитано")
+            ).wait_for()
+            _assert(
+                surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
+                == "Общая пауза включена",
+                "backend failure must preserve and render the actual paused state",
+            )
+            surface.locator("#autoUpdatesMasterButton").click()
+            surface.locator("#autoUpdatesMessage").get_by_text(
+                "Изменение сохранено и подтверждено повторным runtime readback.",
+                exact=True,
+            ).wait_for()
+            _assert(
+                surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
+                == "Часть обновлений выключена",
+                "successful resume must render confirmed actual state without reload",
+            )
+            auto_mode["next"] = "stale_readback"
+            surface.locator("#autoUpdatesMasterButton").click()
+            surface.locator("#autoUpdatesMessage").get_by_text(
+                re.compile("Не применено: Изменение было принято, но повторный runtime readback не подтвердил")
+            ).wait_for()
+            _assert(
+                surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
+                == "Общая пауза включена",
+                "failed post-write readback must render the later factual state",
+            )
+            surface.locator("#autoUpdatesMasterButton").click()
+            surface.locator("#autoUpdatesMessage").get_by_text(
+                "Изменение сохранено и подтверждено повторным runtime readback.",
+                exact=True,
+            ).wait_for()
+            posts_before_reload = len(auto_posts)
+            page.reload(wait_until="domcontentloaded")
+            frame = page.locator('[data-settings-embed-frame]:not([hidden])')
+            frame.wait_for()
+            surface = page.frame_locator("[data-settings-embed-frame]")
+            surface.locator('[data-settings-group-button="auto-updates"]').click()
+            surface.locator('[data-auto-update-process="warehouse_functional"]').wait_for()
+            _assert(
+                surface.locator("#autoUpdatesOverallStatus").inner_text().strip()
+                == "Часть обновлений выключена"
+                and len(auto_posts) == posts_before_reload,
+                "page reload must preserve confirmed resume state without mutation",
             )
             page.set_viewport_size({"width": 560, "height": 900})
             _assert(

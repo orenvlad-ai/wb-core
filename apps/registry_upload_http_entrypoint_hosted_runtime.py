@@ -3138,13 +3138,17 @@ def _run_remote_business_data_maintenance_runner(
     *,
     action: str,
     expected_revision: int | None = None,
+    process_key: str = "",
+    desired: str = "",
+    actor: str = "repo_owned_cli",
+    reason: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
     )
-    if action not in {"status", "prepare", "hold", "restore"}:
+    if action not in {"status", "prepare", "hold", "restore", "set-process"}:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
-    if action in {"prepare", "hold", "restore"}:
+    if action in {"prepare", "hold", "restore", "set-process"}:
         _ensure_target_allows_mutation(
             target,
             action=f"business-data-maintenance-{action}",
@@ -3174,6 +3178,26 @@ def _run_remote_business_data_maintenance_runner(
                 "business-data maintenance restore requires --expected-revision"
             )
         runner_args.extend(["--expected-revision", str(int(expected_revision))])
+    elif action == "set-process":
+        if expected_revision is None or not process_key or desired not in {"on", "off"}:
+            raise ValueError(
+                "business-data maintenance set-process requires exact revision, "
+                "process key and desired on|off"
+            )
+        runner_args.extend(
+            [
+                "--expected-revision",
+                str(int(expected_revision)),
+                "--process-key",
+                process_key,
+                "--desired",
+                desired,
+                "--actor",
+                str(actor or "repo_owned_cli"),
+                "--reason",
+                str(reason or "owner-controlled recovery"),
+            ]
+        )
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -3254,6 +3278,38 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             target,
             action="status",
         )
+    elif action == "set-process":
+        if args.expected_revision is None:
+            raise ValueError(
+                "business-data-maintenance set-process requires --expected-revision"
+            )
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action="set-process",
+            expected_revision=int(args.expected_revision),
+            process_key=str(args.process_key or ""),
+            desired=str(args.desired or ""),
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or "owner-controlled recovery"),
+        )
+        readback = dict(result.get("auto_updates") or {})
+        selected = next(
+            (
+                dict(item)
+                for item in readback.get("processes", [])
+                if isinstance(item, Mapping)
+                and str(item.get("process_key") or "") == str(args.process_key)
+            ),
+            None,
+        )
+        if (
+            str(result.get("status") or "") != "updated"
+            or selected is None
+            or bool(selected.get("desired")) != (str(args.desired) == "on")
+        ):
+            raise RuntimeError(
+                "business-data maintenance set-process readback is incomplete"
+            )
     else:
         result = _run_remote_business_data_maintenance_runner(target, action="status")
         evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
@@ -3957,12 +4013,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     business_data_maintenance.add_argument(
         "action",
-        choices=("status", "hold", "restore"),
+        choices=("status", "hold", "restore", "set-process"),
     )
     business_data_maintenance.add_argument(
         "--expected-revision",
         type=int,
-        help="Exact owner-policy revision required for restore.",
+        help="Exact owner-policy revision required for restore or set-process.",
+    )
+    business_data_maintenance.add_argument(
+        "--process-key",
+        default="",
+        help="Allowlisted process key for set-process.",
+    )
+    business_data_maintenance.add_argument(
+        "--desired",
+        choices=("on", "off"),
+        default="",
+        help="Desired owner state for set-process.",
+    )
+    business_data_maintenance.add_argument(
+        "--actor",
+        default="repo_owned_cli",
+        help="Audited actor for set-process.",
+    )
+    business_data_maintenance.add_argument(
+        "--reason",
+        default="",
+        help="Audited reason for set-process.",
     )
     business_data_maintenance.set_defaults(
         handler=run_business_data_maintenance_command,

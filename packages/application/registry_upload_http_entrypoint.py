@@ -813,6 +813,74 @@ class _EntrypointMaintenanceSchedules:
         return self.read_all()
 
 
+def _confirmed_auto_updates_update_payload(
+    readback: Mapping[str, Any],
+    *,
+    action: str,
+    desired: bool,
+    expected_revision: int,
+    process_key: str = "",
+) -> dict[str, Any]:
+    """Return a success payload only for a persisted and runtime-confirmed change."""
+
+    payload = dict(readback)
+    revision = int(payload.get("revision") or 0)
+    master_desired = bool(payload.get("master_desired"))
+    processes = [
+        dict(item)
+        for item in payload.get("processes", [])
+        if isinstance(item, Mapping)
+    ]
+    selected = next(
+        (
+            item
+            for item in processes
+            if str(item.get("process_key") or "") == str(process_key)
+        ),
+        None,
+    )
+    if action == "set_master":
+        persisted = master_desired == bool(desired)
+    else:
+        persisted = (
+            selected is not None
+            and isinstance(selected.get("desired"), bool)
+            and bool(selected.get("desired")) == bool(desired)
+        )
+    if master_desired:
+        runtime_confirmed = (
+            not payload.get("unknown_processes")
+            and not payload.get("drift_processes")
+            and all(
+                isinstance(item.get("desired"), bool)
+                and bool(item.get("actual")) == bool(item.get("desired"))
+                for item in processes
+            )
+        )
+    else:
+        runtime_confirmed = all(not bool(item.get("actual")) for item in processes)
+    revision_advanced = revision > int(expected_revision)
+    if not persisted or not runtime_confirmed or not revision_advanced:
+        raise RuntimeError(
+            "auto-updates mutation readback not confirmed: "
+            f"persisted={persisted}, runtime_confirmed={runtime_confirmed}, "
+            f"revision_advanced={revision_advanced}"
+        )
+    payload["mutation"] = {
+        "status": "confirmed",
+        "action": action,
+        "desired": bool(desired),
+        "process_key": str(process_key),
+        "expected_revision": int(expected_revision),
+        "persisted": True,
+        "runtime_readback_confirmed": True,
+        "confirmed_revision": revision,
+        "policy_fingerprint": str(payload.get("policy_fingerprint") or ""),
+        "readback_captured_at": str(payload.get("captured_at") or ""),
+    }
+    return payload
+
+
 class RegistryUploadHttpEntrypoint:
     """Тонкий entrypoint: ingest/update current truth, heavy refresh и cheap read готового snapshot."""
 
@@ -1866,17 +1934,43 @@ class RegistryUploadHttpEntrypoint:
         reason = str(payload.get("reason") or "owner Settings action").strip()
         systemd = SystemdClient()
         schedules = self._business_maintenance_schedules()
+        current = maintenance_status(
+            self.runtime.runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+        )
+        current_auto_updates = dict(current.get("auto_updates") or {})
+        current_revision = int(current_auto_updates.get("revision") or 0)
+        if current_revision != expected_revision:
+            raise RuntimeError(
+                f"stale policy revision: expected {expected_revision}, "
+                f"current {current_revision}"
+            )
         if action == "set_process":
             process_key = str(payload.get("process_key") or "").strip()
             desired = payload.get("desired")
             if not isinstance(desired, bool):
                 raise ValueError("desired must be boolean")
-            current = maintenance_status(
-                self.runtime.runtime_dir,
-                systemd=systemd,
-                schedules=schedules,
+            current_process = next(
+                (
+                    dict(item)
+                    for item in current_auto_updates.get("processes", [])
+                    if isinstance(item, Mapping)
+                    and str(item.get("process_key") or "") == process_key
+                ),
+                None,
             )
-            master_desired = bool((current.get("auto_updates") or {}).get("master_desired"))
+            if current_process is None:
+                raise ValueError(f"unknown auto-update process key: {process_key}")
+            if (
+                isinstance(current_process.get("desired"), bool)
+                and bool(current_process.get("desired")) == bool(desired)
+            ):
+                raise RuntimeError(
+                    f"no-op desired state for {process_key}: already "
+                    f"{'ON' if desired else 'OFF'}"
+                )
+            master_desired = bool(current_auto_updates.get("master_desired"))
             policy = update_process_desired_state(
                 self.runtime.runtime_dir,
                 process_key=process_key,
@@ -1904,7 +1998,7 @@ class RegistryUploadHttpEntrypoint:
                     reason=reason,
                     expected_revision=int(policy["revision"]),
                 )
-                return maintenance_restore(
+                restored = maintenance_restore(
                     self.runtime.runtime_dir,
                     systemd=systemd,
                     schedules=schedules,
@@ -1913,46 +2007,69 @@ class RegistryUploadHttpEntrypoint:
                     expected_revision=int(
                         (held.get("auto_updates") or {}).get("revision")
                     ),
-                ).get("auto_updates") or {}
+                )
+                final_readback = dict(restored.get("auto_updates") or {})
+            else:
+                status = maintenance_status(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                )
+                final_readback = dict(status.get("auto_updates") or {})
+            return _confirmed_auto_updates_update_payload(
+                final_readback,
+                action=action,
+                desired=desired,
+                expected_revision=expected_revision,
+                process_key=process_key,
+            )
         elif action == "set_master":
             desired = payload.get("desired")
             if not isinstance(desired, bool):
                 raise ValueError("desired must be boolean")
+            if bool(current_auto_updates.get("master_desired")) == bool(desired):
+                raise RuntimeError(
+                    "no-op master state: global pause is already "
+                    + ("off" if desired else "on")
+                )
             if desired:
-                return maintenance_restore(
+                restored = maintenance_restore(
                     self.runtime.runtime_dir,
                     systemd=systemd,
                     schedules=schedules,
                     actor=actor,
                     reason=reason,
                     expected_revision=expected_revision,
-                ).get("auto_updates") or {}
-            from packages.application.warehouse_functional_maintenance import (
-                maintenance_hold as hold_warehouse_timer,
-            )
+                )
+                final_readback = dict(restored.get("auto_updates") or {})
+            else:
+                from packages.application.warehouse_functional_maintenance import (
+                    maintenance_hold as hold_warehouse_timer,
+                )
 
-            hold_warehouse_timer(
-                self.runtime.runtime_dir,
-                disable_timer=True,
-            )
-            for unit in FORCE_OFF_TIMER_UNITS:
-                systemd.disable_now(unit)
-            maintenance_hold(
-                self.runtime.runtime_dir,
-                systemd=systemd,
-                schedules=schedules,
-                actor=actor,
-                reason=reason,
+                hold_warehouse_timer(
+                    self.runtime.runtime_dir,
+                    disable_timer=True,
+                )
+                for unit in FORCE_OFF_TIMER_UNITS:
+                    systemd.disable_now(unit)
+                held = maintenance_hold(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    actor=actor,
+                    reason=reason,
+                    expected_revision=expected_revision,
+                )
+                final_readback = dict(held.get("auto_updates") or {})
+            return _confirmed_auto_updates_update_payload(
+                final_readback,
+                action=action,
+                desired=desired,
                 expected_revision=expected_revision,
             )
         else:
             raise ValueError("unsupported auto-updates action")
-        status = maintenance_status(
-            self.runtime.runtime_dir,
-            systemd=systemd,
-            schedules=schedules,
-        )
-        return dict(status.get("auto_updates") or {})
 
     def handle_sheet_web_vitrina_auto_schedules_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         schedule_id = str(payload.get("schedule_id") or "").strip()
