@@ -676,7 +676,7 @@
           </div>
           <div id="bankFeeStatementPreview" class="finance-summary-stack" hidden>
             <div class="finance-summary-card">
-              <h4>Preview импорта комиссий</h4>
+              <h4 id="bankFeePreviewTitle">Preview импорта комиссий</h4>
               <div id="bankFeePreviewContent" class="finance-fields"></div>
               <div class="document-actions">
                 <button id="confirmBankFeeImportButton" class="primary compact" type="button">Подтвердить импорт</button>
@@ -833,6 +833,7 @@
       const financialDocumentsMessage = document.getElementById("financialDocumentsMessage");
       const financialUploadProgress = document.getElementById("financialUploadProgress");
       const bankFeeStatementPreview = document.getElementById("bankFeeStatementPreview");
+      const bankFeePreviewTitle = document.getElementById("bankFeePreviewTitle");
       const bankFeePreviewContent = document.getElementById("bankFeePreviewContent");
       const confirmBankFeeImportButton = document.getElementById("confirmBankFeeImportButton");
       const cancelBankFeeImportButton = document.getElementById("cancelBankFeeImportButton");
@@ -2492,10 +2493,12 @@
         if (!document) {
           financialRecognizedFields.innerHTML = '<div class="finance-field"><span>Статус</span><strong>Документ не выбран</strong></div>';
           financialExpenseRows.innerHTML = '<tr><td colspan="9">Расходные строки не загружены.</td></tr>';
+          renderBankFeePreview();
           return;
         }
         renderFinancialFields(document);
         renderFinancialExpenseRows(selectedFinancialLines());
+        renderBankFeePreview();
       }
 
       function renderFinancialFields(document) {
@@ -2692,24 +2695,60 @@
         }).join("");
       }
 
+      function storedBankFeePreview() {
+        const document = selectedFinancialDocument();
+        const normalized = document && document.normalized_parse ? document.normalized_parse : {};
+        const statementImport = normalized && normalized.statement_import;
+        if (
+          !document
+          || document.document_type !== "bank_fee_statement"
+          || !statementImport
+          || !Array.isArray(statementImport.matched_fee_rows)
+        ) {
+          return null;
+        }
+        return {
+          document_id: document.document_id,
+          import_preview: statementImport,
+          stored_review: true
+        };
+      }
+
+      function activeBankFeePreview() {
+        return pendingBankFeePreview || storedBankFeePreview();
+      }
+
       function renderBankFeePreview() {
-        const previewPayload = pendingBankFeePreview || null;
+        const previewPayload = activeBankFeePreview();
         const preview = previewPayload ? (previewPayload.import_preview || {}) : {};
+        const storedReview = Boolean(previewPayload && previewPayload.stored_review);
         bankFeeStatementPreview.hidden = !previewPayload;
         if (!previewPayload) {
           bankFeePreviewContent.innerHTML = "";
           confirmBankFeeImportButton.disabled = true;
+          cancelBankFeeImportButton.hidden = false;
           return;
         }
+        bankFeePreviewTitle.textContent = storedReview
+          ? "Операции выписки · выбор оператора"
+          : "Preview импорта комиссий";
+        cancelBankFeeImportButton.hidden = storedReview;
         const anchors = Array.isArray(preview.payment_anchors) ? preview.payment_anchors : [];
         const fees = Array.isArray(preview.matched_fee_rows) ? preview.matched_fee_rows : [];
         const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
         const totals = preview.fee_totals_by_currency || {};
+        const statusLabels = {
+          "new": "Новая",
+          "already_imported": "Уже импортирована",
+          "conflict": "Конфликт",
+          "needs_review": "Требует выбора"
+        };
         const feeText = fees.length
           ? fees.map((row) => {
             const operationId = String(row.semantic_operation_id || "");
             const disabled = row.import_allowed === false || row.operation_status === "already_imported";
             const checked = row.selected_by_default === true && !disabled;
+            const status = row.operation_status || "needs_review";
             const details = [
               row.operation_date || "дата не распознана",
               row.account_number || "счёт не распознан",
@@ -2717,10 +2756,10 @@
               financialCategoryLabels[row.fee_category] || row.fee_category || "Комиссия",
               formatAmount(row.amount, row.currency),
               "платёж №" + (row.matched_anchor_operation_number || "—"),
-              row.operation_status || "needs_review"
+              statusLabels[status] || status
             ].filter(Boolean).join(" · ");
             return [
-              '<label class="finance-field">',
+              '<label class="finance-field" data-bank-fee-status="' + escapeHtml(status) + '">',
               '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '"' +
                 (checked ? " checked" : "") + (disabled ? " disabled" : "") + '>',
               '<span><strong>' + escapeHtml(details) + '</strong>',
@@ -3008,11 +3047,12 @@
       }
 
       async function confirmBankFeeImport() {
-        if (!pendingBankFeePreview || !currentShipment || !currentShipment.shipment_id) {
+        const previewPayload = activeBankFeePreview();
+        if (!previewPayload || !currentShipment || !currentShipment.shipment_id) {
           setMessage(financialDocumentsMessage, "Нет preview для подтверждения.", "error");
           return;
         }
-        const documentId = pendingBankFeePreview.document_id || "";
+        const documentId = previewPayload.document_id || "";
         if (!documentId) {
           setMessage(financialDocumentsMessage, "Preview не связан с документом.", "error");
           return;
