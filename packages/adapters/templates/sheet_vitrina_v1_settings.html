@@ -461,7 +461,7 @@
         <div class="auto-updates-master">
           <div>
             <h3 style="margin: 0 0 6px;">Общее разрешение автообновлений</h3>
-            <div id="autoUpdatesOverallStatus" class="pill warning">Состояние не подтверждено</div>
+            <div id="autoUpdatesOverallStatus" class="pill warning">Состояние неизвестно</div>
             <p id="autoUpdatesMasterHint" class="muted">Читаем canonical maintenance status...</p>
           </div>
           <button id="autoUpdatesMasterButton" class="auto-update-toggle" type="button" disabled>Изменить</button>
@@ -2221,7 +2221,7 @@
         if (state === "suspended_by_master" || process.suspended_by_master) return "Общая пауза";
         if (state === "off") return "Выключено";
         if (state === "error") return "Остановлено из-за ошибки";
-        return "Состояние не подтверждено";
+        return "Состояние неизвестно";
       }
 
       function normalizeVitrinaSchedulePolicy(policy) {
@@ -2372,32 +2372,51 @@
         autoUpdatesState = payload || {};
         const processes = Array.isArray(autoUpdatesState.processes) ? autoUpdatesState.processes : [];
         const masterDesired = Boolean(autoUpdatesState.master_desired);
-        autoUpdatesOverallStatus.textContent = autoUpdatesState.overall_status || "Состояние не подтверждено";
+        autoUpdatesOverallStatus.textContent = autoUpdatesState.overall_status || "Состояние неизвестно";
         autoUpdatesOverallStatus.className = "pill " + (
-          !masterDesired ? "warning" :
-          (autoUpdatesState.drift_processes || []).length || (autoUpdatesState.unknown_processes || []).length ? "warning" : "success"
+          String(autoUpdatesState.overall_status_code || "") === "healthy" ? "success" : "warning"
         );
-        autoUpdatesMasterHint.textContent = masterDesired
-          ? "Общая пауза снята. Фактически запускаются только процессы с desired=ON."
-          : "Общая пауза включена. Индивидуальные состояния сохранены для безопасного resume.";
+        autoUpdatesMasterHint.textContent = autoUpdatesState.overall_explanation || (
+          masterDesired
+            ? "Общая пауза снята. Проверяем фактический runtime readback."
+            : "Общая пауза включена. Индивидуальные состояния сохранены."
+        );
         autoUpdatesMasterButton.textContent = masterDesired ? "Поставить на паузу" : "Снять общую паузу";
         autoUpdatesMasterButton.disabled = !autoUpdatesState.revision;
         autoUpdatesRows.innerHTML = processes.length ? processes.map((process) => {
           const desiredKnown = typeof process.desired === "boolean";
           const canManage = String(process.control_capability || "manage") === "manage";
-          const desiredText = desiredKnown ? (process.desired ? "Desired: ON" : "Desired: OFF") : "Desired: UNKNOWN";
-          const actualText = "Actual: " + autoUpdateLifecycleLabel(process);
-          const futureText = !masterDesired
-            ? (process.desired ? "Будет включено после снятия общей паузы" : "Останется выключено")
-            : (process.drift_status === "matched" ? "Desired и actual совпадают" : "Есть расхождение desired/actual");
-          const timer = process.timer || {};
-          const properties = timer.properties || {};
+          const desiredText = desiredKnown
+            ? (process.desired ? "Должно работать: да" : "Должно работать: нет")
+            : "Должно работать: неизвестно";
+          const actualText = "Фактически: " + autoUpdateLifecycleLabel(process);
+          const statusCode = String(process.operator_status_code || "unknown");
+          const statusText = process.operator_status || "Состояние неизвестно";
+          const statusExplanation = process.operator_explanation || "Недостаточно runtime evidence.";
           const schedule = process.runtime_schedule || {};
           const components = process.component_states || process.components || {};
-          const componentsText = Object.keys(components).map((key) => {
-            const component = components[key] || {};
-            return key + ": desired=" + autoUpdateValue(component.desired) + ", actual=" + autoUpdateValue(component.actual);
-          }).join(" · ");
+          const readonly = components.readonly_sync || {};
+          const worker = components.worker || {};
+          const budget = process.budget || {};
+          const schedulerFreshness = process.process_key === "autoanswers"
+            ? (process.fresh_scheduler_tick ? "Свежий scheduler tick" : "Свежего scheduler tick нет")
+            : autoUpdateValue(schedule.last_scheduler_tick_at || process.last_run);
+          const autoanswersDetails = process.process_key === "autoanswers"
+            ? '<dt>Режим</dt><dd>' + escapeHtml(autoUpdateValue(process.business_mode)) + '</dd>' +
+              '<dt>Read-only sync</dt><dd>должен: ' + escapeHtml(autoUpdateValue(readonly.desired)) +
+                ' · фактически: ' + escapeHtml(autoUpdateValue(readonly.actual)) + '</dd>' +
+              '<dt>Worker</dt><dd>должен: ' + escapeHtml(autoUpdateValue(worker.desired)) +
+                ' · фактически: ' + escapeHtml(autoUpdateValue(worker.actual)) + '</dd>' +
+              '<dt>Lifecycle</dt><dd>' + escapeHtml(autoUpdateValue(process.lifecycle_state)) + '</dd>' +
+              '<dt>Policy / transition</dt><dd>revision ' + escapeHtml(autoUpdateValue(schedule.policy_epoch)) +
+                ' · run ' + escapeHtml(autoUpdateValue(schedule.transition_run_id)) + '</dd>' +
+              '<dt>Бюджет</dt><dd>' + escapeHtml(autoUpdateValue(budget.budget_state)) +
+                ' · подтверждённый расход $' + escapeHtml(Number(budget.confirmed_actual_usd || 0).toFixed(2)) + '</dd>' +
+              '<dt>Консервативные holds</dt><dd>$' + escapeHtml(Number(budget.uncertainty_hold_usd || 0).toFixed(2)) +
+                ' · это не подтверждённый расход · ' + escapeHtml(autoUpdateValue(budget.hold_explanation)) + '</dd>' +
+              '<dt>Неоформленная неопределённость</dt><dd>' +
+                escapeHtml(autoUpdateValue(budget.unresolved_uncertainty_count)) + '</dd>'
+            : "";
           const control = canManage
             ? '<button class="auto-update-toggle" type="button" data-auto-update-toggle="' + escapeHtml(process.process_key) + '"' +
               (!desiredKnown ? " disabled" : "") + '>' + escapeHtml(process.desired ? "Выключить" : "Включить") + '</button>'
@@ -2406,21 +2425,20 @@
             '<div class="auto-update-card-header"><div><h3>' + escapeHtml(process.display_name) + '</h3>' +
             '<p class="muted">' + escapeHtml(autoUpdateDescription(process.process_key)) + '</p></div>' +
             control + '</div>' +
-            '<div class="auto-update-statuses"><span class="pill">' + escapeHtml(desiredText) + '</span>' +
+            '<div class="auto-update-statuses"><span class="pill ' + (statusCode === "healthy" ? "success" : "warning") + '">' + escapeHtml(statusText) + '</span>' +
+            '<span class="pill">' + escapeHtml(desiredText) + '</span>' +
             '<span class="pill ' + (process.actual ? "success" : "warning") + '">' + escapeHtml(actualText) + '</span>' +
-            '<span class="pill ' + (process.drift_status === "matched" ? "success" : "warning") + '">' + escapeHtml(process.drift_status || "unknown") + '</span></div>' +
-            '<p class="message ' + (process.drift_status === "matched" || !masterDesired ? "" : "warning") + '">' + escapeHtml(futureText) + '</p>' +
+            '</div>' +
+            '<p class="message ' + (["healthy", "user_pause", "global_pause"].includes(statusCode) ? "" : "warning") + '">' + escapeHtml(statusExplanation) + '</p>' +
             (!canManage ? '<div class="auto-update-control-location"><span class="message">Управление: ' + escapeHtml(process.control_location || "функциональный раздел") + '.</span><a class="button-link" href="' + escapeHtml(config.vitrina_path || "/sheet-vitrina-v1/vitrina") + '">Открыть функциональный раздел</a></div>' : "") +
             '<dl class="auto-update-meta">' +
-            '<dt>Владелец</dt><dd>' + escapeHtml(autoUpdateValue(process.control_owner)) + '</dd>' +
-            '<dt>Источник desired</dt><dd>' + escapeHtml(autoUpdateValue(process.desired_source)) + '</dd>' +
-            '<dt>Последний запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.last_run)) + '</dd>' +
-            '<dt>Последний успешный</dt><dd>' + escapeHtml(autoUpdateValue(process.last_success)) + '</dd>' +
+            '<dt>Последний успешный цикл</dt><dd>' + escapeHtml(autoUpdateValue(process.last_success)) + '</dd>' +
             '<dt>Следующий запуск</dt><dd>' + escapeHtml(autoUpdateValue(process.next_run)) + '</dd>' +
+            '<dt>Свежесть scheduler</dt><dd>' + escapeHtml(schedulerFreshness) + '</dd>' +
+            '<dt>Причина паузы/остановки</dt><dd>' + escapeHtml(autoUpdateValue(process.stop_reason)) + '</dd>' +
             '<dt>Последняя ошибка</dt><dd>' + escapeHtml(autoUpdateValue(process.last_error)) + '</dd>' +
-            '<dt>Расписание</dt><dd>' + escapeHtml(autoUpdateValue(schedule.schedule || schedule.enabled_ids || properties.NextElapseUSecRealtime || "repo-owned timer")) + '</dd>' +
-            '<dt>Компоненты</dt><dd>' + escapeHtml(autoUpdateValue(componentsText)) + '</dd>' +
-            '<dt>Evidence</dt><dd>' + escapeHtml(autoUpdateValue(process.provenance)) + '</dd>' +
+            '<dt>Источник подтверждения</dt><dd>' + escapeHtml(autoUpdateValue(process.provenance)) + '</dd>' +
+            autoanswersDetails +
             '</dl>' + (process.process_key === "vitrina_refresh" ? vitrinaScheduleEditorHtml() : "") + '</article>';
         }).join("") : '<p class="message warning">Canonical owner policy не вернула allowlisted процессы.</p>';
         Array.from(autoUpdatesRows.querySelectorAll("[data-auto-update-toggle]")).forEach((button) => {
@@ -2435,7 +2453,8 @@
           actor: autoUpdatesState.actor,
           reason: autoUpdatesState.reason,
           unknown_processes: autoUpdatesState.unknown_processes || [],
-          drift_processes: autoUpdatesState.drift_processes || []
+          drift_processes: autoUpdatesState.drift_processes || [],
+          processes
         }, null, 2);
       }
 

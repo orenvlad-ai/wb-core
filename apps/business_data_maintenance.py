@@ -700,6 +700,146 @@ def _parse_timestamp(value: Any) -> datetime | None:
         return None
 
 
+def _autoanswers_budget_monitor_state(
+    conn: sqlite3.Connection,
+    *,
+    tables: set[str],
+) -> dict[str, Any]:
+    """Read budget evidence without initializing schema or changing lifecycle."""
+
+    required = {
+        "sheet_vitrina_v1_wb_autoanswers_budget_reservations",
+        "sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds",
+        "sheet_vitrina_v1_wb_autoanswers_cost_events",
+        "sheet_vitrina_v1_wb_autoanswers_failed_cost_events",
+        "sheet_vitrina_v1_wb_autoanswers_budget_adjustments",
+        "sheet_vitrina_v1_wb_autoanswer_jobs",
+    }
+    missing = sorted(required - tables)
+    if missing:
+        return {
+            "budget_state": "unknown",
+            "confirmed_actual_usd": None,
+            "active_reserved_usd": None,
+            "uncertainty_hold_usd": None,
+            "uncertainty_hold_count": None,
+            "unresolved_uncertainty_count": None,
+            "last_budget_evidence_at": None,
+            "hold_explanation": (
+                "Бюджет не подтверждён: отсутствуют runtime-таблицы "
+                + ", ".join(missing)
+            ),
+        }
+    reservations = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN status='settled' THEN actual_cost_usd ELSE 0 END),0),
+            COALESCE(SUM(CASE WHEN status='reserved' THEN reserved_usd ELSE 0 END),0),
+            MAX(updated_at)
+        FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+        """
+    ).fetchone()
+    cost_events = conn.execute(
+        """
+        SELECT COALESCE(SUM(actual_cost_usd),0),MAX(incurred_at)
+        FROM sheet_vitrina_v1_wb_autoanswers_cost_events
+        """
+    ).fetchone()
+    failed_cost_events = conn.execute(
+        """
+        SELECT COALESCE(SUM(actual_cost_usd),0),MAX(incurred_at)
+        FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events
+        """
+    ).fetchone()
+    adjustments = conn.execute(
+        """
+        SELECT COALESCE(SUM(amount_usd),0),MAX(effective_at)
+        FROM sheet_vitrina_v1_wb_autoanswers_budget_adjustments
+        """
+    ).fetchone()
+    holds = conn.execute(
+        """
+        SELECT COALESCE(SUM(upper_bound_usd),0),COUNT(*),MAX(created_at)
+        FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+        """
+    ).fetchone()
+    unresolved = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+        JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+          ON j.processing_key=r.processing_key
+        WHERE r.provider_call_started_at IS NOT NULL
+          AND r.status='released'
+          AND CAST(COALESCE(r.actual_cost_usd,'0') AS REAL)=0
+          AND (
+                j.last_error_code IN ('node_timeout','node_invalid_json')
+                OR j.last_error_code LIKE 'node_process_exit_%'
+              )
+          AND NOT EXISTS(
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_cost_events c
+                WHERE c.processing_key=r.processing_key
+              )
+          AND NOT EXISTS(
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events f
+                WHERE f.processing_key=r.processing_key
+              )
+          AND NOT EXISTS(
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                WHERE h.processing_key=r.processing_key
+              )
+        """
+    ).fetchone()[0]
+    confirmed_actual = sum(
+        float(value or 0)
+        for value in (
+            reservations[0],
+            cost_events[0],
+            failed_cost_events[0],
+            adjustments[0],
+        )
+    )
+    hold_total = float(holds[0] or 0)
+    hold_count = int(holds[1] or 0)
+    unresolved_count = int(unresolved or 0)
+    budget_state = (
+        "unknown"
+        if unresolved_count
+        else "conservative_unverified"
+        if hold_count
+        else "confirmed"
+    )
+    evidence_times = [
+        str(value)
+        for value in (
+            reservations[2],
+            cost_events[1],
+            failed_cost_events[1],
+            adjustments[1],
+            holds[2],
+        )
+        if value
+    ]
+    return {
+        "budget_state": budget_state,
+        "confirmed_actual_usd": round(confirmed_actual, 6),
+        "active_reserved_usd": round(float(reservations[1] or 0), 6),
+        "uncertainty_hold_usd": round(hold_total, 6),
+        "uncertainty_hold_count": hold_count,
+        "unresolved_uncertainty_count": unresolved_count,
+        "last_budget_evidence_at": max(evidence_times) if evidence_times else None,
+        "hold_explanation": (
+            "Консервативный hold — верхняя граница возможного расхода, "
+            "а не подтверждённое списание."
+            if hold_count
+            else "Консервативных holds нет."
+        ),
+    }
+
+
 def _autoanswers_feature_state(runtime_dir: Path) -> dict[str, Any]:
     database = runtime_dir / "registry_upload_runtime.sqlite3"
     if not database.is_file():
@@ -764,6 +904,7 @@ def _autoanswers_feature_state(runtime_dir: Path) -> dict[str, Any]:
         last_sync = conn.execute(
             "SELECT MAX(last_success_at) FROM sheet_vitrina_v1_wb_sync_state"
         ).fetchone()[0]
+        budget = _autoanswers_budget_monitor_state(conn, tables=tables)
     lifecycle = _load_json_object(runtime_dir / ".wb-autoanswers-lifecycle.json") or {}
     return {
         "mode": (
@@ -797,6 +938,7 @@ def _autoanswers_feature_state(runtime_dir: Path) -> dict[str, Any]:
         "last_sync_at": str(last_sync) if last_sync else None,
         "stop_reason": str(runtime["stop_reason"] or "") if runtime is not None else "",
         "lifecycle": lifecycle,
+        "budget": budget,
     }
 
 
@@ -993,10 +1135,9 @@ def _autoanswers_process_actual_state(
         "components": components,
         "stop_reason": stop_reason,
         "budget_state": (
-            "unknown"
-            if str(feature.get("stop_reason") or "") == "budget_state_unknown"
-            else "confirmed"
+            str(dict(feature.get("budget") or {}).get("budget_state") or "unknown")
         ),
+        "budget": dict(feature.get("budget") or {}),
         "fresh_scheduler_tick": fresh_tick,
         "provenance": "feature_settings+systemd+lifecycle",
     }
@@ -1108,13 +1249,72 @@ def _process_actual_state(
     }
 
 
+def _with_operator_process_status(
+    process: Mapping[str, Any],
+    *,
+    master_desired: bool,
+) -> dict[str, Any]:
+    result = dict(process)
+    desired = result.get("desired")
+    lifecycle = str(result.get("lifecycle_state") or "")
+    drift = str(result.get("drift_status") or "")
+    stop_reason = str(result.get("stop_reason") or "")
+    if not master_desired:
+        code = "global_pause"
+    elif desired is None:
+        code = "unknown"
+    elif desired is False or lifecycle == "off":
+        code = "user_pause"
+    elif stop_reason == "worker_unavailable" or (
+        result.get("process_key") == "autoanswers"
+        and desired is True
+        and result.get("fresh_scheduler_tick") is False
+        and lifecycle != "starting"
+    ):
+        code = "stale"
+    elif drift == "drift":
+        code = "drift"
+    elif lifecycle == "error" or bool(result.get("last_error")):
+        code = "process_error"
+    elif lifecycle == "starting":
+        code = "starting"
+    elif result.get("actual") is True and drift == "matched":
+        code = "healthy"
+    else:
+        code = "unknown"
+    labels = {
+        "healthy": "Работает штатно",
+        "starting": "Запускается",
+        "user_pause": "Приостановлено пользователем",
+        "global_pause": "Приостановлено общей паузой",
+        "drift": "Есть расхождение",
+        "process_error": "Ошибка процесса",
+        "stale": "Нет свежего подтверждения",
+        "unknown": "Состояние неизвестно",
+    }
+    explanations = {
+        "healthy": "Desired и actual совпадают; runtime readback свежий.",
+        "starting": "Запуск запрошен, ожидается первое свежее подтверждение.",
+        "user_pause": "Процесс выключен владельцем в функциональном разделе.",
+        "global_pause": "Desired сохранён, но выполнение удерживается общей паузой.",
+        "drift": "Desired и actual не совпадают.",
+        "process_error": "Runtime сообщил ошибку процесса.",
+        "stale": "Scheduler tick или runtime readback устарел.",
+        "unknown": "Недостаточно evidence для подтверждения состояния.",
+    }
+    result["operator_status_code"] = code
+    result["operator_status"] = labels[code]
+    result["operator_explanation"] = explanations[code]
+    return result
+
+
 def owner_policy_readback(
     runtime_dir: Path,
     *,
     status: Mapping[str, Any],
 ) -> dict[str, Any]:
     policy = load_or_initialize_owner_policy(runtime_dir)
-    processes = [
+    raw_processes = [
         _process_actual_state(
             spec,
             status=status,
@@ -1123,22 +1323,56 @@ def owner_policy_readback(
         )
         for spec in PROCESS_SPECS
     ]
+    processes = [
+        _with_operator_process_status(
+            item,
+            master_desired=bool(policy.get("master_desired")),
+        )
+        for item in raw_processes
+    ]
     unknown = [item["process_key"] for item in processes if item["desired"] is None]
     drift = [
         item["process_key"]
         for item in processes
         if item["drift_status"] == "drift"
     ]
+    status_codes = {str(item.get("operator_status_code") or "") for item in processes}
     if not bool(policy.get("master_desired")):
-        overall = "Общая пауза включена"
-    elif unknown:
-        overall = "Состояние не подтверждено"
-    elif drift:
-        overall = "Есть расхождение или ошибка"
-    elif any(item["desired"] is False for item in processes):
-        overall = "Часть обновлений выключена"
+        overall_code = "global_pause"
+    elif "process_error" in status_codes:
+        overall_code = "process_error"
+    elif "drift" in status_codes:
+        overall_code = "drift"
+    elif "stale" in status_codes:
+        overall_code = "stale"
+    elif "starting" in status_codes:
+        overall_code = "starting"
+    elif "unknown" in status_codes or unknown:
+        overall_code = "unknown"
+    elif "user_pause" in status_codes:
+        overall_code = "user_pause"
     else:
-        overall = "Все запланированные обновления работают"
+        overall_code = "healthy"
+    overall_labels = {
+        "healthy": "Работает штатно",
+        "starting": "Запускается",
+        "user_pause": "Приостановлено пользователем",
+        "global_pause": "Приостановлено общей паузой",
+        "drift": "Есть расхождение",
+        "process_error": "Ошибка процесса",
+        "stale": "Нет свежего подтверждения",
+        "unknown": "Состояние неизвестно",
+    }
+    overall_explanations = {
+        "healthy": "Все включённые процессы подтверждены runtime readback.",
+        "starting": "Один или несколько процессов ещё подтверждают запуск.",
+        "user_pause": "Часть процессов выключена в своём функциональном разделе.",
+        "global_pause": "Общая пауза временно удерживает все автоматические запуски.",
+        "drift": "Desired и фактическое состояние расходятся хотя бы у одного процесса.",
+        "process_error": "Хотя бы один процесс сообщил ошибку выполнения.",
+        "stale": "Для включённого процесса нет свежего scheduler/runtime подтверждения.",
+        "unknown": "Недостаточно runtime evidence для уверенного статуса.",
+    }
     return {
         "schema_version": POLICY_SCHEMA_VERSION,
         "master_desired": bool(policy.get("master_desired")),
@@ -1148,7 +1382,9 @@ def owner_policy_readback(
         "captured_at": str(status.get("captured_at") or ""),
         "actor": str(policy.get("actor") or ""),
         "reason": str(policy.get("reason") or ""),
-        "overall_status": overall,
+        "overall_status_code": overall_code,
+        "overall_status": overall_labels[overall_code],
+        "overall_explanation": overall_explanations[overall_code],
         "unknown_processes": unknown,
         "drift_processes": drift,
         "processes": processes,
@@ -1277,7 +1513,9 @@ def maintenance_status(
             "schema_version": POLICY_SCHEMA_VERSION,
             "master_desired": False,
             "revision": 0,
-            "overall_status": "Состояние не подтверждено",
+            "overall_status_code": "unknown",
+            "overall_status": "Состояние неизвестно",
+            "overall_explanation": "Owner policy ещё не инициализирована.",
             "unknown_processes": [str(item["key"]) for item in PROCESS_SPECS],
             "drift_processes": [],
             "processes": [],
