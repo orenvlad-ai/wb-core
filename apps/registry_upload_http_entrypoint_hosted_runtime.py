@@ -5245,7 +5245,18 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             payload,
             success_keys=["contract_name", "contract_version", "status", "warehouse", "balances", "documents"],
         )
-        if evaluation["ok"] and str((payload.get("warehouse") or {}).get("warehouse_key") or "") != "ff":
+        warehouse = payload.get("warehouse")
+        if result.get("body_truncated"):
+            warehouse = _object_from_truncated_json(
+                str(result.get("body_excerpt") or ""),
+                key="warehouse",
+            )
+        warehouse_key = (
+            str(warehouse.get("warehouse_key") or "")
+            if isinstance(warehouse, Mapping)
+            else ""
+        )
+        if evaluation["ok"] and warehouse_key != "ff":
             evaluation["ok"] = False
             evaluation["detail"] = "expected canonical FF warehouse detail"
         return evaluation
@@ -5387,6 +5398,19 @@ def _synthetic_payload_from_truncated_json(body: str) -> dict[str, Any]:
         match.group(1): True
         for match in re.finditer(r'"([^"\\]+)"\s*:', body)
     }
+
+
+def _object_from_truncated_json(body: str, *, key: str) -> Mapping[str, Any] | None:
+    """Decode one complete object value retained inside a bounded JSON prefix."""
+
+    marker = re.search(rf'"{re.escape(key)}"\s*:\s*', body)
+    if marker is None:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(body, marker.end())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, Mapping) else None
 
 
 def _collect_remote_loopback_surface(
