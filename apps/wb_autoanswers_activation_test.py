@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from apps.wb_autoanswers_activation import (
     _capacity_heartbeat,
@@ -55,6 +55,19 @@ class ActivationTest(unittest.TestCase):
             with redirect_stderr(output), _capacity_heartbeat():
                 time.sleep(0.03)
         self.assertIn("backup capacity verification in progress", output.getvalue())
+
+    def test_integrity_check_closes_snapshot_before_capacity_readback(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = ("ok",)
+        with patch(
+            "apps.wb_autoanswers_activation.sqlite3.connect",
+            return_value=connection,
+        ):
+            self.assertEqual(
+                _integrity_check(self.runtime_dir / "snapshot.sqlite3"),
+                "ok",
+            )
+        connection.close.assert_called_once_with()
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
     def test_prepare_deploy_migrates_with_verified_backup_while_force_off(self, _dependency: object) -> None:

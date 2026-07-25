@@ -9,7 +9,7 @@ return the persisted master switch to OFF.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -122,7 +122,9 @@ def _compress_verified_backup(source: Path) -> dict[str, Any]:
     compressed = source.with_suffix(source.suffix + ".zst")
     manifest = compressed.with_suffix(compressed.suffix + ".manifest.json")
     source_sha256 = _sha256_file(source)
-    with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=60) as conn:
+    with closing(
+        sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=60)
+    ) as conn:
         integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
     if integrity != "ok":
         raise RuntimeError("schema-v1 backup failed integrity_check before compression")
@@ -258,7 +260,9 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _integrity_check(path: Path) -> str:
-    with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=60) as conn:
+    with closing(
+        sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=60)
+    ) as conn:
         return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
 
@@ -547,8 +551,10 @@ def _create_current_compressed_schema_backup(
             raise RuntimeError("insufficient root-volume capacity for coherent replacement backup")
         source_uri = f"file:{database.resolve()}?mode=ro"
         try:
-            with sqlite3.connect(source_uri, uri=True, timeout=60) as source:
-                with sqlite3.connect(staging, timeout=60) as target:
+            with closing(
+                sqlite3.connect(source_uri, uri=True, timeout=60)
+            ) as source:
+                with closing(sqlite3.connect(staging, timeout=60)) as target:
                     source.backup(target, pages=4096)
             os.chmod(staging, 0o600)
             integrity = _integrity_check(staging)
@@ -775,7 +781,9 @@ def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
     }
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return evidence
-    with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=30) as conn:
+    with closing(
+        sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=30)
+    ) as conn:
         migrations = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_autoanswers_schema_migrations'"
         ).fetchone()
