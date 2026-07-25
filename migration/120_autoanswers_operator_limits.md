@@ -36,6 +36,13 @@ then reads it again. The response returns the new revision and exact
 matches. A concurrent policy or settings change fails closed with a Russian
 refresh-and-retry message.
 
+A limit-only update never invokes lifecycle reconciliation and never disables,
+enables or restarts the worker timer. Mode changes keep the existing lifecycle
+reconciliation contract. This separation lets the already-running worker read
+the new global limits on its next ordinary tick and lets the HTTP response
+return the exact persisted readback without waiting for an active service to
+stop.
+
 The modal is the single edit surface. It is opened from the visible
 `Настроить лимиты` action, the legacy technical link or the contextual
 `Увеличить лимит` action for hourly/daily/monthly budget pauses. It displays

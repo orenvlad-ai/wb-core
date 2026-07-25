@@ -1701,6 +1701,15 @@ class RegistryUploadHttpEntrypoint:
         requested_limit_fields = AUTOANSWERS_OPERATOR_LIMIT_FIELDS.intersection(
             payload.keys()
         )
+        limit_only_update = bool(requested_limit_fields) and not any(
+            key in payload
+            for key in (
+                "selector_state",
+                "master_enabled",
+                "mode",
+                "warning_ratio",
+            )
+        )
         if isinstance(payload.get("expected_policy_epoch"), bool):
             raise ValueError("Ожидаемый policy epoch должен быть целым числом")
         try:
@@ -1844,25 +1853,31 @@ class RegistryUploadHttpEntrypoint:
                 )
         if reconciliation is None:
             reconciliation = self.autoanswers_repository.reconciliation_status()
-        try:
-            lifecycle = dict(
-                self._autoanswers_lifecycle_controller().reconcile(
-                    suspended_by_master=suspended_by_master,
-                    actor=actor_id,
-                    reason="feature-owned Autoanswers settings mutation",
-                    transition_run_id=(
-                        str(reconciliation.get("transition_run_id") or "")
-                        if reconciliation
-                        else None
-                    ),
+        if limit_only_update:
+            # Global limits are consumed from the server-owned settings row on
+            # every ordinary worker tick. Restarting the timer here would make
+            # a budget edit interrupt the active run and delay exact readback.
+            lifecycle = dict(self._autoanswers_lifecycle_readback())
+        else:
+            try:
+                lifecycle = dict(
+                    self._autoanswers_lifecycle_controller().reconcile(
+                        suspended_by_master=suspended_by_master,
+                        actor=actor_id,
+                        reason="feature-owned Autoanswers settings mutation",
+                        transition_run_id=(
+                            str(reconciliation.get("transition_run_id") or "")
+                            if reconciliation
+                            else None
+                        ),
+                    )
                 )
-            )
-        except Exception as exc:
-            raise AutoanswersRuntimeError(
-                "Autoanswers settings were saved, but runtime lifecycle failed: "
-                + str(exc),
-                code="lifecycle_reconciliation_failed",
-            ) from exc
+            except Exception as exc:
+                raise AutoanswersRuntimeError(
+                    "Autoanswers settings were saved, but runtime lifecycle failed: "
+                    + str(exc),
+                    code="lifecycle_reconciliation_failed",
+                ) from exc
         lifecycle["master_policy"] = master_policy
         if str(lifecycle.get("drift_status") or "") in {"drift", "unknown"}:
             raise AutoanswersRuntimeError(
