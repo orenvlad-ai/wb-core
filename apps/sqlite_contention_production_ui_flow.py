@@ -384,7 +384,7 @@ def _run_sqlite_contention_ui_flow(
 
         supplier_url = (
             normalized_base_url
-            + "/sheet-vitrina-v1/supplier?shipment_id="
+            + "/sheet-vitrina-v1/supplier?embedded=operator&shipment_id="
             + quote(target_id, safe="")
             + "&tab=documents"
         )
@@ -403,6 +403,9 @@ def _run_sqlite_contention_ui_flow(
         ).wait_for(timeout=60_000)
         page.locator("#financialDocumentsTabButton").click()
         page.locator("#financialDocumentsPanel:not([hidden])").wait_for(
+            timeout=60_000
+        )
+        page.locator("#operatorDocumentsArea:not([hidden])").wait_for(
             timeout=60_000
         )
         page.locator("#financialDocumentFileInput").set_input_files(
@@ -429,8 +432,9 @@ def _run_sqlite_contention_ui_flow(
         )
         logical_group_text = selectable_groups.first.inner_text()
         normalized_group_text = " ".join(logical_group_text.split())
+        normalized_group_text_casefold = normalized_group_text.casefold()
         _assert(
-            "платёж №9" in normalized_group_text,
+            "платёж №9" in normalized_group_text_casefold,
             "26GN582 preview is not anchored to payment #9",
         )
         _assert(
@@ -439,12 +443,12 @@ def _run_sqlite_contention_ui_flow(
             "26GN582 logical fee total must equal 13 525.89 RUB",
         )
         _assert(
-            "2 банковских списания" in normalized_group_text,
+            "2 банковских списания" in normalized_group_text_casefold,
             "26GN582 logical fee group must contain two atomic rows",
         )
         _assert(
-            "платёж №7" not in normalized_group_text
-            and "платёж №11" not in normalized_group_text,
+            "платёж №7" not in normalized_group_text_casefold
+            and "платёж №11" not in normalized_group_text_casefold,
             "already assigned operations #7/#11 were offered as new",
         )
         bank_preview_screenshot = (

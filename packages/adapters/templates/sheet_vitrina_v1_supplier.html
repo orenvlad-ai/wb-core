@@ -1095,6 +1095,7 @@
             bank_transfer_fee: "Комиссия за перевод / SWIFT",
             currency_control_fee: "Комиссия валютного контроля",
             currency_control_vat: "НДС за валютный контроль",
+            bank_fee_group: "Банковские комиссии",
             other_bank_fee: "Банковская комиссия"
           };
           const priceConformityReasonLabels = {
@@ -3037,6 +3038,7 @@
             const batchResults = Array.isArray(batchPayload.results)
               ? batchPayload.results
               : [batchPayload];
+            let pendingConfirmedBankFeePreview = null;
             for (const result of batchResults) {
               if (!result.readback_confirmed) {
                 throw new Error("Сервер не подтвердил документ в целевой поставке");
@@ -3045,15 +3047,16 @@
               confirmedResults.push(result);
               lastDocumentId = result.document_id || lastDocumentId;
               if (result.preview_required && result.document_id) {
-                pendingBankFeePreview = result;
-                dismissedBankFeePreviewDocumentId = "";
-                storedBankFeePreviewOpen = false;
-                renderBankFeePreview();
+                pendingConfirmedBankFeePreview = result;
               }
             }
             await loadFinancialDocuments(lastDocumentId ? { selectedDocumentId: lastDocumentId } : undefined);
             confirmedResults.forEach((result) => {
-              if (!financialDocuments.some((document) => (
+              const isInactiveDurablePreview = (
+                result.durable_preview === true
+                && result.active_saved === false
+              );
+              if (!isInactiveDurablePreview && !financialDocuments.some((document) => (
                 document.document_id === result.document_id
               ))) {
                 throw new Error(
@@ -3062,6 +3065,12 @@
               }
             });
             await refreshCurrentShipmentCostProof();
+            if (pendingConfirmedBankFeePreview) {
+              pendingBankFeePreview = pendingConfirmedBankFeePreview;
+              dismissedBankFeePreviewDocumentId = "";
+              storedBankFeePreviewOpen = false;
+              renderBankFeePreview();
+            }
           }
           if (errorCount) {
             setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " успешно, " + String(errorCount) + " с ошибкой.", "error");

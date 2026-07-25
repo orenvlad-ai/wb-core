@@ -249,8 +249,8 @@ def _assert_cny_ledger_payment_anchors() -> None:
         args = argparse.Namespace(
             shipment_id="shipment",
             statement_document_id="statement",
-            commission_amount=["20000", "58113.66"],
-            expected_logical_fee_count=4,
+            commission_amount=["4788.83", "20000", "58113.66"],
+            expected_logical_fee_count=2,
             expected_atomic_fee_count=5,
             expected_bank_total="97519.20",
         )
@@ -264,11 +264,11 @@ def _assert_cny_ledger_payment_anchors() -> None:
                 shipment=shipment,
             )
         if (
-            plan.get("amount") != "78113.66"
-            or plan.get("logical_fee_count") != 4
+            plan.get("amount") != "82902.49"
+            or plan.get("logical_fee_count") != 2
             or plan.get("atomic_fee_count") != 5
             or plan.get("total_rub") != "97519.20"
-            or len(plan.get("new_atomic_operation_ids") or []) != 2
+            or len(plan.get("new_atomic_operation_ids") or []) != 3
             or plan.get("atomic_business_dates")
             != ["2026-07-20", "2026-07-21"]
         ):

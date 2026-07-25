@@ -818,9 +818,28 @@ def _assert_http_routes_and_order_integration() -> None:
                 if str(item.get("operation_status") or "") == "new"
                 and bool(item.get("import_allowed"))
             ]
-            if len(selected_logical_fee_ids) != 3:
+            logical_fee_groups = list(
+                import_preview.get("logical_fee_groups") or []
+            )
+            payment_group = (
+                logical_fee_groups[0]
+                if len(logical_fee_groups) == 1
+                else {}
+            )
+            if (
+                len(selected_logical_fee_ids) != 1
+                or payment_group.get("amount") != "16581.05"
+                or payment_group.get("atomic_count") != 3
+                or set(payment_group.get("fee_categories") or [])
+                != {
+                    "bank_transfer_fee",
+                    "currency_control_fee",
+                    "currency_control_vat",
+                }
+            ):
                 raise AssertionError(
-                    "bank statement preview must expose three unselected logical fee groups: "
+                    "bank statement preview must expose one complete unselected "
+                    "payment-anchored logical fee group: "
                     f"{import_preview}"
                 )
             replay_ledger = entrypoint.cny_ledger_block.replay_ledger
