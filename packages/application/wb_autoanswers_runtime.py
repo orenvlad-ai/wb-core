@@ -580,6 +580,8 @@ class AutoanswersRepository:
 
     def ensure_schema(self, *, schema_lock_held: bool = False) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        if self._schema_version_is_applied():
+            return
         if schema_lock_held:
             self._ensure_schema_locked()
             return
@@ -588,7 +590,8 @@ class AutoanswersRepository:
             os.chmod(lock_path, 0o600)
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                self._ensure_schema_locked()
+                if not self._schema_version_is_applied():
+                    self._ensure_schema_locked()
             finally:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
@@ -602,9 +605,14 @@ class AutoanswersRepository:
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
             self._migrate_schema_v7(conn)
-            conn.execute(
-                "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
-                (SCHEMA_VERSION, iso_utc(self._now())),
+            applied_at = iso_utc(self._now())
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(
+                    version,applied_at
+                ) VALUES(?,?)
+                """,
+                [(version, applied_at) for version in range(1, SCHEMA_VERSION + 1)],
             )
             conn.execute(
                 """
@@ -643,18 +651,25 @@ class AutoanswersRepository:
             return False
         uri = f"file:{self.db_path.resolve()}?mode=ro"
         try:
-            with sqlite3.connect(uri, uri=True, timeout=10) as conn:
+            with closing(sqlite3.connect(uri, uri=True, timeout=10)) as conn:
                 table = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     ("sheet_vitrina_v1_wb_autoanswers_schema_migrations",),
                 ).fetchone()
                 if table is None:
                     return False
-                row = conn.execute(
-                    "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=?",
-                    (SCHEMA_VERSION,),
-                ).fetchone()
-                return row is not None
+                versions = {
+                    int(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT version
+                        FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations
+                        WHERE version BETWEEN 1 AND ?
+                        """,
+                        (SCHEMA_VERSION,),
+                    ).fetchall()
+                }
+                return versions == set(range(1, SCHEMA_VERSION + 1))
         except sqlite3.DatabaseError as exc:
             raise AutoanswersRuntimeError(
                 "runtime database is unreadable before autoanswers schema migration",
