@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 
@@ -14,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from apps.warehouse_cost_unified_recovery import (  # noqa: E402
     _checkpoint_audit,
+    _bank_plan,
     _ensure_audit_schema,
     _load_audit_record,
     _mark_audit_failed,
@@ -83,6 +86,7 @@ def main() -> None:
             assert "supply revisions changed" in str(exc)
         else:
             raise AssertionError("resume accepted drifted WB evidence")
+    _assert_cny_ledger_payment_anchors()
     print("warehouse_cost_unified_recovery_smoke: OK")
 
 
@@ -130,6 +134,211 @@ def _current_plan() -> dict:
     current["physical"]["supplies"][0]["already_debited"] = True
     current["box"]["already_applied"] = True
     return current
+
+
+def _assert_cny_ledger_payment_anchors() -> None:
+    with TemporaryDirectory(prefix="warehouse-cost-bank-anchor-") as temp:
+        runtime = RegistryUploadDbBackedRuntime(
+            runtime_dir=Path(temp) / "runtime"
+        )
+        runtime.save_supplier_shipment(
+            header={
+                "shipment_id": "shipment",
+                "created_at": "2026-07-17T08:00:00Z",
+                "updated_at": "2026-07-17T08:00:00Z",
+                "shipment_date": "2026-07-17",
+                "invoice_no": "26GN527",
+                "invoice_date": "2026-07-17",
+                "contract_no": "082/26",
+                "currency": "CNY",
+            },
+            lines=[],
+        )
+        for operation_number, amount in (
+            ("7", "59921.25"),
+            ("11", "339553.75"),
+        ):
+            runtime.save_cny_document(
+                {
+                    "document_id": f"cny-payment-{operation_number}",
+                    "document_type": "supplier_cny_payment",
+                    "source": "smoke",
+                    "source_order_id": "shipment",
+                    "natural_key": f"payment-{operation_number}",
+                    "uploaded_at": "2026-07-17T08:00:00Z",
+                    "created_at": "2026-07-17T08:00:00Z",
+                    "updated_at": "2026-07-17T08:00:00Z",
+                    "operation_date": "2026-07-17",
+                    "status": "posted",
+                    "document_number": operation_number,
+                    "currency": "CNY",
+                    "cny_amount": amount,
+                    "parsed_payload": {
+                        "document_number": operation_number,
+                        "cny_amount": amount,
+                        "invoice_number": "26GN527",
+                    },
+                }
+            )
+        operations = [
+            _payment_row("7", "59921.25"),
+            _payment_row("11", "339553.75"),
+        ]
+        fee_rows = [
+            _fee_row(
+                "cc-7",
+                operation_number="7",
+                amount="948.60",
+                category="currency_control_fee",
+                bank_document_number="130623",
+                operation_date="2026-06-30",
+            ),
+            _fee_row(
+                "transfer-7",
+                operation_number="7",
+                amount="13668.11",
+                category="bank_transfer_fee",
+                bank_document_number="443906",
+                operation_date="2026-06-30",
+            ),
+            _fee_row(
+                "cc-11",
+                operation_number="11",
+                amount="4788.83",
+                category="currency_control_fee",
+                bank_document_number="50149",
+                operation_date="2026-07-20",
+            ),
+            _fee_row(
+                "transfer-11-a",
+                operation_number="11",
+                amount="20000",
+                category="bank_transfer_fee",
+                bank_document_number="244189",
+                operation_date="2026-07-20",
+            ),
+            _fee_row(
+                "transfer-11-b",
+                operation_number="11",
+                amount="58113.66",
+                category="bank_transfer_fee",
+                bank_document_number="244189",
+                operation_date="2026-07-21",
+            ),
+        ]
+        runtime.save_supplier_financial_document(
+            document={
+                "document_id": "statement",
+                "supplier_order_id": "shipment",
+                "document_type": "bank_fee_statement",
+                "file_sha256": "b" * 64,
+                "uploaded_at": "2026-07-24T08:00:00Z",
+                "updated_at": "2026-07-24T08:00:00Z",
+                "parse_status": "confirmed",
+                "normalized_parse": {
+                    "document_type": "bank_fee_statement",
+                    "operations": [*operations, *fee_rows],
+                    "fee_rows": fee_rows,
+                },
+            },
+            expense_lines=[],
+        )
+        args = argparse.Namespace(
+            shipment_id="shipment",
+            statement_document_id="statement",
+            commission_amount=["20000", "58113.66"],
+            expected_logical_fee_count=4,
+            expected_atomic_fee_count=5,
+            expected_bank_total="97519.20",
+        )
+        shipment = runtime.load_supplier_shipment("shipment") or {}
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            plan = _bank_plan(
+                conn,
+                runtime=runtime,
+                args=args,
+                shipment=shipment,
+            )
+        if (
+            plan.get("amount") != "78113.66"
+            or plan.get("logical_fee_count") != 4
+            or plan.get("atomic_fee_count") != 5
+            or plan.get("total_rub") != "97519.20"
+            or len(plan.get("new_atomic_operation_ids") or []) != 2
+        ):
+            raise AssertionError(
+                f"CNY-ledger supplier payments must anchor recovery preview: {plan}"
+            )
+        revision_before = str(plan.get("target_revision") or "")
+        changed = runtime.load_cny_document("cny-payment-11") or {}
+        runtime.save_cny_document(
+            {
+                **changed,
+                "updated_at": "2026-07-17T08:01:00Z",
+            }
+        )
+        from packages.application.supplier_financial_documents import (
+            SupplierFinancialDocumentsBlock,
+        )
+
+        revision_after = SupplierFinancialDocumentsBlock(
+            runtime=runtime
+        )._bank_fee_preview_revision(
+            "shipment",
+            statement_file_sha256="b" * 64,
+            exclude_document_id="statement",
+        )
+        if not revision_before or revision_before == revision_after:
+            raise AssertionError(
+                "CNY payment revision must stale the bank confirmation preview"
+            )
+
+
+def _payment_row(operation_number: str, amount: str) -> dict:
+    return {
+        "row_id": f"payment-row-{operation_number}",
+        "row_type": "supplier_payment",
+        "operation_number": operation_number,
+        "debit_cny": amount,
+        "amount": amount,
+        "operation_date": "2026-07-17",
+        "invoice_number": "26GN527",
+    }
+
+
+def _fee_row(
+    row_id: str,
+    *,
+    operation_number: str,
+    amount: str,
+    category: str,
+    bank_document_number: str,
+    operation_date: str,
+) -> dict:
+    cny_amount = "59921.25" if operation_number == "7" else "339553.75"
+    return {
+        "row_id": row_id,
+        "row_type": "bank_fee",
+        "operation_number": operation_number,
+        "amount": amount,
+        "debit_rub": amount,
+        "currency": "RUB",
+        "fee_category": category,
+        "bank_document_number": bank_document_number,
+        "operation_date": operation_date,
+        "invoice_number": "26GN527",
+        "amount_in_purpose_cny": cny_amount,
+        "payment_purpose": (
+            f"Комиссия по платежу №{operation_number} на сумму {cny_amount} CNY. "
+            + (
+                "Включая НДС."
+                if category == "currency_control_fee"
+                else "НДС не облагается."
+            )
+        ),
+        "semantic_operation_id": f"bankop-{row_id}",
+    }
 
 
 if __name__ == "__main__":
