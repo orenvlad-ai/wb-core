@@ -429,6 +429,11 @@ Archived MCP compatibility publication gate:
   runner atomically replace it with `deployment_complete=true`. `deploy_state`
   exposes the commit, timestamp and completion bit even though `.git` is
   excluded from production;
+- Autoanswers schema-backup verification explicitly closes every SQLite
+  snapshot handle before deleting a byte-verified raw snapshot and reading
+  filesystem headroom. This prevents an unlinked multi-gigabyte snapshot from
+  remaining charged to the backup mount until process exit and falsely
+  halting an otherwise complete deploy;
 - while the compatibility unit remains in the deploy manifest, canonical deploy installs/enables/restarts `wb-core-data-mcp.service`; explicit compatibility-maintenance verification covers authenticated initialize/list/direct business/ops calls, concurrent latency and commit equality;
 - a connector refresh in the ChatGPT UI is relevant only to an explicitly scoped archived-compatibility maintenance task, never to ordinary data acquisition.
 
