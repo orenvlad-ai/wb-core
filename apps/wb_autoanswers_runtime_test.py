@@ -1032,6 +1032,54 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(content["feedback_id"], "rolling-content-5")
         self.assertEqual(content["processing_kind"], "frozen_ai")
 
+    def test_current_policy_media_review_does_not_hold_automatic_priority(self) -> None:
+        for row in (
+            self.classified_feedback(
+                "media-review-1",
+                text="urgent media",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            self.classified_feedback(
+                "automatic-5",
+                text="ordinary",
+                rating=5,
+                created_at="2026-07-20T12:00:00Z",
+            ),
+        ):
+            self.repo.upsert_feedback(
+                row,
+                source_stream="archive",
+                run_kind="backfill",
+            )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        urgent = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(urgent["feedback_id"], "media-review-1")
+        self.repo.complete_media_uncertainty(
+            urgent["processing_key"],
+            uncertainty=["media_fetch_failed"],
+            worker_id="worker",
+        )
+
+        progress = self.repo.progress_status()
+        self.assertEqual(
+            progress["rolling_admission"]["current_priority_bucket"],
+            "content_bearing_5_star",
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        ordinary = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(ordinary["feedback_id"], "automatic-5")
+
     def test_opaque_node_exit_retries_once_with_attempt_holds(self) -> None:
         self.enable("draft_only")
         self.insert_new("opaque-exit", photo_query="")

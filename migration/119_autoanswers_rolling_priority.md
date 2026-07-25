@@ -51,6 +51,14 @@ admitted set. A newly admitted higher bucket preempts lower waiting work on the
 next safe claim. An in-flight provider call or already started WB write is not
 interrupted; mandatory readback remains first.
 
+Rows already resolved to the current policy epoch as `needs_review` or
+`terminal_error` remain visible operator evidence but are not future automatic
+actions, even when they retain `regeneration_required` hard-gate metadata.
+Only a stale-policy regeneration candidate or an actually queued/in-flight
+regeneration participates in the global barrier. This prevents a human-only
+1-star media/error row from deadlocking claimable automatic 2–5-star work
+while preserving the row and its review reason.
+
 ## Opaque Node boundary and affected-row recovery
 
 After provider entry, invalid/no child JSON with

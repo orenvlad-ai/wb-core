@@ -4388,7 +4388,10 @@ class AutoanswersRepository:
                   AND COALESCE(f.answer_text,'')=''
                   AND (
                     j.processing_key IS NULL
-                    OR COALESCE(j.regeneration_required,0)=1
+                    OR (
+                      COALESCE(j.regeneration_required,0)=1
+                      AND COALESCE(j.policy_epoch,-1)<>?
+                    )
                     OR (
                       COALESCE(j.policy_epoch,-1)<>?
                       AND j.state NOT IN ('needs_review','terminal_error','skipped','published')
@@ -4404,6 +4407,7 @@ class AutoanswersRepository:
                     run_id,
                     PROMPT_BUNDLE_VERSION,
                     CONTENT_CLASS_CONTENT_BEARING,
+                    int(policy_epoch),
                     int(policy_epoch),
                 ),
             ).fetchone()[0]
@@ -4463,7 +4467,10 @@ class AutoanswersRepository:
             WHERE COALESCE(f.answer_text,'')=''
               AND (
                 j.processing_key IS NULL
-                OR COALESCE(j.regeneration_required,0)=1
+                OR (
+                  COALESCE(j.regeneration_required,0)=1
+                  AND COALESCE(j.policy_epoch,-1)<>?
+                )
                 OR (
                     COALESCE(j.policy_epoch,-1)<>?
                     AND j.state NOT IN ('needs_review','terminal_error','skipped','published')
@@ -4486,6 +4493,7 @@ class AutoanswersRepository:
                 AUTOMATIC_PRIORITY_INDETERMINATE,
                 AUTOMATIC_PRIORITY_RATING_ONLY,
                 PROMPT_BUNDLE_VERSION,
+                int(policy_epoch),
                 int(policy_epoch),
             ),
         ).fetchone()
