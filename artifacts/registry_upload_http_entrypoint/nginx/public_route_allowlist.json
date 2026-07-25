@@ -433,6 +433,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_supply_wb_warehouse_exclusion_settings",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_supply_wb_supplies_list",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/supply/wb-supplies",

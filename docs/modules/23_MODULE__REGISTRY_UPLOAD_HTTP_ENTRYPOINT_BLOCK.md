@@ -118,6 +118,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
   - "GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options"
+  - "GET/POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings"
   - "GET/POST /v1/sheet-vitrina-v1/settings/auto-updates"
   - "GET /v1/sheet-vitrina-v1/auto-updates/status"
   - "POST /v1/sheet-vitrina-v1/warehouses/sync"

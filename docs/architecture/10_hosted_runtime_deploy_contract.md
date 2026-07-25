@@ -85,6 +85,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip`
 - `GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options`
+- `GET|POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings`
 - `GET|POST /v1/sheet-vitrina-v1/settings/auto-updates`
 - `GET /v1/sheet-vitrina-v1/auto-updates/status`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies`
@@ -218,9 +219,12 @@ Canonical repo-owned public route allowlist:
 
 Every browser-fetched protected API used by the public operator surface must be
 listed explicitly. In particular, the shared WB warehouse exclusion selector
-depends on the exact read-only
-`GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options` route; a
-loopback-only implementation is not a deploy-complete contract.
+depends on the exact read-only options route
+`GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options` and the
+canonical persisted-settings route
+`GET|POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings`; a
+loopback-only implementation of either route is not a deploy-complete contract.
+Production probes validate only the read-only `GET` side of the settings route.
 The same rule applies to the Settings control plane:
 `GET|POST /v1/sheet-vitrina-v1/settings/auto-updates` must be explicitly
 published, while production probes stay read-only and validate only `GET`.
