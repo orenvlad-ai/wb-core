@@ -6008,15 +6008,11 @@ class WarehouseFunctionalBlock:
 
     def _wb_supply_source_digest(self, *, connection: sqlite3.Connection | None = None) -> str:
         if connection is not None:
-            rows = connection.execute(
-                "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
-            ).fetchall()
-            return "sha256:" + _hash(_supply_revisions(dict(row) for row in rows))
+            return "sha256:" + _hash(
+                _current_wb_supply_revisions(connection)
+            )
         with _connect(self.runtime.db_path) as conn:
-            rows = conn.execute(
-                "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
-            ).fetchall()
-            return "sha256:" + _hash(_supply_revisions(dict(row) for row in rows))
+            return "sha256:" + _hash(_current_wb_supply_revisions(conn))
 
     def _last_good_wb_payload(self) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
@@ -7911,6 +7907,34 @@ def _supply_revisions(rows: Iterable[Mapping[str, Any]]) -> dict[str, str]:
         for row in rows
         if str(row.get("supply_id") or "")
     }
+
+
+def _current_wb_supply_revisions(
+    conn: sqlite3.Connection,
+) -> dict[str, str]:
+    supplies = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
+        ).fetchall()
+    ]
+    corrections = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT * FROM {BOX_CORRECTION_TABLE}
+            WHERE status='applied'
+            ORDER BY supply_id,applied_at,correction_id
+            """
+        ).fetchall()
+    ]
+    normalized = _functional_local_source_view(
+        {
+            "wb_supplies": supplies,
+            "box_corrections": corrections,
+        }
+    )
+    return _supply_revisions(normalized["wb_supplies"])
 
 
 def _supply_business_date(record: Mapping[str, Any], row: Mapping[str, Any]) -> str:

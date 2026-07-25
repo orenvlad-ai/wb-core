@@ -24,7 +24,7 @@ Expense allocation is arithmetic-only and remains fully allocated while a newer 
 
 Transit states preserve positive, confirmed zero, not-requested, updating, not-found, source-error, session-expired, pending replay, included and replay-error semantics. Unknown/error never becomes zero.
 
-Whole-box correction uses per-SKU factory box size. Only one final minimum whole-box solution can apply. Gross cross-SKU evidence remains separate before correction. Apply and rollback use append-only FF compensation and exact manifest digests.
+Whole-box correction uses per-SKU factory box size. Only one final minimum whole-box solution can apply. Gross cross-SKU evidence remains separate before correction. Apply and rollback use append-only FF compensation and exact manifest digests. Subsequent functional plan and optimistic apply gates both fingerprint the same corrected supply view plus its correction identity; the gate never compares a corrected plan to the uncorrected persisted raw-goods digest.
 
 Bank import separates payment anchors, logical fees and atomic bank rows. One logical fee may contain several atomic debits. VAT follows purpose semantics. The confirmation UI lists only new logical groups, starts with every checkbox clear, discloses atomic rows and keeps imported/conflict/weak/ignored evidence in collapsed non-selectable blocks. Server target-revision drift rejects confirmation.
 
