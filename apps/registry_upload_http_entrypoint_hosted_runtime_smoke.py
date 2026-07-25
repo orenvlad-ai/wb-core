@@ -752,11 +752,13 @@ def main() -> None:
         ROOT / "apps" / "sqlite_contention_production_ui_flow.py"
     ).read_text(encoding="utf-8")
     if (
-        "&tab=documents" not in sqlite_contention_ui_source
+        "?embedded=operator&shipment_id=" not in sqlite_contention_ui_source
+        or "&tab=documents" not in sqlite_contention_ui_source
         or "&tab=financial" in sqlite_contention_ui_source
     ):
         raise AssertionError(
-            "SQLite contention UI flow must use the supplier documents deep-link contract"
+            "SQLite contention UI flow must use the operator-embedded supplier "
+            "documents deep-link contract"
         )
     rollback_plan_args = hosted_runtime.build_arg_parser().parse_args(
         ["autoanswers-store-rollback-plan"]

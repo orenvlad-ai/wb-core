@@ -384,7 +384,7 @@ def _run_sqlite_contention_ui_flow(
 
         supplier_url = (
             normalized_base_url
-            + "/sheet-vitrina-v1/supplier?shipment_id="
+            + "/sheet-vitrina-v1/supplier?embedded=operator&shipment_id="
             + quote(target_id, safe="")
             + "&tab=documents"
         )
@@ -403,6 +403,9 @@ def _run_sqlite_contention_ui_flow(
         ).wait_for(timeout=60_000)
         page.locator("#financialDocumentsTabButton").click()
         page.locator("#financialDocumentsPanel:not([hidden])").wait_for(
+            timeout=60_000
+        )
+        page.locator("#operatorDocumentsArea:not([hidden])").wait_for(
             timeout=60_000
         )
         page.locator("#financialDocumentFileInput").set_input_files(
