@@ -202,6 +202,20 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
             self.repo.assert_effective_on(operation="test")
 
+    def test_applied_schema_startup_does_not_compete_for_writer_lock(self) -> None:
+        blocker = sqlite3.connect(self.repo.db_path, timeout=1, isolation_level=None)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            reopened = AutoanswersRepository(
+                runtime_dir=Path(self.temp.name),
+                now_factory=self.clock,
+                env=self.env,
+            )
+            self.assertEqual(reopened.settings().policy_epoch, 0)
+        finally:
+            blocker.rollback()
+            blocker.close()
+
     def test_first_additive_schema_backs_up_existing_database_once(self) -> None:
         with TemporaryDirectory() as directory:
             runtime_dir = Path(directory)
