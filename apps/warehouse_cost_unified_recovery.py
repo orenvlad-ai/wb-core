@@ -192,6 +192,16 @@ def build_plan(
                 for nm_id in dict(box.get("corrected") or {})
             }
         )
+        earliest_business_date = min(
+            {
+                str(value)[:10]
+                for value in [
+                    str(args.actual_shipment_date),
+                    *list(bank.get("atomic_business_dates") or []),
+                ]
+                if len(str(value)) >= 10
+            }
+        )
         material = {
             "contract_name": "warehouse_cost_unified_recovery_v1",
             "scope": {
@@ -201,6 +211,7 @@ def build_plan(
                 "supply_ids": sorted({str(item) for item in args.supply_id}),
                 "box_supply_id": str(args.box_supply_id or ""),
                 "affected_nm_ids": affected_nm_ids,
+                "earliest_business_date": earliest_business_date,
             },
             "shipment": {
                 "source_revision": _fingerprint(
@@ -497,7 +508,13 @@ def apply_plan(
                 _checkpoint_audit(runtime, plan, steps)
 
             if "economics" not in steps:
-                economics_plan = build_functional_economics_backfill_plan(runtime)
+                economics_plan = build_functional_economics_backfill_plan(
+                    runtime,
+                    affected_nm_ids=plan["scope"]["affected_nm_ids"],
+                    earliest_business_date=plan["scope"][
+                        "earliest_business_date"
+                    ],
+                )
                 steps["economics"] = apply_functional_economics_backfill_plan(
                     runtime,
                     economics_plan,
@@ -691,6 +708,13 @@ def _bank_plan(
         "atomic_operation_ids": [
             str(value) for value in group.get("atomic_operation_ids") or []
         ],
+        "atomic_business_dates": sorted(
+            {
+                str(row.get("operation_date") or "")[:10]
+                for row in group.get("atomic_rows") or []
+                if str(row.get("operation_date") or "")
+            }
+        ),
         "new_atomic_operation_ids": new_atomic,
         "already_imported_operation_ids": sorted(existing_ids),
         "logical_fee_count": len(preview.get("logical_fee_groups") or []),

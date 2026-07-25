@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from packages.business_time import business_date_from_timestamp, current_business_date_iso
 from packages.application.calculation_parameters import (
@@ -82,6 +82,8 @@ def build_functional_economics_backfill_plan(
     runtime: RegistryUploadDbBackedRuntime,
     *,
     business_date: str | None = None,
+    affected_nm_ids: Iterable[int] | None = None,
+    earliest_business_date: str | None = None,
     _enforce_business_date_boundary: bool = True,
 ) -> dict[str, Any]:
     operation_business_date = str(business_date or current_business_date_iso())[:10]
@@ -89,6 +91,30 @@ def build_functional_economics_backfill_plan(
         date.fromisoformat(operation_business_date)
     except ValueError as exc:
         raise FunctionalEconomicsBackfillError("canonical operation business date is invalid") from exc
+    targeted = affected_nm_ids is not None
+    target_nm_ids = sorted(
+        {
+            int(value)
+            for value in (affected_nm_ids or [])
+            if int(value) > 0
+        }
+    )
+    target_earliest_date = str(earliest_business_date or "")[:10]
+    if targeted and not target_nm_ids:
+        raise FunctionalEconomicsBackfillError(
+            "targeted economics requires affected SKU identities"
+        )
+    if targeted and not target_earliest_date:
+        raise FunctionalEconomicsBackfillError(
+            "targeted economics requires earliest business date"
+        )
+    if target_earliest_date:
+        try:
+            date.fromisoformat(target_earliest_date)
+        except ValueError as exc:
+            raise FunctionalEconomicsBackfillError(
+                "targeted economics earliest business date is invalid"
+            ) from exc
     with _connect(runtime.db_path) as conn:
         cutover = conn.execute(
             """SELECT cutover_at,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_cutovers
@@ -102,7 +128,14 @@ def build_functional_economics_backfill_plan(
             """SELECT bundle_version,as_of_date,plan_json,refreshed_at
                FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date"""
         ).fetchall()]
-    dates = sorted({day for row in snapshots for day in _snapshot_dates(row["plan_json"])})
+    dates = sorted(
+        {
+            day
+            for row in snapshots
+            for day in _snapshot_dates(row["plan_json"])
+            if not target_earliest_date or day >= target_earliest_date
+        }
+    )
     warehouse_dates = [
         day for day in dates if day >= CANONICAL_COST_POLICY_DATE.isoformat()
     ]
@@ -155,6 +188,14 @@ def build_functional_economics_backfill_plan(
             },
             "warehouse_version_ids": warehouse_version_ids,
             "parameters": {day: item.public() for day, item in parameter_by_date.items()},
+            "target_scope": (
+                {
+                    "affected_nm_ids": target_nm_ids,
+                    "earliest_business_date": target_earliest_date,
+                }
+                if targeted
+                else {}
+            ),
         }
     )
     updates: list[dict[str, Any]] = []
@@ -179,6 +220,10 @@ def build_functional_economics_backfill_plan(
                 source_fingerprint=source_fingerprint,
                 cutover_business_date=cutover_business_date,
                 operation_business_date=operation_business_date,
+                affected_nm_ids=target_nm_ids if targeted else None,
+                earliest_business_date=(
+                    target_earliest_date if targeted else None
+                ),
             )
         except Exception as exc:
             raise FunctionalEconomicsBackfillError(
@@ -266,6 +311,15 @@ def build_functional_economics_backfill_plan(
         "non_target_digest": before_digest,
         "updates": updates,
     }
+    if targeted:
+        plan["target_scope"] = {
+            "affected_nm_ids": target_nm_ids,
+            "earliest_business_date": target_earliest_date,
+            "copy_bytes": 0,
+            "full_database_copy": False,
+            "finance_raw_rows_read": 0,
+            "complexity": "O(affected SKU/date cells + dependent totals)",
+        }
     plan["plan_fingerprint"] = _plan_fingerprint(plan)
     if _enforce_business_date_boundary and current_business_date_iso() != operation_business_date:
         raise FunctionalEconomicsBackfillError(
@@ -294,9 +348,22 @@ def apply_functional_economics_backfill_plan(
         raise FunctionalEconomicsBackfillError(
             "functional economics apply crossed the canonical business-date boundary"
         )
+    target_scope = dict(normalized.get("target_scope") or {})
+    target_nm_ids = (
+        list(target_scope.get("affected_nm_ids") or [])
+        if target_scope
+        else None
+    )
+    target_earliest_date = (
+        str(target_scope.get("earliest_business_date") or "")
+        if target_scope
+        else None
+    )
     fresh = build_functional_economics_backfill_plan(
         runtime,
         business_date=operation_business_date,
+        affected_nm_ids=target_nm_ids,
+        earliest_business_date=target_earliest_date,
     )
     if str(fresh["plan_fingerprint"]) != fingerprint:
         raise FunctionalEconomicsBackfillError(
@@ -472,6 +539,8 @@ def apply_functional_economics_backfill_plan(
     readback = build_functional_economics_backfill_plan(
         runtime,
         business_date=operation_business_date,
+        affected_nm_ids=target_nm_ids,
+        earliest_business_date=target_earliest_date,
         _enforce_business_date_boundary=False,
     )
     if readback.get("updates"):
@@ -860,7 +929,18 @@ def _transform_snapshot(
     source_fingerprint: str,
     cutover_business_date: str,
     operation_business_date: str | None = None,
+    affected_nm_ids: Iterable[int] | None = None,
+    earliest_business_date: str | None = None,
 ) -> dict[str, Any]:
+    targeted = affected_nm_ids is not None
+    target_nm_ids = {
+        int(value) for value in (affected_nm_ids or []) if int(value) > 0
+    }
+    target_earliest_date = str(earliest_business_date or "")[:10]
+    if targeted and (not target_nm_ids or not target_earliest_date):
+        raise FunctionalEconomicsBackfillError(
+            "targeted snapshot transformation requires SKU/date scope"
+        )
     original = json.loads(str(snapshot["plan_json"]))
     plan = deepcopy(original)
     sheet = _data_sheet(plan)
@@ -868,7 +948,11 @@ def _transform_snapshot(
     if not isinstance(rows, list):
         raise FunctionalEconomicsBackfillError("DATA_VITRINA rows are missing")
     dates = _date_columns(plan)
-    relevant_indices = list(range(len(dates)))
+    relevant_indices = [
+        index
+        for index, day in enumerate(dates)
+        if not target_earliest_date or day >= target_earliest_date
+    ]
     include_warehouse_rows = any(
         day >= CANONICAL_COST_POLICY_DATE.isoformat() for day in dates
     )
@@ -877,9 +961,20 @@ def _transform_snapshot(
         if include_warehouse_rows
         else set(TARGET_KEYS) - WAREHOUSE_TARGET_KEYS
     )
-    before_digest = _non_target_digest(original)
+    before_digest = (
+        _targeted_non_target_digest(
+            original,
+            affected_nm_ids=target_nm_ids,
+            earliest_business_date=target_earliest_date,
+            target_metric_keys=active_target_keys,
+        )
+        if targeted
+        else _non_target_digest(original)
+    )
     _validate_data_projection_layout(sheet, dates=dates)
-    archived_rows_removed = _remove_archived_metric_rows(rows)
+    archived_rows_removed = (
+        0 if targeted else _remove_archived_metric_rows(rows)
+    )
     metadata_present = "metadata" in plan
     metadata = plan.get("metadata") if metadata_present else {}
     if not isinstance(metadata, dict):
@@ -923,18 +1018,32 @@ def _transform_snapshot(
     scope_nm_ids = {int(scope.split(":", 1)[1]) for scope in scopes}
     if not metadata_present:
         plan["metadata"] = metadata
+    target_scopes = [
+        scope
+        for scope in scopes
+        if int(scope.split(":", 1)[1]) in target_nm_ids
+    ]
     inserted = _ensure_target_rows(
         rows,
         by_id=by_id,
-        scopes=scopes,
+        scopes=target_scopes if targeted else scopes,
         date_count=len(dates),
         include_warehouse=include_warehouse_rows,
     )
+    if targeted and inserted:
+        raise FunctionalEconomicsBackfillError(
+            "targeted economics cannot add globally missing projection rows"
+        )
     by_id = _rows_by_id(rows)
     changed = 0
     presentation_changes = 0
     sku_result: dict[tuple[str, int], dict[str, Decimal | None]] = {}
-    warehouse_coverage: dict[str, dict[str, Any]] = {}
+    existing_coverage = metadata.get("warehouse_history_coverage")
+    warehouse_coverage: dict[str, dict[str, Any]] = (
+        deepcopy(existing_coverage)
+        if targeted and isinstance(existing_coverage, dict)
+        else {}
+    )
     for index in relevant_indices:
         day = dates[index]
         params = parameters[day]
@@ -975,6 +1084,7 @@ def _transform_snapshot(
             }
         for scope in scopes:
             nm_id = int(scope.split(":", 1)[1])
+            mutate_sku = not targeted or nm_id in target_nm_ids
             warehouse_state = day_warehouse.get(nm_id, {})
             sku_warehouse_known = warehouse_known and nm_id in covered_nm_ids
             unavailable_reason = (
@@ -1001,6 +1111,15 @@ def _transform_snapshot(
                     metric_key=metric_key,
                     warehouse_known=sku_warehouse_known,
                 )
+                if not mutate_sku:
+                    _assert_targeted_unrelated_cell_current(
+                        row,
+                        index=index,
+                        value=value,
+                        row_id=f"{scope}|{metric_key}",
+                        day=day,
+                    )
+                    continue
                 changed += _set_cell(row, index, value)
                 presentation_changes += _set_warehouse_cell_presentation(
                     metadata,
@@ -1034,8 +1153,22 @@ def _transform_snapshot(
                 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY: calculated["proxy_margin_3"],
             }
             sku_result[(scope, index)] = calculated
-            for metric_key, value in values.items():
-                changed += _set_cell(by_id[f"{scope}|{metric_key}"], index, value)
+            if mutate_sku:
+                for metric_key, value in values.items():
+                    changed += _set_cell(
+                        by_id[f"{scope}|{metric_key}"],
+                        index,
+                        value,
+                    )
+            else:
+                for metric_key, value in values.items():
+                    _assert_targeted_unrelated_cell_current(
+                        by_id[f"{scope}|{metric_key}"],
+                        index=index,
+                        value=value,
+                        row_id=f"{scope}|{metric_key}",
+                        day=day,
+                    )
 
         complete = [sku_result[(scope, index)] for scope in scopes]
         profits = [item["proxy_profit_3"] for item in complete]
@@ -1124,19 +1257,49 @@ def _transform_snapshot(
         "target_metric_keys": sorted(active_target_keys),
         "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
     }
-    if metadata.get("functional_economics_backfill") != marker:
-        metadata["functional_economics_backfill"] = marker
+    marker_key = (
+        "functional_economics_targeted_replay"
+        if targeted
+        else "functional_economics_backfill"
+    )
+    if targeted:
+        marker["affected_nm_ids"] = sorted(target_nm_ids)
+        marker["earliest_business_date"] = target_earliest_date
+    if metadata.get(marker_key) != marker:
+        metadata[marker_key] = marker
     coverage_changes = int(metadata.get("warehouse_history_coverage") != warehouse_coverage)
     metadata["warehouse_history_coverage"] = warehouse_coverage
     timestamps = metadata.setdefault("row_last_updated_at_by_row_id", {})
     if isinstance(timestamps, dict):
         for row_id in by_id:
-            if "|" in row_id and row_id.split("|", 1)[1] in active_target_keys:
+            scope, separator, metric_key = row_id.partition("|")
+            allowed_target_row = (
+                not targeted
+                or scope == "TOTAL"
+                or (
+                    scope.startswith("SKU:")
+                    and int(scope.split(":", 1)[1]) in target_nm_ids
+                )
+            )
+            if (
+                separator
+                and metric_key in active_target_keys
+                and allowed_target_row
+            ):
                 timestamps[row_id] = str(snapshot.get("refreshed_at") or "")
     if inserted or archived_rows_removed:
         _update_data_dimensions(sheet)
     after = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    after_digest = _non_target_digest(plan)
+    after_digest = (
+        _targeted_non_target_digest(
+            plan,
+            affected_nm_ids=target_nm_ids,
+            earliest_business_date=target_earliest_date,
+            target_metric_keys=active_target_keys,
+        )
+        if targeted
+        else _non_target_digest(plan)
+    )
     return {
         "after_plan_json": after,
         "changed_cells": changed,
@@ -1574,6 +1737,24 @@ def _same_cell(current: Any, expected: Any) -> bool:
         return False
 
 
+def _assert_targeted_unrelated_cell_current(
+    row: list[Any],
+    *,
+    index: int,
+    value: Decimal | None,
+    row_id: str,
+    day: str,
+) -> None:
+    target_index = 2 + index
+    current = row[target_index] if len(row) > target_index else ""
+    expected: Any = "" if value is None else float(value)
+    if not _same_cell(current, expected):
+        raise FunctionalEconomicsBackfillError(
+            "targeted economics found unrelated stale consumer cell: "
+            f"{row_id}:{day}"
+        )
+
+
 def _cell_decimal(row: list[Any] | None, index: int) -> Decimal | None:
     if row is None or len(row) <= 2 + index or row[2 + index] in (None, ""):
         return None
@@ -1633,6 +1814,83 @@ def _snapshot_dates(plan_json: str) -> list[str]:
         return _date_columns(payload)
     except Exception as exc:
         raise FunctionalEconomicsBackfillError(f"invalid ready snapshot plan: {exc}") from exc
+
+
+def _targeted_non_target_digest(
+    plan: Mapping[str, Any],
+    *,
+    affected_nm_ids: set[int],
+    earliest_business_date: str,
+    target_metric_keys: set[str],
+) -> str:
+    """Redact only the exact SKU/date cells and dependent TOTAL cells."""
+
+    value = deepcopy(dict(plan))
+    dates = _date_columns(value)
+    relevant_indices = [
+        index
+        for index, day in enumerate(dates)
+        if day >= earliest_business_date
+    ]
+    sheet = _data_sheet(value)
+    rows = sheet.get("rows") or []
+    allowed_row_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 2:
+            continue
+        row_id = str(row[1] or "")
+        scope, separator, metric_key = row_id.partition("|")
+        allowed_scope = scope == "TOTAL" or (
+            scope.startswith("SKU:")
+            and int(scope.split(":", 1)[1]) in affected_nm_ids
+        )
+        if (
+            not separator
+            or metric_key not in target_metric_keys
+            or not allowed_scope
+        ):
+            continue
+        allowed_row_ids.add(row_id)
+        while len(row) < 2 + len(dates):
+            row.append("")
+        for index in relevant_indices:
+            row[2 + index] = "__target_cell__"
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        value["metadata"] = metadata
+    metadata.pop("functional_economics_targeted_replay", None)
+    coverage = metadata.get("warehouse_history_coverage")
+    if isinstance(coverage, dict):
+        for day in list(coverage):
+            if str(day) >= earliest_business_date:
+                coverage.pop(day, None)
+        if not coverage:
+            metadata.pop("warehouse_history_coverage", None)
+    presentation = metadata.get("server_cell_presentation")
+    if isinstance(presentation, dict):
+        for row_id in list(presentation):
+            if row_id not in allowed_row_ids:
+                continue
+            day_map = presentation.get(row_id)
+            if not isinstance(day_map, dict):
+                continue
+            for day in list(day_map):
+                if str(day) >= earliest_business_date:
+                    day_map.pop(day, None)
+            if not day_map:
+                presentation.pop(row_id, None)
+        if not presentation:
+            metadata.pop("server_cell_presentation", None)
+    timestamps = metadata.get("row_last_updated_at_by_row_id")
+    if isinstance(timestamps, dict):
+        for row_id in allowed_row_ids:
+            timestamps.pop(row_id, None)
+        if not timestamps:
+            metadata.pop("row_last_updated_at_by_row_id", None)
+    if not metadata:
+        value.pop("metadata", None)
+    return "sha256:" + _hash(value)
 
 
 def _non_target_digest(plan: Mapping[str, Any]) -> str:
