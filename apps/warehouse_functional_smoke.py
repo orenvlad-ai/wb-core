@@ -3878,6 +3878,137 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         missing_cost_scope_rows["TOTAL|total_our_wb_unit_cost_rub"][2] == "",
         "pre-boundary TOTAL cost fails closed when any configured SKU lacks its 01.07 row",
     )
+    targeted_dates = ["2026-07-19", "2026-07-20"]
+    targeted_snapshot = {
+        "bundle_version": "economics-targeted-probe",
+        "as_of_date": "2026-07-20",
+        "refreshed_at": NOW,
+        "plan_json": json.dumps(
+            {
+                "date_columns": targeted_dates,
+                "sheets": [
+                    {
+                        "sheet_name": "DATA_VITRINA",
+                        "write_start_cell": "A1",
+                        "header": [
+                            "Показатель",
+                            "row_id",
+                            *targeted_dates,
+                        ],
+                        "rows": [
+                            ["SKU 104", "SKU:104|orderSum", 100, 100],
+                            ["SKU 104", "SKU:104|orderCount", 2, 2],
+                            ["SKU 104", "SKU:104|ads_sum", 10, 10],
+                            ["SKU 105", "SKU:105|orderSum", 100, 100],
+                            ["SKU 105", "SKU:105|orderCount", 2, 2],
+                            ["SKU 105", "SKU:105|ads_sum", 10, 10],
+                        ],
+                    }
+                ],
+            }
+        ),
+    }
+    targeted_parameters = {
+        day: CalculationParametersBlock(runtime=runtime).parameters_for_date(
+            day
+        )
+        for day in targeted_dates
+    }
+    targeted_base_costs = {
+        day: {
+            104: {
+                "our_wb_unit_cost_rub": 14,
+                "stock_qty": 10,
+            },
+            105: {
+                "our_wb_unit_cost_rub": 20,
+                "stock_qty": 10,
+            },
+        }
+        for day in targeted_dates
+    }
+    targeted_baseline = _transform_snapshot(
+        snapshot=targeted_snapshot,
+        costs=targeted_base_costs,
+        warehouse_metrics={},
+        warehouse_exact_dates=set(),
+        warehouse_covered_nm_ids={},
+        warehouse_version_ids={},
+        parameters=targeted_parameters,
+        source_fingerprint="sha256:targeted-baseline",
+        cutover_business_date="2026-07-18",
+    )
+    targeted_costs = copy.deepcopy(targeted_base_costs)
+    targeted_costs["2026-07-19"][104]["our_wb_unit_cost_rub"] = 18
+    targeted_costs["2026-07-20"][104]["our_wb_unit_cost_rub"] = 18
+    targeted_result = _transform_snapshot(
+        snapshot={
+            **targeted_snapshot,
+            "plan_json": targeted_baseline["after_plan_json"],
+        },
+        costs=targeted_costs,
+        warehouse_metrics={},
+        warehouse_exact_dates=set(),
+        warehouse_covered_nm_ids={},
+        warehouse_version_ids={},
+        parameters=targeted_parameters,
+        source_fingerprint="sha256:targeted-change",
+        cutover_business_date="2026-07-18",
+        affected_nm_ids={104},
+        earliest_business_date="2026-07-20",
+    )
+    targeted_payload = json.loads(targeted_result["after_plan_json"])
+    targeted_rows = {
+        row[1]: row for row in targeted_payload["sheets"][0]["rows"]
+    }
+    _assert(
+        targeted_rows["SKU:104|our_wb_unit_cost_rub"][2] == 14.0
+        and targeted_rows["SKU:104|our_wb_unit_cost_rub"][3] == 18.0,
+        "targeted economics changes the affected SKU only from earliest date",
+    )
+    _assert(
+        targeted_rows["SKU:105|our_wb_unit_cost_rub"][2:] == [20.0, 20.0],
+        "targeted economics preserves unrelated SKU cells",
+    )
+    _assert(
+        targeted_rows["TOTAL|total_our_wb_unit_cost_rub"][3] == 19.0,
+        "targeted economics refreshes the direct dependent TOTAL cell",
+    )
+    _assert(
+        targeted_result["non_target_before"]
+        == targeted_result["non_target_after"],
+        "targeted economics proves exact non-target snapshot invariance",
+    )
+    unrelated_drift_costs = copy.deepcopy(targeted_costs)
+    unrelated_drift_costs["2026-07-20"][105][
+        "our_wb_unit_cost_rub"
+    ] = 21
+    try:
+        _transform_snapshot(
+            snapshot={
+                **targeted_snapshot,
+                "plan_json": targeted_baseline["after_plan_json"],
+            },
+            costs=unrelated_drift_costs,
+            warehouse_metrics={},
+            warehouse_exact_dates=set(),
+            warehouse_covered_nm_ids={},
+            warehouse_version_ids={},
+            parameters=targeted_parameters,
+            source_fingerprint="sha256:targeted-unrelated-drift",
+            cutover_business_date="2026-07-18",
+            affected_nm_ids={104},
+            earliest_business_date="2026-07-20",
+        )
+    except Exception as exc:
+        _assert(
+            "unrelated stale consumer cell" in str(exc),
+            "targeted economics exposes a bounded unrelated consumer blocker",
+        )
+    else:
+        raise AssertionError(
+            "targeted economics must reject unrelated consumer drift"
+        )
     plan = {
         "date_columns": ["2026-07-01"],
         "sheets": [
@@ -4160,6 +4291,30 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         coverage_repeated["changed_snapshot_count"] == 0
         and coverage_repeated["coverage_change_count"] == 0,
         "coverage-only repair is idempotent",
+    )
+    targeted_repeated = build_functional_economics_backfill_plan(
+        runtime,
+        affected_nm_ids=[104],
+        earliest_business_date="2026-07-01",
+    )
+    _assert(
+        targeted_repeated["changed_snapshot_count"] == 0
+        and targeted_repeated["target_scope"]["affected_nm_ids"] == [104]
+        and targeted_repeated["target_scope"]["earliest_business_date"]
+        == "2026-07-01",
+        "targeted economics plan carries the exact SKU/date closure",
+    )
+    targeted_noop = apply_functional_economics_backfill_plan(
+        runtime,
+        targeted_repeated,
+        confirm_fingerprint=targeted_repeated["plan_fingerprint"],
+        backup_dir=root / "economics-backups",
+        target_scoped_undo=True,
+    )
+    _assert(
+        targeted_noop["idempotent"] is True
+        and targeted_noop["database_written"] is False,
+        "targeted economics exact repeat is a no-op",
     )
     with sqlite3.connect(runtime.db_path) as conn:
         stored = json.loads(conn.execute(

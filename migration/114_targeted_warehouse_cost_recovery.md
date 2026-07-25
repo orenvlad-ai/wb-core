@@ -36,6 +36,8 @@ Bank-statement matching uses the same payment-anchor source as the operator flow
 
 Before the first write the runner persists the reviewed plan in a durable audit journal. Bank, box, physical, factual-date, functional and economics steps checkpoint independently. A crash between mutation and checkpoint is recovered by rerunning the same fingerprint: every step has deterministic identities and re-entry is a no-op or resumes after exact scope/source-revision validation. Completion requires post-apply readback to be a no-op. The legacy standalone 26GN527 apply is disabled.
 
+The economics checkpoint is pinned to the same affected nmID closure and the earliest selected business date. It may update those SKU/date cells and their direct `TOTAL` consumers only; unrelated SKU cells must already reconcile to their current canonical inputs or the target run fails locally. Its exact non-target digest and snapshot before-images prove that unrelated ready-snapshot content is not rewritten.
+
 The former transit/reservation entrypoint cannot build its monolithic snapshot even in CLI diagnostic mode and its imported apply helper fails closed. It only points operators to the canonical targeted runner.
 
 ## Verification

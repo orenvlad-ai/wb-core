@@ -266,6 +266,8 @@ def _assert_cny_ledger_payment_anchors() -> None:
             or plan.get("atomic_fee_count") != 5
             or plan.get("total_rub") != "97519.20"
             or len(plan.get("new_atomic_operation_ids") or []) != 2
+            or plan.get("atomic_business_dates")
+            != ["2026-07-20", "2026-07-21"]
         ):
             raise AssertionError(
                 f"CNY-ledger supplier payments must anchor recovery preview: {plan}"
