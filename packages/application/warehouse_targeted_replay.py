@@ -466,6 +466,15 @@ def _rebuild_target_rows(
                     },
                 }
             )
+    # The publication readback is ordered by warehouse_key,nm_id.  Keep the
+    # reviewed plan in that same canonical order so its digest is independent
+    # of the calculation loop's SKU-first traversal.
+    output.sort(
+        key=lambda item: (
+            str(item.get("warehouse_key") or ""),
+            int(item.get("nm_id") or 0),
+        )
+    )
     return output, blockers
 
 

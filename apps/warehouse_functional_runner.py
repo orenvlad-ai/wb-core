@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import sys
 import tempfile
+import time
 from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,7 @@ from packages.adapters.stocks_block import HttpBackedStocksSource  # noqa: E402
 from packages.application.our_wb_costs import OurWbCostBlock  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
+    registry_runtime_sqlite_busy_timeout,
 )
 from packages.application.warehouse_functional import (  # noqa: E402
     WarehouseFunctionalBlock,
@@ -38,6 +41,12 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
 )
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 from packages.application.stocks_block import StocksBlock  # noqa: E402
+
+WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_MS = 120_000
+WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV = (
+    "WB_CORE_WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_MS"
+)
+WAREHOUSE_SYNC_COMMANDS = frozenset({"hourly-sync", "manual-sync", "sync-apply"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +116,16 @@ def _add_exact_plan_args(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if str(args.env_file or "").strip():
         _load_env_file(Path(str(args.env_file)).resolve())
+    sqlite_busy_timeout_ms = _warehouse_sync_sqlite_busy_timeout_ms(args.command)
+    with registry_runtime_sqlite_busy_timeout(sqlite_busy_timeout_ms):
+        return _run(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
+
+
+def _run(
+    args: argparse.Namespace,
+    *,
+    sqlite_busy_timeout_ms: int | None,
+) -> dict[str, Any]:
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(str(args.runtime_dir)).resolve())
     block = WarehouseFunctionalBlock(runtime=runtime, stocks_block=_fresh_stocks_block())
 
@@ -241,17 +260,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 block.record_failed_sync(exc)
                 raise
     if args.command in {"hourly-sync", "manual-sync"}:
-        with warehouse_functional_write_lock(runtime.runtime_dir):
+        phase_timings_ms: dict[str, float] = {}
+        with warehouse_functional_write_lock(runtime.runtime_dir) as lock_evidence:
+            phase_timings_ms["warehouse_lock_wait"] = float(
+                lock_evidence.get("wait_ms") or 0
+            )
             if args.command == "manual-sync":
-                block.calculation_parameters.preflight_fresh_economics_backup_capacity(
-                    Path(str(args.backup_dir)),
+                _run_sync_phase(
+                    "backup_capacity_preflight",
+                    phase_timings_ms,
+                    lambda: (
+                        block.calculation_parameters.preflight_fresh_economics_backup_capacity(
+                            Path(str(args.backup_dir)),
+                        )
+                    ),
                 )
             backup_result = (
                 {
-                    **_create_pre_sync_backup(
-                        runtime,
-                        backup_dir=Path(str(args.backup_dir)),
-                        timestamp=block.timestamp_factory(),
+                    **_run_sync_phase(
+                        "create_manual_restore_point",
+                        phase_timings_ms,
+                        lambda: _create_pre_sync_backup(
+                            runtime,
+                            backup_dir=Path(str(args.backup_dir)),
+                            timestamp=block.timestamp_factory(),
+                        ),
                     ),
                     "backup_scope": "fresh_manual_sync",
                 }
@@ -259,36 +292,70 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             )
             try:
-                economics_backup = (
-                    backup_result
-                    if backup_result is not None
-                    else block.calculation_parameters.prepare_functional_economics_backup()
+                economics_backup = _run_sync_phase(
+                    "prepare_economics_restore_point",
+                    phase_timings_ms,
+                    lambda: (
+                        backup_result
+                        if backup_result is not None
+                        else block.calculation_parameters.prepare_functional_economics_backup()
+                    ),
                 )
-                supply_refresh = _refresh_official_supply_state(
-                    runtime,
-                    record_ff_movements=False,
+                supply_refresh = _run_sync_phase(
+                    "refresh_official_supply_state",
+                    phase_timings_ms,
+                    lambda: _refresh_official_supply_state(
+                        runtime,
+                        record_ff_movements=False,
+                    ),
                 )
-                downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
-                ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
-                plan = block.build_sync_plan()
-                result = block.apply_plan(
-                    plan,
-                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                downstream_cost_layers = _run_sync_phase(
+                    "materialize_downstream_cost_layers",
+                    phase_timings_ms,
+                    lambda: _materialize_downstream_cost_layers(runtime),
                 )
-                proxy_recalculation = block.calculation_parameters.process_pending_targeted_recalculations(
-                    verified_backup=economics_backup,
+                ff_state = _run_sync_phase(
+                    "reconcile_functional_ff_state",
+                    phase_timings_ms,
+                    lambda: WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state(),
+                )
+                plan = _run_sync_phase(
+                    "build_sync_plan",
+                    phase_timings_ms,
+                    block.build_sync_plan,
+                )
+                result = _run_sync_phase(
+                    "publish_functional_version",
+                    phase_timings_ms,
+                    lambda: block.apply_plan(
+                        plan,
+                        confirm_fingerprint=str(plan["plan_fingerprint"]),
+                    ),
+                )
+                proxy_recalculation = _run_sync_phase(
+                    "process_targeted_recalculations",
+                    phase_timings_ms,
+                    lambda: (
+                        block.calculation_parameters.process_pending_targeted_recalculations(
+                            verified_backup=economics_backup,
+                        )
+                    ),
                 )
                 if str(proxy_recalculation.get("status") or "") == "failed":
                     raise RuntimeError(
                         "targeted Proxy recalculation failed: "
                         + str(proxy_recalculation.get("error") or "unknown error")
                     )
-                economics_publication = (
-                    proxy_recalculation
-                    if int(proxy_recalculation.get("request_count") or 0) > 0
-                    else block.calculation_parameters.publish_current_functional_economics(
-                        verified_backup=economics_backup,
-                    )
+                economics_publication = _run_sync_phase(
+                    "publish_functional_economics",
+                    phase_timings_ms,
+                    lambda: (
+                        proxy_recalculation
+                        if int(proxy_recalculation.get("request_count") or 0) > 0
+                        else block.calculation_parameters.publish_current_functional_economics(
+                            verified_backup=economics_backup,
+                        )
+                    ),
                 )
                 completed_backup = (
                     economics_publication.get("backup_archive")
@@ -298,6 +365,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 return {
                     "status": "success",
                     "mode": args.command,
+                    "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
+                    "phase_timings_ms": phase_timings_ms,
                     "backup": completed_backup,
                     "raw_backup": (
                         {
@@ -328,7 +397,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 }
             except Exception as exc:
-                block.record_failed_sync(exc)
+                failure = _sync_failure_record(
+                    exc,
+                    sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+                    phase_timings_ms=phase_timings_ms,
+                )
+                try:
+                    block.record_failed_sync(failure)
+                except sqlite3.OperationalError as record_exc:
+                    if not _is_sqlite_locked_error(record_exc):
+                        raise
                 raise
     if args.command == "emergency-dry-run":
         plan = block.build_emergency_rebuild_plan()
@@ -645,6 +723,74 @@ def _write_optional_plan(
         target.write_text(_json(plan) + "\n", encoding="utf-8")
         result["plan_file"] = str(target)
     return result
+
+
+def _warehouse_sync_sqlite_busy_timeout_ms(command: str) -> int | None:
+    if str(command or "") not in WAREHOUSE_SYNC_COMMANDS:
+        return None
+    raw_value = str(
+        os.environ.get(
+            WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV,
+            WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_MS,
+        )
+    ).strip()
+    try:
+        timeout_ms = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV} must be an integer"
+        ) from exc
+    if not 5_000 <= timeout_ms <= 300_000:
+        raise ValueError(
+            f"{WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV} must be between 5000 and 300000"
+        )
+    return timeout_ms
+
+
+def _run_sync_phase(
+    phase: str,
+    phase_timings_ms: dict[str, float],
+    callback,
+):
+    started = time.monotonic()
+    try:
+        result = callback()
+    except Exception as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 3)
+        phase_timings_ms[phase] = elapsed_ms
+        if _is_sqlite_locked_error(exc):
+            raise RuntimeError(
+                "warehouse_sync_sqlite_write_wait_expired "
+                f"phase={phase} elapsed_ms={elapsed_ms}; last-good version preserved"
+            ) from exc
+        raise
+    else:
+        phase_timings_ms[phase] = round((time.monotonic() - started) * 1000, 3)
+        return result
+
+
+def _sync_failure_record(
+    error: Exception,
+    *,
+    sqlite_busy_timeout_ms: int | None,
+    phase_timings_ms: Mapping[str, float],
+) -> RuntimeError:
+    bounded_error = str(error).replace("\n", " ").strip()[:1000]
+    timings = json.dumps(
+        dict(phase_timings_ms),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return RuntimeError(
+        f"{bounded_error}; sqlite_busy_timeout_ms={sqlite_busy_timeout_ms}; "
+        f"phase_timings_ms={timings}"
+    )
+
+
+def _is_sqlite_locked_error(error: BaseException) -> bool:
+    normalized = str(error).casefold()
+    return "database is locked" in normalized or "database table is locked" in normalized
 
 
 def _load_env_file(path: Path) -> None:

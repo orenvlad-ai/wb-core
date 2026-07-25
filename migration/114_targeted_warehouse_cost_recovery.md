@@ -24,7 +24,7 @@ Expense allocation is arithmetic-only and remains fully allocated while a newer 
 
 Transit states preserve positive, confirmed zero, not-requested, updating, not-found, source-error, session-expired, pending replay, included and replay-error semantics. Unknown/error never becomes zero.
 
-Whole-box correction uses per-SKU factory box size. Only one final minimum whole-box solution can apply. Gross cross-SKU evidence remains separate before correction. Apply and rollback use append-only FF compensation and exact manifest digests.
+Whole-box correction uses per-SKU factory box size. Only one final minimum whole-box solution can apply. Gross cross-SKU evidence remains separate before correction. Apply and rollback use append-only FF compensation and exact manifest digests. Subsequent functional plan and optimistic apply gates both fingerprint the same corrected supply view plus its correction identity; the gate never compares a corrected plan to the uncorrected persisted raw-goods digest.
 
 Bank import separates payment anchors, logical fees and atomic bank rows. One logical fee may contain several atomic debits. VAT follows purpose semantics. The confirmation UI lists only new logical groups, starts with every checkbox clear, discloses atomic rows and keeps imported/conflict/weak/ignored evidence in collapsed non-selectable blocks. Server target-revision drift rejects confirmation.
 
@@ -35,6 +35,8 @@ Bank import separates payment anchors, logical fees and atomic bank rows. One lo
 Bank-statement matching uses the same payment-anchor source as the operator flow, including linked supplier-payment documents in the CNY ledger. Those target-scoped CNY payment revisions participate in the stale-preview fingerprint, so changing an anchor after preview is rejected before any recovery write.
 
 Before the first write the runner persists the reviewed plan in a durable audit journal. Bank, box, physical, factual-date, functional and economics steps checkpoint independently. A crash between mutation and checkpoint is recovered by rerunning the same fingerprint: every step has deterministic identities and re-entry is a no-op or resumes after exact scope/source-revision validation. Completion requires post-apply readback to be a no-op. The legacy standalone 26GN527 apply is disabled.
+
+Audit writes use an explicit `BEGIN IMMEDIATE` with a bounded 300-second SQLite writer wait in addition to the warehouse publication lock. This covers short unrelated writers that still share the monolithic operational database without exposing raw `database is locked`; exhaustion reports the bounded `unified_recovery_sqlite_write_wait_expired` reason. The accumulated wait is published as `sqlite_lock_wait_ms`, and a concurrent-writer smoke proves that a checkpoint waits and then commits without duplicating a durable step.
 
 The economics checkpoint is pinned to the same affected nmID closure and the earliest selected business date. It may update those SKU/date cells and their direct `TOTAL` consumers only; unrelated SKU cells must already reconcile to their current canonical inputs or the target run fails locally. Its exact non-target digest and snapshot before-images prove that unrelated ready-snapshot content is not rewritten.
 

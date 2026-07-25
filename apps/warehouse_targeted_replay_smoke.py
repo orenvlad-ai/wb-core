@@ -189,7 +189,7 @@ def main() -> None:
             assert china["quantity"] == "10"
             assert non_target["quantity"] == "5"
             assert active_snapshot["raw_rows_digest"] == "sha256:wb-snapshot"
-            assert active_documents == 2
+            assert active_documents == 3
 
         with patch(
             "packages.application.warehouse_targeted_replay.load_supplier_line_cost_breakdown",
@@ -287,6 +287,14 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
                     "flow_capital_rub": "100",
                     "quality": "confirmed_payments_provisional_expenses",
                     "expenses_complete_certification": False,
+                },
+                {
+                    "shipment_id": "unrelated-shipment-same-sku",
+                    "supplier_flow_id": "supplier_flow_unrelated",
+                    "flow_quantity": "2",
+                    "flow_capital_rub": "20",
+                    "quality": "confirmed_payments_provisional_expenses",
+                    "expenses_complete_certification": False,
                 }
             ]
         }
@@ -296,7 +304,7 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
                 version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
                 cost_covered_quantity,quality,certified,wb_quantity,
                 wb_in_way_to_client,wb_in_way_from_client,provenance_json
-            ) VALUES('base','production',101,'10','10','100','10',?,0,'0','0','0',?)
+            ) VALUES('base','production',101,'12','10','120','12',?,0,'0','0','0',?)
             """,
             ("confirmed_payments_provisional_expenses", _json(source)),
         )
