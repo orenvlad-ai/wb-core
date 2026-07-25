@@ -1115,6 +1115,21 @@ def main() -> None:
                 deploy_dry_run["commands"]["chown_target_dir"]
             ):
                 raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
+            preparing_metadata = " ".join(
+                deploy_dry_run["commands"]["deploy_metadata"]
+            )
+            completed_metadata = " ".join(
+                deploy_dry_run["commands"]["deploy_completion_metadata"]
+            )
+            if (
+                '"deployment_complete":false' not in preparing_metadata
+                or '"deployment_complete":true' not in completed_metadata
+                or "wb_core_deploy_metadata_v2" not in preparing_metadata
+                or "wb_core_deploy_metadata_v2" not in completed_metadata
+            ):
+                raise AssertionError(
+                    "deploy plan must distinguish early SHA visibility from final completion proof"
+                )
             seller_os_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_os_dependencies"])
             if "python3-venv" not in seller_os_command or "xvfb" not in seller_os_command:
                 raise AssertionError("deploy --dry-run must expose seller recovery OS dependency install")

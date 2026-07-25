@@ -237,7 +237,18 @@ Classifier сам выводит `blocked_phase`: при непустом `safe_
 
 Ошибочная stale-terminal recovery identity исправляется только `/wb-core loop correct-to-new <PR> head <HEAD_SHA> old-root <ROOT>`. Command требует `OWNER`/`MEMBER` authorization, open/unmerged exact PR/head, successful baseline, exact classification-blocker proof, repo-owned terminal proof old root и отсутствие его active gate; затем одним label replacement назначает own root/ready и оставляет идемпотентный correction/new-root audit proof. Без любого evidence command fail-closed. Эта операция не применяется автоматически и не изменяет старый root или другие chains.
 
-SSH exit `255` или unexpected disconnect после merge классифицируется как `transport-indeterminate`. Repo-owned reconciler bounded-переподключается и сопоставляет canonical `target_id`, expected merge SHA, deploy metadata SHA, runtime SHA marker, systemd active/MainPID и обязательные loopback probes. Wrong/mixed SHA, inactive unit или failed probes сохраняют `release:halted`. Повторяются только `daemon-reload`, restart, probes и readback. Отдельный production-environment workflow `resume-halted` снимает halted только после healthy exact PR/head/merge/target JSON evidence; ручное снятие label не считается reconciliation.
+SSH exit `255` или unexpected disconnect после merge классифицируется как
+`transport-indeterminate`. Repo-owned reconciler bounded-переподключается и
+сопоставляет canonical `target_id`, expected merge SHA, deploy metadata SHA,
+runtime SHA marker, atomic `deployment_complete=true`, systemd active/MainPID
+и обязательные loopback probes. Ранние exact-SHA markers с
+`deployment_complete=false` доказывают только начатый rollout и не могут снять
+`release:halted`, даже если старый/перезапущенный процесс отвечает на probes.
+Wrong/mixed SHA, incomplete deploy, inactive unit или failed probes сохраняют
+`release:halted`. Повторяются только `daemon-reload`, restart, probes и
+readback. Отдельный production-environment workflow `resume-halted` снимает
+halted только после healthy exact PR/head/merge/target JSON evidence; ручное
+снятие label не считается reconciliation.
 
 ## Канонический Мониторинг
 
