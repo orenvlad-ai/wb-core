@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.sqlite_contention import connect_sqlite
 
 
 SCHEMA_VERSION = "ads_historical_recovery_v4"
@@ -1248,11 +1249,16 @@ class AdsHistoricalRecovery:
         if read_only:
             uri = f"file:{self.db_path.resolve()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=60, isolation_level=None)
+            conn.execute("PRAGMA busy_timeout=60000")
         else:
-            conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None)
+            conn = connect_sqlite(
+                self.db_path,
+                timeout_ms=60_000,
+                priority="background",
+                isolation_level=None,
+            )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=60000")
         return conn
 
     @staticmethod

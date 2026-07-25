@@ -22,6 +22,7 @@ from packages.business_time import business_date_from_timestamp
 from packages.application.calculation_parameters import CalculationParametersBlock
 from packages.application.canonical_cost_engine import CanonicalCostEngine
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.stocks_block import StocksBlock
 from packages.application.warehouse_archival_estimate import (
     QUALITY as BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
@@ -8206,7 +8207,7 @@ def _discard_uncommitted_backup(backup: Mapping[str, Any] | None) -> None:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=30)
+    conn = connect_sqlite(path, timeout_ms=30_000)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.business_time import current_business_date_iso
 
@@ -1413,7 +1414,7 @@ def _verify_daily_raw_backup_manifest(
 
 
 def _connect(db_path: Any) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn = connect_sqlite(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

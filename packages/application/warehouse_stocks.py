@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.stocks_block import StocksBlock, transform_legacy_payload
 from packages.application.supplier_shipment_status import resolve_supplier_shipment_status
@@ -1094,7 +1095,7 @@ class WarehouseStocksBlock:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn = connect_sqlite(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

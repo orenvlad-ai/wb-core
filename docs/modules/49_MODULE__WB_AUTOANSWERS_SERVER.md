@@ -66,7 +66,7 @@ Frozen identity:
 
 ## Data model and versioning
 
-All schema changes are additive in the existing runtime SQLite database. The canonical tables cover feedbacks, immutable feedback versions, media, sync runs/cursors/commands, AI jobs, publication jobs/attempts, budget reservations, backlog previews and audit. Schema v3 introduced media/policy epochs; schema v4 adds incident controls and bounded lazy materialization. Schema v5 additionally adds:
+Autoanswers persistence is physically isolated in `<runtime_dir>/wb_autoanswers_runtime.sqlite3`. The legacy autoanswer tables in `registry_upload_runtime.sqlite3` are migration/rollback evidence only and are no longer opened by the worker, readonly sync, lifecycle or recovery paths after cutover. The canonical tables cover feedbacks, immutable feedback versions, media, sync runs/cursors/commands, AI jobs, publication jobs/attempts, budget reservations, backlog previews and audit. Schema v3 introduced media/policy epochs; schema v4 adds incident controls and bounded lazy materialization. Schema v5 additionally adds:
 
 - canonical `content_classification` on the current feedback content version;
 - immutable `content_classification_at_preview` on each transition-run member;
@@ -361,7 +361,7 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 ## Deploy, verification and rollback
 
-Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries.
+Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. The deploy-only quiet window records active Autoanswers timers, stops the worker/readonly timers and registry HTTP service, then copies all legacy Autoanswers tables from one query-only snapshot into a candidate isolated store. It verifies every table row count and deterministic row digest, foreign keys, integrity and an unchanged source `data_version`, fsyncs a `prepared` manifest before the atomic store rename, and restores the registry plus exactly the previously active timers; interrupted one-shot executions resume idempotently on those timers. An interrupted publish is accepted only after full store re-verification. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries. Legacy main-DB tables are retained for bounded rollback.
 
 Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v7 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
@@ -415,7 +415,7 @@ values once, confirms the new settings revision and exact readback, and proves
 that every global value and the active transition-run cap stayed unchanged.
 It never substitutes a dangerous value or creates a preview/run.
 
-Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v7 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
+Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Before older code is deployed, `autoanswers-store-rollback-plan` binds the current isolated and retained legacy table digests; exact-fingerprint `autoanswers-store-rollback-apply` enters the deploy quiet window, creates and verifies a private legacy-table snapshot, replaces only the Autoanswers table set in one transaction and proves digest/foreign-key readback. The current isolated source and all non-Autoanswers registry tables remain intact. Restore a verified database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 
 No migration or acceptance step creates a replacement transition preview/run
 when the current run is valid. A new preview is an explicit future owner action.

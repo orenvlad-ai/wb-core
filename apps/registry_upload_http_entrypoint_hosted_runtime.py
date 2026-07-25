@@ -1132,6 +1132,7 @@ def _build_autoanswers_prepare_deploy_command(target: HostedRuntimeTarget) -> li
     command = (
         f"cd {shlex.quote(target.target_dir)} && "
         "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true "
+        "WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE=true "
         "python3 apps/wb_autoanswers_activation.py prepare-deploy "
         f"--runtime-dir {shlex.quote(runtime_dir)}"
     )
@@ -3810,6 +3811,194 @@ def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_autoanswers_store_rollback_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.rollback_apply)
+    action = (
+        "autoanswers-store-rollback-apply"
+        if apply
+        else "autoanswers-store-rollback-plan"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+        if not str(args.fingerprint or "").startswith("sha256:"):
+            raise ValueError(
+                "Autoanswers store rollback apply requires the exact plan fingerprint"
+            )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    runner_action = "store-rollback-apply" if apply else "store-rollback-plan"
+    environment = (
+        "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true "
+        "WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE=true "
+        "WB_AUTOANSWERS_STORE_ROLLBACK_FINGERPRINT="
+        + shlex.quote(str(args.fingerprint or ""))
+        + " "
+        if apply
+        else ""
+    )
+    shell_command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        + environment
+        + "python3 apps/wb_autoanswers_activation.py "
+        + runner_action
+        + " --runtime-dir "
+        + shlex.quote(runtime_dir)
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=7200,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Autoanswers store rollback runner returned invalid JSON"
+        ) from exc
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _observe_autoanswers_background_writer(
+    target: HostedRuntimeTarget,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Wait for a real timer-owned Autoanswers process without starting one."""
+
+    units = (
+        "wb-core-autoanswers-worker.service",
+        "wb-core-autoanswers-readonly-sync.service",
+    )
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        for unit in units:
+            result = subprocess.run(
+                _remote_shell_command(
+                    target,
+                    "systemctl show "
+                    + shlex.quote(unit)
+                    + " --property=ActiveState,SubState,ExecMainStartTimestamp,"
+                    "ExecMainExitTimestamp,InvocationID --no-pager",
+                ),
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                timeout=30,
+                check=False,
+            )
+            values = {}
+            if result.returncode == 0:
+                values = {
+                    key: value
+                    for line in result.stdout.splitlines()
+                    if "=" in line
+                    for key, value in [line.split("=", 1)]
+                }
+            latest = {
+                "unit": unit,
+                "active_state": str(values.get("ActiveState") or ""),
+                "sub_state": str(values.get("SubState") or ""),
+                "exec_main_started_at": str(
+                    values.get("ExecMainStartTimestamp") or ""
+                ),
+                "exec_main_exited_at": str(
+                    values.get("ExecMainExitTimestamp") or ""
+                ),
+                "invocation_id_prefix": str(
+                    values.get("InvocationID") or ""
+                )[:12],
+                "observed_at": datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "observer_started_service": False,
+            }
+            if latest["active_state"] in {"active", "activating"}:
+                return latest
+        time.sleep(1.0)
+    raise RuntimeError(
+        "No timer-owned Autoanswers writer became active inside the bounded "
+        f"{float(timeout_seconds):.0f}s observation window; latest={latest}"
+    )
+
+
+def run_sqlite_contention_ui_flow_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(
+        target,
+        action="sqlite-contention-ui-flow",
+    )
+    auth_cookie = _build_probe_auth_cookie(
+        target,
+        timeout_seconds=float(args.timeout_seconds),
+    )
+    if not auth_cookie:
+        raise RuntimeError(
+            "SQLite contention UI flow requires safely available production "
+            "app-session auth"
+        )
+    evidence_dir = Path(str(args.evidence_dir)).resolve()
+    try:
+        evidence_dir.relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "SQLite contention UI evidence must be stored outside the repository"
+        )
+    background_evidence = _observe_autoanswers_background_writer(
+        target,
+        timeout_seconds=float(args.background_wait_seconds),
+    )
+    from apps.sqlite_contention_production_ui_flow import (
+        run_sqlite_contention_ui_flow,
+    )
+
+    result = run_sqlite_contention_ui_flow(
+        base_url=target.public_base_url,
+        auth_cookie=auth_cookie,
+        evidence_dir=evidence_dir,
+        headless=not bool(args.headed),
+        deployed_sha=str(args.deployed_sha or ""),
+        background_evidence=background_evidence,
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "public_base_url": target.public_base_url,
+            "auth": _probe_auth_summary(auth_cookie),
+            "result": result,
+        }
+    )
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repo-owned deploy/probe contract for hosted registry upload runtime.",
@@ -4413,6 +4602,63 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
+
+    autoanswers_store_rollback_plan = subparsers.add_parser(
+        "autoanswers-store-rollback-plan",
+        help=(
+            "Plan a read-only export of the isolated Autoanswers store back "
+            "to the retained legacy tables before an older-code rollback."
+        ),
+    )
+    autoanswers_store_rollback_plan.set_defaults(
+        handler=run_autoanswers_store_rollback_command,
+        rollback_apply=False,
+        fingerprint="",
+    )
+
+    autoanswers_store_rollback_apply = subparsers.add_parser(
+        "autoanswers-store-rollback-apply",
+        help=(
+            "Under the repo-owned quiet window, back up and reconcile current "
+            "isolated Autoanswers data into the legacy tables."
+        ),
+    )
+    autoanswers_store_rollback_apply.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    autoanswers_store_rollback_apply.set_defaults(
+        handler=run_autoanswers_store_rollback_command,
+        rollback_apply=True,
+    )
+
+    sqlite_contention_ui_flow = subparsers.add_parser(
+        "sqlite-contention-ui-flow",
+        help=(
+            "Run production contention acceptance while a timer-owned "
+            "Autoanswers writer is observed."
+        ),
+    )
+    sqlite_contention_ui_flow.add_argument("--evidence-dir", required=True)
+    sqlite_contention_ui_flow.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=180.0,
+    )
+    sqlite_contention_ui_flow.add_argument(
+        "--background-wait-seconds",
+        type=float,
+        default=180.0,
+    )
+    sqlite_contention_ui_flow.add_argument("--headed", action="store_true")
+    sqlite_contention_ui_flow.add_argument(
+        "--deployed-sha",
+        required=True,
+        help="Exact deployed commit expected for the machine-readable evidence.",
+    )
+    sqlite_contention_ui_flow.set_defaults(
+        handler=run_sqlite_contention_ui_flow_command
+    )
 
     return parser
 

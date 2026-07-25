@@ -33,6 +33,7 @@ from packages.application.wb_finance_weekly import (
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.canonical_wb_cost_resolver import resolve_canonical_wb_cost
+from packages.application.sqlite_contention import connect_sqlite
 
 
 PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v4"
@@ -2884,7 +2885,7 @@ class PartnerReportBlock:
         return cleaned[:80]
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=60)
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         return conn

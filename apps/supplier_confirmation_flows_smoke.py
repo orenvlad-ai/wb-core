@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,6 +188,50 @@ def _assert_financial_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
         "reset", counters["reset"] + 1
     )
     source = b"%PDF-1.4 invoice 136"
+    with patch.object(
+        runtime,
+        "save_supplier_confirmation_preview",
+        side_effect=RuntimeError("injected durable preview failure"),
+    ):
+        try:
+            block.preview_document_upload(
+                SHIPMENT_ID,
+                file_bytes=b"%PDF-1.4 staging failure",
+                uploaded_filename="staging-failure.pdf",
+            )
+        except RuntimeError as exc:
+            _assert(
+                "injected durable preview failure" in str(exc),
+                "injected preview failure propagated",
+            )
+        else:
+            raise AssertionError("injected durable preview failure was not raised")
+    staging_root = runtime.runtime_dir / "supplier_financial_staging"
+    _assert(
+        not staging_root.exists() or not any(staging_root.rglob("*")),
+        "failed durable preview removes its owned staging file",
+    )
+    expiring_preview = block.preview_document_upload(
+        SHIPMENT_ID,
+        file_bytes=b"%PDF-1.4 expiring staging fixture",
+        uploaded_filename="expiring-staging.pdf",
+        ttl_seconds=1,
+    )
+    expired_count = runtime.cleanup_expired_supplier_confirmation_previews(
+        now="2026-07-24T09:03:00Z"
+    )
+    _assert(expired_count == 1, "expired preview lifecycle removed one token")
+    _assert(
+        runtime.load_supplier_confirmation_preview(
+            expiring_preview["confirmation_token"]
+        )
+        is None,
+        "expired preview token was not deleted",
+    )
+    _assert(
+        not staging_root.exists() or not any(staging_root.rglob("*")),
+        "expired preview lifecycle leaves no staging orphan",
+    )
     preview = block.preview_document_upload(
         SHIPMENT_ID, file_bytes=source, uploaded_filename="136.pdf"
     )
@@ -202,6 +247,10 @@ def _assert_financial_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
     _assert(
         len(runtime.list_supplier_financial_documents(SHIPMENT_ID)) == 1,
         "one financial document after confirm",
+    )
+    _assert(
+        not staging_root.exists() or not any(staging_root.rglob("*")),
+        "consumed durable preview removes its owned staging file",
     )
     first_queue_count = counters["queue"]
     repeat = block.confirm_document_upload(
@@ -223,6 +272,10 @@ def _assert_financial_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
         exact_result["duplicate_action"] == "existing_active"
         and len(runtime.list_supplier_financial_documents(SHIPMENT_ID)) == 1,
         "active SHA duplicate creates no row",
+    )
+    _assert(
+        not staging_root.exists() or not any(staging_root.rglob("*")),
+        "idempotent duplicate confirmation leaves no staging orphan",
     )
     document_id = str(created["document_id"])
     delete_preview = block.preview_document_delete(SHIPMENT_ID, document_id)

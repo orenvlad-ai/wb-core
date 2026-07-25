@@ -732,6 +732,43 @@ def main() -> None:
     )
     if finance_ui_flow_args.handler is not hosted_runtime.run_finance_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical finance-ui-flow command")
+    sqlite_contention_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "sqlite-contention-ui-flow",
+            "--evidence-dir",
+            "/tmp/wb-core-sqlite-contention-ui-smoke",
+            "--deployed-sha",
+            "a" * 40,
+        ]
+    )
+    if (
+        sqlite_contention_ui_flow_args.handler
+        is not hosted_runtime.run_sqlite_contention_ui_flow_command
+    ):
+        raise AssertionError(
+            "hosted runner must expose canonical sqlite-contention-ui-flow command"
+        )
+    rollback_plan_args = hosted_runtime.build_arg_parser().parse_args(
+        ["autoanswers-store-rollback-plan"]
+    )
+    rollback_apply_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "autoanswers-store-rollback-apply",
+            "--fingerprint",
+            "sha256:" + "a" * 64,
+        ]
+    )
+    if (
+        rollback_plan_args.handler
+        is not hosted_runtime.run_autoanswers_store_rollback_command
+        or rollback_plan_args.rollback_apply
+        or rollback_apply_args.handler
+        is not hosted_runtime.run_autoanswers_store_rollback_command
+        or not rollback_apply_args.rollback_apply
+    ):
+        raise AssertionError(
+            "hosted runner must expose canonical Autoanswers store rollback commands"
+        )
     if finance_ui_flow.REPORTS_PATH != "/sheet-vitrina-v1/vitrina?tab=reports":
         raise AssertionError("Finance UI Flow must enter through canonical unified navigation")
     required_partner_fields = ("partner_share_pct", "invested_capital_rub")

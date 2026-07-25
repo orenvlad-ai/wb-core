@@ -231,3 +231,9 @@ Targeted verification:
 Supplier stage cells are certified only from the current active functional version after revalidating both source and calculation fingerprints. A queued/running targeted request suppresses the frozen numeric value and renders `Ожидает пересчёта`; an error renders its exact blocker; any other fingerprint mismatch is stale and also suppresses the number. After successful replay the current canonical value is green. `production`/`china_to_ff` cells for a shipment that already reached FF are neutral `Не применяется: поставка уже на ФФ`.
 
 The supplier exact-cost cell follows its canonical proof independently of the operator completeness flag. `certified` is green, `provisional` is yellow with warnings, and `unavailable` has no current number and exposes blockers. Thus neither equal-looking values nor `expenses_complete=true` establish functional-version freshness.
+
+## Contention and targeted replay boundary
+
+Warehouse writers use the shared bounded SQLite recovery contract, while the functional sync alone preserves its documented 120-second process-local wait. It does not widen web or feature-worker budgets. A failed commit leaves the immutable last-good functional version active.
+
+A confirmed supplier bank-fee group changes only its exact shipment source revision. The existing targeted queue derives the shipment's exact matched SKU set and actually dependent warehouse stages/projections from canonical provenance. It never invokes Finance raw/history loading or a global/full-history rebuild. Publication still requires the existing immutable functional version, source/calculation fingerprints, conservation and certification gates; unrelated shipment/SKU/version digests remain invariant.

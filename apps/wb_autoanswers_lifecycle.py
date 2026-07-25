@@ -19,13 +19,14 @@ from packages.application.wb_autoanswers_lifecycle import (  # noqa: E402
     AutoanswersLifecycle,
 )
 from packages.application.wb_autoanswers_runtime import (  # noqa: E402
+    AUTOANSWERS_DB_FILENAME,
     AutoanswersRepository,
     SCHEMA_VERSION,
 )
 
 
 def _schema_readback(runtime_dir: Path) -> dict[str, Any]:
-    database = runtime_dir / "registry_upload_runtime.sqlite3"
+    database = runtime_dir / AUTOANSWERS_DB_FILENAME
     if not database.is_file():
         return {"ready": False, "database_exists": False, "versions": []}
     try:

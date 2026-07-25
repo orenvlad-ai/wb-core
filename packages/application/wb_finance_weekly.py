@@ -17,6 +17,7 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
@@ -4683,7 +4684,7 @@ class WbFinanceWeeklyBlock:
         ).hexdigest()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=60)
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         return conn

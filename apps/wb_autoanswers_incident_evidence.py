@@ -17,8 +17,9 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable
 
+from packages.application.wb_autoanswers_runtime import AUTOANSWERS_DB_FILENAME
 
-DATABASE_FILENAME = "registry_upload_runtime.sqlite3"
+DATABASE_FILENAME = AUTOANSWERS_DB_FILENAME
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:

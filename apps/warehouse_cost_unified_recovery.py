@@ -358,6 +358,12 @@ def apply_plan(
                             selected_operation_ids=[
                                 str(bank_plan["logical_fee_id"])
                             ],
+                            expected_source_sha256=str(
+                                document.get("file_sha256") or ""
+                            ),
+                            expected_target_revision=str(
+                                bank_plan["target_revision"]
+                            ),
                         )
                     )
                 else:

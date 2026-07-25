@@ -46,6 +46,7 @@ from packages.application.wb_autoanswers_runtime import (
     autoanswers_settings_revision,
 )
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
+from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
@@ -4297,11 +4298,35 @@ class RegistryUploadHttpEntrypoint:
         document_id: str,
         *,
         selected_operation_ids: Iterable[str] | None = None,
+        expected_source_sha256: str | None = None,
+        expected_target_revision: str | None = None,
     ) -> dict[str, Any]:
         payload = self.supplier_financial_documents_block.confirm_bank_fee_statement_import(
             shipment_id,
             document_id,
             selected_operation_ids=selected_operation_ids,
+            expected_source_sha256=expected_source_sha256,
+            expected_target_revision=expected_target_revision,
+            defer_downstream=True,
+            cny_document_factory=lambda row, document: (
+                self.cny_ledger_block.build_bank_fee_document(
+                    source_order_id=shipment_id,
+                    linked_financial_document_id=document_id,
+                    natural_key=str(
+                        row.get("cny_ledger_natural_key") or ""
+                    ),
+                    fee_row=row,
+                    original_filename=str(
+                        document.get("original_filename") or ""
+                    ),
+                    stored_file_path=str(
+                        document.get("stored_file_path") or ""
+                    ),
+                    file_content_type=str(
+                        document.get("file_content_type") or ""
+                    ),
+                )
+            ),
         )
         cny_rows = list(payload.pop("cny_fee_rows_for_ledger", []) or [])
         for row in cny_rows:
@@ -4314,9 +4339,48 @@ class RegistryUploadHttpEntrypoint:
                 stored_file_path=str(payload.get("stored_file_path") or ""),
                 file_content_type=str(payload.get("file_content_type") or ""),
             )
-        if cny_rows:
-            self.cny_ledger_block.replay_ledger(reason="bank_fee_statement_confirm")
+        replay_required = bool(
+            payload.pop("cny_ledger_replay_required", False) or cny_rows
+        )
+        try:
+            if replay_required:
+                self.cny_ledger_block.replay_ledger(
+                    reason="bank_fee_statement_confirm"
+                )
+            downstream = (
+                self.supplier_financial_documents_block.finalize_bank_fee_statement_import(
+                    shipment_id,
+                    document_id,
+                )
+            )
+        except SQLiteContentionExhausted as exc:
+            result = self.supplier_financial_documents_block.get_document(
+                shipment_id,
+                document_id,
+            )
+            result.update(
+                {
+                    "contract_name": (
+                        "sheet_vitrina_v1_supplier_bank_fee_confirm_pending_v1"
+                    ),
+                    "status": "pending",
+                    "retryable": True,
+                    "operation_applied": True,
+                    "readback_confirmed": True,
+                    "pending_phase": "derived_replay",
+                    "message": (
+                        "Комиссии сохранены атомарно. Связанные расчёты "
+                        "заняты; безопасно повторите подтверждение."
+                    ),
+                    "waited_ms": exc.wait_ms,
+                    "retry_count": exc.retries,
+                    "retry_after_ms": 1_500,
+                    "http_status": 202,
+                }
+            )
+            return result
         result = self.supplier_financial_documents_block.get_document(shipment_id, document_id)
+        result.update(downstream)
         for key in ("idempotent", "already_added"):
             if key in payload:
                 result[key] = payload[key]

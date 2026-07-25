@@ -441,8 +441,44 @@ Archived MCP compatibility publication gate:
   version enters the
   exclusive migration lock and `BEGIN IMMEDIATE`, so an ordinary HTTP restart
   cannot lose startup to a concurrent bounded worker transaction;
+- canonical deploy sets `WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE=1` for
+  `prepare-deploy`. The repo-owned quiet window stops only the exact
+  Autoanswers timers/services and registry HTTP service, records their prior
+  state, migrates all Autoanswers tables from the main runtime DB into
+  `wb_autoanswers_runtime.sqlite3` from one query-only snapshot, verifies
+  per-table counts/digests plus SQLite integrity/foreign keys/source
+  `data_version`, atomically publishes a private manifest and restores the
+  registry service and exactly the timers that were active before the quiet
+  window. Interrupted one-shot executions resume idempotently on those timers.
+  The legacy tables remain intact as rollback evidence; no ordinary worker or
+  readonly-sync connection returns to them.
+- interrupted publication is fail-closed: the private `prepared` manifest is
+  fsynced before the atomic store rename; startup accepts it only after full
+  per-table digest, foreign-key and integrity re-verification of the published
+  store. Emergency older-code rollback uses
+  `autoanswers-store-rollback-plan`, then exact-fingerprint
+  `autoanswers-store-rollback-apply`: under the same quiet window it snapshots
+  and verifies the retained legacy table set, copies the current isolated
+  queues/settings/audit back in one transaction, proves every table digest and
+  preserves all non-Autoanswers registry tables;
+- the same deploy quiet window runs
+  `supplier_financial_source_migration_v1`: dry-run validates every existing
+  bank-statement file against its recorded SHA-256, apply hard-links identical
+  sources into one content-addressed path, transactionally updates only those
+  document paths, performs exact readback and stores a private rollback
+  manifest. A rerun is a verified no-op. Rollback reconstructs the original
+  paths from the exact content source before restoring DB references;
 - while the compatibility unit remains in the deploy manifest, canonical deploy installs/enables/restarts `wb-core-data-mcp.service`; explicit compatibility-maintenance verification covers authenticated initialize/list/direct business/ops calls, concurrent latency and commit equality;
 - a connector refresh in the ChatGPT UI is relevant only to an explicitly scoped archived-compatibility maintenance task, never to ordinary data acquisition.
+
+SQLite contention production acceptance is:
+
+`python3 apps/registry_upload_http_entrypoint_hosted_runtime.py sqlite-contention-ui-flow --evidence-dir <outside-repo> --deployed-sha <exact-merge-sha>`
+
+The runner waits for a timer-owned Autoanswers worker/readonly-sync process
+without starting one, then runs the isolated Playwright calculation and
+supplier statement preview/cancel Flow. It never confirms a new production
+bank posting.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`

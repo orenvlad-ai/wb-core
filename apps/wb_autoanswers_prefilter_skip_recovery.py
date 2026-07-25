@@ -24,12 +24,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_autoanswers_runtime import (
+    AUTOANSWERS_DB_FILENAME,
     EVALUATION_SIGNATURE,
     PROMPT_BUNDLE_VERSION,
 )  # noqa: E402
+from packages.application.sqlite_contention import connect_sqlite  # noqa: E402
 
 
-DATABASE_FILENAME = "registry_upload_runtime.sqlite3"
+DATABASE_FILENAME = AUTOANSWERS_DB_FILENAME
 CONTRACT = "wb_autoanswers_prefilter_skip_recovery_v1"
 RESTORE_EVENT = "prefilter_skip_state_restored"
 LATCH_CONTRACT = "wb_autoanswers_prefilter_skip_latch_recovery_v1"
@@ -59,9 +61,13 @@ def _open_ro(runtime_dir: Path) -> sqlite3.Connection:
 
 def _open_rw(runtime_dir: Path) -> sqlite3.Connection:
     database = (runtime_dir / DATABASE_FILENAME).resolve()
-    conn = sqlite3.connect(database, timeout=30, isolation_level=None)
+    conn = connect_sqlite(
+        database,
+        timeout_ms=30_000,
+        priority="background",
+        isolation_level=None,
+    )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 

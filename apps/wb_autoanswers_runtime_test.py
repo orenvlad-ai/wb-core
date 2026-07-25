@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -12,6 +13,9 @@ import threading
 import unittest
 
 from packages.application.wb_autoanswers_runtime import (
+    AUTOANSWERS_DB_FILENAME,
+    AUTOANSWERS_STORE_MANIFEST,
+    LEGACY_RUNTIME_DB_FILENAME,
     AutoanswersRepository,
     AutoanswersRuntimeError,
     SCHEMA_VERSION,
@@ -202,6 +206,14 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(self.repo.settings().effective_enabled)
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
             self.repo.assert_effective_on(operation="test")
+        self.enable()
+        self.assertTrue(self.repo.settings().effective_enabled)
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+        settings = self.repo.settings()
+        self.assertTrue(settings.master_enabled)
+        self.assertFalse(settings.effective_enabled)
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
+            self.repo.assert_effective_on(operation="test")
 
     def test_applied_schema_startup_does_not_compete_for_writer_lock(self) -> None:
         blocker = sqlite3.connect(self.repo.db_path, timeout=1, isolation_level=None)
@@ -217,7 +229,7 @@ class RuntimeTest(unittest.TestCase):
             blocker.rollback()
             blocker.close()
 
-    def test_first_additive_schema_backs_up_existing_database_once(self) -> None:
+    def test_new_isolated_store_does_not_modify_unrelated_registry_database(self) -> None:
         with TemporaryDirectory() as directory:
             runtime_dir = Path(directory)
             db_path = runtime_dir / "registry_upload_runtime.sqlite3"
@@ -230,39 +242,85 @@ class RuntimeTest(unittest.TestCase):
                     runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
                 ).glob("*.sqlite3")
             )
-            self.assertEqual(len(backups), 1)
-            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
-            with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
-                self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
-                self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
+            self.assertEqual(backups, [])
+            self.assertTrue((runtime_dir / "wb_autoanswers_runtime.sqlite3").is_file())
             with sqlite3.connect(db_path) as conn:
                 self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
             AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
             self.assertEqual(
-                len(
-                    list(
-                        (
-                            runtime_dir
-                            / "backups"
-                            / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
-                        ).glob("*.sqlite3")
-                    )
+                list(
+                    (
+                        runtime_dir
+                        / "backups"
+                        / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+                    ).glob("*.sqlite3")
                 ),
-                1,
+                [],
             )
-            evidence = AutoanswersRepository(
-                runtime_dir=runtime_dir, now_factory=self.clock, env={}
-            ).verified_schema_backup_status()
-            self.assertEqual(evidence["integrity_check"], "ok")
-            self.assertTrue(str(evidence["sha256"]).startswith("sha256:"))
-        self.enable()
-        self.assertTrue(self.repo.settings().effective_enabled)
-        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
-        settings = self.repo.settings()
-        self.assertTrue(settings.master_enabled)
-        self.assertFalse(settings.effective_enabled)
-        with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
-            self.repo.assert_effective_on(operation="test")
+
+    def test_legacy_autoanswers_tables_migrate_to_reconciled_isolated_store(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            legacy_seed = AutoanswersRepository(
+                runtime_dir=runtime_dir,
+                now_factory=self.clock,
+                env={},
+            )
+            legacy_seed.update_settings(
+                master_enabled=True,
+                mode="manual",
+                actor_id="migration-test",
+            )
+            with sqlite3.connect(legacy_seed.db_path) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            os.replace(
+                runtime_dir / AUTOANSWERS_DB_FILENAME,
+                runtime_dir / LEGACY_RUNTIME_DB_FILENAME,
+            )
+            (runtime_dir / AUTOANSWERS_STORE_MANIFEST).unlink(missing_ok=True)
+
+            migrated = AutoanswersRepository(
+                runtime_dir=runtime_dir,
+                now_factory=self.clock,
+                env={},
+            )
+            self.assertEqual(migrated.store_status["status"], "migrated")
+            self.assertEqual(migrated.store_status["integrity_check"], "ok")
+            self.assertTrue(migrated.settings().master_enabled)
+            manifest = json.loads(
+                (runtime_dir / AUTOANSWERS_STORE_MANIFEST).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(manifest["legacy_retained"])
+            self.assertTrue(
+                all(
+                    item["matching"]
+                    for item in manifest["table_evidence"].values()
+                )
+            )
+            manifest["status"] = "prepared"
+            (runtime_dir / AUTOANSWERS_STORE_MANIFEST).write_text(
+                json.dumps(manifest, sort_keys=True),
+                encoding="utf-8",
+            )
+            recovered = AutoanswersRepository(
+                runtime_dir=runtime_dir,
+                now_factory=self.clock,
+                env={},
+            )
+            self.assertEqual(
+                recovered.store_status["migration_status"],
+                "migrated",
+            )
+            recovered_manifest = json.loads(
+                (runtime_dir / AUTOANSWERS_STORE_MANIFEST).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(recovered_manifest["recovered_after_interruption"])
 
     def test_schema_v1_settings_constraint_migrates_to_manual_without_data_loss(self) -> None:
         with TemporaryDirectory() as directory:

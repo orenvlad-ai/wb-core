@@ -757,6 +757,7 @@ def _assert_vtb_statement_parser_and_preview() -> None:
 Входящий остаток на 29.06.2026 CNY: 100.00
 Дата № ВО Контрагент Обороты, RUR Обороты, CNY Назначение
 30.06.2026 7 01 7702070139 VTBRCNSHXXX 40807156200610034920 SUPPLIER 686841.34 0.00 59921.25 0.00 ADV PMT FOR GOODS CONTRACT FR-001/26
+16.07.2026 9 01 7702070139 VTBRCNSHXXX 40807156200610034920 SUPPLIER 630000.00 0.00 54883.00 0.00 ADV PMT FOR GOODS CONTRACT FR-001/26
 20.07.2026 11 01 7702070139 VTBRCNSHXXX 40807156200610034920 SUPPLIER 3925309.26 0.00 339553.75 0.00 ADV PMT FOR GOODS CONTRACT FR-001/26
 ИТОГО за период с 29.06.2026 по 24.07.2026
 ИСХОДЯЩИЙ ОСТАТОК: CNY: 1.00
@@ -767,6 +768,8 @@ def _assert_vtb_statement_parser_and_preview() -> None:
 Дата № ВО Контрагент Обороты, RUR Назначение
 30.06.2026 130623 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 948.60 0.00 Комиссия за ВК по платежу №7 на сумму 59921.25 CNY. Включая НДС.
 30.06.2026 443906 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 13668.11 0.00 Комиссия за перевод (SWIFT) №7 на сумму 59921.25 CNY.
+16.07.2026 160709 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 951.08 0.00 Комиссия за ВК по платежу №9 на сумму 54883.00 CNY. Включая НДС.
+16.07.2026 160910 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 12574.81 0.00 Комиссия за перевод (SWIFT) №9 на сумму 54883.00 CNY.
 20.07.2026 50149 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 4788.83 0.00 Комиссия за ВК по платежу №11 на сумму 339553.75 CNY. Включая НДС.
 20.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 20000.00 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
 21.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 58113.66 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
@@ -855,6 +858,35 @@ def _assert_vtb_statement_parser_and_preview() -> None:
     operation_ids = {
         str(item.get("semantic_operation_id") or "") for item in fees
     }
+    second_order_preview = build_bank_fee_statement_import_preview(
+        normalized,
+        shipment={"header": {"invoice_no": "26GN582"}},
+        payment_documents=[
+            {
+                "document_id": "payment-9",
+                "document_number": "9",
+                "cny_amount": "54883",
+            }
+        ],
+        existing_operation_ids=operation_ids,
+    )
+    second_rows = list(second_order_preview.get("matched_fee_rows") or [])
+    if (
+        sorted(str(item.get("amount") or "") for item in second_rows)
+        != ["12574.81", "951.08"]
+        or second_order_preview.get("fee_totals_by_currency", {}).get("RUB")
+        != "13525.89"
+        or any(item.get("operation_status") != "new" for item in second_rows)
+        or {
+            str(item.get("matched_anchor_operation_number") or "")
+            for item in second_rows
+        }
+        != {"9"}
+    ):
+        raise AssertionError(
+            "same source must expose only the 26GN582 payment #9 fees: "
+            + repr(second_order_preview)
+        )
     overlap = build_bank_fee_statement_import_preview(
         normalized,
         shipment={"header": {"invoice_no": "26GN527"}},
@@ -982,11 +1014,19 @@ def _assert_vtb_statement_parser_and_preview() -> None:
                 "sup_financial",
                 document_id,
                 selected_operation_ids=selected_ids,
+                expected_source_sha256="a" * 64,
+                expected_target_revision=str(
+                    import_before_confirm["target_revision"]
+                ),
             )
         repeated = block.confirm_bank_fee_statement_import(
             "sup_financial",
             document_id,
             selected_operation_ids=selected_ids,
+            expected_source_sha256="a" * 64,
+            expected_target_revision=str(
+                import_before_confirm["target_revision"]
+            ),
         )
         stored = runtime.load_supplier_financial_document(
             supplier_order_id="sup_financial",
@@ -2596,9 +2636,9 @@ def _assert_parser_reclassification_staging() -> None:
         if (
             result.get("duplicate_action") != "parser_reclassification"
             or not result.get("preview_required")
-            or replacement is None
-            or replacement.get("document_type") != "bank_fee_statement"
-            or str(replacement.get("document_id") or "") == archived_id
+            or replacement is not None
+            or result.get("active_saved") is not False
+            or not result.get("durable_preview")
             or archived is None
             or archived.get("parse_status") != "excluded"
         ):
@@ -2617,7 +2657,7 @@ def _assert_parser_reclassification_staging() -> None:
             confirmation_token=str(repeat_preview["confirmation_token"]),
         )
         if (
-            repeat_preview.get("duplicate_action") != "idempotent_active"
+            repeat_preview.get("duplicate_action") != "parser_reclassification"
             or not repeated.get("idempotent")
             or repeated.get("document_id") != result.get("document_id")
             or not repeated.get("preview_required")

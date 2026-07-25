@@ -19,6 +19,7 @@ from packages.application.calculation_parameters import (
 from packages.application.canonical_wb_cost_resolver import CANONICAL_COST_POLICY_DATE
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_PROXY_MARGIN_3_PCT_LABEL,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -1961,6 +1962,6 @@ def _snapshot_manifest_digest(rows: list[Mapping[str, Any]]) -> str:
 
 
 def _connect(path: Any) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path), timeout=30.0)
+    conn = connect_sqlite(str(path), priority="background")
     conn.row_factory = sqlite3.Row
     return conn

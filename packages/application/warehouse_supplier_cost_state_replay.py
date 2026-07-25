@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 
 from packages.business_time import current_business_date_iso
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_functional import (
     _supplier_cost_allocations,
     _supplier_cost_version_states,
@@ -1452,7 +1453,7 @@ def _json(value: Any) -> str:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=30)
+    conn = connect_sqlite(path, priority="background")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

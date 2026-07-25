@@ -23,6 +23,7 @@ from packages.application.canonical_cost_engine import (
     ensure_canonical_cost_schema,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.supplier_financial_document_exact_policy import (
     AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY,
 )
@@ -3066,7 +3067,7 @@ def _integrity_check(db_path: Path) -> str:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=60)
+    conn = connect_sqlite(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

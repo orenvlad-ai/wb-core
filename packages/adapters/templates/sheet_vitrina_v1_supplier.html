@@ -3164,10 +3164,14 @@
           const selectedOperationIds = Array.from(
             bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]:checked")
           ).map((input) => input.getAttribute("data-bank-fee-operation") || "").filter(Boolean);
-          await fetchJson(confirmImportPath(currentShipment.shipment_id, documentId), {
+          const confirmResult = await fetchJson(confirmImportPath(currentShipment.shipment_id, documentId), {
             method: "POST",
             headers: { Accept: "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify({ selected_operation_ids: selectedOperationIds })
+            body: JSON.stringify({
+              selected_operation_ids: selectedOperationIds,
+              source_sha256: previewPayload.source_sha256 || previewPayload.file_sha256 || "",
+              target_revision: (previewPayload.import_preview || {}).target_revision || previewPayload.target_revision || ""
+            })
           });
           pendingBankFeePreview = null;
           dismissedBankFeePreviewDocumentId = documentId;
@@ -3175,7 +3179,15 @@
           renderBankFeePreview();
           await loadFinancialDocuments({ selectedDocumentId: documentId });
           await refreshCurrentShipmentCostProof();
-          setMessage(financialDocumentsMessage, "Комиссии импортированы.", "success");
+          if (confirmResult.status === "pending" && confirmResult.retryable) {
+            setMessage(
+              financialDocumentsMessage,
+              confirmResult.message || "Комиссии сохранены. Безопасно повторите подтверждение для завершения связанных расчётов.",
+              "warning"
+            );
+          } else {
+            setMessage(financialDocumentsMessage, "Комиссии импортированы.", "success");
+          }
         } catch (error) {
           setMessage(financialDocumentsMessage, error.message, "error");
           confirmBankFeeImportButton.disabled = false;

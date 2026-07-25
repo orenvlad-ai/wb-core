@@ -383,6 +383,42 @@ class CnyLedgerBlock:
                 "idempotent": True,
                 "replay": replay.get("replay") or replay,
             }
+        document = self.build_bank_fee_document(
+            source_order_id=normalized_order_id,
+            linked_financial_document_id=linked_financial_document_id,
+            natural_key=normalized_natural_key,
+            fee_row=fee_row,
+            original_filename=original_filename,
+            stored_file_path=stored_file_path,
+            file_content_type=file_content_type,
+        )
+        saved = self.runtime.save_cny_document(document)
+        replay = self.replay_ledger(reason="bank_fee_import")
+        return {
+            **self._with_download_path(saved),
+            "idempotent": False,
+            "replay": replay.get("replay") or replay,
+        }
+
+    def build_bank_fee_document(
+        self,
+        *,
+        source_order_id: str,
+        linked_financial_document_id: str,
+        natural_key: str,
+        fee_row: Mapping[str, Any],
+        original_filename: str = "",
+        stored_file_path: str = "",
+        file_content_type: str = "",
+    ) -> dict[str, Any]:
+        """Build a deterministic CNY projection for an atomic parent commit."""
+
+        normalized_order_id = str(source_order_id or "").strip()
+        normalized_natural_key = str(natural_key or "").strip()
+        if not normalized_order_id:
+            raise ValueError("source_order_id is required for CNY bank fee")
+        if not normalized_natural_key:
+            raise ValueError("natural_key is required for CNY bank fee")
         amount = _parse_decimal(fee_row.get("amount") or fee_row.get("debit_cny"))
         if amount is None or amount <= 0:
             raise ValueError("CNY bank fee amount must be > 0")
@@ -394,7 +430,12 @@ class CnyLedgerBlock:
             or _optional_iso_date(fee_row.get("document_date"))
         )
         row_id = str(fee_row.get("row_id") or "").strip()
-        document_id = "cnydoc_" + uuid4().hex
+        document_id = (
+            "cnydoc_bankfee_"
+            + hashlib.sha256(
+                normalized_natural_key.encode("utf-8")
+            ).hexdigest()[:24]
+        )
         normalized = {
             "document_type": CNY_DOCUMENT_TYPE_BANK_FEE,
             "document_number": str(fee_row.get("bank_document_number") or row_id or "bank_fee"),
@@ -442,13 +483,7 @@ class CnyLedgerBlock:
             "warnings": [] if operation_date else ["Missing bank fee operation date"],
             "errors": [],
         }
-        saved = self.runtime.save_cny_document(document)
-        replay = self.replay_ledger(reason="bank_fee_import")
-        return {
-            **self._with_download_path(saved),
-            "idempotent": False,
-            "replay": replay.get("replay") or replay,
-        }
+        return document
 
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
         now = self.timestamp_factory()
