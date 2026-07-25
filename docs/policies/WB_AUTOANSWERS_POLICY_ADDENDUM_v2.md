@@ -34,6 +34,15 @@ Every paid review requires an atomic reservation immediately before its claim. D
 
 An automated mode-transition run is invalid unless its owner-bound preview includes at least one positive cap: maximum USD or maximum paid reviews. Reservations settle only to reported actual usage. A durable provider-entry marker distinguishes a safe pre-call crash from an ambiguous post-call crash. Timeout, retry, cancellation, terminal execution failure and lease loss release unused reservation capacity; any post-entry outcome without usage latches paid processing as `budget_state_unknown`. Expired/orphaned reservations are reconciled durably. Unknown budget state fails closed.
 
+Admin operators may change the persisted global limits without replacing the
+active run. The allowed envelope is `$0.01..$10/hour`,
+`$0.01..$50/day`, `$0.01..$500/month`, `1..200` paid reviews/hour,
+`1..4` concurrent paid reviews, `1..8` concurrent role calls and `1..100`
+materialized processing jobs. The monetary order is hour <= day <= month and
+neither concurrency value may exceed queue depth. The active run's
+owner-confirmed USD/review cap is not operator-editable and global changes
+never reset accumulated usage, reservations, holds or stronger stop reasons.
+
 ## Lazy reconciliation and observability
 
 Automated transitions persist the exact preview membership, scope, policy epoch, transition run ID, run caps and cursor. Jobs materialize in bounded batches only after current mode, epoch, budgets, throughput and total processing queue depth are rechecked. Paid caps still permit bounded zero-cost templates and ready-draft reuse. Restart resumes from durable database state, and a duplicate sweep/job cannot create a duplicate processing or publication aggregate. Replaying one consumed preview is idempotent; a fresh capped preview starts a new run even if the automatic mode name is unchanged.

@@ -698,7 +698,40 @@
     .autoanswers-progress-fill { height:100%; background:var(--accent); }
     .autoanswers-progress-meta { grid-column:1/-1; color:var(--muted); overflow-wrap:anywhere; }
     .autoanswers-rating-barrier-note { margin:12px 0 0; color:var(--muted); font-size:12px; }
-    .autoanswers-stop-reason { margin:10px 0 0; color:var(--warning-text); font-size:12px; }
+    .autoanswers-stop-reason { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:10px 0 0; color:var(--warning-text); font-size:12px; }
+    .autoanswers-limits-modal { width:min(860px,100%); }
+    .autoanswers-limits-modal-body { display:grid; gap:14px; padding:14px; background:#17191f; }
+    .autoanswers-limits-usage { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+    .autoanswers-limits-usage-card,
+    .autoanswers-run-cap-card {
+      min-width:0;
+      border:1px solid var(--border);
+      border-radius:8px;
+      padding:12px;
+      background:var(--panel-subtle);
+    }
+    .autoanswers-limits-usage-card span,
+    .autoanswers-run-cap-card span { display:block; color:var(--muted); font-size:11px; }
+    .autoanswers-limits-usage-card strong,
+    .autoanswers-run-cap-card strong { display:block; margin-top:4px; font-size:16px; overflow-wrap:anywhere; }
+    .autoanswers-limits-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .autoanswers-limit-field {
+      border:1px solid transparent;
+      border-radius:8px;
+      padding:8px;
+      background:var(--control-bg);
+      transition:border-color .15s ease, box-shadow .15s ease;
+    }
+    .autoanswers-limit-field.is-context {
+      border-color:var(--warning);
+      box-shadow:0 0 0 2px rgba(245,158,11,.18);
+    }
+    .autoanswers-limit-current { margin:5px 0 0; color:var(--muted); font-size:11px; }
+    .autoanswers-limits-guidance { margin:0; color:var(--muted); font-size:12px; line-height:1.45; }
+    .autoanswers-limits-result { margin:0; border-radius:8px; padding:10px 12px; font-size:12px; }
+    .autoanswers-limits-result.is-success { border:1px solid rgba(34,197,94,.42); background:#14251b; color:var(--success-text); }
+    .autoanswers-limits-result.is-error { border:1px solid rgba(248,113,113,.42); background:#2a1719; color:var(--error-text); }
+    .autoanswers-limits-legacy-link { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 
     .feedbacks-panel,
     .feedbacks-subpanel,
@@ -4793,6 +4826,8 @@
       .autoanswers-detail-grid,
       .autoanswers-technical-grid,
       .autoanswers-queue-grid,
+      .autoanswers-limits-usage,
+      .autoanswers-limits-fields,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
@@ -5267,29 +5302,21 @@
 	                <div class="research-field"><span class="filter-label">Активный резерв</span><strong data-autoanswers-budget-reserved>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Доступно до лимитов</span><strong data-autoanswers-budget-available>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Без usage / holds</span><strong data-autoanswers-budget-unverified>—</strong></div>
-	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-backlog hidden disabled>Legacy backlog отключён</button></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button secondary" type="button" data-autoanswers-open-limits>Настроить лимиты</button><button class="button ghost" type="button" data-autoanswers-backlog hidden disabled>Legacy backlog отключён</button></div>
 	              </div>
 	              <section class="autoanswers-queue-dashboard autoanswers-lifecycle-summary" aria-label="Фактическое состояние Autoanswers">
 	                <strong>Фактическое состояние runtime</strong>
 	                <div class="autoanswers-queue-grid" data-autoanswers-lifecycle-summary></div>
 	              </section>
 	              <p class="feedbacks-source-helper" data-autoanswers-settings-note>Загружаем настройки…</p>
-	              <details class="autoanswers-technical" data-autoanswers-limits>
-	                <summary>Лимиты расхода и скорости</summary>
-	                <div class="autoanswers-filter-grid">
-	                  <label class="research-field"><span class="filter-label">USD в час</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="hourly_cap_usd"></label>
-	                  <label class="research-field"><span class="filter-label">USD в день</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="daily_cap_usd"></label>
-	                  <label class="research-field"><span class="filter-label">USD в месяц</span><input class="input" type="number" min="0.01" step="0.01" data-autoanswers-setting="monthly_cap_usd"></label>
-	                  <label class="research-field"><span class="filter-label">Платных отзывов / час</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_paid_reviews_per_hour"></label>
-	                  <label class="research-field"><span class="filter-label">Одновременных отзывов</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="global_paid_review_concurrency"></label>
-	                  <label class="research-field"><span class="filter-label">Одновременных role calls</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_inflight_role_calls"></label>
-	                  <label class="research-field"><span class="filter-label">Глубина processing queue</span><input class="input" type="number" min="1" step="1" data-autoanswers-setting="max_materialized_processing_jobs"></label>
-	                </div>
-	                <button class="button secondary" type="button" data-autoanswers-save-limits>Сохранить лимиты</button>
-	              </details>
+	              <div class="autoanswers-technical autoanswers-limits-legacy-link" data-autoanswers-limits>
+	                <strong>Лимиты расхода и скорости</strong>
+	                <span class="feedbacks-source-helper">Редактируются в едином окне с фактическим расходом и active run cap.</span>
+	                <button class="button ghost" type="button" data-autoanswers-open-limits>Открыть настройки лимитов</button>
+	              </div>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
-	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые. Новый более приоритетный отзыв будет выбран на следующем безопасном claim.</p></section><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
+	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые. Новый более приоритетный отзыв будет выбран на следующем безопасном claim.</p></section><p class="autoanswers-stop-reason"><span data-autoanswers-stop-reason></span><button class="button secondary" type="button" data-autoanswers-increase-limit hidden>Увеличить лимит</button></p></section>
 	            </section>
 
 	            <section class="autoanswers-filters">
@@ -6039,6 +6066,42 @@
     </section>
   </div>
 
+  <div class="autoanswers-limits-modal-backdrop operator-modal-backdrop" data-autoanswers-limits-modal hidden>
+    <section class="autoanswers-limits-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="autoanswers-limits-modal-title">
+      <div class="ads-modal-head">
+        <div><h3 class="ads-modal-title" id="autoanswers-limits-modal-title">Лимиты Autoanswers</h3><p class="panel-note">Глобальные лимиты применяются на ближайшем штатном tick и не создают новый запуск.</p></div>
+        <button class="button ghost" type="button" data-autoanswers-close-limits>Закрыть</button>
+      </div>
+      <div class="autoanswers-limits-modal-body">
+        <div class="autoanswers-limits-usage" aria-label="Текущий расход">
+          <div class="autoanswers-limits-usage-card"><span>За час</span><strong data-autoanswers-limits-hour-usage>—</strong></div>
+          <div class="autoanswers-limits-usage-card"><span>За день</span><strong data-autoanswers-limits-day-usage>—</strong></div>
+          <div class="autoanswers-limits-usage-card"><span>За месяц</span><strong data-autoanswers-limits-month-usage>—</strong></div>
+        </div>
+        <div class="autoanswers-limits-fields">
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="hourly_cap_usd"><span class="filter-label">USD в час</span><input class="input" type="number" inputmode="decimal" data-autoanswers-setting="hourly_cap_usd"><span class="autoanswers-limit-current" data-autoanswers-limit-current="hourly_cap_usd"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="daily_cap_usd"><span class="filter-label">USD в день</span><input class="input" type="number" inputmode="decimal" data-autoanswers-setting="daily_cap_usd"><span class="autoanswers-limit-current" data-autoanswers-limit-current="daily_cap_usd"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="monthly_cap_usd"><span class="filter-label">USD в месяц</span><input class="input" type="number" inputmode="decimal" data-autoanswers-setting="monthly_cap_usd"><span class="autoanswers-limit-current" data-autoanswers-limit-current="monthly_cap_usd"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="max_paid_reviews_per_hour"><span class="filter-label">Платных отзывов в час</span><input class="input" type="number" inputmode="numeric" data-autoanswers-setting="max_paid_reviews_per_hour"><span class="autoanswers-limit-current" data-autoanswers-limit-current="max_paid_reviews_per_hour"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="global_paid_review_concurrency"><span class="filter-label">Одновременных платных отзывов</span><input class="input" type="number" inputmode="numeric" data-autoanswers-setting="global_paid_review_concurrency"><span class="autoanswers-limit-current" data-autoanswers-limit-current="global_paid_review_concurrency"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="max_inflight_role_calls"><span class="filter-label">Одновременных role calls</span><input class="input" type="number" inputmode="numeric" data-autoanswers-setting="max_inflight_role_calls"><span class="autoanswers-limit-current" data-autoanswers-limit-current="max_inflight_role_calls"></span></label>
+          <label class="autoanswers-limit-field" data-autoanswers-limit-field="max_materialized_processing_jobs"><span class="filter-label">Глубина processing queue</span><input class="input" type="number" inputmode="numeric" data-autoanswers-setting="max_materialized_processing_jobs"><span class="autoanswers-limit-current" data-autoanswers-limit-current="max_materialized_processing_jobs"></span></label>
+        </div>
+        <div class="autoanswers-run-cap-card">
+          <span>Лимит текущего запуска — только чтение</span>
+          <strong data-autoanswers-active-run-cap>Нет активного автоматического запуска</strong>
+          <p class="autoanswers-limits-guidance">Active run cap — отдельная подтверждённая владельцем граница. Это сохранение его не увеличивает и не меняет исторически. Для нового cap нужен отдельный preview и новый transition run.</p>
+        </div>
+        <p class="autoanswers-limits-guidance" data-autoanswers-limits-bounds>Допустимые границы загружаются с сервера.</p>
+        <p class="autoanswers-limits-result" data-autoanswers-limits-result hidden></p>
+      </div>
+      <div class="ads-modal-actions">
+        <button class="button secondary" type="button" data-autoanswers-close-limits>Отмена</button>
+        <button class="button primary" type="button" data-autoanswers-save-limits>Сохранить и проверить</button>
+      </div>
+    </section>
+  </div>
+
   <script>
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
@@ -6200,10 +6263,20 @@
     const autoanswersProgressBarsNode = document.querySelector("[data-autoanswers-progress-bars]");
     const autoanswersContentProgressBarsNode = document.querySelector("[data-autoanswers-content-progress-bars]");
     const autoanswersStopReasonNode = document.querySelector("[data-autoanswers-stop-reason]");
+    const autoanswersIncreaseLimitButton = document.querySelector("[data-autoanswers-increase-limit]");
     const autoanswersQueueContextNode = document.querySelector("[data-autoanswers-queue-context]");
     const autoanswersLimitsNode = document.querySelector("[data-autoanswers-limits]");
+    const autoanswersOpenLimitsButtons = Array.from(document.querySelectorAll("[data-autoanswers-open-limits]"));
     const autoanswersSettingNodes = Array.from(document.querySelectorAll("[data-autoanswers-setting]"));
     const autoanswersSaveLimitsButton = document.querySelector("[data-autoanswers-save-limits]");
+    const autoanswersLimitsModalNode = document.querySelector("[data-autoanswers-limits-modal]");
+    const autoanswersCloseLimitsButtons = Array.from(document.querySelectorAll("[data-autoanswers-close-limits]"));
+    const autoanswersLimitsHourUsageNode = document.querySelector("[data-autoanswers-limits-hour-usage]");
+    const autoanswersLimitsDayUsageNode = document.querySelector("[data-autoanswers-limits-day-usage]");
+    const autoanswersLimitsMonthUsageNode = document.querySelector("[data-autoanswers-limits-month-usage]");
+    const autoanswersActiveRunCapNode = document.querySelector("[data-autoanswers-active-run-cap]");
+    const autoanswersLimitsBoundsNode = document.querySelector("[data-autoanswers-limits-bounds]");
+    const autoanswersLimitsResultNode = document.querySelector("[data-autoanswers-limits-result]");
     const autoanswersSaveModeButton = document.querySelector("[data-autoanswers-save-mode]");
     const autoanswersSettingsNoteNode = document.querySelector("[data-autoanswers-settings-note]");
     const autoanswersApplyButton = document.querySelector("[data-autoanswers-apply]");
@@ -6705,6 +6778,12 @@
           loaded: false,
           settingsLoading: false,
           settings: null,
+          settingsRevision: "",
+          limitsContract: null,
+          limitsModalOpen: false,
+          limitsFocusField: "",
+          limitsResult: "",
+          limitsResultTone: "",
           budget: null,
           runtime: null,
           reconciliation: null,
@@ -7084,6 +7163,22 @@
     if (autoanswersSyncButton) autoanswersSyncButton.addEventListener("click", requestAutoanswersSync);
     if (autoanswersBacklogButton) autoanswersBacklogButton.addEventListener("click", previewAutoanswersBacklog);
     if (autoanswersSaveModeButton) autoanswersSaveModeButton.addEventListener("click", saveAutoanswersMode);
+    autoanswersOpenLimitsButtons.forEach(function(button) {
+      button.addEventListener("click", function() { openAutoanswersLimits(""); });
+    });
+    if (autoanswersIncreaseLimitButton) {
+      autoanswersIncreaseLimitButton.addEventListener("click", function() {
+        openAutoanswersLimits(String(autoanswersIncreaseLimitButton.dataset.focusLimit || ""));
+      });
+    }
+    autoanswersCloseLimitsButtons.forEach(function(button) {
+      button.addEventListener("click", closeAutoanswersLimits);
+    });
+    if (autoanswersLimitsModalNode) {
+      autoanswersLimitsModalNode.addEventListener("click", function(event) {
+        if (event.target === autoanswersLimitsModalNode) closeAutoanswersLimits();
+      });
+    }
     if (autoanswersSaveLimitsButton) autoanswersSaveLimitsButton.addEventListener("click", saveAutoanswersLimits);
     if (autoanswersPrevButton) {
       autoanswersPrevButton.addEventListener("click", function() {
@@ -7570,6 +7665,7 @@
       document.addEventListener("keydown", function(event) {
         if (event.key === "Escape") {
           closeAllFloatingControls();
+          if (state.feedbacks.server.limitsModalOpen) closeAutoanswersLimits();
         }
       });
     }
@@ -12188,6 +12284,8 @@
         const payload = await readJsonResponse(response, "non-json autoanswers settings response");
         if (!response.ok) throw new Error(payload.error || "settings HTTP " + response.status);
         server.settings = payload.settings || null;
+        server.settingsRevision = String(payload.settings_revision || "");
+        server.limitsContract = payload.limits_contract || null;
         server.budget = payload.budget || null;
         server.runtime = payload.runtime || null;
         server.reconciliation = payload.reconciliation || null;
@@ -12215,8 +12313,23 @@
         body: JSON.stringify(body || {})
       });
       const payload = await readJsonResponse(response, "non-json autoanswers response");
-      if (!response.ok) throw new Error(payload.error || "autoanswers HTTP " + response.status);
+      if (!response.ok) {
+        const error = new Error(payload.error || "autoanswers HTTP " + response.status);
+        error.code = String(payload.code || "");
+        throw error;
+      }
       return payload;
+    }
+
+    function friendlyAutoanswersMutationError(error) {
+      const code = String(error && error.code || "");
+      if (code === "policy_epoch_stale" || code === "settings_revision_stale") {
+        return "Настройки уже изменились в другой сессии. Закройте окно, обновите данные и повторите сохранение.";
+      }
+      if (code === "settings_readback_unconfirmed") {
+        return "Сервер не подтвердил сохранённые значения. Настройки не считаются сохранёнными.";
+      }
+      return String(error && error.message ? error.message : error);
     }
 
     async function updateAutoanswersSettings(change) {
@@ -12232,12 +12345,17 @@
       const requestBody = Object.assign({}, change || {}, {
         expected_policy_epoch: expectedPolicyEpoch
       });
+      if (server.settingsRevision) {
+        requestBody.expected_settings_revision = server.settingsRevision;
+      }
       server.error = "";
       server.settingsLoading = true;
       renderAutoanswersServer();
       try {
         const payload = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, requestBody);
         server.settings = payload.settings || null;
+        server.settingsRevision = String(payload.settings_revision || "");
+        server.limitsContract = payload.limits_contract || server.limitsContract;
         server.budget = payload.budget || null;
         server.runtime = payload.runtime || null;
         server.reconciliation = payload.reconciliation || null;
@@ -12246,13 +12364,15 @@
         if (server.mutationStatus === "pending") {
           pollAutoanswersLifecycle(Number((server.settings || {}).policy_epoch || 0));
         }
+        return payload;
       } catch (error) {
-        server.error = String(error && error.message ? error.message : error);
+        server.error = friendlyAutoanswersMutationError(error);
         server.mutationStatus = "error";
+        return null;
       } finally {
         server.settingsLoading = false;
+        renderAutoanswersServer();
       }
-      renderAutoanswersServer();
     }
 
     async function pollAutoanswersLifecycle(policyEpoch) {
@@ -12268,6 +12388,8 @@
           if (!response.ok) throw new Error(payload.error || "settings HTTP " + response.status);
           if (Number((payload.settings || {}).policy_epoch || 0) !== Number(policyEpoch || 0)) return;
           server.settings = payload.settings || null;
+          server.settingsRevision = String(payload.settings_revision || "");
+          server.limitsContract = payload.limits_contract || server.limitsContract;
           server.budget = payload.budget || null;
           server.runtime = payload.runtime || null;
           server.reconciliation = payload.reconciliation || null;
@@ -12318,6 +12440,8 @@
           if (!response.ok) return;
           if (Number((payload.settings || {}).policy_epoch || 0) !== Number(policyEpoch || 0)) return;
           server.settings = payload.settings || null;
+          server.settingsRevision = String(payload.settings_revision || "");
+          server.limitsContract = payload.limits_contract || server.limitsContract;
           server.budget = payload.budget || null;
           server.runtime = payload.runtime || null;
           server.reconciliation = payload.reconciliation || null;
@@ -12395,21 +12519,152 @@
       await updateAutoanswersSettings({selector_state: selectorState});
     }
 
+    function openAutoanswersLimits(focusField) {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
+      const server = state.feedbacks.server;
+      server.limitsModalOpen = true;
+      server.limitsFocusField = String(focusField || "");
+      server.limitsResult = "";
+      server.limitsResultTone = "";
+      renderAutoanswersLimitsModal();
+      window.requestAnimationFrame(function() {
+        const target = autoanswersSettingNodes.find(function(node) {
+          return String(node.dataset.autoanswersSetting || "") === server.limitsFocusField;
+        }) || autoanswersSettingNodes[0];
+        if (target) {
+          target.focus();
+          if (server.limitsFocusField && typeof target.select === "function") target.select();
+        }
+      });
+    }
+
+    function closeAutoanswersLimits() {
+      const server = state.feedbacks.server;
+      if (server.settingsLoading) return;
+      server.limitsModalOpen = false;
+      server.limitsFocusField = "";
+      server.limitsResult = "";
+      server.limitsResultTone = "";
+      renderAutoanswersLimitsModal();
+    }
+
+    function renderAutoanswersLimitsModal() {
+      if (!autoanswersLimitsModalNode) return;
+      const server = state.feedbacks.server;
+      const settings = server.settings || {};
+      const budget = server.budget || {};
+      const reconciliation = server.reconciliation || {};
+      const progress = (server.runtime || {}).progress || {};
+      const contract = server.limitsContract || {};
+      const fields = contract.fields || {};
+      autoanswersLimitsModalNode.hidden = !server.limitsModalOpen;
+      if (!server.limitsModalOpen) return;
+      if (autoanswersLimitsHourUsageNode) autoanswersLimitsHourUsageNode.textContent = "$" + Number(budget.hourly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(settings.hourly_cap_usd || 0).toFixed(2);
+      if (autoanswersLimitsDayUsageNode) autoanswersLimitsDayUsageNode.textContent = "$" + Number(budget.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(settings.daily_cap_usd || 0).toFixed(2);
+      if (autoanswersLimitsMonthUsageNode) autoanswersLimitsMonthUsageNode.textContent = "$" + Number(budget.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(settings.monthly_cap_usd || 0).toFixed(2);
+      autoanswersSettingNodes.forEach(function(node) {
+        const key = String(node.dataset.autoanswersSetting || "");
+        const fieldContract = fields[key] || {};
+        if (document.activeElement !== node && settings[key] !== undefined && settings[key] !== null) {
+          node.value = String(settings[key]);
+        }
+        if (fieldContract.minimum !== undefined) node.min = String(fieldContract.minimum);
+        if (fieldContract.maximum !== undefined) node.max = String(fieldContract.maximum);
+        if (fieldContract.step !== undefined) node.step = String(fieldContract.step);
+        node.disabled = server.settingsLoading || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        const wrapper = document.querySelector('[data-autoanswers-limit-field="' + key + '"]');
+        if (wrapper) wrapper.classList.toggle("is-context", key === server.limitsFocusField);
+        const current = document.querySelector('[data-autoanswers-limit-current="' + key + '"]');
+        if (!current) return;
+        const usageKey = key === "hourly_cap_usd" ? "hourly_used_and_reserved_usd" : key === "daily_cap_usd" ? "daily_used_and_reserved_usd" : key === "monthly_cap_usd" ? "monthly_used_and_reserved_usd" : "";
+        current.textContent = usageKey
+          ? ("Израсходовано и зарезервировано: $" + Number(budget[usageKey] || 0).toFixed(2) + " · текущий лимит: $" + Number(settings[key] || 0).toFixed(2) + " · новый лимит: в поле выше")
+          : ("Текущее значение: " + Number(settings[key] || 0) + " · новое значение: в поле выше");
+      });
+      if (autoanswersActiveRunCapNode) {
+        const runId = String(reconciliation.transition_run_id || "");
+        if (!runId) {
+          autoanswersActiveRunCapNode.textContent = "Нет активного автоматического запуска";
+        } else {
+          const cap = reconciliation.run_max_usd !== null && reconciliation.run_max_usd !== undefined && reconciliation.run_max_usd !== ""
+            ? ("$" + Number(reconciliation.run_max_usd).toFixed(2))
+            : (Number(reconciliation.run_max_paid_reviews || 0) + " платных отзывов");
+          autoanswersActiveRunCapNode.textContent = cap + " · использовано $" + Number(progress.run_actual_usd || 0).toFixed(2) + " · резерв $" + Number(progress.run_active_reserved_usd || 0).toFixed(2) + " · run " + runId;
+        }
+      }
+      if (autoanswersLimitsBoundsNode) {
+        const max = function(key) { return fields[key] && fields[key].maximum; };
+        autoanswersLimitsBoundsNode.textContent = fields.hourly_cap_usd
+          ? ("Серверные границы: час $0.01–$" + Number(max("hourly_cap_usd")).toFixed(2) +
+            ", день до $" + Number(max("daily_cap_usd")).toFixed(2) +
+            ", месяц до $" + Number(max("monthly_cap_usd")).toFixed(2) +
+            ", платных отзывов/ч до " + max("max_paid_reviews_per_hour") +
+            ", одновременных отзывов до " + max("global_paid_review_concurrency") +
+            ", role calls до " + max("max_inflight_role_calls") +
+            ", queue до " + max("max_materialized_processing_jobs") +
+            ". Обязательно: час ≤ день ≤ месяц; concurrency не больше queue.")
+          : "Допустимые границы загружаются с сервера.";
+      }
+      if (autoanswersLimitsResultNode) {
+        autoanswersLimitsResultNode.hidden = !server.limitsResult;
+        autoanswersLimitsResultNode.textContent = server.limitsResult || "";
+        autoanswersLimitsResultNode.className = "autoanswers-limits-result" + (server.limitsResultTone ? " is-" + server.limitsResultTone : "");
+      }
+      if (autoanswersSaveLimitsButton) {
+        autoanswersSaveLimitsButton.disabled = server.settingsLoading || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        autoanswersSaveLimitsButton.textContent = server.settingsLoading ? "Сохраняем…" : "Сохранить и проверить";
+      }
+    }
+
     async function saveAutoanswersLimits() {
       if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
+      const server = state.feedbacks.server;
       try {
         const change = {};
+        const contractFields = (server.limitsContract || {}).fields || {};
+        const integerFields = new Set(["max_paid_reviews_per_hour", "global_paid_review_concurrency", "max_inflight_role_calls", "max_materialized_processing_jobs"]);
         autoanswersSettingNodes.forEach(function(node) {
           const key = String(node.dataset.autoanswersSetting || "");
-          const value = Number(node.value);
-          if (!key || !Number.isFinite(value) || value <= 0) throw new Error("Все лимиты должны быть положительными числами.");
+          const raw = String(node.value || "").trim().replace(",", ".");
+          const value = Number(raw);
+          const bounds = contractFields[key] || {};
+          if (!key || !raw || !Number.isFinite(value)) throw new Error("Заполните все лимиты конечными числами.");
+          if (integerFields.has(key) && !Number.isInteger(value)) throw new Error("Лимиты количества и concurrency должны быть целыми числами.");
+          if (bounds.minimum !== undefined && value < Number(bounds.minimum)) throw new Error("Значение «" + key + "» ниже допустимого минимума " + bounds.minimum + ".");
+          if (bounds.maximum !== undefined && value > Number(bounds.maximum)) throw new Error("Значение «" + key + "» выше безопасного максимума " + bounds.maximum + ".");
           change[key] = value;
         });
-        await updateAutoanswersSettings(change);
+        if (!(change.hourly_cap_usd <= change.daily_cap_usd && change.daily_cap_usd <= change.monthly_cap_usd)) {
+          throw new Error("Проверьте бюджет: USD в час ≤ USD в день ≤ USD в месяц.");
+        }
+        if (change.global_paid_review_concurrency > change.max_materialized_processing_jobs || change.max_inflight_role_calls > change.max_materialized_processing_jobs) {
+          throw new Error("Глубина processing queue не может быть меньше concurrency.");
+        }
+        server.limitsResult = "Сохраняем и читаем значения обратно с сервера…";
+        server.limitsResultTone = "";
+        renderAutoanswersLimitsModal();
+        const payload = await updateAutoanswersSettings(change);
+        if (!payload) throw new Error(server.error || "Сохранение не подтверждено.");
+        const confirmed = payload.confirmed_limits || {};
+        const confirmedAll = Object.keys(change).every(function(key) {
+          return Number(confirmed[key]) === Number(change[key]);
+        });
+        if (!confirmedAll) throw new Error("Readback не подтвердил все сохранённые значения.");
+        server.error = "";
+        server.limitsResultTone = "success";
+        server.limitsResult = "Сохранено и подтверждено сервером: час $" + Number(confirmed.hourly_cap_usd).toFixed(2) +
+          ", день $" + Number(confirmed.daily_cap_usd).toFixed(2) +
+          ", месяц $" + Number(confirmed.monthly_cap_usd).toFixed(2) +
+          ", платных отзывов/ч " + Number(confirmed.max_paid_reviews_per_hour) +
+          ", одновременных отзывов " + Number(confirmed.global_paid_review_concurrency) +
+          ", role calls " + Number(confirmed.max_inflight_role_calls) +
+          ", queue " + Number(confirmed.max_materialized_processing_jobs) + ".";
       } catch (error) {
-        state.feedbacks.server.error = String(error && error.message ? error.message : error);
-        renderAutoanswersServer();
+        server.limitsResultTone = "error";
+        server.limitsResult = friendlyAutoanswersMutationError(error);
+        server.error = server.limitsResult;
       }
+      renderAutoanswersServer();
     }
 
     async function requestAutoanswersSync() {
@@ -12603,6 +12858,10 @@
         autoanswersBacklogButton.disabled = true;
       }
       if (autoanswersLimitsNode) autoanswersLimitsNode.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      autoanswersOpenLimitsButtons.forEach(function(button) {
+        button.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        button.disabled = server.settingsLoading || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      });
       if (autoanswersSaveLimitsButton) autoanswersSaveLimitsButton.disabled = server.settingsLoading || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
       autoanswersSettingNodes.forEach(function(node) {
         const key = String(node.dataset.autoanswersSetting || "");
@@ -12734,6 +12993,13 @@
         const reason = String(queue.stop_reason || "no_eligible_jobs");
         const eta = queue.eta_hours === null || queue.eta_hours === undefined ? "ETA пока недоступно" : ("ETA около " + Number(queue.eta_hours).toFixed(1) + " ч.");
         autoanswersStopReasonNode.textContent = (stopLabels[reason] || friendlyAutoanswersStatus(reason)) + " · run $" + Number(queue.run_actual_usd || 0).toFixed(2) + " · reserved $" + Number(queue.run_active_reserved_usd || 0).toFixed(2) + " · " + eta + " · policy epoch " + Number(queue.policy_epoch || 0);
+        if (autoanswersIncreaseLimitButton) {
+          const focusByReason = {hourly_budget_reached:"hourly_cap_usd",daily_budget_reached:"daily_cap_usd",monthly_budget_reached:"monthly_cap_usd"};
+          const focusField = focusByReason[reason] || "";
+          autoanswersIncreaseLimitButton.hidden = !focusField || !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+          autoanswersIncreaseLimitButton.dataset.focusLimit = focusField;
+          autoanswersIncreaseLimitButton.disabled = server.settingsLoading;
+        }
       }
       if (autoanswersSettingsNoteNode) {
         const mutationNote = server.mutationStatus === "pending"
@@ -12744,6 +13010,7 @@
           : (modeNotes[selectorState] || modeNotes.off) + mutationNote;
       }
       if (autoanswersErrorNode) autoanswersErrorNode.textContent = server.error || "";
+      renderAutoanswersLimitsModal();
       if (autoanswersListMetaNode) autoanswersListMetaNode.textContent = server.loading ? "Загрузка…" : ("Найдено: " + server.total + " · по 50 на странице");
       if (autoanswersPrevButton) autoanswersPrevButton.disabled = server.loading || server.page <= 1;
       if (autoanswersNextButton) autoanswersNextButton.disabled = server.loading || !server.hasMore;

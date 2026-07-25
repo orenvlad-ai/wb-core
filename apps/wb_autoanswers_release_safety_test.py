@@ -105,6 +105,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         )
         self.assertIs(ui_args.handler, hosted.run_autoanswers_ui_flow_command)
         self.assertEqual(ui_args.expected_state, "off-force")
+        self.assertFalse(ui_args.verify_limit_save)
         unforced_ui_args = hosted.build_arg_parser().parse_args(
             [
                 "autoanswers-ui-flow",
@@ -130,6 +131,17 @@ class ReleaseSafetyTest(unittest.TestCase):
             hosted.run_autoanswers_ui_flow_command,
         )
         self.assertEqual(auto_all_ui_args.expected_state, "auto_all")
+        limit_save_ui_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-ui-flow",
+                "--evidence-dir",
+                "/tmp/wb-autoanswers-ui-limit-save-test",
+                "--expected-state",
+                "auto_all",
+                "--verify-limit-save",
+            ]
+        )
+        self.assertTrue(limit_save_ui_args.verify_limit_save)
         timer_args = hosted.build_arg_parser().parse_args(["autoanswers-readonly-timer", "enable"])
         self.assertIs(timer_args.handler, hosted.run_autoanswers_readonly_timer_command)
         for lifecycle_action in ("status", "reconcile", "suspend"):

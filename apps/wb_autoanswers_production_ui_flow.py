@@ -86,6 +86,7 @@ def run_autoanswers_ui_flow(
     evidence_dir: Path,
     headless: bool = True,
     expected_state: str = "off-force",
+    verify_limit_save: bool = False,
 ) -> dict[str, Any]:
     normalized_base_url = str(base_url or "").strip().rstrip("/")
     parsed = urlparse(normalized_base_url)
@@ -290,6 +291,84 @@ def run_autoanswers_ui_flow(
         )
         runtime_before = dict(settings.get("runtime") or {})
         budget_before = dict(settings.get("budget") or {})
+        reconciliation_before = dict(settings.get("reconciliation") or {})
+        limit_fields = (
+            "hourly_cap_usd",
+            "daily_cap_usd",
+            "monthly_cap_usd",
+            "max_paid_reviews_per_hour",
+            "global_paid_review_concurrency",
+            "max_inflight_role_calls",
+            "max_materialized_processing_jobs",
+        )
+        limits_before = {
+            field: setting_values.get(field)
+            for field in limit_fields
+        }
+        _assert(
+            str(settings.get("settings_revision") or "").startswith("sha256:"),
+            "settings revision is missing",
+        )
+        limit_contract = dict(settings.get("limits_contract") or {})
+        _assert(
+            set((limit_contract.get("fields") or {}).keys()) == set(limit_fields),
+            "server-owned limit contract is incomplete",
+        )
+        limits_button = page.locator("[data-autoanswers-open-limits]").first
+        _assert(limits_button.is_visible(), "main limits action must be visible")
+        limits_button.click()
+        limits_modal = page.locator(
+            "[data-autoanswers-limits-modal]:not([hidden])"
+        )
+        limits_modal.wait_for(timeout=30_000)
+        _assert(
+            limits_modal.locator("[data-autoanswers-setting]").count()
+            == len(limit_fields),
+            "limits modal must expose all seven editable global limits",
+        )
+        for field in limit_fields:
+            input_node = limits_modal.locator(
+                f'[data-autoanswers-setting="{field}"]'
+            )
+            _assert(input_node.count() == 1, f"limits modal misses {field}")
+            _assert(
+                float(input_node.input_value()) == float(limits_before[field]),
+                f"limits modal does not show current {field}",
+            )
+        modal_style = limits_modal.locator(".autoanswers-limits-modal").evaluate(
+            """node => ({
+              background: getComputedStyle(node).backgroundColor,
+              opacity: getComputedStyle(node).opacity
+            })"""
+        )
+        _assert(
+            modal_style == {"background": "rgb(23, 25, 31)", "opacity": "1"},
+            "limits modal must be opaque and dark",
+        )
+        active_run_cap_text = limits_modal.locator(
+            "[data-autoanswers-active-run-cap]"
+        ).inner_text().strip()
+        _assert(active_run_cap_text, "active run cap explanation is missing")
+        bounds_text = limits_modal.locator(
+            "[data-autoanswers-limits-bounds]"
+        ).inner_text().strip()
+        _assert(
+            "Серверные границы" in bounds_text,
+            "server-owned limit bounds are not visible",
+        )
+        limits_screenshot_path = evidence_dir / "wb_autoanswers_limits_modal.png"
+        page.screenshot(path=str(limits_screenshot_path), full_page=True)
+        if verify_limit_save:
+            limits_modal.locator("[data-autoanswers-save-limits]").click()
+            page.wait_for_function(
+                """() => {
+                  const node = document.querySelector('[data-autoanswers-limits-result]');
+                  return node && node.textContent.includes('Сохранено и подтверждено сервером');
+                }""",
+                timeout=120_000,
+            )
+        limits_modal.locator("[data-autoanswers-close-limits]").last.click()
+        limits_modal.wait_for(state="hidden", timeout=30_000)
         if expected_state != "auto_all":
             _assert(
                 int(runtime_before.get("claimable_ai_jobs") or 0) == 0,
@@ -793,6 +872,26 @@ def run_autoanswers_ui_flow(
             label="autoanswers settings readback",
         )
         runtime_after = dict(settings_after.get("runtime") or {})
+        setting_values_after = dict(settings_after.get("settings") or {})
+        reconciliation_after = dict(settings_after.get("reconciliation") or {})
+        limits_unchanged = all(
+            float(setting_values_after.get(field))
+            == float(limits_before[field])
+            for field in limit_fields
+        )
+        run_cap_unchanged = all(
+            reconciliation_after.get(field) == reconciliation_before.get(field)
+            for field in (
+                "transition_run_id",
+                "run_max_usd",
+                "run_max_paid_reviews",
+            )
+        )
+        _assert(limits_unchanged, "production limit verification changed a value")
+        _assert(
+            run_cap_unchanged,
+            "production limit verification changed active run cap",
+        )
         jobs_unchanged = (
             runtime_after.get("ai_jobs") == runtime_before.get("ai_jobs")
             and runtime_after.get("publication_jobs")
@@ -830,9 +929,22 @@ def run_autoanswers_ui_flow(
         "jobs_unchanged": jobs_unchanged,
         "background_progress_allowed": expected_state == "auto_all",
         "ui_business_mutations": 0,
+        "ui_settings_mutations": 1 if verify_limit_save else 0,
         "active_ai_jobs": int((runtime_before.get("ai_jobs") or {}).get("processing") or 0),
         "active_publication_jobs": int((runtime_before.get("publication_jobs") or {}).get("publishing") or 0),
         "active_reserved_usd": float(budget_before.get("active_reserved_usd") or 0),
+        "limits": {
+            "modal_visible": True,
+            "opaque_dark": True,
+            "editable_fields": list(limit_fields),
+            "settings_revision_present": True,
+            "safe_same_value_save_requested": bool(verify_limit_save),
+            "readback_confirmed": bool(verify_limit_save),
+            "values_unchanged": limits_unchanged,
+            "active_run_cap_unchanged": run_cap_unchanged,
+            "active_run_cap_text": active_run_cap_text,
+            "bounds_text": bounds_text,
+        },
         "list": {
             "total": int(first.get("total") or 0),
             "page_1_count": len(items),
@@ -870,6 +982,7 @@ def run_autoanswers_ui_flow(
         "screenshots": {
             "desktop": str(desktop_screenshot_path),
             "narrow": str(narrow_screenshot_path),
+            "limits_modal": str(limits_screenshot_path),
         },
     }
     evidence_path = evidence_dir / "wb_autoanswers_ui_evidence.json"

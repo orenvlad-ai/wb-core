@@ -148,10 +148,12 @@ class HttpUiTest(unittest.TestCase):
         self.assertEqual(first["command"]["command_id"], second["command"]["command_id"])
 
     def test_five_state_selector_maps_atomically_to_master_and_mode(self) -> None:
+        initial = self.app.handle_sheet_feedbacks_autoanswers_settings_request()
         manual = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
             {
                 "selector_state": "manual",
                 "expected_policy_epoch": 0,
+                "expected_settings_revision": initial["settings_revision"],
                 "daily_cap_usd": "7.00",
             },
             actor_id="admin",
@@ -182,6 +184,71 @@ class HttpUiTest(unittest.TestCase):
         self.assertEqual(draft["selector_state"], "draft_only")
         self.assertEqual(draft["settings"]["mode"], "draft_only")
 
+    def test_limit_update_requires_fresh_settings_revision_and_returns_exact_readback(self) -> None:
+        initial = self.app.handle_sheet_feedbacks_autoanswers_settings_request()
+        saved = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {
+                "expected_policy_epoch": initial["settings"]["policy_epoch"],
+                "expected_settings_revision": initial["settings_revision"],
+                "hourly_cap_usd": "0.75",
+                "daily_cap_usd": "6.00",
+                "monthly_cap_usd": "60.00",
+                "max_paid_reviews_per_hour": 30,
+                "global_paid_review_concurrency": 2,
+                "max_inflight_role_calls": 2,
+                "max_materialized_processing_jobs": 10,
+            },
+            actor_id="admin",
+        )
+        self.assertEqual(
+            saved["confirmed_limits"],
+            {
+                "daily_cap_usd": 6.0,
+                "global_paid_review_concurrency": 2,
+                "hourly_cap_usd": 0.75,
+                "max_inflight_role_calls": 2,
+                "max_materialized_processing_jobs": 10,
+                "max_paid_reviews_per_hour": 30,
+                "monthly_cap_usd": 60.0,
+            },
+        )
+        self.assertNotEqual(saved["settings_revision"], initial["settings_revision"])
+        self.assertEqual(
+            saved["limits_contract"]["fields"]["hourly_cap_usd"]["maximum"],
+            10.0,
+        )
+        with self.assertRaisesRegex(
+            AutoanswersRuntimeError,
+            "уже изменились",
+        ) as stale:
+            self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+                {
+                    "expected_policy_epoch": saved["settings"]["policy_epoch"],
+                    "expected_settings_revision": initial["settings_revision"],
+                    "daily_cap_usd": "7.00",
+                },
+                actor_id="admin",
+            )
+        self.assertEqual(stale.exception.code, "settings_revision_stale")
+
+        manual = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+            {
+                "selector_state": "manual",
+                "expected_policy_epoch": saved["settings"]["policy_epoch"],
+            },
+            actor_id="admin",
+        )
+        with self.assertRaises(AutoanswersRuntimeError) as policy_stale:
+            self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
+                {
+                    "expected_policy_epoch": saved["settings"]["policy_epoch"],
+                    "expected_settings_revision": manual["settings_revision"],
+                    "daily_cap_usd": "7.00",
+                },
+                actor_id="admin",
+            )
+        self.assertEqual(policy_stale.exception.code, "policy_epoch_stale")
+
     def test_rendered_ui_contains_local_routes_protected_controls_and_valid_javascript(self) -> None:
         html = _render_sheet_vitrina_web_vitrina_ui(
             read_path="/read",
@@ -209,6 +276,10 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("autoGrowReplyEditors", html)
         self.assertIn('addEventListener("input", handleFeedbacksInputChange)', html)
         self.assertIn("autoanswers-answer-box", html)
+        self.assertIn("Настроить лимиты", html)
+        self.assertIn("data-autoanswers-limits-modal", html)
+        self.assertIn("Лимит текущего запуска — только чтение", html)
+        self.assertIn("Увеличить лимит", html)
         self.assertIn("data-autoanswers-copy", html)
         self.assertIn("Скопировано", html)
         self.assertIn("overflow: auto", html)

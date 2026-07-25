@@ -250,6 +250,175 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 self.assertEqual(dialog.locator("[data-autoanswers-publish]").count(), 0)
                 browser.close()
 
+    def test_limits_modal_context_focus_readback_and_immutable_run_cap(self) -> None:
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            repository = fixture.entrypoint.autoanswers_repository
+            preview = repository.preview_mode_transition(
+                "draft_only",
+                actor_id="local_operator",
+                run_max_usd="0.50",
+            )
+            applied = repository.apply_mode_transition(
+                "draft_only",
+                actor_id="local_operator",
+                preview_id=preview["preview_id"],
+            )
+            run_id = applied["sweep"]["transition_run_id"]
+            with repository.transaction() as conn:
+                repository._set_stop_reason(  # noqa: SLF001 - UI pause fixture
+                    conn,
+                    "daily_budget_reached",
+                    at=fixture.now,
+                )
+
+            posted: list[dict[str, object]] = []
+
+            def settings_payload() -> dict[str, object]:
+                payload = (
+                    fixture.entrypoint.handle_sheet_feedbacks_autoanswers_settings_request()
+                )
+                payload["lifecycle"] = {
+                    "desired": True,
+                    "actual": True,
+                    "lifecycle_state": "running",
+                    "drift_status": "matched",
+                    "components": {
+                        "worker": {
+                            "desired": True,
+                            "actual": True,
+                            "drift_status": "matched",
+                        },
+                        "readonly_sync": {
+                            "desired": True,
+                            "actual": True,
+                            "drift_status": "matched",
+                        },
+                    },
+                }
+                payload["runtime"]["progress"]["stop_reason"] = (
+                    "daily_budget_reached"
+                )
+                payload["budget"]["daily_used_and_reserved_usd"] = payload[
+                    "settings"
+                ]["daily_cap_usd"]
+                return payload
+
+            def route_settings(route: object) -> None:
+                if route.request.method == "POST":
+                    body = route.request.post_data_json
+                    posted.append(dict(body))
+                    repository.update_settings(
+                        hourly_cap_usd=body["hourly_cap_usd"],
+                        daily_cap_usd=body["daily_cap_usd"],
+                        monthly_cap_usd=body["monthly_cap_usd"],
+                        max_paid_reviews_per_hour=body[
+                            "max_paid_reviews_per_hour"
+                        ],
+                        global_paid_review_concurrency=body[
+                            "global_paid_review_concurrency"
+                        ],
+                        max_inflight_role_calls=body["max_inflight_role_calls"],
+                        max_materialized_processing_jobs=body[
+                            "max_materialized_processing_jobs"
+                        ],
+                        actor_id="local_operator",
+                    )
+                    payload = settings_payload()
+                    payload["confirmed_limits"] = {
+                        key: payload["settings"][key]
+                        for key in (
+                            "hourly_cap_usd",
+                            "daily_cap_usd",
+                            "monthly_cap_usd",
+                            "max_paid_reviews_per_hour",
+                            "global_paid_review_concurrency",
+                            "max_inflight_role_calls",
+                            "max_materialized_processing_jobs",
+                        )
+                    }
+                    payload["mutation_status"] = "confirmed"
+                else:
+                    payload = settings_payload()
+                route.fulfill(
+                    status=200,
+                    content_type="application/json; charset=utf-8",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
+
+            page_errors: list[str] = []
+            console_errors: list[str] = []
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                context.route(
+                    "**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
+                    route_settings,
+                )
+                page = context.new_page()
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
+                page.on(
+                    "console",
+                    lambda message: console_errors.append(message.text)
+                    if message.type == "error"
+                    else None,
+                )
+                page.goto(
+                    base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks",
+                    wait_until="domcontentloaded",
+                )
+                page.locator("[data-autoanswers-increase-limit]").wait_for()
+                page.locator("[data-autoanswers-increase-limit]").click()
+                modal = page.locator("[data-autoanswers-limits-modal]:not([hidden])")
+                modal.wait_for()
+                daily_input = modal.locator(
+                    '[data-autoanswers-setting="daily_cap_usd"]'
+                )
+                self.assertTrue(daily_input.evaluate("node => node === document.activeElement"))
+                daily_context = modal.locator(
+                    '[data-autoanswers-limit-current="daily_cap_usd"]'
+                ).inner_text()
+                self.assertIn("Израсходовано и зарезервировано", daily_context)
+                self.assertIn("текущий лимит", daily_context)
+                self.assertIn("новый лимит", daily_context)
+                run_cap_text = modal.locator(
+                    "[data-autoanswers-active-run-cap]"
+                ).inner_text()
+                self.assertIn("$0.50", run_cap_text)
+                self.assertIn(run_id, run_cap_text)
+                modal_style = modal.locator(".autoanswers-limits-modal").evaluate(
+                    "node => ({background: getComputedStyle(node).backgroundColor, opacity: getComputedStyle(node).opacity})"
+                )
+                self.assertEqual(modal_style["background"], "rgb(23, 25, 31)")
+                self.assertEqual(modal_style["opacity"], "1")
+
+                daily_input.fill("6")
+                modal.locator("[data-autoanswers-save-limits]").click()
+                page.wait_for_function(
+                    """() => {
+                      const node = document.querySelector('[data-autoanswers-limits-result]');
+                      return node && node.textContent.includes('Сохранено и подтверждено сервером');
+                    }"""
+                )
+                self.assertEqual(repository.settings().daily_cap_usd, 6.0)
+                self.assertEqual(
+                    repository.reconciliation_status()["run_max_usd"],
+                    "0.50000000",
+                )
+                self.assertEqual(len(posted), 1)
+                self.assertTrue(
+                    str(posted[0]["expected_settings_revision"]).startswith(
+                        "sha256:"
+                    )
+                )
+                self.assertEqual(
+                    posted[0]["expected_policy_epoch"],
+                    repository.settings().policy_epoch,
+                )
+                self.assertEqual(page_errors, [])
+                self.assertEqual(console_errors, [])
+                browser.close()
+
     def test_compact_detail_autogrow_fixed_answer_copy_media_and_narrow_layout(self) -> None:
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
         with fixture as base_url:
