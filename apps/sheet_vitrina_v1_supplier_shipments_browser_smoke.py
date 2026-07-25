@@ -6,6 +6,7 @@ import base64
 from contextlib import contextmanager
 import hashlib
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import re
@@ -81,6 +82,8 @@ def main() -> None:
         invoice_path.write_bytes(_build_invoice_fixture())
         quote_comparison_path = tmp_path / "quote-comparison.pdf"
         quote_comparison_path.write_bytes(b"%PDF-1.4\n% synthetic quote comparison browser smoke\n")
+        durable_preview_path = tmp_path / "durable-preview-not-active.pdf"
+        durable_preview_path.write_bytes(b"%PDF-1.4\n% durable inactive bank preview browser smoke\n")
         runtime_dir = tmp_path / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         config = RegistryUploadHttpEntrypointConfig(
@@ -152,6 +155,8 @@ def main() -> None:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                page_errors: list[str] = []
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
                 settings_page = browser.new_page(viewport={"width": 1280, "height": 900})
                 settings_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1", wait_until="domcontentloaded")
                 settings_page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:settings-active-tab:v2')")
@@ -546,6 +551,146 @@ def main() -> None:
                 expect(frame.locator("#cancelBankFeeImportButton")).to_have_text("Закрыть")
                 frame.locator("#cancelBankFeeImportButton").click()
                 expect(frame.locator("#bankFeeStatementPreview")).to_be_hidden()
+
+                durable_preview_document_id = "fdoc_browser_durable_inactive_preview"
+                durable_preview_sha = "c" * 64
+                durable_preview_result = {
+                    "document_id": durable_preview_document_id,
+                    "supplier_order_id": "browser-durable-preview-shipment",
+                    "readback_confirmed": True,
+                    "preview_required": True,
+                    "durable_preview": True,
+                    "durable_saved": True,
+                    "active_saved": False,
+                    "source_sha256": durable_preview_sha,
+                    "target_revision": "browser-durable-preview-revision",
+                    "import_preview": {
+                        "target_revision": "browser-durable-preview-revision",
+                        "payment_anchors": [{"operation_number": "9"}],
+                        "matched_fee_rows": [
+                            {
+                                "semantic_operation_id": "browser-fee-atomic-1",
+                                "logical_fee_id": "browser-fee-group-9",
+                                "operation_status": "new",
+                                "import_allowed": True,
+                                "operation_date": "2026-07-16",
+                                "fee_category": "bank_fee",
+                                "amount": 951.08,
+                                "currency": "RUB",
+                                "matched_anchor_operation_number": "9",
+                            },
+                            {
+                                "semantic_operation_id": "browser-fee-atomic-2",
+                                "logical_fee_id": "browser-fee-group-9",
+                                "operation_status": "new",
+                                "import_allowed": True,
+                                "operation_date": "2026-07-16",
+                                "fee_category": "bank_fee",
+                                "amount": 12574.81,
+                                "currency": "RUB",
+                                "matched_anchor_operation_number": "9",
+                            },
+                        ],
+                        "logical_fee_groups": [
+                            {
+                                "logical_fee_id": "browser-fee-group-9",
+                                "operation_status": "new",
+                                "import_allowed": True,
+                                "date_from": "2026-07-16",
+                                "date_to": "2026-07-16",
+                                "fee_category": "bank_fee",
+                                "amount": 13525.89,
+                                "currency": "RUB",
+                                "matched_anchor_operation_number": "9",
+                                "atomic_count": 2,
+                                "atomic_rows": [
+                                    {
+                                        "operation_date": "2026-07-16",
+                                        "amount": 951.08,
+                                        "currency": "RUB",
+                                    },
+                                    {
+                                        "operation_date": "2026-07-16",
+                                        "amount": 12574.81,
+                                        "currency": "RUB",
+                                    },
+                                ],
+                            }
+                        ],
+                        "fee_totals_by_currency": {"RUB": 13525.89},
+                        "warnings": [],
+                    },
+                }
+
+                def _mock_durable_preview_upload(route):
+                    if route.request.method != "POST":
+                        route.continue_()
+                        return
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "confirmation_token": "browser-durable-preview-token",
+                                "preview_required": True,
+                                "active_saved": False,
+                                "shipment": {"invoice_no": "26GN390"},
+                                "document": {
+                                    "filename": durable_preview_path.name,
+                                    "document_type": "bank_fee_statement",
+                                    "document_number": "VTB-DURABLE-PREVIEW",
+                                    "document_date": "2026-07-16",
+                                    "vendor": "Банк ВТБ",
+                                    "currency": "RUB",
+                                },
+                                "warnings": [],
+                                "duplicates": [],
+                                "duplicate_action": "create",
+                            }
+                        ),
+                    )
+
+                def _mock_durable_preview_confirm(route):
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "status": "ok",
+                                "results": [durable_preview_result],
+                                "readback_confirmed": True,
+                            }
+                        ),
+                    )
+
+                page.route(
+                    "**/supplier-shipments/*/financial-documents",
+                    _mock_durable_preview_upload,
+                )
+                page.route(
+                    "**/supplier-shipments/*/financial-documents/confirm-upload",
+                    _mock_durable_preview_confirm,
+                )
+                frame.locator("#financialDocumentFileInput").set_input_files(
+                    str(durable_preview_path)
+                )
+                expect(frame.locator("#systemModal")).to_be_visible(timeout=5000)
+                frame.locator("#systemModalConfirm").click()
+                expect(frame.locator("#bankFeeStatementPreview")).to_be_visible(timeout=5000)
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text(
+                    re.compile(r"13\s*525,89 RUB")
+                )
+                expect(frame.locator("#cancelBankFeeImportButton")).to_have_text("Отмена")
+                frame.locator("#cancelBankFeeImportButton").click()
+                expect(frame.locator("#financialDocumentsMessage")).to_contain_text(
+                    "Импорт комиссий отменён",
+                    timeout=5000,
+                )
+                expect(frame.locator("#bankFeeStatementPreview")).to_be_hidden()
+                if page_errors:
+                    raise AssertionError(
+                        f"durable inactive bank preview emitted page errors: {page_errors}"
+                    )
                 expect(frame.locator("#supplierOrderDocumentsTable thead")).to_contain_text("Распределение расходов")
                 frame.locator("#financialDocumentsColumnChooser > summary").click()
                 counterparty_toggle = frame.locator("#financialDocumentsColumnChooser input[value='counterparty']")
