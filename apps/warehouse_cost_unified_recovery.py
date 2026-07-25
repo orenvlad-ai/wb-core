@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -11,7 +12,8 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Any, Mapping
+import time
+from typing import Any, Iterator, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +51,7 @@ from packages.application.wb_supply_box_correction import (  # noqa: E402
 
 
 AUDIT_TABLE = "sheet_vitrina_v1_warehouse_cost_unified_recovery_audit"
+AUDIT_SQLITE_LOCK_WAIT_MS = 300_000
 ZERO = Decimal("0")
 
 
@@ -284,7 +287,7 @@ def apply_plan(
             "applied": False,
             "idempotent": True,
         }
-    _ensure_audit_schema(runtime)
+    audit_sqlite_lock_wait_ms = _ensure_audit_schema(runtime)
     prior_audit = _load_audit_record(
         runtime, str(plan["fingerprint"])
     )
@@ -292,7 +295,7 @@ def apply_plan(
         prior_audit
         and prior_audit.get("status") in {"running", "failed"}
     )
-    _start_audit(runtime, plan)
+    audit_sqlite_lock_wait_ms += _start_audit(runtime, plan)
     started = datetime.now(timezone.utc)
     audit = _load_audit_record(runtime, str(plan["fingerprint"])) or {}
     steps: dict[str, Any] = dict(audit.get("steps") or {})
@@ -359,7 +362,9 @@ def apply_plan(
                     )
                 else:
                     steps["bank"] = {"applied": False, "idempotent": True}
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             box_plan = dict(plan["box"])
             if "box" not in steps:
@@ -413,7 +418,9 @@ def apply_plan(
                             raise
                 else:
                     steps["box"] = {"applied": False, "idempotent": True}
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             if "physical" not in steps:
                 records = {
@@ -451,7 +458,9 @@ def apply_plan(
                         )
                     physical_results.append(result)
                 steps["physical"] = physical_results
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             if "factual_date" not in steps:
                 correction = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
@@ -479,7 +488,9 @@ def apply_plan(
                             or factual_status
                         )
                     )
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             stable_sources = [
                 f"supplier_shipment:{args.shipment_id}",
@@ -505,7 +516,9 @@ def apply_plan(
                         functional_plan["plan_fingerprint"]
                     ),
                 )
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             if "economics" not in steps:
                 economics_plan = build_functional_economics_backfill_plan(
@@ -528,7 +541,9 @@ def apply_plan(
                     ).resolve(),
                     target_scoped_undo=True,
                 )
-                _checkpoint_audit(runtime, plan, steps)
+                audit_sqlite_lock_wait_ms += _checkpoint_audit(
+                    runtime, plan, steps
+                )
 
             after = build_plan(runtime, args)
             report = {
@@ -536,6 +551,7 @@ def apply_plan(
             "plan_fingerprint": str(plan["fingerprint"]),
             "applied_at": _now(),
             "lock_wait_ms": int(lock_info["wait_ms"]),
+            "sqlite_lock_wait_ms": round(audit_sqlite_lock_wait_ms, 3),
             "steps": steps,
             "before": {
                 "shipment": plan["shipment"],
@@ -564,6 +580,9 @@ def apply_plan(
                 "copy_bytes": 0,
                 "full_database_copy": False,
                 "finance_raw_rows_read": 0,
+                "sqlite_lock_wait_ms": round(
+                    audit_sqlite_lock_wait_ms, 3
+                ),
             },
             }
             if after["would_change"]:
@@ -1049,9 +1068,42 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _ensure_audit_schema(runtime: RegistryUploadDbBackedRuntime) -> None:
+@contextmanager
+def _audit_write_connection(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> Iterator[tuple[sqlite3.Connection, float]]:
+    conn = sqlite3.connect(
+        runtime.db_path,
+        timeout=AUDIT_SQLITE_LOCK_WAIT_MS / 1000,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={AUDIT_SQLITE_LOCK_WAIT_MS}")
+    started = time.monotonic()
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).casefold():
+                raise RuntimeError(
+                    "unified_recovery_sqlite_write_wait_expired"
+                ) from exc
+            raise
+        wait_ms = (time.monotonic() - started) * 1000
+        try:
+            yield conn, wait_ms
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def _ensure_audit_schema(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> float:
     runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(runtime.db_path) as conn:
+    with _audit_write_connection(runtime) as (conn, wait_ms):
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {AUDIT_TABLE}(
@@ -1084,7 +1136,7 @@ def _ensure_audit_schema(runtime: RegistryUploadDbBackedRuntime) -> None:
                 conn.execute(
                     f"ALTER TABLE {AUDIT_TABLE} ADD COLUMN {name} {declaration}"
                 )
-        conn.commit()
+    return wait_ms
 
 
 def _load_audit_record(
@@ -1124,9 +1176,9 @@ def _load_audit_record(
 def _start_audit(
     runtime: RegistryUploadDbBackedRuntime,
     plan: Mapping[str, Any],
-) -> None:
+) -> float:
     now = _now()
-    with sqlite3.connect(runtime.db_path) as conn:
+    with _audit_write_connection(runtime) as (conn, wait_ms):
         conn.execute(
             f"""
             INSERT INTO {AUDIT_TABLE}(
@@ -1152,15 +1204,15 @@ def _start_audit(
                 _json_value(plan),
             ),
         )
-        conn.commit()
+    return wait_ms
 
 
 def _checkpoint_audit(
     runtime: RegistryUploadDbBackedRuntime,
     plan: Mapping[str, Any],
     steps: Mapping[str, Any],
-) -> None:
-    with sqlite3.connect(runtime.db_path) as conn:
+) -> float:
+    with _audit_write_connection(runtime) as (conn, wait_ms):
         updated = conn.execute(
             f"""
             UPDATE {AUDIT_TABLE}
@@ -1175,7 +1227,7 @@ def _checkpoint_audit(
         )
         if int(updated.rowcount or 0) != 1:
             raise ValueError("unified recovery audit journal changed")
-        conn.commit()
+    return wait_ms
 
 
 def _mark_audit_failed(
@@ -1183,9 +1235,9 @@ def _mark_audit_failed(
     plan: Mapping[str, Any],
     steps: Mapping[str, Any],
     exc: Exception,
-) -> None:
-    _ensure_audit_schema(runtime)
-    with sqlite3.connect(runtime.db_path) as conn:
+) -> float:
+    wait_ms = _ensure_audit_schema(runtime)
+    with _audit_write_connection(runtime) as (conn, write_wait_ms):
         conn.execute(
             f"""
             UPDATE {AUDIT_TABLE}
@@ -1199,14 +1251,14 @@ def _mark_audit_failed(
                 str(plan["fingerprint"]),
             ),
         )
-        conn.commit()
+    return wait_ms + write_wait_ms
 
 
 def _save_audit(
     runtime: RegistryUploadDbBackedRuntime,
     report: Mapping[str, Any],
-) -> None:
-    with sqlite3.connect(runtime.db_path) as conn:
+) -> float:
+    with _audit_write_connection(runtime) as (conn, wait_ms):
         updated = conn.execute(
             f"""
             UPDATE {AUDIT_TABLE}
@@ -1224,7 +1276,7 @@ def _save_audit(
         )
         if int(updated.rowcount or 0) != 1:
             raise ValueError("unified recovery audit could not complete")
-        conn.commit()
+    return wait_ms
 
 
 def _validate_resume_invariants(
