@@ -16,8 +16,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
+import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -60,9 +62,16 @@ from packages.contracts.wb_autoanswers import (
     publication_key,
     validate_mode,
 )
+from packages.application.sqlite_contention import connect_sqlite
 
 
 SCHEMA_VERSION = 7
+AUTOANSWERS_STORE_SCHEMA_VERSION = 1
+AUTOANSWERS_DB_FILENAME = "wb_autoanswers_runtime.sqlite3"
+LEGACY_RUNTIME_DB_FILENAME = "registry_upload_runtime.sqlite3"
+AUTOANSWERS_STORE_MANIFEST = "wb_autoanswers_store_migration_v1.json"
+AUTOANSWERS_STORE_MIN_HEADROOM_BYTES = 256 * 1024 * 1024
+AUTOANSWERS_STORE_COPY_BATCH_SIZE = 1_000
 DEFAULT_DAILY_CAP_USD = Decimal("5.00")
 DEFAULT_MONTHLY_CAP_USD = Decimal("50.00")
 DEFAULT_HOURLY_CAP_USD = Decimal("0.50")
@@ -679,6 +688,554 @@ def classify_feedback_content(
     return CONTENT_CLASS_INDETERMINATE
 
 
+def autoanswers_store_path(runtime_dir: Path) -> Path:
+    return Path(runtime_dir) / AUTOANSWERS_DB_FILENAME
+
+
+def legacy_autoanswers_store_path(runtime_dir: Path) -> Path:
+    return Path(runtime_dir) / LEGACY_RUNTIME_DB_FILENAME
+
+
+def _autoanswers_schema_table_names() -> list[str]:
+    names = re.findall(
+        r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+        _SCHEMA_SQL,
+        flags=re.IGNORECASE,
+    )
+    return list(dict.fromkeys(names))
+
+
+def _legacy_autoanswers_store_exists(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    uri = f"file:{path.resolve()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=10)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table'
+              AND name='sheet_vitrina_v1_wb_autoanswers_schema_migrations'
+            """
+        ).fetchone()
+        return row is not None
+
+
+def ensure_autoanswers_store(runtime_dir: Path) -> dict[str, Any]:
+    """Create or migrate the physically isolated Autoanswers SQLite store.
+
+    The legacy tables remain untouched as a rollback source.  A new candidate
+    is copied from one read snapshot, fully reconciled by per-table SHA-256,
+    integrity-checked, and only then atomically published.
+    """
+
+    runtime_dir = Path(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    store_path = autoanswers_store_path(runtime_dir)
+    manifest_path = runtime_dir / AUTOANSWERS_STORE_MANIFEST
+    lock_path = runtime_dir / ".wb_autoanswers_store_migration.lock"
+    with lock_path.open("a+b") as lock_handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if store_path.is_file() and store_path.stat().st_size > 0:
+                return _read_autoanswers_store_manifest(
+                    store_path=store_path,
+                    manifest_path=manifest_path,
+                )
+            legacy_path = legacy_autoanswers_store_path(runtime_dir)
+            if not _legacy_autoanswers_store_exists(legacy_path):
+                return {
+                    "status": "new_store",
+                    "store_schema_version": AUTOANSWERS_STORE_SCHEMA_VERSION,
+                    "database": AUTOANSWERS_DB_FILENAME,
+                    "legacy_source": False,
+                }
+            return _migrate_legacy_autoanswers_store(
+                runtime_dir=runtime_dir,
+                legacy_path=legacy_path,
+                store_path=store_path,
+                manifest_path=manifest_path,
+            )
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _migrate_legacy_autoanswers_store(
+    *,
+    runtime_dir: Path,
+    legacy_path: Path,
+    store_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    table_names = _autoanswers_schema_table_names()
+    estimated_bytes = _legacy_autoanswers_allocated_bytes(legacy_path, table_names)
+    available_bytes = shutil.disk_usage(runtime_dir).free
+    required_bytes = max(
+        AUTOANSWERS_STORE_MIN_HEADROOM_BYTES,
+        estimated_bytes * 2 + AUTOANSWERS_STORE_MIN_HEADROOM_BYTES,
+    )
+    if available_bytes < required_bytes:
+        raise AutoanswersRuntimeError(
+            "insufficient capacity for isolated autoanswers store migration",
+            code="autoanswers_store_migration_capacity",
+            retryable=False,
+        )
+
+    last_change_error: Exception | None = None
+    for attempt in range(1, 4):
+        candidate_path = runtime_dir / (
+            f".{AUTOANSWERS_DB_FILENAME}.migrating.{os.getpid()}.{uuid4().hex}"
+        )
+        try:
+            migration = _copy_legacy_autoanswers_snapshot(
+                legacy_path=legacy_path,
+                candidate_path=candidate_path,
+                table_names=table_names,
+            )
+            if migration["source_data_version_before"] != migration["source_data_version_after"]:
+                raise AutoanswersRuntimeError(
+                    "legacy autoanswers store changed during snapshot copy",
+                    code="autoanswers_store_migration_source_changed",
+                    retryable=True,
+                )
+            os.chmod(candidate_path, 0o600)
+            _fsync_path(candidate_path)
+            prepared_at = iso_utc()
+            prepared_manifest = {
+                "contract_name": "wb_autoanswers_store_migration_v1",
+                "status": "prepared",
+                "store_schema_version": AUTOANSWERS_STORE_SCHEMA_VERSION,
+                "database": AUTOANSWERS_DB_FILENAME,
+                "legacy_database": LEGACY_RUNTIME_DB_FILENAME,
+                "legacy_retained": True,
+                "source_data_version_before": migration["source_data_version_before"],
+                "source_data_version_after": migration["source_data_version_after"],
+                "estimated_source_bytes": estimated_bytes,
+                "candidate_size_bytes": candidate_path.stat().st_size,
+                "table_evidence": migration["table_evidence"],
+                "integrity_check": migration["integrity_check"],
+                "foreign_key_check_rows": migration["foreign_key_check_rows"],
+                "attempt": attempt,
+                "prepared_at": prepared_at,
+            }
+            _write_private_json(manifest_path, prepared_manifest)
+            os.replace(candidate_path, store_path)
+            _fsync_directory(runtime_dir)
+            with closing(
+                connect_sqlite(
+                    store_path,
+                    timeout_ms=300_000,
+                    priority="background",
+                    isolation_level=None,
+                )
+            ) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            manifest = {
+                **prepared_manifest,
+                "status": "migrated",
+                "rollback": (
+                    "run the repo-owned Autoanswers store rollback under the "
+                    "deployment quiet window before deploying older code"
+                ),
+                "isolated_size_bytes": store_path.stat().st_size,
+                "created_at": iso_utc(),
+            }
+            _write_private_json(manifest_path, manifest)
+            return manifest
+        except AutoanswersRuntimeError as exc:
+            candidate_path.unlink(missing_ok=True)
+            Path(str(candidate_path) + "-wal").unlink(missing_ok=True)
+            Path(str(candidate_path) + "-shm").unlink(missing_ok=True)
+            last_change_error = exc
+            if not exc.retryable or attempt >= 3:
+                raise
+            time.sleep(0.25 * attempt)
+        except Exception:
+            candidate_path.unlink(missing_ok=True)
+            Path(str(candidate_path) + "-wal").unlink(missing_ok=True)
+            Path(str(candidate_path) + "-shm").unlink(missing_ok=True)
+            raise
+    assert last_change_error is not None
+    raise last_change_error
+
+
+def _copy_legacy_autoanswers_snapshot(
+    *,
+    legacy_path: Path,
+    candidate_path: Path,
+    table_names: Sequence[str],
+) -> dict[str, Any]:
+    source_uri = f"file:{legacy_path.resolve()}?mode=ro"
+    source = sqlite3.connect(source_uri, uri=True, timeout=30, isolation_level=None)
+    target = connect_sqlite(
+        candidate_path,
+        timeout_ms=300_000,
+        priority="background",
+        isolation_level=None,
+    )
+    source.row_factory = sqlite3.Row
+    target.row_factory = sqlite3.Row
+    try:
+        source.execute("PRAGMA query_only=ON")
+        source.execute("PRAGMA foreign_keys=ON")
+        target.execute("PRAGMA journal_mode=DELETE")
+        target.execute("PRAGMA foreign_keys=OFF")
+        target.executescript(_SCHEMA_SQL)
+        source_data_version_before = int(source.execute("PRAGMA data_version").fetchone()[0])
+        source.execute("BEGIN")
+        target.execute("BEGIN IMMEDIATE")
+        table_evidence: dict[str, dict[str, Any]] = {}
+        try:
+            for table_name in table_names:
+                if not _sqlite_table_exists(source, table_name):
+                    continue
+                source_columns = _sqlite_table_columns(source, table_name)
+                target_columns = _sqlite_table_columns(target, table_name)
+                columns = [
+                    column for column in target_columns if column in source_columns
+                ]
+                if not columns:
+                    continue
+                quoted_columns = ",".join(_quote_identifier(column) for column in columns)
+                placeholders = ",".join("?" for _ in columns)
+                source_cursor = source.execute(
+                    f"SELECT {quoted_columns} FROM {_quote_identifier(table_name)} ORDER BY rowid"
+                )
+                digest = hashlib.sha256()
+                row_count = 0
+                while True:
+                    rows = source_cursor.fetchmany(AUTOANSWERS_STORE_COPY_BATCH_SIZE)
+                    if not rows:
+                        break
+                    tuples = [tuple(row[column] for column in columns) for row in rows]
+                    for row in tuples:
+                        _update_row_digest(digest, row)
+                    target.executemany(
+                        f"INSERT INTO {_quote_identifier(table_name)}({quoted_columns}) "
+                        f"VALUES({placeholders})",
+                        tuples,
+                    )
+                    row_count += len(tuples)
+                table_evidence[table_name] = {
+                    "row_count": row_count,
+                    "source_sha256": digest.hexdigest(),
+                    "columns": columns,
+                }
+            target.commit()
+            source.commit()
+        except Exception:
+            target.rollback()
+            source.rollback()
+            raise
+        source_data_version_after = int(source.execute("PRAGMA data_version").fetchone()[0])
+        if source_data_version_before != source_data_version_after:
+            return {
+                "source_data_version_before": source_data_version_before,
+                "source_data_version_after": source_data_version_after,
+                "table_evidence": table_evidence,
+                "integrity_check": "not_checked_source_changed",
+                "foreign_key_check_rows": -1,
+            }
+
+        target.execute("PRAGMA foreign_keys=ON")
+        for table_name, evidence in table_evidence.items():
+            columns = [str(value) for value in evidence.get("columns") or []]
+            quoted_columns = ",".join(_quote_identifier(column) for column in columns)
+            digest = hashlib.sha256()
+            count = 0
+            cursor = target.execute(
+                f"SELECT {quoted_columns} FROM {_quote_identifier(table_name)} ORDER BY rowid"
+            )
+            while True:
+                rows = cursor.fetchmany(AUTOANSWERS_STORE_COPY_BATCH_SIZE)
+                if not rows:
+                    break
+                for row in rows:
+                    _update_row_digest(
+                        digest,
+                        tuple(row[column] for column in columns),
+                    )
+                count += len(rows)
+            evidence["target_row_count"] = count
+            evidence["target_sha256"] = digest.hexdigest()
+            evidence["matching"] = (
+                count == int(evidence["row_count"])
+                and evidence["target_sha256"] == evidence["source_sha256"]
+            )
+            if not evidence["matching"]:
+                raise AutoanswersRuntimeError(
+                    f"autoanswers store migration reconciliation failed for {table_name}",
+                    code="autoanswers_store_migration_reconciliation",
+                )
+        integrity_check = str(target.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_rows = target.execute("PRAGMA foreign_key_check").fetchall()
+        if integrity_check != "ok" or foreign_key_rows:
+            raise AutoanswersRuntimeError(
+                "autoanswers store migration integrity check failed",
+                code="autoanswers_store_migration_integrity",
+            )
+        return {
+            "source_data_version_before": source_data_version_before,
+            "source_data_version_after": source_data_version_after,
+            "table_evidence": table_evidence,
+            "integrity_check": integrity_check,
+            "foreign_key_check_rows": len(foreign_key_rows),
+        }
+    finally:
+        source.close()
+        target.close()
+
+
+def _legacy_autoanswers_allocated_bytes(
+    legacy_path: Path,
+    table_names: Sequence[str],
+) -> int:
+    uri = f"file:{legacy_path.resolve()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        names = set(table_names)
+        names.update(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ("
+                + ",".join("?" for _ in table_names)
+                + ")",
+                tuple(table_names),
+            ).fetchall()
+            if str(row[0] or "")
+        )
+        if not names:
+            return 0
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name IN ("
+                + ",".join("?" for _ in names)
+                + ")",
+                tuple(sorted(names)),
+            ).fetchone()
+            return max(0, int(row[0] or 0))
+        except sqlite3.DatabaseError:
+            return min(legacy_path.stat().st_size, 2 * 1024 * 1024 * 1024)
+
+
+def _read_autoanswers_store_manifest(
+    *,
+    store_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    legacy_source = legacy_autoanswers_store_path(store_path.parent)
+    if not manifest_path.is_file():
+        if _legacy_autoanswers_store_exists(legacy_source):
+            raise AutoanswersRuntimeError(
+                "isolated autoanswers store has no migration manifest",
+                code="autoanswers_store_migration_manifest_missing",
+                retryable=False,
+            )
+        return {
+            "status": "ready",
+            "store_schema_version": AUTOANSWERS_STORE_SCHEMA_VERSION,
+            "database": AUTOANSWERS_DB_FILENAME,
+            "legacy_source": False,
+            "isolated_size_bytes": store_path.stat().st_size,
+        }
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AutoanswersRuntimeError(
+            "isolated autoanswers store migration manifest is invalid",
+            code="autoanswers_store_migration_manifest_invalid",
+            retryable=False,
+        ) from exc
+    if not isinstance(manifest, Mapping):
+        raise AutoanswersRuntimeError(
+            "isolated autoanswers store migration manifest is invalid",
+            code="autoanswers_store_migration_manifest_invalid",
+            retryable=False,
+        )
+    if str(manifest.get("status") or "") == "prepared":
+        verification = _verify_autoanswers_store_against_evidence(
+            store_path=store_path,
+            table_evidence=dict(manifest.get("table_evidence") or {}),
+        )
+        recovered = {
+            **dict(manifest),
+            "status": "migrated",
+            "created_at": iso_utc(),
+            "recovered_after_interruption": True,
+            "isolated_size_bytes": store_path.stat().st_size,
+            "recovery_verification": verification,
+        }
+        _write_private_json(manifest_path, recovered)
+        manifest = recovered
+    if (
+        str(manifest.get("contract_name") or "")
+        != "wb_autoanswers_store_migration_v1"
+        or str(manifest.get("status") or "") != "migrated"
+    ):
+        raise AutoanswersRuntimeError(
+            "isolated autoanswers store migration is not complete",
+            code="autoanswers_store_migration_incomplete",
+            retryable=False,
+        )
+    payload: dict[str, Any] = {
+        "status": "ready",
+        "store_schema_version": AUTOANSWERS_STORE_SCHEMA_VERSION,
+        "database": AUTOANSWERS_DB_FILENAME,
+        "legacy_source": legacy_source.is_file(),
+        "isolated_size_bytes": store_path.stat().st_size,
+    }
+    payload["migration_contract"] = str(manifest.get("contract_name") or "")
+    payload["migration_status"] = str(manifest.get("status") or "")
+    payload["migration_created_at"] = str(manifest.get("created_at") or "")
+    payload["legacy_retained"] = bool(manifest.get("legacy_retained"))
+    return payload
+
+
+def _verify_autoanswers_store_against_evidence(
+    *,
+    store_path: Path,
+    table_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    uri = f"file:{store_path.resolve()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        for table_name, raw_evidence in sorted(table_evidence.items()):
+            evidence = dict(raw_evidence or {})
+            columns = [str(value) for value in evidence.get("columns") or []]
+            quoted_columns = ",".join(
+                _quote_identifier(column) for column in columns
+            )
+            digest = hashlib.sha256()
+            row_count = 0
+            cursor = conn.execute(
+                f"SELECT {quoted_columns} FROM "
+                f"{_quote_identifier(str(table_name))} ORDER BY rowid"
+            )
+            while True:
+                rows = cursor.fetchmany(AUTOANSWERS_STORE_COPY_BATCH_SIZE)
+                if not rows:
+                    break
+                for row in rows:
+                    _update_row_digest(
+                        digest,
+                        tuple(row[column] for column in columns),
+                    )
+                row_count += len(rows)
+            if (
+                row_count != int(evidence.get("row_count") or 0)
+                or digest.hexdigest() != str(evidence.get("source_sha256") or "")
+            ):
+                raise AutoanswersRuntimeError(
+                    "interrupted autoanswers store migration readback failed",
+                    code="autoanswers_store_migration_recovery_mismatch",
+                    retryable=False,
+                )
+        integrity_check = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if integrity_check != "ok" or foreign_key_rows:
+            raise AutoanswersRuntimeError(
+                "interrupted autoanswers store migration integrity failed",
+                code="autoanswers_store_migration_recovery_integrity",
+                retryable=False,
+            )
+    return {
+        "table_count": len(table_evidence),
+        "integrity_check": integrity_check,
+        "foreign_key_check_rows": len(foreign_key_rows),
+    }
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _sqlite_table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> list[str]:
+    return [
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({_quote_identifier(table_name)})"
+        ).fetchall()
+    ]
+
+
+def _quote_identifier(value: str) -> str:
+    normalized = str(value or "")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized):
+        raise ValueError("invalid SQLite identifier")
+    return f'"{normalized}"'
+
+
+def _update_row_digest(digest: Any, row: Sequence[Any]) -> None:
+    for value in row:
+        if value is None:
+            encoded = b"N"
+        elif isinstance(value, bytes):
+            encoded = b"B" + value
+        else:
+            encoded = (
+                type(value).__name__.encode("ascii", errors="replace")
+                + b":"
+                + str(value).encode("utf-8")
+            )
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+
+
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    descriptor = os.open(
+        temp_path,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                dict(payload),
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        _fsync_directory(path.parent)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_path(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class AutoanswersRepository:
     def __init__(
         self,
@@ -689,7 +1246,8 @@ class AutoanswersRepository:
         schema_lock_held: bool = False,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
-        self.db_path = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        self.store_status = ensure_autoanswers_store(self.runtime_dir)
+        self.db_path = autoanswers_store_path(self.runtime_dir)
         self.now_factory = now_factory
         self.env = env
         self.ensure_schema(schema_lock_held=schema_lock_held)
@@ -704,11 +1262,13 @@ class AutoanswersRepository:
 
     def _connect(self) -> sqlite3.Connection:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10, isolation_level=None)
+        conn = connect_sqlite(
+            self.db_path,
+            timeout_ms=30_000,
+            isolation_level=None,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 10000")
-        conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
     @contextmanager
@@ -746,6 +1306,7 @@ class AutoanswersRepository:
             self._backup_database_before_first_schema()
         conn = self._connect()
         try:
+            conn.execute("PRAGMA journal_mode = WAL")
             # sqlite3.executescript otherwise commits an already-open
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
@@ -2558,6 +3119,13 @@ class AutoanswersRepository:
         )
         settings = self.settings()
         return {
+            "persistence": {
+                **dict(self.store_status),
+                "database": self.db_path.name,
+                "isolated_from_registry": (
+                    self.db_path.name == AUTOANSWERS_DB_FILENAME
+                ),
+            },
             "settings": {
                 "master_enabled": settings.master_enabled,
                 "force_off": settings.force_off,

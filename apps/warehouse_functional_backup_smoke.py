@@ -23,6 +23,9 @@ import apps.warehouse_functional_runner as functional_runner  # noqa: E402
 import packages.application.warehouse_functional_economics_backfill as economics_backfill  # noqa: E402
 import packages.application.calculation_parameters as calculation_parameters  # noqa: E402
 import packages.application.registry_upload_db_backed_runtime as db_runtime_module  # noqa: E402
+from packages.application.sqlite_contention import (  # noqa: E402
+    SQLITE_ATTEMPT_BUSY_TIMEOUT_MS,
+)
 from packages.application.calculation_parameters import (  # noqa: E402
     CalculationParametersBlock,
     ensure_calculation_parameters_schema,
@@ -202,8 +205,13 @@ def main() -> int:
             conn.commit()
         with db_runtime_module._connect(contention_db) as conn:
             default_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-        if default_busy_timeout != db_runtime_module.DEFAULT_SQLITE_BUSY_TIMEOUT_MS:
-            raise AssertionError("default runtime SQLite busy timeout drifted")
+            default_contention_budget = getattr(conn, "_contention_timeout_ms", None)
+        if (
+            db_runtime_module.DEFAULT_SQLITE_BUSY_TIMEOUT_MS != 30_000
+            or default_busy_timeout != SQLITE_ATTEMPT_BUSY_TIMEOUT_MS
+            or default_contention_budget != 30_000
+        ):
+            raise AssertionError("default runtime SQLite contention contract drifted")
 
         blocker = sqlite3.connect(contention_db)
         blocker.execute("BEGIN IMMEDIATE")
@@ -217,7 +225,11 @@ def main() -> int:
             try:
                 with db_runtime_module.registry_runtime_sqlite_busy_timeout(120_000):
                     with db_runtime_module._connect(contention_db) as conn:
-                        if conn.execute("PRAGMA busy_timeout").fetchone()[0] != 120_000:
+                        if (
+                            conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                            != SQLITE_ATTEMPT_BUSY_TIMEOUT_MS
+                            or getattr(conn, "_contention_timeout_ms", None) != 120_000
+                        ):
                             raise AssertionError("warehouse busy timeout was not applied")
                         conn.execute("INSERT INTO writes VALUES('warehouse')")
                         conn.commit()
@@ -240,7 +252,11 @@ def main() -> int:
                 f"warehouse writer did not wait for the competing transaction: {writer_results}"
             )
         with db_runtime_module._connect(contention_db) as conn:
-            if conn.execute("PRAGMA busy_timeout").fetchone()[0] != 5_000:
+            if (
+                conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                != SQLITE_ATTEMPT_BUSY_TIMEOUT_MS
+                or getattr(conn, "_contention_timeout_ms", None) != 30_000
+            ):
                 raise AssertionError("warehouse busy timeout leaked outside its process context")
             if conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] != 2:
                 raise AssertionError("contended warehouse write was lost")

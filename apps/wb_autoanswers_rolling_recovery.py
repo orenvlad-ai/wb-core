@@ -29,17 +29,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_autoanswers_runtime import (  # noqa: E402
+    AUTOANSWERS_DB_FILENAME,
     EVALUATION_SIGNATURE,
     PROMPT_BUNDLE_VERSION,
     SCHEMA_VERSION,
     _sha256_path,
     _verified_compressed_schema_backup_status,
 )
+from packages.application.sqlite_contention import connect_sqlite  # noqa: E402
 
 
 CONTRACT = "wb_autoanswers_rolling_recovery_v1"
 EVENT = "rolling_runtime_recovery_applied"
-DATABASE_FILENAME = "registry_upload_runtime.sqlite3"
+DATABASE_FILENAME = AUTOANSWERS_DB_FILENAME
 
 
 def _canonical(value: Any) -> str:
@@ -60,10 +62,14 @@ def _open(runtime_dir: Path, *, read_only: bool) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
         conn.execute("PRAGMA query_only=ON")
     else:
-        conn = sqlite3.connect(database, timeout=30, isolation_level=None)
+        conn = connect_sqlite(
+            database,
+            timeout_ms=30_000,
+            priority="background",
+            isolation_level=None,
+        )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 

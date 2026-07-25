@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -151,6 +152,7 @@ BANK_FEE_CONFIDENCE_STRONG = "strong"
 BANK_FEE_CONFIDENCE_PROBABLE = "probable"
 BANK_FEE_CONFIDENCE_WEAK = "weak"
 BANK_FEE_IMPORTABLE_CONFIDENCES = {BANK_FEE_CONFIDENCE_STRONG, BANK_FEE_CONFIDENCE_PROBABLE}
+BANK_FEE_PREVIEW_TTL_SECONDS = 24 * 60 * 60
 EXACT_COST_STATUS_OK = "ok"
 EXACT_COST_STATUS_UNAVAILABLE = "unavailable"
 EXACT_COST_STATUS_CNY_PAYMENT_PENDING = "cny_payment_cost_unavailable"
@@ -293,6 +295,10 @@ class SupplierFinancialDocumentsBlock:
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
         self.usd_rate_provider = usd_rate_provider or CbrUsdRateProvider()
         self.pdf_text_extractor = pdf_text_extractor or extract_pdf_text_layer
+        self.runtime.cleanup_expired_supplier_confirmation_previews(
+            now=self.timestamp_factory()
+        )
+        self._cleanup_expired_bank_fee_previews()
 
     def list_documents(
         self,
@@ -490,7 +496,12 @@ class SupplierFinancialDocumentsBlock:
         filename = _safe_filename(uploaded_filename or "financial-document.pdf")
         if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
             raise ValueError("financial document upload must be a PDF, XLS or XLSX file")
-        parsed = self.parse_document_preview(file_bytes, uploaded_filename=filename)
+        file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        parsed = (
+            self._cached_bank_fee_source_parse(file_sha256)
+            if Path(filename).suffix.lower() == ".pdf"
+            else None
+        ) or self.parse_document_preview(file_bytes, uploaded_filename=filename)
         normalized = dict(parsed.get("normalized_parse") or {})
         warnings = _string_list(parsed.get("warnings"))
         errors = _string_list(parsed.get("errors"))
@@ -513,7 +524,6 @@ class SupplierFinancialDocumentsBlock:
                     "warnings": warnings,
                 }
             normalized["document_date"] = normalized_date
-        file_sha256 = hashlib.sha256(file_bytes).hexdigest()
         all_documents = self.runtime.list_supplier_financial_documents(
             supplier_order_id
         )
@@ -559,6 +569,15 @@ class SupplierFinancialDocumentsBlock:
             ),
             None,
         )
+        durable_bank_exact = (
+            self._find_bank_fee_preview(
+                supplier_order_id=supplier_order_id,
+                source_sha256=file_sha256,
+            )
+            if parsed_document_type
+            == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+            else None
+        )
         token = "sfc_" + uuid4().hex
         created_at = self.timestamp_factory()
         expires_at = _confirmation_expiry(created_at, ttl_seconds)
@@ -567,9 +586,14 @@ class SupplierFinancialDocumentsBlock:
             / "supplier_financial_staging"
             / token
         )
-        staging_dir.mkdir(parents=True, exist_ok=False)
+        staging_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(staging_dir, 0o700)
+        self._fsync_directory_lineage(
+            staging_dir,
+            stop=self.runtime.runtime_dir,
+        )
         staging_path = staging_dir / filename
-        staging_path.write_bytes(file_bytes)
+        self._write_private_bytes(staging_path, file_bytes)
         target_revision = self._financial_target_revision(supplier_order_id)
         preview_payload = {
             "filename": filename,
@@ -597,17 +621,25 @@ class SupplierFinancialDocumentsBlock:
                 for item in classification_mismatches
             ],
         }
-        self.runtime.save_supplier_confirmation_preview(
-            token=token,
-            confirmation_type="financial_document_upload",
-            supplier_order_id=supplier_order_id,
-            subject_id="",
-            target_revision=target_revision,
-            source_sha256=file_sha256,
-            payload=preview_payload,
-            created_at=created_at,
-            expires_at=expires_at,
-        )
+        try:
+            self.runtime.save_supplier_confirmation_preview(
+                token=token,
+                confirmation_type="financial_document_upload",
+                supplier_order_id=supplier_order_id,
+                subject_id="",
+                target_revision=target_revision,
+                source_sha256=file_sha256,
+                payload=preview_payload,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+        except Exception:
+            staging_path.unlink(missing_ok=True)
+            try:
+                staging_dir.rmdir()
+            except OSError:
+                pass
+            raise
         duplicate_action = (
             "idempotent_active"
             if active_exact
@@ -615,14 +647,16 @@ class SupplierFinancialDocumentsBlock:
             if excluded_exact
             else "parser_reclassification"
             if classification_mismatches
+            else "idempotent_active"
+            if durable_bank_exact
             else "semantic_warning"
             if semantic_duplicates
             else "create"
         )
         duplicate_warnings = []
-        if active_exact:
+        if active_exact or durable_bank_exact:
             duplicate_warnings.append(
-                "Файл с тем же SHA уже активен; новая строка создана не будет."
+                "Файл с тем же SHA уже загружен; повторное хранение и разбор не выполняются."
             )
         if excluded_exact:
             duplicate_warnings.append(
@@ -866,6 +900,15 @@ class SupplierFinancialDocumentsBlock:
             if semantic_ids:
                 result["duplicate_reason"] = str(duplicate_reason or "").strip()
         result_document_id = str(result.get("document_id") or "")
+        if bool(result.get("durable_preview")) and not bool(
+            result.get("active_saved")
+        ):
+            completed = self.runtime.complete_supplier_confirmation_preview(
+                token=confirmation_token,
+                consumed_at=self.timestamp_factory(),
+                result=result,
+            )
+            return dict(completed.get("result") or result)
         readback = self.runtime.load_supplier_financial_document(
             supplier_order_id=supplier_order_id,
             document_id=result_document_id,
@@ -1073,11 +1116,56 @@ class SupplierFinancialDocumentsBlock:
         if existing is not None:
             return self._bank_fee_statement_preview_response(existing, idempotent=True)
 
-        parsed = parse_financial_document_pdf(
-            file_bytes,
-            filename=filename,
-            text_extractor=self.pdf_text_extractor,
+        existing_preview = self._find_bank_fee_preview(
+            supplier_order_id=supplier_order_id,
+            source_sha256=file_sha256,
         )
+        if existing_preview is not None:
+            return self._bank_fee_statement_preview_response(
+                existing_preview,
+                idempotent=True,
+            )
+
+        source_path, parse_path = self._bank_fee_source_paths(file_sha256)
+        source_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._fsync_directory_lineage(
+            source_path.parent,
+            stop=self.runtime.runtime_dir,
+        )
+        if source_path.is_file():
+            if hashlib.sha256(source_path.read_bytes()).hexdigest() != file_sha256:
+                raise ValueError("content-addressed bank statement source hash mismatch")
+        else:
+            self._write_private_bytes(source_path, file_bytes)
+        parsed: dict[str, Any]
+        if parse_path.is_file():
+            cached = json.loads(parse_path.read_text(encoding="utf-8"))
+            if (
+                str(cached.get("source_sha256") or "") != file_sha256
+                or not isinstance(cached.get("parsed"), Mapping)
+            ):
+                raise ValueError("content-addressed bank statement parse cache mismatch")
+            parsed = dict(cached["parsed"])
+        else:
+            parsed = self._cached_bank_fee_source_parse(file_sha256) or (
+                parse_financial_document_pdf(
+                    file_bytes,
+                    filename=filename,
+                    text_extractor=self.pdf_text_extractor,
+                )
+            )
+            self._write_private_json(
+                parse_path,
+                {
+                    "contract_name": "supplier_financial_source_parse_v1",
+                    "source_sha256": file_sha256,
+                    "parser_version": str(
+                        parsed.get("parser_version")
+                        or BANK_FEE_STATEMENT_PARSER_VERSION
+                    ),
+                    "parsed": parsed,
+                },
+            )
         normalized = dict(parsed.get("normalized_parse") or {})
         if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
             raise ValueError("uploaded PDF was not recognized as a VTB bank statement for fees")
@@ -1106,11 +1194,9 @@ class SupplierFinancialDocumentsBlock:
             statement_file_sha256=file_sha256,
             exclude_document_id=document_id,
         )
-        stored_file_path = self._write_document_file(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-            filename=filename,
-            body=file_bytes,
+        stored_file_path = _relative_to_runtime(
+            self.runtime.runtime_dir,
+            source_path,
         )
         parse_status = (
             FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR
@@ -1159,8 +1245,43 @@ class SupplierFinancialDocumentsBlock:
             "warnings": _dedupe_strings([*warnings, *_string_list(preview.get("warnings"))]),
             "errors": _dedupe_strings(errors),
         }
-        saved = self.runtime.save_supplier_financial_document(document=document, expense_lines=[])
-        return self._bank_fee_statement_preview_response(saved, idempotent=False)
+        expires_at = _confirmation_expiry(now, BANK_FEE_PREVIEW_TTL_SECONDS)
+        document["preview_expires_at"] = expires_at
+        self._write_private_json(
+            self._bank_fee_preview_path(document_id),
+            {
+                "contract_name": "supplier_bank_fee_durable_preview_v1",
+                "source_sha256": file_sha256,
+                "target_revision": preview["target_revision"],
+                "supplier_order_id": supplier_order_id,
+                "document_id": document_id,
+                "created_at": now,
+                "expires_at": expires_at,
+                "document": document,
+            },
+        )
+        durable_readback = self._load_bank_fee_preview(document_id)
+        if (
+            durable_readback is None
+            or str(durable_readback.get("file_sha256") or "") != file_sha256
+        ):
+            raise ValueError("durable bank statement preview readback failed")
+        response = self._bank_fee_statement_preview_response(
+            document,
+            idempotent=False,
+        )
+        response.update(
+            {
+                "durable_preview": True,
+                "durable_saved": True,
+                "active_saved": False,
+                "readback_confirmed": True,
+                "source_sha256": file_sha256,
+                "target_revision": preview["target_revision"],
+                "expires_at": expires_at,
+            }
+        )
+        return response
 
     def confirm_bank_fee_statement_import(
         self,
@@ -1168,6 +1289,14 @@ class SupplierFinancialDocumentsBlock:
         document_id: str,
         *,
         selected_operation_ids: Iterable[str] | None = None,
+        expected_source_sha256: str | None = None,
+        expected_target_revision: str | None = None,
+        defer_downstream: bool = False,
+        cny_document_factory: Callable[
+            [Mapping[str, Any], Mapping[str, Any]],
+            Mapping[str, Any],
+        ]
+        | None = None,
     ) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         document = self.runtime.load_supplier_financial_document(
@@ -1175,15 +1304,32 @@ class SupplierFinancialDocumentsBlock:
             document_id=document_id,
         )
         if document is None:
-            raise ValueError(f"financial document not found: {document_id}")
+            document = self._load_bank_fee_preview(document_id)
+        if document is None:
+            raise ValueError(f"financial document preview not found: {document_id}")
         if str(document.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
             raise ValueError("financial document is not a bank fee statement")
         normalized = dict(document.get("normalized_parse") or {})
         statement_import = dict(normalized.get("statement_import") or {})
         expected_revision = str(statement_import.get("target_revision") or "")
+        source_sha256 = str(document.get("file_sha256") or "")
+        if (
+            not str(expected_source_sha256 or "").strip()
+            or str(expected_source_sha256 or "").strip() != source_sha256
+        ):
+            raise ValueError(
+                "exact bank statement source SHA-256 is required for confirm"
+            )
+        if (
+            not str(expected_target_revision or "").strip()
+            or str(expected_target_revision or "").strip() != expected_revision
+        ):
+            raise ValueError(
+                "exact bank statement target revision is required for confirm"
+            )
         current_revision = self._bank_fee_preview_revision(
             supplier_order_id,
-            statement_file_sha256=str(document.get("file_sha256") or ""),
+            statement_file_sha256=source_sha256,
             exclude_document_id=document_id,
         )
         if not expected_revision or current_revision != expected_revision:
@@ -1225,7 +1371,12 @@ class SupplierFinancialDocumentsBlock:
         unknown_ids: list[str] = []
         for selected_id in sorted(requested_ids):
             if selected_id in rows_by_operation_id:
-                requested_operation_ids.add(selected_id)
+                logical_id = str(
+                    rows_by_operation_id[selected_id].get("logical_fee_id") or ""
+                )
+                requested_operation_ids.update(
+                    rows_by_logical_id.get(logical_id) or {selected_id}
+                )
             elif selected_id in rows_by_logical_id:
                 requested_operation_ids.update(rows_by_logical_id[selected_id])
             else:
@@ -1244,7 +1395,22 @@ class SupplierFinancialDocumentsBlock:
             payload = self.get_document(supplier_order_id, document_id)
             payload["idempotent"] = True
             payload["already_added"] = True
-            payload["cny_fee_rows_for_ledger"] = []
+            confirmed_cny_rows = _confirmed_cny_fee_rows(document)
+            payload["cny_fee_rows_for_ledger"] = (
+                confirmed_cny_rows
+                if defer_downstream and cny_document_factory is None
+                else []
+            )
+            payload["cny_ledger_replay_required"] = bool(
+                confirmed_cny_rows and cny_document_factory is not None
+            )
+            if not defer_downstream:
+                payload.update(
+                    self.finalize_bank_fee_statement_import(
+                        supplier_order_id,
+                        document_id,
+                    )
+                )
             return payload
         now = self.timestamp_factory()
         newly_confirmed_ids = {
@@ -1302,26 +1468,80 @@ class SupplierFinancialDocumentsBlock:
             )
             for index, row in enumerate(matched_rows, start=1)
         ]
-        saved = self.runtime.save_supplier_financial_document(
-            document=updated_document,
-            expense_lines=expense_lines,
-        )
-        payload = self.get_document(supplier_order_id, document_id)
-        payload["idempotent"] = False
-        payload["already_added"] = False
-        payload["cny_fee_rows_for_ledger"] = [
+        newly_confirmed_cny_rows = [
             item
-            for item in _confirmed_cny_fee_rows(saved)
+            for item in _confirmed_cny_fee_rows(
+                {**updated_document, "expense_lines": expense_lines}
+            )
             if str(item.get("semantic_operation_id") or "")
             in newly_confirmed_ids
         ]
-        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
-            supplier_order_id
+        atomic_cny_documents = (
+            [
+                dict(cny_document_factory(row, updated_document))
+                for row in newly_confirmed_cny_rows
+            ]
+            if cny_document_factory is not None
+            else []
         )
+        saved = self.runtime.save_supplier_financial_document(
+            document=updated_document,
+            expense_lines=expense_lines,
+            bank_operation_assignments=[
+                {
+                    "semantic_operation_id": str(
+                        row.get("semantic_operation_id") or ""
+                    ),
+                    "logical_fee_id": str(row.get("logical_fee_id") or ""),
+                    "raw": row,
+                }
+                for row in matched_rows
+            ],
+            cny_documents=atomic_cny_documents,
+        )
+        self._bank_fee_preview_path(document_id).unlink(missing_ok=True)
+        payload = self.get_document(supplier_order_id, document_id)
+        payload["idempotent"] = False
+        payload["already_added"] = False
+        payload["cny_fee_rows_for_ledger"] = (
+            newly_confirmed_cny_rows
+            if cny_document_factory is None
+            else []
+        )
+        payload["cny_ledger_replay_required"] = bool(atomic_cny_documents)
+        if not defer_downstream:
+            payload.update(
+                self.finalize_bank_fee_statement_import(
+                    supplier_order_id,
+                    document_id,
+                )
+            )
+        return payload
+
+    def finalize_bank_fee_statement_import(
+        self,
+        supplier_order_id: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        """Publish derived state only after idempotent CNY ledger writes succeed."""
+
+        document = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if document is None:
+            raise ValueError(f"financial document not found: {document_id}")
+        payload = self.get_document(supplier_order_id, document_id)
+        result: dict[str, Any] = {
+            "own_product_capital": self._materialize_own_capital_expense_events(
+                supplier_order_id
+            )
+        }
         changed_cny_documents: list[str] = []
         target_cny_status = (
             CNY_DOCUMENT_STATUS_POSTED
-            if str(updated_document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
+            if str(document.get("parse_status") or "")
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
             else CNY_DOCUMENT_STATUS_EXCLUDED
         )
         for cny_document in self.runtime.list_cny_documents():
@@ -1339,14 +1559,14 @@ class SupplierFinancialDocumentsBlock:
                 }
             )
             changed_cny_documents.append(str(saved_cny.get("document_id") or ""))
-        payload["cny_documents_status_changed"] = changed_cny_documents
+        result["cny_documents_status_changed"] = changed_cny_documents
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
+            result["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
                 supplier_order_id,
-                source_id=str(saved.get("document_id") or document_id),
+                source_id=document_id,
                 source_payload=payload,
             )
-        return payload
+        return result
 
     def _bank_fee_preview_revision(
         self,
@@ -1562,10 +1782,14 @@ class SupplierFinancialDocumentsBlock:
                 sort_order=index,
             )
             stored_lines.append(stored_line)
-        saved = self.runtime.save_supplier_financial_document(
-            document=document,
-            expense_lines=stored_lines,
-        )
+        try:
+            saved = self.runtime.save_supplier_financial_document(
+                document=document,
+                expense_lines=stored_lines,
+            )
+        except Exception:
+            self._delete_owned_document_file(document)
+            raise
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
             self.runtime.update_supplier_shipment_expenses_complete(
                 shipment_id=supplier_order_id,
@@ -1955,11 +2179,223 @@ class SupplierFinancialDocumentsBlock:
                 return loaded or document
         return None
 
+    def _bank_fee_source_paths(self, source_sha256: str) -> tuple[Path, Path]:
+        source_dir = (
+            self.runtime.runtime_dir
+            / "supplier_financial_sources"
+            / "sha256"
+            / source_sha256[:2]
+            / source_sha256
+        )
+        return source_dir / "source.pdf", source_dir / "parse.json"
+
+    def _cached_bank_fee_source_parse(
+        self,
+        source_sha256: str,
+    ) -> dict[str, Any] | None:
+        _source_path, parse_path = self._bank_fee_source_paths(source_sha256)
+        if parse_path.is_file():
+            cached = json.loads(parse_path.read_text(encoding="utf-8"))
+            if (
+                str(cached.get("source_sha256") or "") != source_sha256
+                or not isinstance(cached.get("parsed"), Mapping)
+            ):
+                raise ValueError(
+                    "content-addressed bank statement parse cache mismatch"
+                )
+            return dict(cached["parsed"])
+        source = self.runtime.load_supplier_financial_source(source_sha256)
+        if source is None:
+            return None
+        normalized = dict(source.get("normalized_parse") or {})
+        if (
+            str(normalized.get("document_type") or "")
+            != FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+        ):
+            return None
+        normalized.pop("statement_import", None)
+        return {
+            "parser_version": str(source.get("parser_version") or ""),
+            "raw_parse": dict(source.get("raw_parse") or {}),
+            "normalized_parse": normalized,
+            "warnings": [],
+            "errors": [],
+        }
+
+    def _bank_fee_preview_path(self, document_id: str) -> Path:
+        preview_dir = self.runtime.runtime_dir / "supplier_financial_previews"
+        preview_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return preview_dir / f"{document_id}.json"
+
+    def _load_bank_fee_preview(self, document_id: str) -> dict[str, Any] | None:
+        path = self._bank_fee_preview_path(document_id)
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if str(payload.get("document_id") or "") != document_id:
+            raise ValueError("bank statement preview identity mismatch")
+        if _confirmation_is_expired(
+            str(payload.get("expires_at") or ""),
+            self.timestamp_factory(),
+        ):
+            path.unlink(missing_ok=True)
+            self._cleanup_bank_fee_source_if_orphan(
+                str(payload.get("source_sha256") or "")
+            )
+            raise ValueError("bank statement preview expired; upload it again")
+        document = payload.get("document")
+        if not isinstance(document, Mapping):
+            raise ValueError("bank statement preview payload is invalid")
+        return dict(document)
+
+    def _find_bank_fee_preview(
+        self,
+        *,
+        supplier_order_id: str,
+        source_sha256: str,
+    ) -> dict[str, Any] | None:
+        preview_dir = self.runtime.runtime_dir / "supplier_financial_previews"
+        if not preview_dir.is_dir():
+            return None
+        for path in sorted(preview_dir.glob("fdoc_*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if _confirmation_is_expired(
+                    str(payload.get("expires_at") or ""),
+                    self.timestamp_factory(),
+                ):
+                    path.unlink(missing_ok=True)
+                    self._cleanup_bank_fee_source_if_orphan(
+                        str(payload.get("source_sha256") or "")
+                    )
+                    continue
+                if (
+                    str(payload.get("supplier_order_id") or "")
+                    == supplier_order_id
+                    and str(payload.get("source_sha256") or "")
+                    == source_sha256
+                    and isinstance(payload.get("document"), Mapping)
+                ):
+                    return dict(payload["document"])
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        return None
+
+    def _cleanup_expired_bank_fee_previews(self) -> int:
+        preview_dir = self.runtime.runtime_dir / "supplier_financial_previews"
+        if not preview_dir.is_dir():
+            return 0
+        removed = 0
+        for path in sorted(preview_dir.glob("fdoc_*.json"))[:250]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not _confirmation_is_expired(
+                    str(payload.get("expires_at") or ""),
+                    self.timestamp_factory(),
+                ):
+                    continue
+                source_sha256 = str(payload.get("source_sha256") or "")
+                path.unlink(missing_ok=True)
+                removed += 1
+                self._cleanup_bank_fee_source_if_orphan(source_sha256)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        return removed
+
+    def _cleanup_bank_fee_source_if_orphan(self, source_sha256: str) -> None:
+        if len(source_sha256) != 64:
+            return
+        if any(
+            str(item.get("file_sha256") or "") == source_sha256
+            for item in self.runtime.list_supplier_financial_documents_all()
+        ):
+            return
+        preview_dir = self.runtime.runtime_dir / "supplier_financial_previews"
+        for path in preview_dir.glob("fdoc_*.json") if preview_dir.is_dir() else []:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(payload.get("source_sha256") or "") == source_sha256:
+                return
+        source_path, parse_path = self._bank_fee_source_paths(source_sha256)
+        source_root = (
+            self.runtime.runtime_dir / "supplier_financial_sources" / "sha256"
+        ).resolve()
+        for path in (source_path, parse_path):
+            resolved = path.resolve()
+            if resolved.is_file() and _path_is_relative_to(resolved, source_root):
+                resolved.unlink()
+        try:
+            source_path.parent.rmdir()
+            source_path.parent.parent.rmdir()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _write_private_bytes(path: Path, body: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            SupplierFinancialDocumentsBlock._fsync_directory(path.parent)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _fsync_directory_lineage(path: Path, *, stop: Path) -> None:
+        current = path.resolve()
+        boundary = stop.resolve()
+        while True:
+            SupplierFinancialDocumentsBlock._fsync_directory(current)
+            if current == boundary:
+                return
+            if not current.is_relative_to(boundary):
+                raise ValueError("durable financial path escapes runtime directory")
+            current = current.parent
+
+    @staticmethod
+    def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        SupplierFinancialDocumentsBlock._write_private_bytes(
+            path,
+            (
+                json.dumps(
+                    dict(payload),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+
     def _existing_bank_fee_operation_ids(
         self,
         supplier_order_id: str,
     ) -> set[str]:
-        operation_ids: set[str] = set()
+        operation_ids = {
+            str(item.get("semantic_operation_id") or "")
+            for item in self.runtime.list_supplier_bank_operation_assignments()
+            if str(item.get("semantic_operation_id") or "")
+        }
         for line in self.runtime.list_supplier_financial_expense_lines(
             supplier_order_id
         ):
@@ -2077,6 +2513,18 @@ class SupplierFinancialDocumentsBlock:
                 ),
             }
         )
+        if str(document.get("preview_expires_at") or ""):
+            payload.update(
+                {
+                    "durable_preview": True,
+                    "durable_saved": True,
+                    "active_saved": False,
+                    "readback_confirmed": True,
+                    "source_sha256": str(document.get("file_sha256") or ""),
+                    "target_revision": str(preview.get("target_revision") or ""),
+                    "expires_at": str(document.get("preview_expires_at") or ""),
+                }
+            )
         return payload
 
     def _with_cny_fee_equivalents(self, lines: list[Mapping[str, Any]]) -> list[dict[str, Any]]:

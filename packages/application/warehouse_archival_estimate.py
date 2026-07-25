@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 
 
@@ -1444,7 +1445,7 @@ def _connect(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
     if readonly:
         conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=60)
     else:
-        conn = sqlite3.connect(path, timeout=60)
+        conn = connect_sqlite(path, priority="background")
     conn.row_factory = sqlite3.Row
     if not readonly:
         conn.execute("PRAGMA foreign_keys=ON")

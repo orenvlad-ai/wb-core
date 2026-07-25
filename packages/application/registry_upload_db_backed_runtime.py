@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
@@ -26,6 +27,7 @@ from packages.application.registry_upload_bundle_v1 import (
     parse_registry_upload_bundle_v1_payload,
 )
 from packages.application.supplier_shipment_status import apply_derived_supplier_status
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
@@ -74,8 +76,14 @@ ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
 DB_FILENAME = "registry_upload_runtime.sqlite3"
-DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000
+SUPPLIER_CONFIRMATION_DB_FILENAME = "supplier_confirmation_runtime.sqlite3"
+MIN_SQLITE_BUSY_TIMEOUT_MS = 5_000
+DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000
 MAX_SQLITE_BUSY_TIMEOUT_MS = 300_000
+_SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
+_SCHEMA_READY_LOCK = threading.Lock()
+_CONFIRMATION_SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
+_CONFIRMATION_SCHEMA_READY_LOCK = threading.Lock()
 _SQLITE_BUSY_TIMEOUT_MS: ContextVar[int | None] = ContextVar(
     "registry_upload_sqlite_busy_timeout_ms",
     default=None,
@@ -88,10 +96,10 @@ def registry_runtime_sqlite_busy_timeout(timeout_ms: int | None):
 
     if timeout_ms is not None:
         timeout_ms = int(timeout_ms)
-        if not DEFAULT_SQLITE_BUSY_TIMEOUT_MS <= timeout_ms <= MAX_SQLITE_BUSY_TIMEOUT_MS:
+        if not MIN_SQLITE_BUSY_TIMEOUT_MS <= timeout_ms <= MAX_SQLITE_BUSY_TIMEOUT_MS:
             raise ValueError(
                 "registry runtime SQLite busy timeout must be between "
-                f"{DEFAULT_SQLITE_BUSY_TIMEOUT_MS} and {MAX_SQLITE_BUSY_TIMEOUT_MS} ms"
+                f"{MIN_SQLITE_BUSY_TIMEOUT_MS} and {MAX_SQLITE_BUSY_TIMEOUT_MS} ms"
             )
     token = _SQLITE_BUSY_TIMEOUT_MS.set(timeout_ms)
     try:
@@ -4643,6 +4651,8 @@ class RegistryUploadDbBackedRuntime:
         *,
         document: Mapping[str, Any],
         expense_lines: list[Mapping[str, Any]],
+        bank_operation_assignments: list[Mapping[str, Any]] | None = None,
+        cny_documents: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         document_id = str(document.get("document_id") or "").strip()
         supplier_order_id = str(document.get("supplier_order_id") or document.get("order_id") or "").strip()
@@ -4660,6 +4670,83 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            assignments = [
+                dict(item) for item in (bank_operation_assignments or [])
+            ]
+            for assignment in assignments:
+                operation_id = str(
+                    assignment.get("semantic_operation_id") or ""
+                ).strip()
+                if not operation_id:
+                    raise ValueError(
+                        "bank statement semantic operation id is required"
+                    )
+                existing_assignment = conn.execute(
+                    """
+                    SELECT supplier_order_id,financial_document_id
+                    FROM sheet_vitrina_v1_supplier_bank_operation_assignments
+                    WHERE semantic_operation_id = ?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if (
+                    existing_assignment is not None
+                    and (
+                        str(existing_assignment["supplier_order_id"])
+                        != supplier_order_id
+                        or str(existing_assignment["financial_document_id"])
+                        != document_id
+                    )
+                ):
+                    raise ValueError(
+                        "Банковская операция уже назначена другой поставке; "
+                        "для переноса требуется отдельное подтверждение перепривязки."
+                    )
+            is_bank_statement = (
+                str(document.get("document_type") or "")
+                == "bank_fee_statement"
+            )
+            if assignments or is_bank_statement:
+                source_sha256 = str(document.get("file_sha256") or "").strip()
+                if len(source_sha256) != 64:
+                    raise ValueError("exact bank statement source SHA-256 is required")
+                source_normalized_parse = dict(
+                    document.get("normalized_parse") or {}
+                )
+                source_normalized_parse.pop("statement_import", None)
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_supplier_financial_sources(
+                        source_sha256,stored_file_path,original_filename,
+                        file_content_type,parser_version,raw_parse_json,
+                        normalized_parse_json,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(source_sha256) DO UPDATE SET
+                        stored_file_path=excluded.stored_file_path,
+                        parser_version=excluded.parser_version,
+                        raw_parse_json=excluded.raw_parse_json,
+                        normalized_parse_json=excluded.normalized_parse_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        source_sha256,
+                        str(document.get("stored_file_path") or ""),
+                        str(document.get("original_filename") or ""),
+                        str(document.get("file_content_type") or ""),
+                        str(document.get("parser_version") or ""),
+                        json.dumps(
+                            dict(document.get("raw_parse") or {}),
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            source_normalized_parse,
+                            ensure_ascii=False,
+                        ),
+                        uploaded_at,
+                        updated_at,
+                    ),
+                )
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_financial_documents(
@@ -4814,6 +4901,61 @@ class RegistryUploadDbBackedRuntime:
                     for index, line in enumerate(expense_lines, start=1)
                 ],
             )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_bank_operation_assignments(
+                    semantic_operation_id,source_sha256,logical_fee_id,
+                    supplier_order_id,financial_document_id,assigned_at,raw_json
+                ) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(semantic_operation_id) DO UPDATE SET
+                    raw_json=excluded.raw_json,
+                    assigned_at=excluded.assigned_at
+                WHERE supplier_order_id=excluded.supplier_order_id
+                  AND financial_document_id=excluded.financial_document_id
+                """,
+                [
+                    (
+                        str(item.get("semantic_operation_id") or ""),
+                        str(document.get("file_sha256") or ""),
+                        str(item.get("logical_fee_id") or ""),
+                        supplier_order_id,
+                        document_id,
+                        updated_at,
+                        json.dumps(dict(item.get("raw") or item), ensure_ascii=False),
+                    )
+                    for item in assignments
+                ],
+            )
+            for cny_document in cny_documents or []:
+                natural_key = str(
+                    cny_document.get("natural_key") or ""
+                ).strip()
+                if not natural_key:
+                    raise ValueError(
+                        "atomic CNY bank fee natural_key is required"
+                    )
+                existing_cny = conn.execute(
+                    """
+                    SELECT document_id,source_order_id,
+                           linked_financial_document_id
+                    FROM sheet_vitrina_v1_cny_documents
+                    WHERE natural_key=?
+                    """,
+                    (natural_key,),
+                ).fetchone()
+                if existing_cny is not None:
+                    if (
+                        str(existing_cny["source_order_id"])
+                        != supplier_order_id
+                        or str(existing_cny["linked_financial_document_id"])
+                        != document_id
+                    ):
+                        raise ValueError(
+                            "CNY-операция комиссии уже связана с другой "
+                            "поставкой или выпиской."
+                        )
+                    continue
+                _save_cny_document_in_connection(conn, cny_document)
             conn.commit()
         loaded = self.load_supplier_financial_document(
             supplier_order_id=supplier_order_id,
@@ -4822,6 +4964,183 @@ class RegistryUploadDbBackedRuntime:
         if loaded is None:
             raise ValueError(f"financial document was not saved: {document_id}")
         return loaded
+
+    def list_supplier_bank_operation_assignments(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT semantic_operation_id,source_sha256,logical_fee_id,
+                       supplier_order_id,financial_document_id,assigned_at
+                FROM sheet_vitrina_v1_supplier_bank_operation_assignments
+                ORDER BY semantic_operation_id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def load_supplier_financial_source(
+        self,
+        source_sha256: str,
+    ) -> dict[str, Any] | None:
+        normalized_sha256 = str(source_sha256 or "").strip()
+        if len(normalized_sha256) != 64:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_sources
+                WHERE source_sha256=?
+                """,
+                (normalized_sha256,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["raw_parse"] = _loads_json_object(
+            str(payload.pop("raw_parse_json") or "{}")
+        )
+        payload["normalized_parse"] = _loads_json_object(
+            str(payload.pop("normalized_parse_json") or "{}")
+        )
+        return payload
+
+    def migrate_supplier_financial_source_paths(
+        self,
+        *,
+        contract_version: str,
+        applied_at: str,
+        manifest_sha256: str,
+        source_paths: Mapping[str, str],
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        _validate_timestamp(applied_at, field_name="applied_at")
+        normalized_contract = str(contract_version or "").strip()
+        if not normalized_contract:
+            raise ValueError("financial source migration contract is required")
+        normalized_paths = {
+            str(source_sha256): str(path)
+            for source_sha256, path in source_paths.items()
+            if len(str(source_sha256)) == 64 and str(path).strip()
+        }
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            for source_sha256, stored_file_path in normalized_paths.items():
+                cursor = conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_supplier_financial_documents
+                    SET stored_file_path=?
+                    WHERE document_type='bank_fee_statement'
+                      AND file_sha256=?
+                    """,
+                    (stored_file_path, source_sha256),
+                )
+                if cursor.rowcount <= 0:
+                    conn.rollback()
+                    raise ValueError(
+                        f"bank statement source disappeared: {source_sha256}"
+                    )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_supplier_financial_sources
+                    SET stored_file_path=?,updated_at=?
+                    WHERE source_sha256=?
+                    """,
+                    (stored_file_path, applied_at, source_sha256),
+                )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_financial_source_migrations(
+                    contract_version,applied_at,manifest_sha256,result_json
+                ) VALUES(?,?,?,?)
+                ON CONFLICT(contract_version) DO UPDATE SET
+                    applied_at=excluded.applied_at,
+                    manifest_sha256=excluded.manifest_sha256,
+                    result_json=excluded.result_json
+                """,
+                (
+                    normalized_contract,
+                    applied_at,
+                    str(manifest_sha256 or ""),
+                    json.dumps(
+                        dict(result),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+            if normalized_paths:
+                rows = conn.execute(
+                    """
+                    SELECT file_sha256,COUNT(*) AS document_count,
+                           COUNT(DISTINCT stored_file_path) AS path_count,
+                           MIN(stored_file_path) AS stored_file_path
+                    FROM sheet_vitrina_v1_supplier_financial_documents
+                    WHERE document_type='bank_fee_statement'
+                      AND file_sha256 IN (
+                    """
+                    + ",".join("?" for _ in normalized_paths)
+                    + """
+                      )
+                    GROUP BY file_sha256
+                    ORDER BY file_sha256
+                    """,
+                    tuple(normalized_paths),
+                ).fetchall()
+            else:
+                rows = []
+        return {
+            "contract_version": normalized_contract,
+            "groups": [dict(row) for row in rows],
+            "readback_confirmed": all(
+                int(row["path_count"]) == 1
+                and str(row["stored_file_path"])
+                == normalized_paths.get(str(row["file_sha256"]))
+                for row in rows
+            )
+            and len(rows) == len(normalized_paths),
+        }
+
+    def restore_supplier_financial_source_paths(
+        self,
+        *,
+        restored_at: str,
+        document_paths: Mapping[str, str],
+    ) -> int:
+        _validate_timestamp(restored_at, field_name="restored_at")
+        normalized = {
+            str(document_id): str(path)
+            for document_id, path in document_paths.items()
+            if str(document_id).strip() and str(path).strip()
+        }
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            affected = 0
+            for document_id, stored_file_path in normalized.items():
+                cursor = conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_supplier_financial_documents
+                    SET stored_file_path=?
+                    WHERE document_id=? AND document_type='bank_fee_statement'
+                    """,
+                    (stored_file_path, document_id),
+                )
+                affected += max(0, int(cursor.rowcount))
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_financial_source_migrations
+                WHERE contract_version='supplier_financial_source_migration_v1'
+                """
+            )
+            conn.commit()
+        return affected
 
     def save_supplier_confirmation_preview(
         self,
@@ -4842,8 +5161,12 @@ class RegistryUploadDbBackedRuntime:
         _validate_timestamp(created_at, field_name="created_at")
         _validate_timestamp(expires_at, field_name="expires_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+        with _connect_supplier_confirmation_store(self.runtime_dir) as conn:
+            _cleanup_expired_supplier_confirmation_previews(
+                conn,
+                runtime_dir=self.runtime_dir,
+                now=created_at,
+            )
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_confirmation_previews(
@@ -4872,8 +5195,7 @@ class RegistryUploadDbBackedRuntime:
 
     def load_supplier_confirmation_preview(self, token: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+        with _connect_supplier_confirmation_store(self.runtime_dir) as conn:
             row = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_supplier_confirmation_previews
@@ -4881,6 +5203,18 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (str(token or "").strip(),),
             ).fetchone()
+        if row is None:
+            # Transitional read-only fallback for previews created by the
+            # preceding release. New previews are never written to the main DB.
+            with _connect(self.db_path) as conn:
+                _ensure_schema(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_supplier_confirmation_previews
+                    WHERE token=?
+                    """,
+                    (str(token or "").strip(),),
+                ).fetchone()
         if row is None:
             return None
         payload = dict(row)
@@ -4897,12 +5231,11 @@ class RegistryUploadDbBackedRuntime:
     ) -> dict[str, Any]:
         _validate_timestamp(consumed_at, field_name="consumed_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+        with _connect_supplier_confirmation_store(self.runtime_dir) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT consumed_at,result_json
+                SELECT consumed_at,result_json,payload_json
                 FROM sheet_vitrina_v1_supplier_confirmation_previews
                 WHERE token=?
                 """,
@@ -4910,7 +5243,48 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
             if row is None:
                 conn.rollback()
-                raise ValueError("confirmation token is invalid")
+                # Old previews are bounded to their short TTL. Preserve their
+                # compatibility without routing any new preview write here.
+                with _connect(self.db_path) as legacy:
+                    _ensure_schema(legacy)
+                    legacy_row = legacy.execute(
+                        """
+                        SELECT consumed_at,result_json,payload_json
+                        FROM sheet_vitrina_v1_supplier_confirmation_previews
+                        WHERE token=?
+                        """,
+                        (str(token or "").strip(),),
+                    ).fetchone()
+                    if legacy_row is None:
+                        raise ValueError("confirmation token is invalid")
+                    if not str(legacy_row["consumed_at"] or "").strip():
+                        legacy.execute(
+                            """
+                            UPDATE sheet_vitrina_v1_supplier_confirmation_previews
+                            SET consumed_at=?,result_json=?
+                            WHERE token=? AND consumed_at IS NULL
+                            """,
+                            (
+                                consumed_at,
+                                json.dumps(
+                                    dict(result or {}),
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                ),
+                                str(token or "").strip(),
+                            ),
+                        )
+                        legacy.commit()
+                    _finalize_supplier_confirmation_staging(
+                        legacy,
+                        runtime_dir=self.runtime_dir,
+                        token=str(token or "").strip(),
+                        payload_json=str(legacy_row["payload_json"] or "{}"),
+                    )
+                loaded = self.load_supplier_confirmation_preview(token)
+                if loaded is None:
+                    raise ValueError("confirmation token is invalid")
+                return loaded
             if str(row["consumed_at"] or "").strip():
                 conn.rollback()
                 loaded = self.load_supplier_confirmation_preview(token)
@@ -4930,10 +5304,30 @@ class RegistryUploadDbBackedRuntime:
                 ),
             )
             conn.commit()
+            _finalize_supplier_confirmation_staging(
+                conn,
+                runtime_dir=self.runtime_dir,
+                token=str(token or "").strip(),
+                payload_json=str(row["payload_json"] or "{}"),
+            )
         loaded = self.load_supplier_confirmation_preview(token)
         if loaded is None:
             raise ValueError("confirmation token is invalid")
         return loaded
+
+    def cleanup_expired_supplier_confirmation_previews(
+        self,
+        *,
+        now: str,
+    ) -> int:
+        _validate_timestamp(now, field_name="now")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect_supplier_confirmation_store(self.runtime_dir) as conn:
+            return _cleanup_expired_supplier_confirmation_previews(
+                conn,
+                runtime_dir=self.runtime_dir,
+                now=now,
+            )
 
     def list_supplier_financial_documents(self, supplier_order_id: str) -> list[dict[str, Any]]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -5097,115 +5491,10 @@ class RegistryUploadDbBackedRuntime:
             return [_supplier_financial_document_to_dict(row) for row in rows]
 
     def save_cny_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
-        document_id = str(document.get("document_id") or "").strip()
-        if not document_id:
-            raise ValueError("CNY document_id is required")
-        document_type = str(document.get("document_type") or "").strip()
-        if document_type not in CNY_DOCUMENT_TYPES:
-            raise ValueError(f"unsupported CNY document_type: {document_type}")
-        status = str(document.get("status") or CNY_DOCUMENT_STATUS_POSTED).strip()
-        if status not in CNY_DOCUMENT_STATUSES:
-            raise ValueError(f"unsupported CNY document status: {status}")
-        uploaded_at = str(document.get("uploaded_at") or document.get("created_at") or "").strip()
-        created_at = str(document.get("created_at") or uploaded_at).strip()
-        updated_at = str(document.get("updated_at") or uploaded_at).strip()
-        _validate_timestamp(uploaded_at, field_name="uploaded_at")
-        _validate_timestamp(created_at, field_name="created_at")
-        _validate_timestamp(updated_at, field_name="updated_at")
-        operation_date = str(document.get("operation_date") or "").strip()
-        if operation_date:
-            _validate_iso_date(operation_date, field_name="operation_date")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_cny_documents(
-                    document_id,
-                    document_type,
-                    source,
-                    source_order_id,
-                    context_order_id,
-                    linked_financial_document_id,
-                    original_filename,
-                    stored_file_path,
-                    file_content_type,
-                    file_sha256,
-                    natural_key,
-                    uploaded_at,
-                    created_at,
-                    updated_at,
-                    operation_date,
-                    operation_datetime,
-                    status,
-                    document_number,
-                    currency,
-                    rub_amount,
-                    cny_amount,
-                    bank_rate,
-                    parsed_payload_json,
-                    raw_parse_json,
-                    parser_version,
-                    warnings_json,
-                    errors_json
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(document_id) DO UPDATE SET
-                    document_type = excluded.document_type,
-                    source = excluded.source,
-                    source_order_id = excluded.source_order_id,
-                    context_order_id = excluded.context_order_id,
-                    linked_financial_document_id = excluded.linked_financial_document_id,
-                    original_filename = excluded.original_filename,
-                    stored_file_path = excluded.stored_file_path,
-                    file_content_type = excluded.file_content_type,
-                    file_sha256 = excluded.file_sha256,
-                    natural_key = excluded.natural_key,
-                    updated_at = excluded.updated_at,
-                    operation_date = excluded.operation_date,
-                    operation_datetime = excluded.operation_datetime,
-                    status = excluded.status,
-                    document_number = excluded.document_number,
-                    currency = excluded.currency,
-                    rub_amount = excluded.rub_amount,
-                    cny_amount = excluded.cny_amount,
-                    bank_rate = excluded.bank_rate,
-                    parsed_payload_json = excluded.parsed_payload_json,
-                    raw_parse_json = excluded.raw_parse_json,
-                    parser_version = excluded.parser_version,
-                    warnings_json = excluded.warnings_json,
-                    errors_json = excluded.errors_json
-                """,
-                (
-                    document_id,
-                    document_type,
-                    str(document.get("source") or ""),
-                    str(document.get("source_order_id") or ""),
-                    str(document.get("context_order_id") or ""),
-                    str(document.get("linked_financial_document_id") or ""),
-                    str(document.get("original_filename") or ""),
-                    str(document.get("stored_file_path") or ""),
-                    str(document.get("file_content_type") or ""),
-                    str(document.get("file_sha256") or ""),
-                    str(document.get("natural_key") or ""),
-                    uploaded_at,
-                    created_at,
-                    updated_at,
-                    operation_date,
-                    str(document.get("operation_datetime") or ""),
-                    status,
-                    str(document.get("document_number") or ""),
-                    str(document.get("currency") or ""),
-                    str(document.get("rub_amount") or ""),
-                    str(document.get("cny_amount") or ""),
-                    str(document.get("bank_rate") or ""),
-                    json.dumps(dict(document.get("parsed_payload") or {}), ensure_ascii=False),
-                    json.dumps(dict(document.get("raw_parse") or {}), ensure_ascii=False),
-                    str(document.get("parser_version") or ""),
-                    json.dumps(list(document.get("warnings") or []), ensure_ascii=False),
-                    json.dumps(list(document.get("errors") or []), ensure_ascii=False),
-                ),
-            )
+            document_id = _save_cny_document_in_connection(conn, document)
             conn.commit()
         loaded = self.load_cny_document(document_id)
         if loaded is None:
@@ -7703,6 +7992,116 @@ def _supplier_financial_expense_line_to_dict(row: sqlite3.Row) -> dict[str, Any]
     }
 
 
+def _save_cny_document_in_connection(
+    conn: sqlite3.Connection,
+    document: Mapping[str, Any],
+) -> str:
+    """Upsert one validated CNY document in the caller-owned transaction."""
+
+    document_id = str(document.get("document_id") or "").strip()
+    if not document_id:
+        raise ValueError("CNY document_id is required")
+    document_type = str(document.get("document_type") or "").strip()
+    if document_type not in CNY_DOCUMENT_TYPES:
+        raise ValueError(f"unsupported CNY document_type: {document_type}")
+    status = str(
+        document.get("status") or CNY_DOCUMENT_STATUS_POSTED
+    ).strip()
+    if status not in CNY_DOCUMENT_STATUSES:
+        raise ValueError(f"unsupported CNY document status: {status}")
+    uploaded_at = str(
+        document.get("uploaded_at") or document.get("created_at") or ""
+    ).strip()
+    created_at = str(document.get("created_at") or uploaded_at).strip()
+    updated_at = str(document.get("updated_at") or uploaded_at).strip()
+    _validate_timestamp(uploaded_at, field_name="uploaded_at")
+    _validate_timestamp(created_at, field_name="created_at")
+    _validate_timestamp(updated_at, field_name="updated_at")
+    operation_date = str(document.get("operation_date") or "").strip()
+    if operation_date:
+        _validate_iso_date(operation_date, field_name="operation_date")
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_cny_documents(
+            document_id,document_type,source,source_order_id,context_order_id,
+            linked_financial_document_id,original_filename,stored_file_path,
+            file_content_type,file_sha256,natural_key,uploaded_at,created_at,
+            updated_at,operation_date,operation_datetime,status,document_number,
+            currency,rub_amount,cny_amount,bank_rate,parsed_payload_json,
+            raw_parse_json,parser_version,warnings_json,errors_json
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            document_type=excluded.document_type,
+            source=excluded.source,
+            source_order_id=excluded.source_order_id,
+            context_order_id=excluded.context_order_id,
+            linked_financial_document_id=excluded.linked_financial_document_id,
+            original_filename=excluded.original_filename,
+            stored_file_path=excluded.stored_file_path,
+            file_content_type=excluded.file_content_type,
+            file_sha256=excluded.file_sha256,
+            natural_key=excluded.natural_key,
+            updated_at=excluded.updated_at,
+            operation_date=excluded.operation_date,
+            operation_datetime=excluded.operation_datetime,
+            status=excluded.status,
+            document_number=excluded.document_number,
+            currency=excluded.currency,
+            rub_amount=excluded.rub_amount,
+            cny_amount=excluded.cny_amount,
+            bank_rate=excluded.bank_rate,
+            parsed_payload_json=excluded.parsed_payload_json,
+            raw_parse_json=excluded.raw_parse_json,
+            parser_version=excluded.parser_version,
+            warnings_json=excluded.warnings_json,
+            errors_json=excluded.errors_json
+        """,
+        (
+            document_id,
+            document_type,
+            str(document.get("source") or ""),
+            str(document.get("source_order_id") or ""),
+            str(document.get("context_order_id") or ""),
+            str(document.get("linked_financial_document_id") or ""),
+            str(document.get("original_filename") or ""),
+            str(document.get("stored_file_path") or ""),
+            str(document.get("file_content_type") or ""),
+            str(document.get("file_sha256") or ""),
+            str(document.get("natural_key") or ""),
+            uploaded_at,
+            created_at,
+            updated_at,
+            operation_date,
+            str(document.get("operation_datetime") or ""),
+            status,
+            str(document.get("document_number") or ""),
+            str(document.get("currency") or ""),
+            str(document.get("rub_amount") or ""),
+            str(document.get("cny_amount") or ""),
+            str(document.get("bank_rate") or ""),
+            json.dumps(
+                dict(document.get("parsed_payload") or {}),
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                dict(document.get("raw_parse") or {}),
+                ensure_ascii=False,
+            ),
+            str(document.get("parser_version") or ""),
+            json.dumps(
+                list(document.get("warnings") or []),
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                list(document.get("errors") or []),
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    return document_id
+
+
 def _cny_document_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "document_id": row["document_id"],
@@ -8499,11 +8898,127 @@ def _to_namespace(value: Any) -> Any:
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     timeout_ms = _SQLITE_BUSY_TIMEOUT_MS.get() or DEFAULT_SQLITE_BUSY_TIMEOUT_MS
-    conn = sqlite3.connect(db_path, timeout=timeout_ms / 1000.0)
+    conn = connect_sqlite(db_path, timeout_ms=timeout_ms)
     conn.row_factory = sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _connect_supplier_confirmation_store(
+    runtime_dir: Path,
+) -> sqlite3.Connection:
+    db_path = runtime_dir / SUPPLIER_CONFIRMATION_DB_FILENAME
+    conn = connect_sqlite(db_path, timeout_ms=30_000)
+    conn.row_factory = sqlite3.Row
+    schema_key = _schema_ready_key(conn)
+    if schema_key not in _CONFIRMATION_SCHEMA_READY_KEYS:
+        with _CONFIRMATION_SCHEMA_READY_LOCK:
+            if schema_key not in _CONFIRMATION_SCHEMA_READY_KEYS:
+                conn.executescript(
+                    """
+                    PRAGMA journal_mode=WAL;
+                    CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_confirmation_previews (
+                        token TEXT PRIMARY KEY,
+                        confirmation_type TEXT NOT NULL,
+                        supplier_order_id TEXT NOT NULL,
+                        subject_id TEXT,
+                        target_revision TEXT NOT NULL,
+                        source_sha256 TEXT,
+                        payload_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        consumed_at TEXT,
+                        result_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE INDEX IF NOT EXISTS supplier_confirmation_previews_by_target
+                    ON sheet_vitrina_v1_supplier_confirmation_previews(
+                        supplier_order_id,confirmation_type,created_at DESC
+                    );
+                    """
+                )
+                _CONFIRMATION_SCHEMA_READY_KEYS.add(schema_key)
+    return conn
+
+
+def _cleanup_expired_supplier_confirmation_previews(
+    conn: sqlite3.Connection,
+    *,
+    runtime_dir: Path,
+    now: str,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT token,payload_json,consumed_at,expires_at
+        FROM sheet_vitrina_v1_supplier_confirmation_previews
+        WHERE (consumed_at IS NOT NULL OR expires_at <= ?)
+          AND COALESCE(json_extract(payload_json,'$.staging_path'),'') <> ''
+        ORDER BY CASE WHEN consumed_at IS NULL THEN 0 ELSE 1 END, created_at
+        LIMIT 250
+        """,
+        (str(now or ""),),
+    ).fetchall()
+    removed_expired_tokens: list[tuple[str]] = []
+    for row in rows:
+        token = str(row["token"])
+        if not _finalize_supplier_confirmation_staging(
+            conn,
+            runtime_dir=runtime_dir,
+            token=token,
+            payload_json=str(row["payload_json"] or "{}"),
+        ):
+            continue
+        if not str(row["consumed_at"] or "").strip():
+            removed_expired_tokens.append((token,))
+    if removed_expired_tokens:
+        conn.executemany(
+            """
+            DELETE FROM sheet_vitrina_v1_supplier_confirmation_previews
+            WHERE token=? AND consumed_at IS NULL
+            """,
+            removed_expired_tokens,
+        )
+        conn.commit()
+    return len(removed_expired_tokens)
+
+
+def _finalize_supplier_confirmation_staging(
+    conn: sqlite3.Connection,
+    *,
+    runtime_dir: Path,
+    token: str,
+    payload_json: str,
+) -> bool:
+    payload = _loads_json_object(payload_json)
+    relative_path = str(payload.get("staging_path") or "").strip()
+    if not relative_path:
+        return True
+    staging_root = (runtime_dir / "supplier_financial_staging").resolve()
+    candidate = (runtime_dir / relative_path).resolve()
+    if (
+        not candidate.is_relative_to(staging_root)
+        or candidate.parent.parent != staging_root
+    ):
+        return False
+    try:
+        candidate.unlink(missing_ok=True)
+        if candidate.parent.exists():
+            candidate.parent.rmdir()
+    except OSError:
+        return False
+    payload["staging_path"] = ""
+    conn.execute(
+        """
+        UPDATE sheet_vitrina_v1_supplier_confirmation_previews
+        SET payload_json=?
+        WHERE token=?
+        """,
+        (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            str(token or "").strip(),
+        ),
+    )
+    conn.commit()
+    return True
 
 
 def _bundle_version_exists(conn: sqlite3.Connection, bundle_version: str) -> bool:
@@ -8531,6 +9046,24 @@ def _cost_price_dataset_version_exists(conn: sqlite3.Connection, dataset_version
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    schema_key = _schema_ready_key(conn)
+    if schema_key in _SCHEMA_READY_KEYS:
+        return
+    with _SCHEMA_READY_LOCK:
+        if schema_key in _SCHEMA_READY_KEYS:
+            return
+        _ensure_schema_uncached(conn)
+        _SCHEMA_READY_KEYS.add(schema_key)
+
+
+def _schema_ready_key(conn: sqlite3.Connection) -> tuple[str, int, int]:
+    database_row = conn.execute("PRAGMA database_list").fetchone()
+    db_path = Path(str(database_row[2] if database_row else "")).resolve()
+    stat = db_path.stat()
+    return str(db_path), int(stat.st_dev), int(stat.st_ino)
+
+
+def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS registry_upload_versions (
@@ -9298,6 +9831,86 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines_by_order
         ON sheet_vitrina_v1_supplier_financial_expense_lines(supplier_order_id, financial_document_id, sort_order);
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_financial_sources (
+            source_sha256 TEXT PRIMARY KEY,
+            stored_file_path TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            file_content_type TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            raw_parse_json TEXT NOT NULL DEFAULT '{}',
+            normalized_parse_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_bank_operation_assignments (
+            semantic_operation_id TEXT PRIMARY KEY,
+            source_sha256 TEXT NOT NULL,
+            logical_fee_id TEXT NOT NULL,
+            supplier_order_id TEXT NOT NULL,
+            financial_document_id TEXT NOT NULL,
+            assigned_at TEXT NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_bank_assignments_by_source
+        ON sheet_vitrina_v1_supplier_bank_operation_assignments(
+            source_sha256, logical_fee_id, semantic_operation_id
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_bank_assignments_by_order
+        ON sheet_vitrina_v1_supplier_bank_operation_assignments(
+            supplier_order_id, financial_document_id
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_financial_source_migrations (
+            contract_version TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            result_json TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO sheet_vitrina_v1_supplier_financial_sources(
+            source_sha256,stored_file_path,original_filename,file_content_type,
+            parser_version,raw_parse_json,normalized_parse_json,created_at,updated_at
+        )
+        SELECT file_sha256,MAX(stored_file_path),MAX(original_filename),
+               MAX(file_content_type),MAX(parser_version),MAX(raw_parse_json),
+               MAX(normalized_parse_json),MIN(uploaded_at),MAX(updated_at)
+        FROM sheet_vitrina_v1_supplier_financial_documents
+        WHERE document_type = 'bank_fee_statement' AND length(file_sha256) = 64
+        GROUP BY file_sha256;
+
+        INSERT OR IGNORE INTO sheet_vitrina_v1_supplier_bank_operation_assignments(
+            semantic_operation_id,source_sha256,logical_fee_id,supplier_order_id,
+            financial_document_id,assigned_at,raw_json
+        )
+        SELECT
+            COALESCE(
+                json_extract(line.raw_json,'$.semantic_operation_id'),
+                json_extract(line.raw_json,'$.row.semantic_operation_id')
+            ),
+            document.file_sha256,
+            COALESCE(
+                json_extract(line.raw_json,'$.logical_fee_id'),
+                json_extract(line.raw_json,'$.row.logical_fee_id'),
+                ''
+            ),
+            line.supplier_order_id,
+            line.financial_document_id,
+            document.updated_at,
+            line.raw_json
+        FROM sheet_vitrina_v1_supplier_financial_expense_lines AS line
+        JOIN sheet_vitrina_v1_supplier_financial_documents AS document
+          ON document.document_id = line.financial_document_id
+        WHERE document.document_type = 'bank_fee_statement'
+          AND document.parse_status <> 'excluded'
+          AND COALESCE(
+                json_extract(line.raw_json,'$.semantic_operation_id'),
+                json_extract(line.raw_json,'$.row.semantic_operation_id'),
+                ''
+              ) <> '';
+
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_confirmation_previews (
             token TEXT PRIMARY KEY,
             confirmation_type TEXT NOT NULL,
@@ -9581,6 +10194,34 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ambiguous_bank_assignment = conn.execute(
+        """
+        SELECT 1
+        FROM sheet_vitrina_v1_supplier_financial_expense_lines AS line
+        JOIN sheet_vitrina_v1_supplier_financial_documents AS document
+          ON document.document_id = line.financial_document_id
+        WHERE document.document_type='bank_fee_statement'
+          AND document.parse_status <> 'excluded'
+          AND COALESCE(
+                json_extract(line.raw_json,'$.semantic_operation_id'),
+                json_extract(line.raw_json,'$.row.semantic_operation_id'),
+                ''
+              ) <> ''
+        GROUP BY COALESCE(
+            json_extract(line.raw_json,'$.semantic_operation_id'),
+            json_extract(line.raw_json,'$.row.semantic_operation_id')
+        )
+        HAVING COUNT(
+            DISTINCT line.supplier_order_id || char(31) || line.financial_document_id
+        ) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if ambiguous_bank_assignment is not None:
+        raise ValueError(
+            "Обнаружено неоднозначное прежнее назначение банковской операции; "
+            "требуется отдельная проверяемая миграция."
+        )
     users_access_columns_added = False
     users_access_columns_added = (
         _ensure_column(

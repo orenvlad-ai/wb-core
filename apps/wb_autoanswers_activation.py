@@ -31,7 +31,9 @@ if str(ROOT) not in sys.path:
 
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge
 from packages.application.wb_autoanswers_runtime import (
+    AUTOANSWERS_DB_FILENAME,
     COMPRESSED_SCHEMA_BACKUP_CONTRACT,
+    LEGACY_RUNTIME_DB_FILENAME,
     AutoanswersRepository,
     SCHEMA_VERSION,
     _verified_compressed_schema_backup_status,
@@ -83,6 +85,65 @@ def _schema_preparation_lock(runtime_dir: Path) -> Any:
             yield
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _deployment_quiesce() -> Any:
+    """Bound the one-time store split inside a repo-owned quiet window."""
+
+    if not _truthy(os.environ.get("WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE")):
+        yield {"applied": False, "units": []}
+        return
+    timers = (
+        "wb-core-autoanswers-worker.timer",
+        "wb-core-autoanswers-readonly-sync.timer",
+    )
+    services = (
+        "wb-core-autoanswers-worker.service",
+        "wb-core-autoanswers-readonly-sync.service",
+    )
+    registry_service = "wb-core-registry-http.service"
+
+    def active(unit: str) -> bool:
+        return (
+            subprocess.run(
+                ["systemctl", "is-active", "--quiet", unit],
+                check=False,
+                timeout=20,
+            ).returncode
+            == 0
+        )
+
+    active_timers = [unit for unit in timers if active(unit)]
+    registry_was_active = active(registry_service)
+    stopped: list[str] = []
+    try:
+        for unit in (*timers, *services, registry_service):
+            subprocess.run(
+                ["systemctl", "stop", unit],
+                check=True,
+                timeout=120,
+            )
+            stopped.append(unit)
+        yield {
+            "applied": True,
+            "units": stopped,
+            "registry_was_active": registry_was_active,
+            "active_timers": active_timers,
+        }
+    finally:
+        if registry_was_active:
+            subprocess.run(
+                ["systemctl", "start", registry_service],
+                check=True,
+                timeout=120,
+            )
+        for unit in active_timers:
+            subprocess.run(
+                ["systemctl", "start", unit],
+                check=True,
+                timeout=120,
+            )
 
 
 def _sha256_file(path: Path) -> str:
@@ -772,9 +833,13 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
 def _pre_migration_safety(runtime_dir: Path) -> dict[str, Any]:
     """Inspect only the two fields needed before constructor-triggered DDL."""
 
-    db_path = runtime_dir / "registry_upload_runtime.sqlite3"
+    isolated_path = runtime_dir / AUTOANSWERS_DB_FILENAME
+    legacy_path = runtime_dir / LEGACY_RUNTIME_DB_FILENAME
+    db_path = isolated_path if isolated_path.is_file() else legacy_path
     evidence: dict[str, Any] = {
-        "database_exists": db_path.is_file(),
+        "database_exists": isolated_path.is_file() or legacy_path.is_file(),
+        "database": db_path.name,
+        "isolated_store_exists": isolated_path.is_file(),
         "autoanswers_initialized": False,
         "target_schema_applied": False,
         "schema_versions": [],
@@ -865,8 +930,55 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
                 "capacity": _prepare_backup_capacity(runtime_dir),
             }
 
+    if action == "store-rollback-plan":
+        from apps.wb_autoanswers_store_rollback import build_plan
+
+        return {
+            "status": "planned",
+            "action": action,
+            "rollback": build_plan(runtime_dir),
+        }
+
+    if action == "store-rollback-apply":
+        if not force_off:
+            raise RuntimeError(
+                "store rollback requires WB_AUTOANSWERS_FORCE_OFF=true"
+            )
+        fingerprint = str(
+            os.environ.get("WB_AUTOANSWERS_STORE_ROLLBACK_FINGERPRINT") or ""
+        )
+        if not fingerprint:
+            raise RuntimeError("store rollback requires an exact fingerprint")
+        with (
+            _schema_preparation_lock(runtime_dir),
+            _capacity_heartbeat(),
+            _deployment_quiesce() as quiesce,
+        ):
+            if not bool(quiesce.get("applied")):
+                raise RuntimeError(
+                    "store rollback requires the deployment service quiet window"
+                )
+            from apps.wb_autoanswers_store_rollback import (
+                apply_rollback_export,
+            )
+
+            rollback = apply_rollback_export(
+                runtime_dir,
+                expected_fingerprint=fingerprint,
+            )
+        return {
+            "status": "ready_for_older_release",
+            "action": action,
+            "rollback": rollback,
+            "quiesce": quiesce,
+        }
+
     if action == "prepare-deploy":
-        with _schema_preparation_lock(runtime_dir), _capacity_heartbeat():
+        with (
+            _schema_preparation_lock(runtime_dir),
+            _capacity_heartbeat(),
+            _deployment_quiesce() as quiesce,
+        ):
             locked_before = _pre_migration_safety(runtime_dir)
             if not force_off:
                 raise RuntimeError("schema preparation requires WB_AUTOANSWERS_FORCE_OFF=true")
@@ -877,6 +989,16 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
                 raise RuntimeError("initial schema preparation requires persisted master-switch OFF")
             capacity = _prepare_backup_capacity(runtime_dir)
             repository = AutoanswersRepository(runtime_dir=runtime_dir, schema_lock_held=True)
+            financial_sources: dict[str, Any] = {"status": "not_requested"}
+            if bool(quiesce.get("applied")):
+                from apps.supplier_financial_source_migration import (
+                    run as run_supplier_financial_source_migration,
+                )
+
+                financial_sources = run_supplier_financial_source_migration(
+                    action="apply",
+                    runtime_dir=runtime_dir,
+                )
             dependencies = _dependency_status(verify_boundary=True)
             status_after = repository.operational_status()
             if SCHEMA_VERSION not in {
@@ -884,7 +1006,9 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             }:
                 raise RuntimeError("current schema migration marker is missing")
             backup = repository.verified_schema_backup_status()
-            if before.get("database_exists") and not before.get("target_schema_applied"):
+            if before.get("autoanswers_initialized") and not before.get(
+                "target_schema_applied"
+            ):
                 if int(backup.get("count") or 0) < 1 or backup.get("integrity_check") != "ok":
                     raise RuntimeError("verified pre-schema backup is missing")
         return {
@@ -894,6 +1018,8 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
             "schema_backup": backup,
             "capacity": capacity,
             "dependencies": dependencies,
+            "quiesce": quiesce,
+            "supplier_financial_sources": financial_sources,
         }
 
     if action == "status" and not before.get("target_schema_applied"):
@@ -974,7 +1100,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "action",
-        choices=("status", "prepare-capacity", "prepare-deploy", "activate-manual", "deactivate"),
+        choices=(
+            "status",
+            "prepare-capacity",
+            "prepare-deploy",
+            "store-rollback-plan",
+            "store-rollback-apply",
+            "activate-manual",
+            "deactivate",
+        ),
     )
     parser.add_argument("--runtime-dir", type=Path, required=True)
     args = parser.parse_args()

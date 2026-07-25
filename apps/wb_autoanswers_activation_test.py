@@ -78,7 +78,8 @@ class ActivationTest(unittest.TestCase):
         with patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "true"}, clear=False):
             result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
         self.assertEqual(result["status"], "ready")
-        self.assertEqual(result["schema_backup"]["integrity_check"], "ok")
+        self.assertEqual(result["schema_backup"]["count"], 0)
+        self.assertTrue(result["runtime"]["persistence"]["isolated_from_registry"])
         self.assertIn(
             SCHEMA_VERSION,
             {int(row["version"]) for row in result["runtime"]["schema_migrations"]},

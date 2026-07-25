@@ -54,6 +54,12 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
     FEEDBACKS_EXPORT_CONTENT_TYPE,
     SheetVitrinaV1FeedbacksError,
 )
+from packages.application.sqlite_contention import (
+    current_sqlite_contention_state,
+    emit_controlled_contention_response_event,
+    is_sqlite_contention_error,
+    set_sqlite_operation_context,
+)
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_prices_management import WbPricesManagementError
 from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
@@ -469,8 +475,29 @@ def _build_handler(
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         runtime_entrypoint = entrypoint
 
+        def handle_one_request(self) -> None:
+            try:
+                super().handle_one_request()
+            except Exception as exc:
+                if not is_sqlite_contention_error(exc):
+                    raise
+                self.close_connection = True
+                _write_json_response(
+                    self,
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": exc},
+                )
+
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            self._sqlite_request_started_at = time.monotonic()
+            set_sqlite_operation_context(
+                endpoint=parsed.path,
+                operation="POST",
+                phase="request",
+                priority="interactive",
+                owner="registry-http",
+            )
             if parsed.path == DEFAULT_WEB_AUTH_LOGIN_PATH:
                 _handle_web_auth_login(self, parsed.query)
                 return
@@ -1977,6 +2004,12 @@ def _build_handler(
                         shipment_id,
                         document_id,
                         selected_operation_ids=selected_operation_ids,
+                        expected_source_sha256=str(
+                            confirm_payload.get("source_sha256") or ""
+                        ),
+                        expected_target_revision=str(
+                            confirm_payload.get("target_revision") or ""
+                        ),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -1988,7 +2021,12 @@ def _build_handler(
                         {"error": f"supplier financial document import confirm failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = (
+                    HTTPStatus.ACCEPTED
+                    if int(payload.get("http_status") or 0) == 202
+                    else HTTPStatus.OK
+                )
+                _write_json_response(self, response_status, payload)
                 return
 
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
@@ -2471,6 +2509,14 @@ def _build_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            self._sqlite_request_started_at = time.monotonic()
+            set_sqlite_operation_context(
+                endpoint=parsed.path,
+                operation="GET",
+                phase="request",
+                priority="interactive",
+                owner="registry-http",
+            )
             if parsed.path == DEFAULT_WEB_AUTH_LOGIN_PATH:
                 _write_login_form_response(self, parsed.query)
                 return
@@ -6071,12 +6117,64 @@ def _write_json_response(
     status: HTTPStatus,
     payload: Any,
 ) -> None:
+    if _payload_is_sqlite_contention(payload):
+        state = current_sqlite_contention_state()
+        request_started_at = getattr(handler, "_sqlite_request_started_at", None)
+        elapsed_ms = (
+            max(0, int((time.monotonic() - request_started_at) * 1000))
+            if isinstance(request_started_at, (int, float))
+            else 0
+        )
+        wait_ms = int(state.wait_ms) if state is not None else elapsed_ms
+        retries = int(state.retries) if state is not None else 0
+        endpoint = urllib_parse.urlparse(str(getattr(handler, "path", "") or "")).path
+        operation = str(getattr(handler, "command", "") or "")
+        emit_controlled_contention_response_event(
+            endpoint=endpoint,
+            operation=operation,
+            wait_ms=wait_ms,
+            retries=retries,
+        )
+        status = HTTPStatus.SERVICE_UNAVAILABLE
+        payload = {
+            "contract_name": "wb_core_sqlite_contention_v1",
+            "status": "retryable",
+            "code": "sqlite_write_busy",
+            "retryable": True,
+            "pending": False,
+            "message": (
+                "Данные сейчас обновляются другим процессом. "
+                "Повторите действие: незавершённые изменения не были применены."
+            ),
+            "operation": endpoint,
+            "waited_ms": wait_ms,
+            "retry_count": retries,
+            "retry_after_ms": 1_500,
+        }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     handler.send_response(status.value)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    if status == HTTPStatus.SERVICE_UNAVAILABLE and isinstance(payload, Mapping):
+        if str(payload.get("code") or "") == "sqlite_write_busy":
+            handler.send_header("Retry-After", "2")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     _write_response_body(handler, body)
+
+
+def _payload_is_sqlite_contention(payload: Any) -> bool:
+    if isinstance(payload, Mapping):
+        if is_sqlite_contention_error(payload.get("error")):
+            return True
+        if is_sqlite_contention_error(payload.get("message")):
+            return True
+        if str(payload.get("code") or "") in {
+            "sqlite_contention_exhausted",
+            "sqlite_write_busy",
+        }:
+            return True
+        return False
+    return is_sqlite_contention_error(payload)
 
 
 def _request_origin(handler: BaseHTTPRequestHandler) -> str:

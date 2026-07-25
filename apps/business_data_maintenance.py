@@ -861,7 +861,9 @@ def _autoanswers_budget_monitor_state(
 
 
 def _autoanswers_feature_state(runtime_dir: Path) -> dict[str, Any]:
-    database = runtime_dir / "registry_upload_runtime.sqlite3"
+    from packages.application.wb_autoanswers_runtime import AUTOANSWERS_DB_FILENAME
+
+    database = runtime_dir / AUTOANSWERS_DB_FILENAME
     if not database.is_file():
         return {
             "mode": "unknown",

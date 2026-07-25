@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterable, Mapping
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_functional import (
     FUNCTIONAL_CUTOVER_ID,
     STAGE_CHINA_TO_FF,
@@ -49,7 +50,7 @@ class WarehouseTargetedReplayError(RuntimeError):
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = connect_sqlite(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

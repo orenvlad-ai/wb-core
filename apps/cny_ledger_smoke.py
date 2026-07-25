@@ -34,6 +34,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.cny_ledger import CnyLedgerBlock, parse_cny_document_text  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.sqlite_contention import SQLiteContentionExhausted  # noqa: E402
 from packages.application.supplier_financial_documents import (  # noqa: E402
     build_bank_fee_statement_import_preview,
     build_financial_summary,
@@ -822,12 +823,66 @@ def _assert_http_routes_and_order_integration() -> None:
                     "bank statement preview must expose three unselected logical fee groups: "
                     f"{import_preview}"
                 )
+            replay_ledger = entrypoint.cny_ledger_block.replay_ledger
+
+            def fail_derived_replay_once(*, reason: str = "manual") -> dict[str, object]:
+                raise SQLiteContentionExhausted(
+                    wait_ms=30_000,
+                    retries=12,
+                    phase="begin",
+                )
+
+            entrypoint.cny_ledger_block.replay_ledger = fail_derived_replay_once
+            confirm_status, pending_statement = _post_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
+                {
+                    "selected_operation_ids": selected_logical_fee_ids,
+                    "source_sha256": statement_preview.get("source_sha256")
+                    or statement_preview.get("file_sha256"),
+                    "target_revision": import_preview.get("target_revision"),
+                },
+            )
+            entrypoint.cny_ledger_block.replay_ledger = replay_ledger
+            pending_cny_documents = [
+                item
+                for item in runtime.list_cny_documents()
+                if item.get("document_type") == CNY_DOCUMENT_TYPE_BANK_FEE
+                and item.get("source_order_id") == "http-order"
+            ]
+            if (
+                confirm_status != 202
+                or pending_statement.get("status") != "pending"
+                or pending_statement.get("operation_applied") is not True
+                or pending_statement.get("retryable") is not True
+                or len(
+                    runtime.list_supplier_financial_expense_lines("http-order")
+                )
+                != 3
+                or len(pending_cny_documents) != 3
+            ):
+                raise AssertionError(
+                    "contention after atomic confirm must return resumable pending "
+                    "with all business rows committed together: "
+                    f"{confirm_status} {pending_statement}"
+                )
             confirm_status, confirmed_statement = _post_json(
                 f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
-                {"selected_operation_ids": selected_logical_fee_ids},
+                {
+                    "selected_operation_ids": selected_logical_fee_ids,
+                    "source_sha256": statement_preview.get("source_sha256")
+                    or statement_preview.get("file_sha256"),
+                    "target_revision": import_preview.get("target_revision"),
+                },
             )
-            if confirm_status != 200 or confirmed_statement.get("parse_status") != "confirmed":
-                raise AssertionError(f"statement confirm import changed: {confirm_status} {confirmed_statement}")
+            if (
+                confirm_status != 200
+                or confirmed_statement.get("parse_status") != "confirmed"
+                or not confirmed_statement.get("already_added")
+            ):
+                raise AssertionError(
+                    "statement confirm resume changed: "
+                    f"{confirm_status} {confirmed_statement}"
+                )
             imported_lines = runtime.list_supplier_financial_expense_lines("http-order")
             if len(imported_lines) != 3 or {item.get("currency") for item in imported_lines} != {"CNY"}:
                 raise AssertionError(f"confirmed import must create exactly three CNY expense lines: {imported_lines}")
@@ -864,7 +919,12 @@ def _assert_http_routes_and_order_integration() -> None:
                 raise AssertionError("source-owned delete guard must leave canonical document, ledger, and source file unchanged")
             duplicate_confirm_status, duplicate_confirm = _post_json(
                 f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
-                {},
+                {
+                    "selected_operation_ids": selected_logical_fee_ids,
+                    "source_sha256": statement_preview.get("source_sha256")
+                    or statement_preview.get("file_sha256"),
+                    "target_revision": import_preview.get("target_revision"),
+                },
             )
             if duplicate_confirm_status != 200 or not duplicate_confirm.get("already_added"):
                 raise AssertionError(f"duplicate confirm must be idempotent: {duplicate_confirm_status} {duplicate_confirm}")
