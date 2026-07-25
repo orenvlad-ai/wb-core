@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Final
 
 
-AUTOANSWERS_CONTRACT_VERSION: Final = "wb_autoanswers_server_v3"
+AUTOANSWERS_CONTRACT_VERSION: Final = "wb_autoanswers_server_v4"
 NODE_BOUNDARY_VERSION: Final = "wb_autoanswers_node_boundary_v1"
 PROMPT_BUNDLE_VERSION: Final = "1.4.2"
 EVALUATION_SIGNATURE: Final = "sha256:5f305d7eceba13e90b5b51f2a774b6ce71c24b9b2af07cc2637210f2e25b30da"
@@ -35,6 +35,9 @@ REVIEW_ONLY_ROUTES: Final = frozenset({"seller_chat"})
 ROUTE_RATING_ONLY_TEMPLATE: Final = "rating_only_template"
 PROCESSING_KIND_FROZEN_AI: Final = "frozen_ai"
 PROCESSING_KIND_RATING_ONLY_TEMPLATE: Final = "rating_only_template"
+
+AUTOMATIC_PRIORITY_RATING_ONLY: Final = 7
+AUTOMATIC_PRIORITY_INDETERMINATE: Final = 6
 
 CONTENT_CLASS_CONTENT_BEARING: Final = "content_bearing"
 CONTENT_CLASS_RATING_ONLY: Final = "rating_only"

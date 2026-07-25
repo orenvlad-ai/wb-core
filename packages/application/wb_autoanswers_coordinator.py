@@ -34,6 +34,7 @@ class AutoanswersCoordinator:
         report: dict[str, Any] = {
             "tick": tick,
             "sync": [],
+            "rolling_admission": None,
             "reconciliation": None,
             "processing": None,
             "publication": None,
@@ -63,6 +64,14 @@ class AutoanswersCoordinator:
         self.repository.save_sync_cursor(
             "wb_autoanswers_coordinator", cursor={"tick": tick}, successful=not report["errors"]
         )
+        try:
+            report["rolling_admission"] = self.repository.refresh_rolling_admissions(
+                actor_id=self.worker_id,
+                batch_size=250,
+            )
+        except AutoanswersRuntimeError as exc:
+            if exc.code not in {"master_switch_off", "emergency_force_off"}:
+                report["errors"].append({"stage": "rolling_admission", "code": exc.code})
         # Reservation cleanup is local and safe in every mode, including OFF.
         # It never claims work and preserves the reservation row as released
         # evidence, so a crashed worker cannot block future budgets forever.

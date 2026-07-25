@@ -257,7 +257,7 @@ class RuntimeTest(unittest.TestCase):
             with sqlite3.connect(repo.db_path) as conn:
                 conn.executescript(
                     """
-                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version IN (2,3,4,5,6);
+                    DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version>=2;
                     ALTER TABLE sheet_vitrina_v1_wb_autoanswers_settings RENAME TO sheet_vitrina_v1_wb_autoanswers_settings_v2;
                     CREATE TABLE sheet_vitrina_v1_wb_autoanswers_settings(
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -593,6 +593,10 @@ class RuntimeTest(unittest.TestCase):
 
         claimed_order: list[str] = []
         for _feedback_id in expected[:6]:
+            self.repo.reconcile_policy_sweep_once(
+                worker_id="reconcile",
+                batch_size=25,
+            )
             claimed = self.repo.claim_processing_job(worker_id="worker")
             self.assertIsNotNone(claimed)
             claimed_order.append(str(claimed["feedback_id"]))
@@ -652,6 +656,516 @@ class RuntimeTest(unittest.TestCase):
                 worker_id="worker",
             )
         self.assertEqual(claimed_order, expected)
+
+    def test_rolling_admission_is_incremental_idempotent_and_version_safe(self) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "initial-3",
+                text="initial",
+                rating=3,
+            ),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        initial = self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertEqual(initial["admitted"], 0)
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "rolling-1",
+                text="new urgent",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+            sync_run_id="sync-1",
+        )
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "rolling-rating",
+                rating=5,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+            sync_run_id="sync-1",
+        )
+        admitted = self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertEqual(admitted["admitted"], 2)
+        self.assertEqual(
+            admitted["admitted_by_class"],
+            {"content_bearing": 1, "rating_only": 1},
+        )
+        replay = self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertEqual(replay["admitted"], 0)
+
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env=self.env,
+        )
+        self.assertEqual(
+            restarted.refresh_rolling_admissions(actor_id="restarted")["admitted"],
+            0,
+        )
+        runtime_progress = restarted.progress_status()
+        progress = runtime_progress["rolling_admission"]
+        self.assertEqual(progress["initial_membership"], 1)
+        self.assertEqual(progress["admitted_since_start"], 2)
+        self.assertEqual(progress["current_total"], 3)
+        self.assertEqual(runtime_progress["scope_total"], 3)
+        self.assertEqual(runtime_progress["content_bearing_total"], 2)
+        self.assertEqual(runtime_progress["rating_only_total"], 1)
+        self.assertEqual(
+            progress["current_priority_bucket"],
+            "content_bearing_1_star",
+        )
+
+        self.clock.advance(1)
+        changed = self.classified_feedback(
+            "rolling-rating",
+            text="new content version",
+            rating=2,
+            created_at="2026-07-20T12:00:01Z",
+        )
+        outcome = restarted.upsert_feedback(
+            changed,
+            source_stream="unanswered",
+            run_kind="steady",
+            sync_run_id="sync-2",
+        )
+        self.assertEqual(outcome["content_version"], 2)
+        changed_admission = restarted.refresh_rolling_admissions(
+            actor_id="scheduler"
+        )
+        self.assertEqual(changed_admission["admitted"], 1)
+        runtime_progress = restarted.progress_status()
+        progress = runtime_progress["rolling_admission"]
+        self.assertEqual(progress["admitted_since_start"], 3)
+        self.assertEqual(progress["current_total"], 3)
+        self.assertEqual(runtime_progress["scope_total"], 3)
+        self.assertEqual(runtime_progress["content_bearing_total"], 3)
+        self.assertEqual(runtime_progress["rating_only_total"], 0)
+        with sqlite3.connect(restarted.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT feedback_id,content_version,content_version_hash
+                FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions
+                WHERE transition_run_id=?
+                ORDER BY feedback_id,content_version
+                """,
+                (applied["sweep"]["transition_run_id"],),
+            ).fetchall()
+        self.assertEqual(
+            [(row[0], row[1]) for row in rows],
+            [("rolling-1", 1), ("rolling-rating", 1), ("rolling-rating", 2)],
+        )
+
+    def test_new_high_priority_blocks_ready_lower_publication(self) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback("ready-5", text="low", rating=5),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        low = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(low["feedback_id"], "ready-5")
+        self.repo.settle_budget(low["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            low["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "urgent-1",
+                text="urgent",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertIsNone(self.repo.claim_publication_job(worker_id="publisher"))
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        urgent = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(urgent["feedback_id"], "urgent-1")
+        self.assertIsNone(self.repo.claim_publication_job(worker_id="publisher"))
+        self.repo.settle_budget(urgent["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            urgent["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        publication = self.repo.claim_publication_job(worker_id="publisher")
+        self.assertEqual(publication["feedback_id"], "urgent-1")
+
+    def test_inflight_lower_result_defers_publication_enqueue_until_bucket_opens(
+        self,
+    ) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback("inflight-5", text="low", rating=5),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        low = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(low["feedback_id"], "inflight-5")
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "urgent-before-completion",
+                text="urgent",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+
+        self.repo.settle_budget(low["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            low["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_publication_jobs
+                    WHERE feedback_id='inflight-5'
+                    """
+                ).fetchone()[0],
+                0,
+            )
+
+        urgent = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(urgent["feedback_id"], "urgent-before-completion")
+        self.repo.settle_budget(urgent["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            urgent["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        first_publication = self.repo.claim_publication_job(
+            worker_id="publisher"
+        )
+        self.assertEqual(first_publication["feedback_id"], "urgent-before-completion")
+
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_publication_jobs
+                SET state='published',updated_at=?
+                WHERE publication_key=?
+                """,
+                (self.clock().isoformat(), first_publication["publication_key"]),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state='published',updated_at=?
+                WHERE processing_key=?
+                """,
+                (self.clock().isoformat(), urgent["processing_key"]),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_feedbacks
+                SET answer_text='Спасибо за отзыв!'
+                WHERE feedback_id='urgent-before-completion'
+                """
+            )
+
+        lower_publication = self.repo.claim_publication_job(
+            worker_id="publisher"
+        )
+        self.assertEqual(lower_publication["feedback_id"], "inflight-5")
+        self.assertEqual(lower_publication["action"], "write")
+
+    def test_started_write_readback_is_not_preempted(self) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback("writing-5", text="low", rating=5),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        low = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(low["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            low["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        write = self.repo.claim_publication_job(worker_id="publisher")
+        begun = self.repo.begin_publication_write(
+            write["publication_key"],
+            worker_id="publisher",
+        )
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "urgent-during-write",
+                text="urgent",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.repo.record_publication_transport(
+            write["publication_key"],
+            attempt_id=begun["attempt_id"],
+            outcome="http_200",
+            http_status=200,
+            worker_id="publisher",
+        )
+        readback = self.repo.claim_publication_job(worker_id="publisher")
+        self.assertEqual(readback["publication_key"], write["publication_key"])
+        self.assertEqual(readback["action"], "readback")
+
+    def test_rolling_content_preempts_ready_rating_only(self) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback("ready-rating", rating=5),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="10.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        rating = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(rating["processing_kind"], "rating_only_template")
+        self.repo.complete_rating_only_template(
+            rating["processing_key"],
+            worker_id="worker",
+        )
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "rolling-content-5",
+                tags=["важный тег"],
+                rating=5,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertIsNone(self.repo.claim_publication_job(worker_id="publisher"))
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        content = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(content["feedback_id"], "rolling-content-5")
+        self.assertEqual(content["processing_kind"], "frozen_ai")
+
+    def test_opaque_node_exit_retries_once_with_attempt_holds(self) -> None:
+        self.enable("draft_only")
+        self.insert_new("opaque-exit", photo_query="")
+        queued = self.repo.enqueue_processing(
+            "opaque-exit",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.mark_provider_call_started(
+            first["processing_key"],
+            worker_id="worker",
+        )
+        retry = self.repo.record_processing_boundary_failure(
+            first["processing_key"],
+            error_code="node_process_exit_1",
+            worker_id="worker",
+            diagnostics={
+                "returncode": 1,
+                "stderr_bytes": 12,
+                "stderr_sha256": "a" * 64,
+                "raw_output_persisted": False,
+                "unsafe_raw": "must-not-persist",
+            },
+        )
+        self.assertEqual(retry["state"], "retryable_error")
+        self.clock.advance(61)
+        second = self.repo.claim_processing_job(worker_id="worker")
+        self.assertEqual(second["processing_key"], queued["processing_key"])
+        self.assertEqual(second["attempts"], 2)
+        self.repo.mark_provider_call_started(
+            second["processing_key"],
+            worker_id="worker",
+        )
+        isolated = self.repo.record_processing_boundary_failure(
+            second["processing_key"],
+            error_code="node_process_exit_1",
+            worker_id="worker",
+            diagnostics={"returncode": 1, "stderr_bytes": 8},
+        )
+        self.assertEqual(isolated["state"], "needs_review")
+        self.assertEqual(
+            isolated["last_error_code"],
+            "node_process_exit_1_repeated_needs_review",
+        )
+        budget = self.repo.budget_status()
+        self.assertEqual(budget["uncertainty_hold_count"], 2)
+        self.assertAlmostEqual(budget["all_time_uncertainty_hold_usd"], 0.2)
+        self.assertEqual(budget["unresolved_uncertainty_count"], 0)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            evidence = conn.execute(
+                """
+                SELECT evidence_json
+                FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                ORDER BY attempt_number
+                """
+            ).fetchall()
+        self.assertNotIn("must-not-persist", "\n".join(row[0] for row in evidence))
+        self.assertNotIn(
+            self.repo.progress_status()["stop_reason"],
+            {"budget_state_unknown", "worker_error"},
+        )
+
+    def test_opaque_node_exit_does_not_clear_unrelated_budget_pause(self) -> None:
+        self.enable("draft_only")
+        self.insert_new("opaque-budget-pause", photo_query="")
+        queued = self.repo.enqueue_processing(
+            "opaque-budget-pause",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.mark_provider_call_started(
+            first["processing_key"],
+            worker_id="worker",
+        )
+        with self.repo.transaction() as conn:
+            self.repo._set_stop_reason(
+                conn,
+                "hourly_budget_reached",
+                details={"source": "test"},
+                at=self.clock(),
+            )
+        retry = self.repo.record_processing_boundary_failure(
+            queued["processing_key"],
+            error_code="node_process_exit_1",
+            worker_id="worker",
+        )
+        self.assertEqual(retry["state"], "retryable_error")
+        self.assertEqual(
+            self.repo.progress_status()["stop_reason"],
+            "hourly_budget_reached",
+        )
+
+    def test_rolling_admissions_share_existing_run_cap(self) -> None:
+        self.repo.upsert_feedback(
+            self.classified_feedback("initial-cap", text="initial", rating=5),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="0.10",
+        )
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(first["processing_key"], actual_cost_usd="0.10")
+        self.repo.complete_generation(
+            first["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+
+        self.clock.advance(1)
+        self.repo.upsert_feedback(
+            self.classified_feedback(
+                "rolling-after-cap",
+                text="new",
+                rating=1,
+                created_at="2026-07-20T12:00:01Z",
+            ),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        admission = self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        self.assertEqual(admission["admitted"], 1)
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.assertEqual(
+            self.repo.progress_status()["stop_reason"],
+            "run_budget_reached",
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            run_cap = conn.execute(
+                """
+                SELECT run_max_usd
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                WHERE transition_run_id=?
+                """,
+                (applied["sweep"]["transition_run_id"],),
+            ).fetchone()[0]
+        self.assertEqual(run_cap, "0.10000000")
 
     def test_manual_jobs_keep_owner_triggered_newest_first_order(self) -> None:
         self.enable("manual")
@@ -812,7 +1326,9 @@ class RuntimeTest(unittest.TestCase):
         rating = self.repo.claim_processing_job(worker_id="worker")
         self.assertEqual(rating["feedback_id"], "rating-waits")
 
-    def test_reviews_seen_after_preview_remain_outside_current_run(self) -> None:
+    def test_reviews_seen_after_preview_wait_for_bounded_rolling_admission(
+        self,
+    ) -> None:
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
         self.repo.upsert_feedback(
             self.classified_feedback("in-scope", text="scope"),
@@ -908,11 +1424,13 @@ class RuntimeTest(unittest.TestCase):
         changed = self.classified_feedback("content", text="новая версия содержимого")
         self.repo.upsert_feedback(changed, source_stream="detail", run_kind="reconciliation")
         stale_progress = self.repo.progress_status()
-        self.assertEqual(stale_progress["all_preparation"]["total"], 2)
-        self.assertEqual(stale_progress["content_bearing_preparation"]["total"], 1)
-        self.assertEqual(stale_progress["content_bearing_preparation"]["done"], 0)
-        self.assertEqual(stale_progress["content_bearing_stale_or_regeneration"], 1)
+        self.assertEqual(stale_progress["rolling_admission"]["initial_membership"], 2)
+        self.assertEqual(stale_progress["rolling_admission"]["current_total"], 1)
+        self.assertEqual(stale_progress["all_preparation"]["total"], 1)
         self.assertEqual(stale_progress["outside_current_run"], 1)
+        self.assertIsNone(
+            self.repo.refresh_rolling_admissions(actor_id="scheduler")
+        )
 
     def test_observation_only_update_does_not_create_new_version(self) -> None:
         self.enable()
@@ -1201,7 +1719,10 @@ class RuntimeTest(unittest.TestCase):
             status = restarted.reconcile_policy_sweep_once(worker_id="restarted", batch_size=1)
             if status and status["state"] == "succeeded":
                 break
-        self.assertEqual(restarted.reconciliation_status()["state"], "succeeded")
+        # A live automatic sweep remains queued while any admitted automatic
+        # action is still pending; this is what keeps the cross-stage priority
+        # barrier authoritative after materialization.
+        self.assertEqual(restarted.reconciliation_status()["state"], "queued")
         ready_detail = restarted.get_feedback("ready")
         self.assertEqual(ready_detail["generated_reply"], "Спасибо за отзыв!")
         self.assertEqual(len(ready_detail["publications"]), 1)

@@ -68,6 +68,60 @@ class NodeBridgeTest(unittest.TestCase):
         self.assertEqual(data["pipeline"]["result"]["outcome"], "skipped")
         self.assertEqual(data["pipeline"]["model_calls_this_run"], 0)
 
+    def test_content_bearing_tags_and_photo_bypass_only_empty_prefilter(self) -> None:
+        variants = {
+            "tags": {
+                "tags": ["Красивый цвет"],
+                "media": [],
+            },
+            "photo": {
+                "tags": [],
+                "media": [
+                    {
+                        "kind": "photo",
+                        "fetch_status": "downloaded",
+                        "stable_full_url": "https://cdn.example/photo.jpg",
+                        "stable_preview_url": "",
+                    }
+                ],
+            },
+        }
+        for name, evidence in variants.items():
+            with self.subTest(name=name):
+                detail = {
+                    "id": f"content-{name}",
+                    "createdDate": "2026-07-20T00:00:00Z",
+                    "productValuation": 5,
+                    "text": "",
+                    "pros": "",
+                    "cons": "",
+                    "tags": evidence["tags"],
+                    "content_version": 1,
+                    "productDetails": {
+                        "nm_id": 428849827,
+                        "supplier_article": "(Anti-Spy) iPhone 14 Pro",
+                        "product_name": "Товар",
+                    },
+                    "answer": {"text": ""},
+                    "media": evidence["media"],
+                }
+                raw = build_frozen_raw_input(
+                    detail,
+                    processing_key=f"content-{name}|1|1.4.2",
+                )
+                data = self.bridge().run(
+                    processing_key=f"content-{name}|1|1.4.2",
+                    raw_input=raw,
+                    execution_mode="fixture",
+                    fixture_scenario="public_only",
+                )
+                self.assertNotEqual(data["pipeline"]["result"]["outcome"], "skipped")
+                self.assertEqual(
+                    data["boundary_adapter"]["contract"],
+                    "content_bearing_prefilter_adapter_v1",
+                )
+                self.assertFalse(data["boundary_adapter"]["frozen_bundle_changed"])
+
     def test_server_adapter_embeds_downloaded_photo_and_marks_unknown_sku(self) -> None:
         with TemporaryDirectory() as directory:
             photo = Path(directory) / "photo.jpg"
@@ -139,6 +193,26 @@ class NodeBridgeTest(unittest.TestCase):
             raised.exception.partial_usage["classifier"]["input_tokens"],
             100,
         )
+
+    def test_invalid_child_json_exposes_only_digest_diagnostics(self) -> None:
+        runner = (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "wb_autoanswers_node_opaque_exit.mjs"
+        )
+        bridge = NodeAutoanswersBridge(runner_path=runner, env=os.environ)
+        with self.assertRaises(NodeBoundaryError) as raised:
+            bridge.run(
+                processing_key="opaque|1|1.4.2",
+                raw_input={"review_id": "opaque", "review_version": "1"},
+            )
+        self.assertEqual(raised.exception.code, "node_process_exit_1")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.diagnostics["returncode"], 1)
+        self.assertGreater(raised.exception.diagnostics["stderr_bytes"], 0)
+        self.assertEqual(len(raised.exception.diagnostics["stderr_sha256"]), 64)
+        self.assertNotIn("stderr_text", raised.exception.diagnostics)
+        self.assertNotIn("stderr_raw", raised.exception.diagnostics)
 
 
 if __name__ == "__main__":

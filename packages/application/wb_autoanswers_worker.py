@@ -93,13 +93,18 @@ class AutoanswersProcessingWorker:
                 return {"processing_key": key, "state": stored["state"], "model_calls": 0}
             actual_cost = pipeline.get("estimated_cost_usd") or 0
             self.repository.settle_budget(key, actual_cost_usd=actual_cost)
+            pipeline_result = dict(result)
+            if node.get("boundary_adapter"):
+                pipeline_result["server_boundary_adapter"] = dict(
+                    node["boundary_adapter"]
+                )
             stored = self.repository.complete_generation(
                 key,
                 result={
                     "final_route": result.get("route"),
                     "final_reply": result.get("final_reply"),
                     "case_code": result.get("case_code"),
-                    "pipeline_result": result,
+                    "pipeline_result": pipeline_result,
                     "usage": pipeline.get("usage") or {},
                     "hard_gates_passed": True,
                     "fallback_used": result.get("outcome") == "fallback",
@@ -125,6 +130,29 @@ class AutoanswersProcessingWorker:
                     error_code=exc.code,
                     worker_id=self.worker_id,
                 )
+            if (
+                exc.partial_cost_usd <= 0
+                and exc.code in {
+                    "node_timeout",
+                    "node_invalid_json",
+                    "node_process_exit_1",
+                }
+            ):
+                stored = self.repository.record_processing_boundary_failure(
+                    key,
+                    error_code=exc.code,
+                    worker_id=self.worker_id,
+                    diagnostics=exc.diagnostics,
+                    max_attempts=2,
+                )
+                return {
+                    "processing_key": key,
+                    "state": stored["state"],
+                    "error_code": stored["last_error_code"],
+                    "bounded_retry": stored["state"] == "retryable_error",
+                    "uncertainty_accounting": "conservative_upper_bound",
+                    "model_calls": 0,
+                }
             if exc.retryable:
                 self.repository.record_processing_retry(
                     key,

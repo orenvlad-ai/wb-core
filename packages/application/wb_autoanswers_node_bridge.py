@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -31,6 +32,7 @@ class NodeBoundaryError(RuntimeError):
         partial_cost_usd: float = 0.0,
         partial_usage: Mapping[str, Any] | None = None,
         partial_role_calls: int = 0,
+        diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -38,6 +40,7 @@ class NodeBoundaryError(RuntimeError):
         self.partial_cost_usd = max(0.0, float(partial_cost_usd or 0))
         self.partial_usage = dict(partial_usage or {})
         self.partial_role_calls = max(0, int(partial_role_calls or 0))
+        self.diagnostics = dict(diagnostics or {})
 
 
 def _data_url(path_value: str | None, mime_type: str | None = None) -> str | None:
@@ -142,6 +145,12 @@ def build_frozen_raw_input(feedback: Mapping[str, Any], *, processing_key: str) 
         "history": {"previous_public_reply": answer.get("text") or None},
     }
     raw["_server_media_uncertain"] = media_uncertain
+    raw["_server_content_bearing_prefilter"] = bool(
+        any(str(value or "").strip() for value in (raw["text"], raw["pros"], raw["cons"]))
+        or raw["wb_tags"]
+        or photos
+        or video
+    )
     return raw
 
 
@@ -175,16 +184,72 @@ class NodeAutoanswersBridge:
         execution_mode: str = "live",
         fixture_scenario: str | None = None,
     ) -> dict[str, Any]:
+        payload_raw = {
+            key: value
+            for key, value in raw_input.items()
+            if not str(key).startswith("_server_")
+        }
+        adapter: dict[str, Any] | None = None
+        if (
+            bool(raw_input.get("_server_content_bearing_prefilter"))
+            and int(payload_raw.get("rating") or 0) == 5
+            and not any(
+                str(payload_raw.get(field) or "").strip()
+                for field in ("text", "pros", "cons")
+            )
+        ):
+            tags = [
+                str(item).strip()
+                for item in payload_raw.get("wb_tags") or []
+                if str(item).strip()
+            ]
+            media = (
+                payload_raw.get("media")
+                if isinstance(payload_raw.get("media"), Mapping)
+                else {}
+            )
+            photos = (
+                media.get("photos")
+                if isinstance(media.get("photos"), list)
+                else []
+            )
+            video = (
+                media.get("video")
+                if isinstance(media.get("video"), Mapping)
+                else {}
+            )
+            evidence_parts: list[str] = []
+            if tags:
+                evidence_parts.append("Теги отзыва Wildberries: " + "; ".join(tags[:50]))
+            if photos:
+                evidence_parts.append(f"К отзыву приложено фото: {len(photos)}")
+            if bool(video.get("present")):
+                evidence_parts.append("К отзыву приложено видео")
+            if evidence_parts:
+                payload_raw["text"] = ". ".join(evidence_parts)
+                adapter = {
+                    "contract": "content_bearing_prefilter_adapter_v1",
+                    "source_fields": [
+                        *([] if not tags else ["wb_tags"]),
+                        *([] if not photos else ["media.photos"]),
+                        *([] if not bool(video.get("present")) else ["media.video"]),
+                    ],
+                    "frozen_bundle_changed": False,
+                    "original_text_fields_empty": True,
+                }
         payload: dict[str, Any] = {
             "boundary_version": NODE_BOUNDARY_VERSION,
             "operation": "run",
             "processing_key": processing_key,
             "execution_mode": execution_mode,
-            "raw_input": {key: value for key, value in raw_input.items() if not str(key).startswith("_server_")},
+            "raw_input": payload_raw,
         }
         if fixture_scenario:
             payload["fixture_scenario"] = fixture_scenario
-        return self._invoke(payload)
+        result = self._invoke(payload)
+        if adapter is not None:
+            result["boundary_adapter"] = adapter
+        return result
 
     def guard_final(
         self,
@@ -240,10 +305,20 @@ class NodeAutoanswersBridge:
             response = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             code = "node_invalid_json" if completed.returncode == 0 else f"node_process_exit_{completed.returncode}"
+            stderr_bytes = completed.stderr.encode("utf-8", errors="replace")
+            stdout_bytes = completed.stdout.encode("utf-8", errors="replace")
             raise NodeBoundaryError(
                 "frozen Node boundary returned no valid JSON",
                 code=code,
-                retryable=completed.returncode in {-9, -15},
+                retryable=completed.returncode in {-9, -15, 1},
+                diagnostics={
+                    "returncode": completed.returncode,
+                    "stderr_bytes": len(stderr_bytes),
+                    "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+                    "stdout_bytes": len(stdout_bytes),
+                    "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+                    "raw_output_persisted": False,
+                },
             ) from exc
         if (
             response.get("boundary_version") != NODE_BOUNDARY_VERSION

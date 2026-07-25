@@ -763,8 +763,26 @@ def _autoanswers_budget_monitor_state(
         FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
         """
     ).fetchone()
-    unresolved = conn.execute(
+    if "sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts" in tables:
+        attempt_holds = conn.execute(
+            """
+            SELECT COALESCE(SUM(upper_bound_usd),0),COUNT(*),MAX(created_at)
+            FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+            """
+        ).fetchone()
+        attempt_resolution_clause = """
+          AND NOT EXISTS(
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts u
+                WHERE u.processing_key=r.processing_key
+                  AND u.attempt_number=j.attempts
+              )
         """
+    else:
+        attempt_holds = (0, 0, None)
+        attempt_resolution_clause = ""
+    unresolved = conn.execute(
+        f"""
         SELECT COUNT(*)
         FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
         JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
@@ -791,6 +809,7 @@ def _autoanswers_budget_monitor_state(
                 FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
                 WHERE h.processing_key=r.processing_key
               )
+          {attempt_resolution_clause}
         """
     ).fetchone()[0]
     confirmed_actual = sum(
@@ -802,8 +821,8 @@ def _autoanswers_budget_monitor_state(
             adjustments[0],
         )
     )
-    hold_total = float(holds[0] or 0)
-    hold_count = int(holds[1] or 0)
+    hold_total = float(holds[0] or 0) + float(attempt_holds[0] or 0)
+    hold_count = int(holds[1] or 0) + int(attempt_holds[1] or 0)
     unresolved_count = int(unresolved or 0)
     budget_state = (
         "unknown"
@@ -820,6 +839,7 @@ def _autoanswers_budget_monitor_state(
             failed_cost_events[1],
             adjustments[1],
             holds[2],
+            attempt_holds[2],
         )
         if value
     ]

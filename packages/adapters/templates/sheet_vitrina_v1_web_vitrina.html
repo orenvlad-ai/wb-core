@@ -5289,7 +5289,7 @@
 	              </details>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
-	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Пустые отзывы начнут обрабатываться после завершения автоматически допустимых отзывов с содержанием.</p></section><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
+	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые. Новый более приоритетный отзыв будет выбран на следующем безопасном claim.</p></section><p class="autoanswers-stop-reason" data-autoanswers-stop-reason></p></section>
 	            </section>
 
 	            <section class="autoanswers-filters">
@@ -12075,6 +12075,21 @@
       const item = process || {};
       const lifecycle = String(item.lifecycle_state || "");
       const drift = String(item.drift_status || "");
+      const stopReason = String(item.stop_reason || "");
+      const normalPauseReasons = new Set([
+        "hourly_budget_reached",
+        "daily_budget_reached",
+        "monthly_budget_reached",
+        "run_budget_reached",
+        "run_review_limit_reached",
+        "paid_reviews_hourly_limit",
+        "concurrency_limit",
+        "retry_backoff",
+        "rate_limited"
+      ]);
+      if (normalPauseReasons.has(stopReason) && item.desired !== false) {
+        return {label: "Работает · штатная пауза", tone: "warning"};
+      }
       if (lifecycle === "running" && drift === "matched" && item.actual === true) {
         return {label: "Работает", tone: "success"};
       }
@@ -12634,6 +12649,7 @@
       }
       const reconciliation = server.reconciliation || {};
       const queue = server.runtime && server.runtime.progress ? server.runtime.progress : {};
+      const rolling = queue.rolling_admission || {};
       if (autoanswersProgressNode) {
         const progress = reconciliation.progress || {};
         autoanswersProgressNode.textContent = reconciliation.state
@@ -12651,6 +12667,10 @@
           ["Ошибки", queue.errors], ["Осталось", queue.remaining],
           ["Шаблоны $0", queue.zero_cost_template_jobs], ["Скорость / час", queue.throughput_last_hour],
           ["С содержанием", queue.content_bearing_total], ["Пустых осталось", queue.rating_only_remaining],
+          ["Начальный состав", rolling.initial_membership], ["Добавлено после старта", rolling.admitted_since_start],
+          ["Добавлено с содержанием", (rolling.admitted_by_class || {}).content_bearing],
+          ["Добавлено пустых", (rolling.admitted_by_class || {}).rating_only],
+          ["Сейчас в запуске", rolling.current_total], ["Добавлено в последний раз", rolling.last_batch_count],
           ["Вне текущего run", queue.outside_current_run]
         ];
         autoanswersQueueMetricsNode.innerHTML = metrics.map(function(item) { return '<div class="autoanswers-queue-metric"><span>' + escapeHtml(item[0]) + '</span><strong>' + Number(item[1] || 0) + '</strong></div>'; }).join("");
@@ -12664,7 +12684,14 @@
           "публикация " + (queue.last_confirmed_publication_at || "—")
         ].join(" · ");
         const scopeEvidence = queue.transition_run_id ? (queue.scope_membership_exact ? "точный snapshot" : "legacy scope реконструирован") : "локальная история";
-        autoanswersQueueContextNode.textContent = "Режим: " + (modeLabels[queue.effective_mode] || queue.effective_mode || "—") + " · scope с " + (scope.from || "—") + (scope.to ? (" по " + scope.to) : "") + " (" + scopeEvidence + ") · run " + (queue.transition_run_id || "не запущен") + " · " + timestamps;
+        const priorityLabels = {content_bearing_1_star:"с содержанием 1★",content_bearing_2_star:"с содержанием 2★",content_bearing_3_star:"с содержанием 3★",content_bearing_4_star:"с содержанием 4★",content_bearing_5_star:"с содержанием 5★",indeterminate:"требуют проверки",rating_only:"пустые"};
+        const admissionRatings = rolling.admitted_by_rating || {};
+        const admissionKindLabels = {content_bearing:"с содержанием",rating_only:"пустые",indeterminate:"требуют проверки"};
+        const ratingSummary = Object.keys(admissionRatings).sort().map(function(kind) {
+          const counts = admissionRatings[kind] || {};
+          return (admissionKindLabels[kind] || kind) + " " + Object.keys(counts).sort().map(function(rating) { return rating + "★:" + Number(counts[rating] || 0); }).join(",");
+        }).join(" · ");
+        autoanswersQueueContextNode.textContent = "Режим: " + (modeLabels[queue.effective_mode] || queue.effective_mode || "—") + " · начальный состав " + Number(rolling.initial_membership || 0) + " · добавлено +" + Number(rolling.admitted_since_start || 0) + (ratingSummary ? (" (" + ratingSummary + ")") : "") + " · сейчас " + Number(rolling.current_total || 0) + " · приоритет " + (priorityLabels[String(rolling.current_priority_bucket || "")] || "нет ожидающих действий") + " · очередь обновлена " + (rolling.last_refresh_at || "—") + " · период с " + (scope.from || "—") + (scope.to ? (" по " + scope.to) : "") + " (" + scopeEvidence + ") · запуск " + (queue.transition_run_id || "не запущен") + " · " + timestamps;
       }
       if (autoanswersProgressBarsNode) {
         const statusLabels = {paused_manual:"Приостановлено вручную",content_readback:"Проверяем публикацию содержательного отзыва",content_processing:"Обрабатывается отзыв с содержанием",content_waiting:"Ожидают отзывы с содержанием",rating_only_waiting:"Ожидают пустые отзывы",complete:"Завершено"};

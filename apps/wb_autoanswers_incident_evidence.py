@@ -306,6 +306,22 @@ def collect_evidence(runtime_dir: Path, *, now: datetime | None = None) -> dict[
             )
         else:
             uncertainty_holds = []
+        if (
+            "sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts"
+            in table_names
+        ):
+            provider_uncertainty_attempts = _rows(
+                conn.execute(
+                    """
+                    SELECT uncertainty_id,transition_run_id,attempt_number,
+                           upper_bound_usd,effective_at,error_code,created_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                    ORDER BY effective_at,uncertainty_id
+                    """
+                ).fetchall()
+            )
+        else:
+            provider_uncertainty_attempts = []
         run_failed_actual = _sum(
             conn,
             """
@@ -489,9 +505,57 @@ def collect_evidence(runtime_dir: Path, *, now: datetime | None = None) -> dict[
                 _money(budget_adjustments["monthly_unverified"])
             ),
         }
+        all_uncertainty_holds = [
+            *uncertainty_holds,
+            *provider_uncertainty_attempts,
+        ]
+        budget.update(
+            {
+                "hourly_uncertainty_hold_usd": float(
+                    sum(
+                        (
+                            _money(item.get("upper_bound_usd"))
+                            for item in all_uncertainty_holds
+                            if str(item.get("effective_at") or "") >= hour_start
+                        ),
+                        Decimal(0),
+                    )
+                ),
+                "daily_uncertainty_hold_usd": float(
+                    sum(
+                        (
+                            _money(item.get("upper_bound_usd"))
+                            for item in all_uncertainty_holds
+                            if str(item.get("effective_at") or "")[:10] == day
+                        ),
+                        Decimal(0),
+                    )
+                ),
+                "monthly_uncertainty_hold_usd": float(
+                    sum(
+                        (
+                            _money(item.get("upper_bound_usd"))
+                            for item in all_uncertainty_holds
+                            if str(item.get("effective_at") or "")[:7] == month
+                        ),
+                        Decimal(0),
+                    )
+                ),
+                "all_time_uncertainty_hold_usd": float(
+                    sum(
+                        (
+                            _money(item.get("upper_bound_usd"))
+                            for item in all_uncertainty_holds
+                        ),
+                        Decimal(0),
+                    )
+                ),
+                "uncertainty_hold_count": len(all_uncertainty_holds),
+            }
+        )
 
     return {
-        "contract": "wb_autoanswers_incident_evidence_v1",
+        "contract": "wb_autoanswers_incident_evidence_v2",
         "captured_at": _iso(captured_at),
         "database_open_mode": "ro",
         "settings": settings,
@@ -509,6 +573,17 @@ def collect_evidence(runtime_dir: Path, *, now: datetime | None = None) -> dict[
             "successful_actual_usd": float(run_success_actual),
             "failed_actual_usd": float(run_failed_actual),
             "total_actual_usd": float(run_success_actual + run_failed_actual),
+            "uncertainty_hold_usd": float(
+                sum(
+                    (
+                        _money(item.get("upper_bound_usd"))
+                        for item in all_uncertainty_holds
+                        if str(item.get("transition_run_id") or "")
+                        == transition_run_id
+                    ),
+                    Decimal(0),
+                )
+            ),
         },
         "reservation_evidence": reservation_evidence,
         "latest_provider_started_reservations": latest_provider_started,
@@ -527,6 +602,23 @@ def collect_evidence(runtime_dir: Path, *, now: datetime | None = None) -> dict[
                 )
             ),
             "holds": uncertainty_holds,
+        },
+        "provider_uncertainty_attempts": {
+            "schema_available": (
+                "sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts"
+                in table_names
+            ),
+            "count": len(provider_uncertainty_attempts),
+            "upper_bound_usd": float(
+                sum(
+                    (
+                        _money(item.get("upper_bound_usd"))
+                        for item in provider_uncertainty_attempts
+                    ),
+                    Decimal(0),
+                )
+            ),
+            "attempts": provider_uncertainty_attempts,
         },
         "calls_after_run_created": calls_after_run,
         "wb_writes_after_run_created": writes_after_run,
