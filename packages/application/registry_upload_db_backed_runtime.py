@@ -1794,6 +1794,34 @@ class RegistryUploadDbBackedRuntime:
             ).fetchall()
             return [str(row["snapshot_date"]) for row in rows]
 
+    def list_temporal_source_snapshots(
+        self,
+        *,
+        source_key: str,
+        date_to: str,
+    ) -> list[tuple[str, Any, str]]:
+        """Read one source's accepted candidates in descending date order."""
+
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT snapshot_date, captured_at, payload_json
+                FROM temporal_source_snapshots
+                WHERE source_key = ? AND snapshot_date <= ?
+                ORDER BY snapshot_date DESC
+                """,
+                (source_key, date_to),
+            ).fetchall()
+            return [
+                (
+                    str(row["snapshot_date"]),
+                    _deserialize_temporal_source_payload(row["payload_json"]),
+                    str(row["captured_at"] or ""),
+                )
+                for row in rows
+            ]
+
     def delete_temporal_source_snapshots(
         self,
         *,

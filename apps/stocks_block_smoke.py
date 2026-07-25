@@ -102,6 +102,8 @@ def _check_shared_warehouse_exclusion() -> None:
     assert selected["excluded_stock_total_mp"] == 10
     assert selected["effective_stock_total_mp"] == 5
     assert selected["reconciliation_difference"] == 0
+    assert selected["by_nm_id"]["1"]["effective_stock_ru_central"] == 5
+    assert selected["by_nm_id"]["1"]["excluded_stock_ru_central"] == 10
     assert {item["warehouse_id"] for item in selected["options"]} == {
         0,
         999,
@@ -117,6 +119,7 @@ def _check_shared_warehouse_exclusion() -> None:
     assert len(
         [item for item in selected["options"] if item["warehouse_name"] == "Одинаковое имя"]
     ) == 2
+    assert [item["warehouse_id"] for item in selected["options"]] == [120762, 0, 999]
     missing = build_wb_warehouse_exclusion(
         items=items,
         warehouse_rows=rows,
@@ -130,6 +133,7 @@ def _check_shared_warehouse_exclusion() -> None:
     assert next(
         item for item in missing["options"] if item["warehouse_id"] == 777
     )["temporarily_missing"] is True
+    assert missing["options"][-1]["warehouse_id"] == 777
     assert parse_excluded_wb_warehouse_ids(
         {"exclude_elektrostal_stock": True}
     ) == (120762,)

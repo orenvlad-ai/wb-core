@@ -15,6 +15,10 @@ from uuid import uuid4
 from packages.adapters.spp_proxy_block import HttpBackedPublicWbCardBuyerPriceSource, SppProxySource
 from packages.application.demand_estimation import estimate_availability_adjusted_demand, sales_lookup_days
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
+from packages.application.stocks_block import (
+    build_wb_warehouse_exclusion,
+    parse_excluded_wb_warehouse_ids,
+)
 from packages.application.wb_prices_management import WbPricesManagementBlock, normalize_goods_payload
 from packages.business_time import current_business_date_iso
 from packages.contracts.spp_proxy_block import SppProxyRequest
@@ -28,8 +32,44 @@ from packages.contracts.supplier_shipments import (
 
 SKU_MANAGEMENT_CONFIG_KEY = "sku_management"
 SKU_MANAGEMENT_CONFIG_SCHEMA_VERSION = 2
+WB_WAREHOUSE_EXCLUSION_CONFIG_KEY = "wb_warehouse_exclusions"
+WB_WAREHOUSE_EXCLUSION_CONFIG_SCHEMA_VERSION = 1
 PRICE_PARAMETER = "seller_price"
 BID_PARAMETER = "advertising_bid"
+
+SKU_CUMULATIVE_METRIC_FIELDS = (
+    "view_count",
+    "openCount",
+    "cartCount",
+    "addToCartConversion",
+    "cartToOrderConversion",
+    "orderCount",
+    "orderSum",
+    "ads_drr",
+    "ads_drr_attributed",
+    "ads_views",
+    "ads_clicks",
+    "ads_atbs",
+    "ads_orders",
+    "ads_sum",
+    "ads_sum_price",
+    "ads_cpc",
+    "ads_ctr",
+    "ads_cr",
+    "proxy_profit_3_rub",
+    "proxy_profit_rub",
+    "proxy_margin_3_pct",
+    "proxy_margin_pct",
+)
+SKU_SNAPSHOT_METRIC_FIELDS = (
+    "seller_price",
+    "buyer_price_rub",
+    "spp_proxy",
+    "promo_participation",
+    "promo_count_by_price",
+    "campaigns",
+    "advertising_bid",
+)
 
 
 class SkuManagementError(ValueError):
@@ -64,7 +104,7 @@ DEFAULT_TABLE_PREFERENCES: dict[str, Any] = {
 TABLE_COLUMN_KEYS = {
     "product", "risk", "deficit_date", "coverage_pct", "deficit_units",
     "nearest_inbound", "seller_price", "buyer_price", "spp_proxy", "promo",
-    "campaigns", "current_bid", "ads_drr", "ads_drr_attributed", "funnel", "orders",
+    "campaigns", "current_bid", "ads_drr", "ads_drr_attributed", "ads_spend_rub", "funnel", "orders",
     "profit_rub", "margin_pct", "last_price_change_at", "last_bid_change_at", "diagnostics",
 }
 TABLE_SORT_KEYS = TABLE_COLUMN_KEYS | {"risk_rank"}
@@ -508,12 +548,80 @@ class SkuManagementBlock:
             raise SkuManagementError("sku management settings revision conflict", http_status=409, payload=saved)
         return self.get_settings(user_key=user_key)
 
+    def get_warehouse_exclusion_settings(self, *, user_key: str) -> dict[str, Any]:
+        record = self.runtime.load_sheet_vitrina_user_config(
+            user_key=user_key,
+            config_key=WB_WAREHOUSE_EXCLUSION_CONFIG_KEY,
+        )
+        config = dict(record.get("config") or {}) if record.get("status") == "ok" else {}
+        try:
+            excluded = parse_excluded_wb_warehouse_ids(
+                {
+                    "excluded_wb_warehouse_ids": config.get(
+                        "excluded_wb_warehouse_ids", []
+                    )
+                }
+            )
+        except ValueError as exc:
+            raise SkuManagementError(
+                "stored WB warehouse exclusion settings are invalid",
+                http_status=500,
+            ) from exc
+        return {
+            "status": "ok",
+            "exists": record.get("status") == "ok",
+            "revision": int(record.get("revision") or 0),
+            "updated_at": str(record.get("updated_at") or ""),
+            "excluded_wb_warehouse_ids": list(excluded),
+            "canonical_store": "server_runtime_user_config",
+        }
+
+    def save_warehouse_exclusion_settings(
+        self,
+        *,
+        user_key: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            excluded = parse_excluded_wb_warehouse_ids(
+                {
+                    "excluded_wb_warehouse_ids": payload.get(
+                        "excluded_wb_warehouse_ids", []
+                    )
+                }
+            )
+        except ValueError as exc:
+            raise SkuManagementError(str(exc), http_status=422) from exc
+        saved = self.runtime.save_sheet_vitrina_user_config(
+            user_key=user_key,
+            config_key=WB_WAREHOUSE_EXCLUSION_CONFIG_KEY,
+            schema_version=WB_WAREHOUSE_EXCLUSION_CONFIG_SCHEMA_VERSION,
+            payload={"excluded_wb_warehouse_ids": list(excluded)},
+            updated_at=self.timestamp_factory(),
+            expected_revision=_optional_int(payload.get("base_revision")),
+        )
+        if saved.get("status") == "conflict":
+            raise SkuManagementError(
+                "WB warehouse exclusion settings revision conflict",
+                http_status=409,
+                payload=saved,
+            )
+        return self.get_warehouse_exclusion_settings(user_key=user_key)
+
     def build_table(self, *, user_key: str) -> dict[str, Any]:
         settings_payload = self.get_settings(user_key=user_key)
+        warehouse_settings = self.get_warehouse_exclusion_settings(user_key=user_key)
+        excluded_warehouse_ids = tuple(
+            int(item) for item in warehouse_settings["excluded_wb_warehouse_ids"]
+        )
         settings = validate_forecast_settings(settings_payload["forecast"])
         active = self._active_skus()
         nm_ids = [int(item["nm_id"]) for item in active]
-        commercial = self._commercial_projection(nm_ids)
+        cumulative_date = (
+            date.fromisoformat(current_business_date_iso(self.now_factory())) - timedelta(days=2)
+        ).isoformat()
+        commercial = self._commercial_projection(nm_ids, target_date=cumulative_date)
+        snapshot_metrics = self._snapshot_projection(nm_ids)
         current_buyer_prices = self._current_buyer_price_projection(nm_ids)
         source_warnings: list[str] = []
         try:
@@ -534,7 +642,11 @@ class SkuManagementBlock:
         except Exception as exc:
             ad_options = {nm_id: [] for nm_id in nm_ids}
             source_warnings.append(f"advertising placement evidence error: {exc}")
-        evidence = self._collect_forecast_evidence(active=active, settings=settings)
+        evidence = self._collect_forecast_evidence(
+            active=active,
+            settings=settings,
+            excluded_warehouse_ids=excluded_warehouse_ids,
+        )
         for item_evidence in evidence.values():
             item_evidence["warnings"].extend(source_warnings)
         last_events = self.runtime.latest_sku_action_events_by_nm(nm_ids)
@@ -563,6 +675,7 @@ class SkuManagementBlock:
             current_bid = bid_values[0] if len(options) == 1 and bid_values else None
             latest = last_events.get(nm_id, {})
             metrics = commercial.get(nm_id, {})
+            snapshots = snapshot_metrics.get(nm_id, {})
             latest_price_readback = (latest.get(PRICE_PARAMETER) or {}).get("readback") or {}
             event_buyer = (
                 latest_price_readback.get("buyer_price") or {}
@@ -571,12 +684,28 @@ class SkuManagementBlock:
             )
             buyer = _select_observed_buyer_price(
                 event_buyer=event_buyer,
-                metrics=metrics,
+                metrics=snapshots,
                 current_buyer=current_buyer_prices.get(nm_id),
             )
-            promo_count = metrics.get("promo_count_by_price")
-            if promo_count is None:
-                promo_count = price.get("promoEligibleCount")
+            promo_count = snapshots.get("promo_count_by_price")
+            price_updated_at = str(
+                price.get("updated_at")
+                or price.get("fetched_at")
+                or prices_payload.get("generated_at")
+                or ""
+            )
+            ads_updated_at = str(
+                ads.get("last_refreshed_at")
+                or ads_payload.get("last_refreshed_at")
+                or ""
+            )
+            bid_updated_at = max(
+                (
+                    str(item.get("campaign_fetched_at") or ads_updated_at)
+                    for item in options
+                ),
+                default=ads_updated_at,
+            )
             rows.append(
                 {
                     **sku,
@@ -586,24 +715,40 @@ class SkuManagementBlock:
                         as_of_date=str(item_evidence.get("as_of_date") or ""),
                     ),
                     "seller_price": price.get("discountedPrice"),
+                    "seller_price_updated_at": price_updated_at,
                     "initial_price": price.get("price"),
                     "seller_discount": price.get("discount"),
                     "buyer_price": buyer["value"],
                     "buyer_price_source": buyer["source"],
                     "buyer_price_freshness": buyer["freshness"],
                     "buyer_price_quality": buyer["quality"],
-                    "spp_proxy": price.get("sppProxy"),
+                    "buyer_price_updated_at": str(
+                        buyer.get("observed_at") or buyer.get("freshness") or ""
+                    ),
+                    "spp_proxy": snapshots.get("spp_proxy"),
+                    "spp_proxy_updated_at": str(
+                        snapshots.get("spp_proxy__observed_at")
+                        or snapshots.get("spp_proxy__date")
+                        or price_updated_at
+                    ),
                     "promo_label": price.get("promoLabel") or "н/д",
                     "promo_count": promo_count,
-                    "promo_participation": metrics.get("promo_participation"),
-                    "promo_freshness": metrics.get("promo_participation__date") or metrics.get("promo_count_by_price__date") or "",
+                    "promo_participation": snapshots.get("promo_participation"),
+                    "promo_freshness": snapshots.get("promo_participation__observed_at")
+                    or snapshots.get("promo_count_by_price__observed_at")
+                    or snapshots.get("promo_participation__date")
+                    or snapshots.get("promo_count_by_price__date")
+                    or "",
                     "campaign_count": ads.get("campaign_count", 0),
                     "placement_count": ads.get("placement_count", 0),
+                    "campaigns_updated_at": ads_updated_at,
                     "ad_options": options,
                     "current_bid": current_bid,
+                    "current_bid_updated_at": bid_updated_at,
                     "bid_sort_value": min(bid_values) if bid_values else None,
                     "ads_drr": metrics.get("ads_drr"),
                     "ads_drr_attributed": metrics.get("ads_drr_attributed"),
+                    "ads_spend_rub": metrics.get("ads_sum"),
                     "funnel": {key: metrics.get(key) for key in ("view_count", "openCount", "cartCount", "addToCartConversion", "cartToOrderConversion")},
                     "orders": metrics.get("orderCount"),
                     "sales_rub": metrics.get("orderSum"),
@@ -625,6 +770,21 @@ class SkuManagementBlock:
                 "forecast_is_calculation_only": True,
                 "writes_enabled": True,
                 "write_gates": ["section_authorization", "preview", "explicit_confirmation", "validation", "audit", "readback"],
+                "metric_policy": {
+                    "business_timezone": "Asia/Yekaterinburg",
+                    "business_date": current_business_date_iso(self.now_factory()),
+                    "cumulative_exact_date": cumulative_date,
+                    "cumulative_no_fallback": True,
+                    "cumulative_fields": list(SKU_CUMULATIVE_METRIC_FIELDS),
+                    "snapshot_latest_successful_fields": list(SKU_SNAPSHOT_METRIC_FIELDS),
+                },
+                "warehouse_exclusion": {
+                    **warehouse_settings,
+                    "names": self._warehouse_exclusion_names(
+                        evidence,
+                        excluded_warehouse_ids=excluded_warehouse_ids,
+                    ),
+                },
             },
         }
 
@@ -939,7 +1099,13 @@ class SkuManagementBlock:
             )
         return rows
 
-    def _collect_forecast_evidence(self, *, active: Sequence[Mapping[str, Any]], settings: ForecastSettings) -> dict[int, dict[str, Any]]:
+    def _collect_forecast_evidence(
+        self,
+        *,
+        active: Sequence[Mapping[str, Any]],
+        settings: ForecastSettings,
+        excluded_warehouse_ids: tuple[int, ...] = (),
+    ) -> dict[int, dict[str, Any]]:
         today = current_business_date_iso(self.now_factory())
         nm_ids = [int(item["nm_id"]) for item in active]
         result = {
@@ -952,6 +1118,7 @@ class SkuManagementBlock:
                 "supplier_inbounds": [],
                 "districts": {},
                 "warnings": [],
+                "warehouse_exclusion_options": [],
             }
             for nm_id in nm_ids
         }
@@ -960,12 +1127,42 @@ class SkuManagementBlock:
                 row["warnings"].append("stocks contour is unavailable")
         else:
             try:
-                stock_result = self.stocks_block.execute(StocksRequest(snapshot_type="stocks", snapshot_date=today, nm_ids=nm_ids)).result
+                stock_result = self.stocks_block.execute(
+                    StocksRequest(
+                        snapshot_type="stocks",
+                        snapshot_date=today,
+                        nm_ids=nm_ids,
+                    )
+                ).result
+                if getattr(stock_result, "kind", "") != "success":
+                    raise ValueError("official WB stock snapshot is incomplete")
+                exclusion = build_wb_warehouse_exclusion(
+                    items=list(getattr(stock_result, "items", []) or []),
+                    warehouse_rows=list(
+                        getattr(stock_result, "warehouse_rows", []) or []
+                    ),
+                    excluded_warehouse_ids=excluded_warehouse_ids,
+                    snapshot_date=str(getattr(stock_result, "snapshot_date", "") or ""),
+                    fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
+                    pagination_complete=bool(
+                        getattr(stock_result, "pagination_complete", False)
+                    ),
+                    raw_rows_digest=str(
+                        getattr(stock_result, "raw_rows_digest", "") or ""
+                    ),
+                    require_complete=bool(excluded_warehouse_ids),
+                )
                 for item in getattr(stock_result, "items", []):
                     target = result.get(int(item.nm_id))
                     if target is None:
                         continue
-                    target["stock_wb"] = _optional_float(getattr(item, "stock_total", None))
+                    exclusion_row = exclusion["by_nm_id"].get(str(int(item.nm_id)), {})
+                    target["stock_wb"] = _optional_float(
+                        exclusion_row.get("effective_stock_total_mp")
+                    )
+                    target["warehouse_exclusion_options"] = list(
+                        exclusion.get("options") or []
+                    )
                     if target["stock_wb"] is None:
                         target["warnings"].append("current WB stock evidence is unavailable")
                     for key, attribute in (
@@ -973,7 +1170,9 @@ class SkuManagementBlock:
                         ("volga", "stock_ru_volga"), ("ural", "stock_ru_ural"),
                         ("south_caucasus", "stock_ru_south_caucasus"), ("far_siberia", "stock_ru_far_siberia"),
                     ):
-                        value = _optional_float(getattr(item, attribute, None))
+                        value = _optional_float(
+                            exclusion_row.get(f"effective_{attribute}")
+                        )
                         if value is not None:
                             target["districts"].setdefault(key, {})["stock"] = value
             except Exception as exc:
@@ -1031,6 +1230,22 @@ class SkuManagementBlock:
         self._append_wb_supply_inbounds(result, settings=settings)
         self._append_regional_demand(result, settings=settings, as_of_date=today)
         return result
+
+    @staticmethod
+    def _warehouse_exclusion_names(
+        evidence: Mapping[int, Mapping[str, Any]],
+        *,
+        excluded_warehouse_ids: Sequence[int],
+    ) -> list[str]:
+        for row in evidence.values():
+            selected = [
+                str(item.get("warehouse_name") or f"warehouseId {item.get('warehouse_id')}")
+                for item in row.get("warehouse_exclusion_options", [])
+                if item.get("selected")
+            ]
+            if selected:
+                return selected
+        return [f"warehouseId {item}" for item in excluded_warehouse_ids]
 
     def _append_supplier_inbounds(self, result: dict[int, dict[str, Any]], *, settings: ForecastSettings) -> None:
         try:
@@ -1274,60 +1489,208 @@ class SkuManagementBlock:
             if not any(_optional_float(item.get("daily_demand")) is not None for item in row["districts"].values()):
                 row["warnings"].append("regional demand evidence is unavailable")
 
-    def _commercial_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+    def _commercial_projection(
+        self,
+        nm_ids: Sequence[int],
+        *,
+        target_date: str | None = None,
+    ) -> dict[int, dict[str, Any]]:
         result = {int(nm_id): {} for nm_id in nm_ids}
+        exact_date = target_date or (
+            date.fromisoformat(current_business_date_iso(self.now_factory()))
+            - timedelta(days=2)
+        ).isoformat()
         try:
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(
+                column_date=exact_date
+            )
         except Exception:
-            return result
-        data = next((sheet for sheet in snapshot.sheets if sheet.sheet_name == "DATA_VITRINA"), None)
-        if data is None:
-            return result
-        date_columns = [str(item) for item in getattr(snapshot, "date_columns", [])]
-        for row in data.rows:
-            if not isinstance(row, list) or len(row) < 3:
-                continue
-            key = str(row[1])
-            if not key.startswith("SKU:") or "|" not in key:
-                continue
-            nm_raw, metric = key[4:].split("|", 1)
-            nm_id = _optional_int(nm_raw)
-            if nm_id not in result:
-                continue
-            values = list(row[2:])
-            found_index = next(
-                (index for index in range(len(values) - 1, -1, -1) if _optional_float(values[index]) is not None),
+            snapshot = None
+        data = (
+            next(
+                (
+                    sheet
+                    for sheet in snapshot.sheets
+                    if sheet.sheet_name == "DATA_VITRINA"
+                ),
                 None,
             )
-            if found_index is not None:
-                result[nm_id][metric] = _optional_float(values[found_index])
-                result[nm_id][f"{metric}__date"] = (
-                    date_columns[found_index] if found_index < len(date_columns) else ""
+            if snapshot is not None
+            else None
+        )
+        date_columns = (
+            [str(item) for item in getattr(snapshot, "date_columns", [])]
+            if snapshot is not None
+            else []
+        )
+        exact_index = (
+            date_columns.index(exact_date)
+            if exact_date in date_columns
+            else None
+        )
+        if data is not None and exact_index is not None:
+            for row in data.rows:
+                if not isinstance(row, list) or len(row) < 3:
+                    continue
+                key = str(row[1])
+                if not key.startswith("SKU:") or "|" not in key:
+                    continue
+                nm_raw, metric = key[4:].split("|", 1)
+                nm_id = _optional_int(nm_raw)
+                if nm_id not in result or metric not in SKU_CUMULATIVE_METRIC_FIELDS:
+                    continue
+                values = list(row[2:])
+                value = (
+                    _optional_float(values[exact_index])
+                    if exact_index < len(values)
+                    else None
                 )
+                if value is not None:
+                    result[nm_id][metric] = value
+                    result[nm_id][f"{metric}__date"] = exact_date
+        try:
+            ads_payload, _ = self.runtime.load_temporal_source_snapshot(
+                source_key="ads_compact",
+                snapshot_date=exact_date,
+            )
+        except Exception:
+            ads_payload = None
+        for item in _temporal_payload_items(ads_payload):
+            nm_id = _optional_int(
+                item.get("nm_id")
+                if isinstance(item, Mapping)
+                else getattr(item, "nm_id", None)
+            )
+            if nm_id not in result:
+                continue
+            for metric in (
+                "ads_views",
+                "ads_clicks",
+                "ads_atbs",
+                "ads_orders",
+                "ads_sum",
+                "ads_sum_price",
+                "ads_cpc",
+                "ads_ctr",
+                "ads_cr",
+            ):
+                raw = (
+                    item.get(metric)
+                    if isinstance(item, Mapping)
+                    else getattr(item, metric, None)
+                )
+                value = _optional_float(raw)
+                if value is not None:
+                    result[nm_id][metric] = value
+                    result[nm_id][f"{metric}__date"] = exact_date
         return result
 
     def _current_buyer_price_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
-        today = current_business_date_iso(self.now_factory())
-        try:
-            payload, captured_at = self.runtime.load_temporal_source_snapshot(
-                source_key="spp_proxy",
-                snapshot_date=today,
+        projected = self._latest_temporal_projection(
+            source_key="spp_proxy",
+            nm_ids=nm_ids,
+            fields=("public_buyer_price",),
+        )
+        return {
+            nm_id: {
+                "value": row.get("public_buyer_price"),
+                "source": "spp_proxy_temporal_snapshot",
+                "freshness": row.get("public_buyer_price__date", ""),
+                "observed_at": row.get("public_buyer_price__observed_at", ""),
+                "quality": "observed",
+            }
+            for nm_id, row in projected.items()
+            if row.get("public_buyer_price") is not None
+        }
+
+    def _snapshot_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+        result = {int(nm_id): {} for nm_id in nm_ids}
+        for source_key, fields in (
+            ("spp_proxy", ("spp_proxy", "public_buyer_price")),
+            ("promo_by_price", ("promo_participation", "promo_count_by_price")),
+        ):
+            projection = self._latest_temporal_projection(
+                source_key=source_key,
+                nm_ids=nm_ids,
+                fields=fields,
             )
-        except Exception:
-            return {}
+            for nm_id, row in projection.items():
+                result[nm_id].update(row)
+        for nm_id, row in result.items():
+            if row.get("public_buyer_price") is not None:
+                row["buyer_price_rub"] = row["public_buyer_price"]
+                row["buyer_price_rub__date"] = row.get(
+                    "public_buyer_price__date", ""
+                )
+                row["buyer_price_rub__observed_at"] = row.get(
+                    "public_buyer_price__observed_at", ""
+                )
+        return result
+
+    def _latest_temporal_projection(
+        self,
+        *,
+        source_key: str,
+        nm_ids: Sequence[int],
+        fields: Sequence[str],
+    ) -> dict[int, dict[str, Any]]:
         requested = {int(item) for item in nm_ids}
-        result: dict[int, dict[str, Any]] = {}
-        for item in getattr(payload, "items", []) if payload is not None else []:
-            nm_id = _optional_int(getattr(item, "nm_id", None))
-            value = _optional_float(getattr(item, "public_buyer_price", None))
-            if nm_id in requested and value is not None:
-                result[nm_id] = {
-                    "value": value,
-                    "source": "spp_proxy_temporal_snapshot",
-                    "freshness": today,
-                    "observed_at": str(captured_at or ""),
-                    "quality": "observed",
-                }
+        result = {nm_id: {} for nm_id in requested}
+        today = current_business_date_iso(self.now_factory())
+        snapshots: list[tuple[str, Any, str]] = []
+        if hasattr(self.runtime, "list_temporal_source_snapshots"):
+            try:
+                snapshots = list(
+                    self.runtime.list_temporal_source_snapshots(
+                        source_key=source_key,
+                        date_to=today,
+                    )
+                )
+            except Exception:
+                snapshots = []
+        else:
+            try:
+                dates = [
+                    item
+                    for item in self.runtime.list_temporal_source_snapshot_dates(
+                        source_key=source_key
+                    )
+                    if _is_iso_date(str(item)) and str(item) <= today
+                ]
+            except Exception:
+                return result
+            for snapshot_date in sorted(dates, reverse=True):
+                try:
+                    payload, captured_at = self.runtime.load_temporal_source_snapshot(
+                        source_key=source_key,
+                        snapshot_date=str(snapshot_date),
+                    )
+                except Exception:
+                    continue
+                snapshots.append(
+                    (str(snapshot_date), payload, str(captured_at or ""))
+                )
+        for snapshot_date, payload, captured_at in snapshots:
+            if not _is_iso_date(str(snapshot_date)) or str(snapshot_date) > today:
+                continue
+            for item in _temporal_payload_items(payload):
+                nm_id = _optional_int(
+                    item.get("nm_id") if isinstance(item, Mapping) else getattr(item, "nm_id", None)
+                )
+                if nm_id not in requested:
+                    continue
+                for field in fields:
+                    if field in result[nm_id]:
+                        continue
+                    raw = item.get(field) if isinstance(item, Mapping) else getattr(item, field, None)
+                    value = _optional_float(raw)
+                    if value is None:
+                        continue
+                    result[nm_id][field] = value
+                    result[nm_id][f"{field}__date"] = str(snapshot_date)
+                    result[nm_id][f"{field}__observed_at"] = str(captured_at or "")
+            if all(all(field in result[nm_id] for field in fields) for nm_id in requested):
+                break
         return result
 
     def _stabilization_warnings(self, *, nm_id: int, parameter: str, actor: str) -> list[dict[str, Any]]:
@@ -1448,44 +1811,24 @@ class SkuManagementBlock:
             )
 
     def _price_promo_snapshot(self, *, nm_id: int, current_view: Mapping[str, Any]) -> dict[str, Any]:
-        metrics = self._commercial_projection([nm_id]).get(nm_id, {})
+        metrics = self._snapshot_projection([nm_id]).get(nm_id, {})
         participation = _optional_float(metrics.get("promo_participation"))
         participation_date = str(metrics.get("promo_participation__date") or "")
         count = _optional_float(metrics.get("promo_count_by_price"))
         count_date = str(metrics.get("promo_count_by_price__date") or "")
-        captured_at = ""
-        today = current_business_date_iso(self.now_factory())
-        try:
-            current_payload, current_captured_at = self.runtime.load_temporal_source_snapshot(
-                source_key="promo_by_price",
-                snapshot_date=today,
-            )
-            current_item = next(
-                (
-                    item
-                    for item in (getattr(current_payload, "items", []) if current_payload is not None else [])
-                    if _optional_int(getattr(item, "nm_id", None)) == nm_id
-                ),
-                None,
-            )
-            current_participation = _optional_float(getattr(current_item, "promo_participation", None))
-            current_count = _optional_float(getattr(current_item, "promo_count_by_price", None))
-            if current_participation is not None and current_count is not None:
-                participation = current_participation
-                count = current_count
-                participation_date = today
-                count_date = today
-                captured_at = str(current_captured_at or "")
-        except Exception:
-            pass
+        captured_at = str(
+            metrics.get("promo_participation__observed_at")
+            or metrics.get("promo_count_by_price__observed_at")
+            or ""
+        )
         freshness = min(
             (item for item in (participation_date, count_date) if _is_iso_date(item)),
             default="",
         )
         quality = (
             "observed"
-            if participation is not None and count is not None and freshness == today
-            else "stale" if participation is not None or count is not None
+            if participation is not None and count is not None
+            else "partial" if participation is not None or count is not None
             else "missing"
         )
         return {
@@ -1699,6 +2042,7 @@ def _select_observed_buyer_price(
                 "value": event_value,
                 "source": str(event_buyer.get("source") or "public_wb_card"),
                 "freshness": str(event_buyer.get("freshness") or event_buyer.get("observed_at") or ""),
+                "observed_at": str(event_buyer.get("observed_at") or ""),
                 "quality": "observed",
                 "_sort_freshness": str(event_buyer.get("observed_at") or event_buyer.get("freshness") or ""),
             }
@@ -1710,8 +2054,13 @@ def _select_observed_buyer_price(
                 "value": metric_value,
                 "source": "web_vitrina_spp_proxy_projection",
                 "freshness": str(metrics.get("buyer_price_rub__date") or ""),
+                "observed_at": str(metrics.get("buyer_price_rub__observed_at") or ""),
                 "quality": "observed",
-                "_sort_freshness": str(metrics.get("buyer_price_rub__date") or ""),
+                "_sort_freshness": str(
+                    metrics.get("buyer_price_rub__observed_at")
+                    or metrics.get("buyer_price_rub__date")
+                    or ""
+                ),
             }
         )
     current_value = _optional_float((current_buyer or {}).get("value"))
@@ -1722,6 +2071,7 @@ def _select_observed_buyer_price(
                 "source": str((current_buyer or {}).get("source") or "spp_proxy_temporal_snapshot"),
                 "freshness": str((current_buyer or {}).get("freshness") or ""),
                 "quality": "observed",
+                "observed_at": str((current_buyer or {}).get("observed_at") or ""),
                 "_sort_freshness": str(
                     (current_buyer or {}).get("observed_at")
                     or (current_buyer or {}).get("freshness")
@@ -1760,9 +2110,14 @@ def _sanitize_table_preferences(payload: Mapping[str, Any]) -> dict[str, Any]:
     if visible_columns:
         visible_columns = [*TABLE_MANDATORY_COLUMNS, *visible_columns]
         visible_columns = list(dict.fromkeys(visible_columns))
+    requested_order = [
+        item
+        for item in _string_list(payload.get("column_order"))
+        if item in TABLE_COLUMN_KEYS and item not in TABLE_MANDATORY_COLUMNS
+    ]
     return {
         "visible_columns": visible_columns,
-        "column_order": [item for item in _string_list(payload.get("column_order")) if item in TABLE_COLUMN_KEYS],
+        "column_order": [*TABLE_MANDATORY_COLUMNS, *requested_order],
         "column_widths": widths,
         "filters": filters,
         "sort": sort if sort_supplied else list(DEFAULT_TABLE_PREFERENCES["sort"]),
@@ -1778,6 +2133,29 @@ def _string_list(value: Any) -> list[str]:
         if normalized and normalized not in result:
             result.append(normalized)
     return result[:100]
+
+
+def _temporal_payload_items(payload: Any) -> list[Any]:
+    if payload is None:
+        return []
+    direct = (
+        payload.get("items")
+        if isinstance(payload, Mapping)
+        else getattr(payload, "items", None)
+    )
+    if isinstance(direct, (list, tuple)):
+        return list(direct)
+    nested = (
+        payload.get("result")
+        if isinstance(payload, Mapping)
+        else getattr(payload, "result", None)
+    )
+    items = (
+        nested.get("items")
+        if isinstance(nested, Mapping)
+        else getattr(nested, "items", None)
+    )
+    return list(items) if isinstance(items, (list, tuple)) else []
 
 
 def _dedupe_strings(values: Sequence[Any]) -> list[str]:

@@ -95,6 +95,12 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
 - Целевой смысл блока: bounded stocks snapshot с сохранением coverage guard без буквального переноса Apps Script cursor/staging.
 - Для two-day sheet read model блок обязан оставаться честным: required `yesterday_closed` читается только из authoritative exact-date historical path/runtime cache, while `today_current` stays blank/`not_available` and is not filled through surrogate current values.
 
+## 3.1 Shared warehouse exclusion projection
+
+`build_wb_warehouse_exclusion` is the single calculation-only projection used by Supply and SKU Management. It accepts stable numeric IDs and a current official warehouse-granular result. Present options are ordered by `total_contour desc`, then case-folded Russian warehouse name and numeric ID; selected IDs absent from current rows are appended at the bottom with `temporarily_missing=true`.
+
+For every nmID it publishes actual/excluded/effective total WB stock and the same triple for each canonical regional field. Regional subtraction is derived only from the official row's mapped `region_name`; unmapped rows may affect total but never an invented district. Empty selection is an identity projection. Non-empty selection requires complete pagination; incomplete evidence raises a controlled error so downstream forecast quality remains unknown rather than zero.
+
 # 4. Артефакты по модулю
 
 - legacy samples:

@@ -3978,6 +3978,10 @@
     .sku-management-table th { position: sticky; top: 0; z-index: 5; background: #20242c; color: var(--muted-strong); text-align: left; cursor: pointer; box-shadow: inset 0 -1px 0 var(--border-strong); }
     .sku-management-table tbody tr:last-child td { border-bottom: 0; }
     .sku-management-table tbody tr:hover td { background: #1d2129; }
+    .sku-management-table th[data-sku-column="product"] { left: 0; z-index: 8; background: #20242c; box-shadow: 2px 0 0 var(--border-strong), 8px 0 12px rgba(0,0,0,.22), inset 0 -1px 0 var(--border-strong); }
+    .sku-management-table td.sku-product-column { position: sticky; left: 0; z-index: 3; background: #171b22; box-shadow: 2px 0 0 var(--border-strong), 8px 0 12px rgba(0,0,0,.18); }
+    .sku-management-table tbody tr:hover td.sku-product-column { background: #1d2129; }
+    .sku-product-name { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: inherit; font-weight: 700; color: var(--text); }
     .sku-management-table td.wrap { white-space: normal; max-width: 280px; }
     .sku-management-table td.sku-cell-number { text-align: right; font-variant-numeric: tabular-nums; }
     .sku-management-table .sku-cell-truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4000,6 +4004,7 @@
     .sku-column-drag-handle { cursor: grab; user-select: none; touch-action: none; }
     .sku-column-drag-handle:active { cursor: grabbing; }
     .sku-management-status { min-height: 20px; color: var(--text-muted); }
+    .sku-warehouse-exclusion-summary { text-align: left; }
     .sku-management-modal { width: min(760px, 100%); }
 
     .ads-toolbar {
@@ -5857,6 +5862,7 @@
           <label class="research-field"><span>SKU / nmID / название</span><input class="input" type="search" data-sku-filter="search"></label>
           <details class="column-manager" data-sku-column-manager><summary class="button secondary">Колонки</summary><div class="column-manager-panel"><div class="sku-column-controls" data-sku-column-controls></div></div></details>
         </div>
+        <p class="panel-meta sku-warehouse-exclusion-summary" data-sku-warehouse-exclusion-summary>В расчёте учитываются все склады.</p>
         <p class="sku-management-status" data-sku-management-status>Раздел не загружен.</p>
         <p class="research-error" data-sku-management-error></p>
         <div class="sku-management-table-shell">
@@ -6345,6 +6351,7 @@
     const skuManagementRefreshButton = document.querySelector("[data-sku-management-refresh]");
     const skuManagementSettingsSaveButton = document.querySelector("[data-sku-settings-save]");
     const skuManagementStatusNode = document.querySelector("[data-sku-management-status]");
+    const skuManagementWarehouseExclusionSummaryNode = document.querySelector("[data-sku-warehouse-exclusion-summary]");
     const skuManagementErrorNode = document.querySelector("[data-sku-management-error]");
     const skuManagementHeadNode = document.querySelector("[data-sku-management-head]");
     const skuManagementBodyNode = document.querySelector("[data-sku-management-body]");
@@ -6544,13 +6551,14 @@
       {id: "edit", label: "Редактирование", width: 180}
     ];
     const SKU_MANAGEMENT_COLUMNS = [
-      {id:"product", label:"SKU / nmID / название", width:240}, {id:"risk", label:"Риск", width:90},
+      {id:"product", label:"Название / nmID", width:240}, {id:"risk", label:"Риск", width:90},
       {id:"deficit_date", label:"Дата дефицита", width:120}, {id:"coverage_pct", label:"Обеспеченность, %", width:125},
       {id:"deficit_units", label:"Дефицит, шт.", width:110}, {id:"nearest_inbound", label:"Ближ. поставка", width:170},
       {id:"seller_price", label:"Наша цена", width:190}, {id:"buyer_price", label:"Цена покупателя", width:120},
       {id:"spp_proxy", label:"СПП / прокси", width:110}, {id:"promo", label:"Акции", width:100},
       {id:"campaigns", label:"Кампании", width:100}, {id:"current_bid", label:"Рекламная ставка", width:300},
       {id:"ads_drr", label:"Общий ДРР", width:100}, {id:"ads_drr_attributed", label:"ДРР рекламных заказов", width:150},
+      {id:"ads_spend_rub", label:"Рекламные расходы", width:140},
       {id:"funnel", label:"Воронка", width:220}, {id:"orders", label:"Продажи / заказы", width:130},
       {id:"profit_rub", label:"Прибыль", width:110}, {id:"margin_pct", label:"Маржинальность", width:120},
       {id:"last_price_change_at", label:"Последняя цена", width:150}, {id:"last_bid_change_at", label:"Последняя ставка", width:150},
@@ -6963,6 +6971,7 @@
         rows: [],
         settings: null,
         revision: 0,
+        meta: {},
         table: {visible_columns: [], column_order: [], column_widths: {}, filters: {}, sort: []},
         drafts: {},
         editingPriceNmId: null,
@@ -20304,6 +20313,7 @@
         state.skuManagement.settings = (payload.settings || {}).forecast || {};
         state.skuManagement.revision = Number((payload.settings || {}).revision || 0);
         state.skuManagement.table = normalizeSkuManagementTablePreferences((payload.settings || {}).table || {});
+        state.skuManagement.meta = payload.meta || {};
         state.skuManagement.loaded = true;
         syncSkuManagementSettingsInputs();
       } catch (error) {
@@ -20317,7 +20327,7 @@
     function normalizeSkuManagementTablePreferences(raw) {
       const source=raw&&typeof raw==="object"?raw:{};
       const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);
-      const order=[];(Array.isArray(source.column_order)?source.column_order:[]).forEach(function(id){id=String(id||"");if(allowed.has(id)&&!order.includes(id))order.push(id);});
+      const order=["product"];(Array.isArray(source.column_order)?source.column_order:[]).forEach(function(id){id=String(id||"");if(id!=="product"&&allowed.has(id)&&!order.includes(id))order.push(id);});
       SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!order.includes(id))order.push(id);});
       let visible=(Array.isArray(source.visible_columns)?source.visible_columns:[]).map(String).filter(function(id,index,items){return allowed.has(id)&&items.indexOf(id)===index;});
       if(visible.length){SKU_MANAGEMENT_MANDATORY_COLUMNS.slice().reverse().forEach(function(id){if(!visible.includes(id))visible.unshift(id);});}
@@ -20384,7 +20394,8 @@
       const byId = new Map(SKU_MANAGEMENT_COLUMNS.map(function(item){return [item.id,item];}));
       const order = Array.isArray(state.skuManagement.table.column_order) && state.skuManagement.table.column_order.length ? state.skuManagement.table.column_order : SKU_MANAGEMENT_DEFAULT_COLUMNS;
       const result=[]; const seen=new Set();
-      order.forEach(function(id){if(byId.has(id)&&!seen.has(id)){result.push(byId.get(id));seen.add(id);}});
+      result.push(byId.get("product"));seen.add("product");
+      order.forEach(function(id){if(id!=="product"&&byId.has(id)&&!seen.has(id)){result.push(byId.get(id));seen.add(id);}});
       SKU_MANAGEMENT_COLUMNS.forEach(function(item){if(!seen.has(item.id)) result.push(item);});
       const visible = new Set(Array.isArray(state.skuManagement.table.visible_columns)&&state.skuManagement.table.visible_columns.length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
       SKU_MANAGEMENT_MANDATORY_COLUMNS.forEach(function(id){visible.add(id);});
@@ -20402,7 +20413,7 @@
     }
 
     function skuManagementSortValue(row,key){
-      if(key==="product")return String(row.sku||row.name||row.nm_id||"");
+      if(key==="product")return String(row.name||row.nm_id||"");
       if(key==="risk")return row.risk==="unknown"||row.risk_rank==null||Number(row.risk_rank)<0?null:Number(row.risk_rank);
       if(key==="promo")return row.promo_count==null?null:Number(row.promo_count);
       if(key==="campaigns")return Number(row.campaign_count||0);
@@ -20416,10 +20427,16 @@
       if (!skuManagementPanelNode) return;
       if (skuManagementErrorNode) skuManagementErrorNode.textContent=state.skuManagement.error||"";
       if (skuManagementStatusNode) skuManagementStatusNode.textContent=state.skuManagement.loading?"Загрузка canonical SKU и evidence…":state.skuManagement.commitRunning?"Commit running / readback pending…":state.skuManagement.loaded?("SKU: "+state.skuManagement.rows.length+" · настройки и представление хранятся на сервере"):"Раздел не загружен.";
+      if (skuManagementWarehouseExclusionSummaryNode) {
+        const names=((((state.skuManagement.meta||{}).warehouse_exclusion||{}).names)||[]);
+        skuManagementWarehouseExclusionSummaryNode.textContent=names.length
+          ? "В расчёте не участвуют склады: "+names.join(", ")
+          : "В расчёте учитываются все склады.";
+      }
       renderSkuManagementColumns();
       const columns=skuManagementOrderedColumns();
       const sort=(state.skuManagement.table.sort||[])[0]||{};const visibleSortKey=sort.key==="risk_rank"?"risk":sort.key;
-      if(skuManagementHeadNode) skuManagementHeadNode.innerHTML="<tr>"+columns.map(function(col){const marker=visibleSortKey===col.id?(sort.direction==="asc"?" ↑":" ↓"):"";const width=Number((state.skuManagement.table.column_widths||{})[col.id]||col.width||120);return '<th data-sku-sort="'+escapeHtml(col.id)+'" style="width:'+width+'px;min-width:'+width+'px">'+escapeHtml(col.label)+marker+'</th>';}).join("")+"</tr>";
+      if(skuManagementHeadNode) skuManagementHeadNode.innerHTML="<tr>"+columns.map(function(col){const marker=visibleSortKey===col.id?(sort.direction==="asc"?" ↑":" ↓"):"";const width=Number((state.skuManagement.table.column_widths||{})[col.id]||col.width||120);return '<th data-sku-column="'+escapeHtml(col.id)+'" data-sku-sort="'+escapeHtml(col.id)+'" style="width:'+width+'px;min-width:'+width+'px">'+escapeHtml(skuManagementColumnLabel(col))+marker+'</th>';}).join("")+"</tr>";
       if(!skuManagementBodyNode)return;
       if(state.skuManagement.loading){skuManagementBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Загрузка…</td></tr>';return;}
       const rows=skuManagementFilteredRows();
@@ -20431,7 +20448,7 @@
       const money=function(value){return value==null?"—":formatNumber(Number(value),2,true)+" ₽";};
       const pct=function(value){return value==null?"—":formatNumber(Number(value)*((id==="spp_proxy"||id==="margin_pct"||id==="ads_drr"||id==="ads_drr_attributed")?100:1),1,true)+"%";};
       const td=function(content,className,title){return '<td data-sku-cell="'+escapeHtml(id)+'"'+(className?' class="'+escapeHtml(className)+'"':'')+(title?' title="'+escapeHtml(title)+'"':'')+'>'+content+'</td>';};
-      if(id==="product")return td('<strong>'+escapeHtml(row.sku||"—")+'</strong> · '+escapeHtml(row.nm_id)+'<br><span class="panel-meta sku-cell-truncate">'+escapeHtml(row.name||"")+'</span>',"wrap");
+      if(id==="product")return td('<strong class="sku-product-name">'+escapeHtml(row.name||"Без названия")+'</strong><span class="panel-meta">nmID '+escapeHtml(row.nm_id)+'</span>',"wrap sku-product-column",row.name||"");
       if(id==="risk")return td('<span class="sku-risk '+escapeHtml(row.risk||"unknown")+'">'+escapeHtml({high:"высокий",medium:"средний",low:"низкий",unknown:"нет данных"}[row.risk]||row.risk)+'</span>');
       if(id==="deficit_date")return td(escapeHtml(row.deficit_date||"—"));
       if(id==="coverage_pct")return td(pct(row.coverage_pct),"sku-cell-number");
@@ -20441,19 +20458,36 @@
         const title=[inbound.shipment_id,inbound.date_source].filter(Boolean).join(" · ");
         return td('<div class="sku-nearest-inbound"><strong>'+escapeHtml(inbound.invoice_no||"—")+'</strong><span class="panel-meta">'+escapeHtml(formatSkuInboundDate(inbound.arrival_date))+' · '+escapeHtml(formatNumber(Number(inbound.quantity),0,true))+' шт.</span></div>',"",title);
       }
-      if(id==="seller_price")return Number(state.skuManagement.editingPriceNmId)===Number(row.nm_id)?td('<div class="sku-inline-edit"><input class="input" type="number" min="0.01" step="0.01" value="'+escapeHtml(row.seller_price==null?"":row.seller_price)+'" data-sku-price-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-price-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>'):td('<button class="button ghost sku-edit-trigger" type="button" data-sku-price-edit="'+escapeHtml(row.nm_id)+'">'+money(row.seller_price)+'</button>',"sku-cell-number");
-      if(id==="buyer_price")return td(money(row.buyer_price)+'<br><span class="panel-meta">'+escapeHtml(row.buyer_price_quality||"missing")+(row.buyer_price_freshness?' · '+escapeHtml(row.buyer_price_freshness):'')+'</span>',"sku-cell-number");
-      if(id==="spp_proxy")return td(pct(row.spp_proxy),"sku-cell-number");
-      if(id==="promo")return td(escapeHtml(row.promo_label||"н/д")+'<br><span class="panel-meta">SKU участвует: '+escapeHtml(row.promo_participation==null?"н/д":Number(row.promo_participation)>0?"да":"нет")+' · доступно: '+escapeHtml(row.promo_count==null?"н/д":row.promo_count)+(row.promo_freshness?' · '+escapeHtml(row.promo_freshness):'')+'</span>');
-      if(id==="campaigns"){const names=Array.from(new Set((row.ad_options||[]).map(function(item){return item.campaign_name||String(item.advert_id||"");}).filter(Boolean)));return td(escapeHtml(String(row.campaign_count||0))+' / '+escapeHtml(String(row.placement_count||0))+(names.length?'<br><span class="panel-meta sku-cell-truncate">'+escapeHtml(names.join(", "))+'</span>':""),"wrap",names.join(", "));}
+      if(id==="seller_price")return Number(state.skuManagement.editingPriceNmId)===Number(row.nm_id)?td('<div class="sku-inline-edit"><input class="input" type="number" min="0.01" step="0.01" value="'+escapeHtml(row.seller_price==null?"":row.seller_price)+'" data-sku-price-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-price-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>'):td('<button class="button ghost sku-edit-trigger" type="button" data-sku-price-edit="'+escapeHtml(row.nm_id)+'">'+money(row.seller_price)+'</button><br><span class="panel-meta">'+escapeHtml(skuSnapshotUpdatedLabel(row.seller_price_updated_at))+'</span>',"sku-cell-number");
+      if(id==="buyer_price")return td(money(row.buyer_price)+'<br><span class="panel-meta">'+escapeHtml(row.buyer_price_quality||"missing")+' · '+escapeHtml(skuSnapshotUpdatedLabel(row.buyer_price_updated_at||row.buyer_price_freshness))+'</span>',"sku-cell-number");
+      if(id==="spp_proxy")return td(pct(row.spp_proxy)+'<br><span class="panel-meta">'+escapeHtml(skuSnapshotUpdatedLabel(row.spp_proxy_updated_at))+'</span>',"sku-cell-number");
+      if(id==="promo")return td(escapeHtml(row.promo_label||"н/д")+'<br><span class="panel-meta">Участвует: '+escapeHtml(row.promo_participation==null?"н/д":Number(row.promo_participation)>0?"да":"нет")+' · доступно: '+escapeHtml(row.promo_count==null?"н/д":row.promo_count)+' · '+escapeHtml(skuSnapshotUpdatedLabel(row.promo_freshness))+'</span>');
+      if(id==="campaigns"){const names=Array.from(new Set((row.ad_options||[]).map(function(item){return item.campaign_name||String(item.advert_id||"");}).filter(Boolean)));return td(escapeHtml(String(row.campaign_count||0))+' / '+escapeHtml(String(row.placement_count||0))+(names.length?'<br><span class="panel-meta sku-cell-truncate">'+escapeHtml(names.join(", "))+'</span>':"")+'<br><span class="panel-meta">'+escapeHtml(skuSnapshotUpdatedLabel(row.campaigns_updated_at))+'</span>',"wrap",names.join(", "));}
       if(id==="current_bid")return td(renderSkuBidEditor(row),"sku-cell-number");
       if(id==="ads_drr"||id==="ads_drr_attributed"||id==="margin_pct")return td(pct(row[id]),"sku-cell-number");
+      if(id==="ads_spend_rub")return td(money(row.ads_spend_rub),"sku-cell-number");
       if(id==="funnel"){const f=row.funnel||{};return td('Просмотры '+escapeHtml(f.view_count==null?"—":f.view_count)+' · карточка '+escapeHtml(f.openCount==null?"—":f.openCount)+' · корзина '+escapeHtml(f.cartCount==null?"—":f.cartCount)+'<br><span class="panel-meta">в корзину '+escapeHtml(f.addToCartConversion==null?"—":formatNumber(Number(f.addToCartConversion)*100,1,true)+"%")+' · в заказ '+escapeHtml(f.cartToOrderConversion==null?"—":formatNumber(Number(f.cartToOrderConversion)*100,1,true)+"%")+'</span>',"wrap");}
       if(id==="orders")return td(money(row.sales_rub)+' / '+escapeHtml(row.orders==null?"—":row.orders),"sku-cell-number");
       if(id==="profit_rub")return td(money(row.profit_rub),"sku-cell-number");
       if(id==="last_price_change_at"||id==="last_bid_change_at")return td(escapeHtml(row[id]||"—"));
       if(id==="diagnostics")return td('<strong>'+escapeHtml(row.quality||"unknown")+'</strong> · '+escapeHtml(row.reason||"")+(Array.isArray(row.quality_warnings)&&row.quality_warnings.length?'<br><span class="panel-meta">'+escapeHtml(row.quality_warnings.join("; "))+'</span>':""),"wrap");
       return td(escapeHtml(row[id]==null?"—":row[id]));
+    }
+
+    function skuManagementColumnLabel(column){
+      const cumulative=new Set(["ads_drr","ads_drr_attributed","ads_spend_rub","funnel","orders","profit_rub","margin_pct"]);
+      const exactDate=String((((state.skuManagement.meta||{}).metric_policy||{}).cumulative_exact_date)||"");
+      if(!cumulative.has(column.id)||!/^\d{4}-\d{2}-\d{2}$/.test(exactDate))return column.label;
+      return column.label+" (за "+exactDate.slice(8,10)+"."+exactDate.slice(5,7)+")";
+    }
+
+    function skuSnapshotUpdatedLabel(value){
+      const raw=String(value||"").trim();
+      if(!raw)return "обновление не подтверждено";
+      if(/^\d{4}-\d{2}-\d{2}$/.test(raw))return "обновлено "+raw.slice(8,10)+"."+raw.slice(5,7);
+      const parsed=new Date(raw);
+      if(Number.isNaN(parsed.getTime()))return "обновлено "+raw;
+      return "обновлено "+new Intl.DateTimeFormat("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"Asia/Yekaterinburg"}).format(parsed).replace(",","");
     }
 
     function formatSkuInboundDate(value){
@@ -20465,7 +20499,7 @@
     function renderSkuBidEditor(row){
       const options=Array.isArray(row.ad_options)?row.ad_options:[];
       if(!options.length)return "—";
-      if(Number(state.skuManagement.editingBidNmId)!==Number(row.nm_id)){const values=options.map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);const range=values.length?(Math.min.apply(null,values)===Math.max.apply(null,values)?Math.min.apply(null,values)+" ₽":Math.min.apply(null,values)+"–"+Math.max.apply(null,values)+" ₽"):"н/д";const label=options.length===1?range:(options.length+" ставки · "+range);return '<button class="button ghost sku-edit-trigger" type="button" data-sku-bid-edit="'+escapeHtml(row.nm_id)+'">'+escapeHtml(label)+'</button>';}
+      if(Number(state.skuManagement.editingBidNmId)!==Number(row.nm_id)){const values=options.map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);const range=values.length?(Math.min.apply(null,values)===Math.max.apply(null,values)?Math.min.apply(null,values)+" ₽":Math.min.apply(null,values)+"–"+Math.max.apply(null,values)+" ₽"):"н/д";const label=options.length===1?range:(options.length+" ставки · "+range);return '<button class="button ghost sku-edit-trigger" type="button" data-sku-bid-edit="'+escapeHtml(row.nm_id)+'">'+escapeHtml(label)+'</button><br><span class="panel-meta">'+escapeHtml(skuSnapshotUpdatedLabel(row.current_bid_updated_at))+'</span>';}
       const select=options.length>1?'<select class="input" data-sku-bid-option="'+escapeHtml(row.nm_id)+'">'+options.map(function(item){return '<option value="'+escapeHtml(item.advert_id+"|"+item.placement)+'">'+escapeHtml((item.campaign_name||item.advert_id)+" · "+item.placement+" · "+(item.current_bid_rub==null?"—":item.current_bid_rub+" ₽"))+'</option>';}).join("")+'</select>':'';
       const initial=options.length===1?options[0].current_bid_rub:"";
       return '<div class="sku-inline-edit">'+select+'<input class="input" type="number" min="0" step="0.01" value="'+escapeHtml(initial==null?"":initial)+'" data-sku-bid-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-bid-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>';
@@ -20475,10 +20509,10 @@
       if(!skuManagementColumnControlsNode)return;
       const order=skuManagementOrderedAllIds(); const visible=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
       SKU_MANAGEMENT_MANDATORY_COLUMNS.forEach(function(id){visible.add(id);});
-      skuManagementColumnControlsNode.innerHTML=order.map(function(id,index){const col=SKU_MANAGEMENT_COLUMNS.find(function(item){return item.id===id;});const width=Number((state.skuManagement.table.column_widths||{})[id]||col.width||120);const mandatory=SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(id);return '<div class="sku-column-row'+(state.skuManagement.draggingColumnId===id?' is-dragging':'')+'" draggable="true" data-sku-column-row="'+escapeHtml(id)+'"><button class="button ghost sku-column-drag-handle" type="button" data-sku-column-drag-handle="'+escapeHtml(id)+'" aria-label="Перетащить колонку '+escapeHtml(col.label)+'" title="Перетащить или используйте стрелки">⋮⋮</button><label><input type="checkbox" data-sku-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked":"")+' '+(mandatory?'disabled aria-label="Обязательная колонка"':'')+'> '+escapeHtml(col.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-sku-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-sku-column-up="'+escapeHtml(id)+'" '+(index===0?"disabled":"")+' aria-label="Поднять колонку">↑</button><button class="button ghost" type="button" data-sku-column-down="'+escapeHtml(id)+'" '+(index===order.length-1?"disabled":"")+' aria-label="Опустить колонку">↓</button></div>';}).join("");
+      skuManagementColumnControlsNode.innerHTML=order.map(function(id,index){const col=SKU_MANAGEMENT_COLUMNS.find(function(item){return item.id===id;});const width=Number((state.skuManagement.table.column_widths||{})[id]||col.width||120);const mandatory=SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(id);return '<div class="sku-column-row'+(state.skuManagement.draggingColumnId===id?' is-dragging':'')+'" draggable="'+(mandatory?'false':'true')+'" data-sku-column-row="'+escapeHtml(id)+'"><button class="button ghost sku-column-drag-handle" type="button" data-sku-column-drag-handle="'+escapeHtml(id)+'" '+(mandatory?'disabled ':'')+'aria-label="'+(mandatory?'Обязательная первая колонка':'Перетащить колонку '+escapeHtml(col.label))+'" title="'+(mandatory?'Обязательная первая колонка':'Перетащить или используйте стрелки')+'">'+(mandatory?'🔒':'⋮⋮')+'</button><label><input type="checkbox" data-sku-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked":"")+' '+(mandatory?'disabled aria-label="Обязательная колонка"':'')+'> '+escapeHtml(col.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-sku-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-sku-column-up="'+escapeHtml(id)+'" '+(mandatory||index===0?"disabled":"")+' aria-label="Поднять колонку">↑</button><button class="button ghost" type="button" data-sku-column-down="'+escapeHtml(id)+'" '+(mandatory||index===order.length-1?"disabled":"")+' aria-label="Опустить колонку">↓</button></div>';}).join("");
     }
 
-    function skuManagementOrderedAllIds(){const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);const result=[];(state.skuManagement.table.column_order||[]).forEach(function(id){if(allowed.has(id)&&!result.includes(id))result.push(id);});SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!result.includes(id))result.push(id);});return result;}
+    function skuManagementOrderedAllIds(){const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);const result=["product"];(state.skuManagement.table.column_order||[]).forEach(function(id){if(id!=="product"&&allowed.has(id)&&!result.includes(id))result.push(id);});SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!result.includes(id))result.push(id);});return result;}
 
     function handleSkuManagementInput(event){
       const filter=event.target.closest("[data-sku-filter]"); if(filter){const key=filter.getAttribute("data-sku-filter");state.skuManagement.table.filters=Object.assign({},state.skuManagement.table.filters||{}, {[key]:filter.value});renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
@@ -20498,13 +20532,15 @@
     function persistSkuManagementColumnOrder(order){state.skuManagement.table.column_order=order;renderSkuManagement();scheduleSkuManagementPreferencesSave();}
 
     function moveSkuManagementColumnByOffset(id,offset){
+      if(SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(String(id||"")))return;
       const order=skuManagementOrderedAllIds();const index=order.indexOf(String(id||""));const next=index+Number(offset||0);
-      if(index<0||next<0||next>=order.length)return;[order[index],order[next]]=[order[next],order[index]];persistSkuManagementColumnOrder(order);
+      if(index<0||next<=0||next>=order.length)return;[order[index],order[next]]=[order[next],order[index]];persistSkuManagementColumnOrder(order);
     }
 
     function handleSkuManagementColumnDragStart(event){
       const row=event.target.closest("[data-sku-column-row]");if(!row)return;
       state.skuManagement.draggingColumnId=String(row.getAttribute("data-sku-column-row")||"");
+      if(SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(state.skuManagement.draggingColumnId)){state.skuManagement.draggingColumnId="";event.preventDefault();return;}
       row.classList.add("is-dragging");
       if(event.dataTransfer){event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",state.skuManagement.draggingColumnId);}
     }
@@ -20515,6 +20551,7 @@
       const target=event.target.closest("[data-sku-column-row]");if(!target)return;event.preventDefault();
       const sourceId=state.skuManagement.draggingColumnId||(event.dataTransfer?event.dataTransfer.getData("text/plain"):"");
       const targetId=String(target.getAttribute("data-sku-column-row")||"");
+      if(SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(sourceId)||SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(targetId)){handleSkuManagementColumnDragEnd();return;}
       const order=skuManagementOrderedAllIds();const from=order.indexOf(sourceId);const to=order.indexOf(targetId);if(from<0||to<0||from===to){handleSkuManagementColumnDragEnd();return;}
       order.splice(from,1);let insertAt=order.indexOf(targetId);const rect=target.getBoundingClientRect();if(event.clientY>rect.top+rect.height/2)insertAt+=1;order.splice(insertAt,0,sourceId);
       state.skuManagement.draggingColumnId="";persistSkuManagementColumnOrder(order);

@@ -3086,8 +3086,37 @@ class RegistryUploadHttpEntrypoint:
         payload["recommendation_download_path"] = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
         return payload
 
-    def handle_wb_warehouse_exclusion_options_request(self) -> dict[str, Any]:
-        return self.factory_order_supply_block.build_wb_warehouse_exclusion_options()
+    def handle_wb_warehouse_exclusion_options_request(
+        self,
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        settings = self.sku_management_block.get_warehouse_exclusion_settings(
+            user_key=user_key
+        )
+        return self.factory_order_supply_block.build_wb_warehouse_exclusion_options(
+            excluded_warehouse_ids=tuple(settings["excluded_wb_warehouse_ids"])
+        )
+
+    def handle_wb_warehouse_exclusion_settings_request(
+        self,
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        return self.sku_management_block.get_warehouse_exclusion_settings(
+            user_key=user_key
+        )
+
+    def handle_wb_warehouse_exclusion_settings_save_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        return self.sku_management_block.save_warehouse_exclusion_settings(
+            user_key=user_key,
+            payload=payload,
+        )
 
     def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
         return self.factory_order_supply_block.build_template(dataset_type)
@@ -3121,8 +3150,17 @@ class RegistryUploadHttpEntrypoint:
     def handle_factory_order_delete_request(self, dataset_type: str) -> dict[str, Any]:
         return asdict(self.factory_order_supply_block.delete_dataset(dataset_type))
 
-    def handle_factory_order_calculate_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        result = asdict(self.factory_order_supply_block.calculate(payload))
+    def handle_factory_order_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str | None = None,
+    ) -> dict[str, Any]:
+        effective_payload = self._with_canonical_warehouse_exclusions(
+            payload,
+            user_key=user_key,
+        )
+        result = asdict(self.factory_order_supply_block.calculate(effective_payload))
         result["recommendation_download_path"] = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
         return result
 
@@ -3132,8 +3170,20 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_regional_status_request(self) -> dict[str, Any]:
         return asdict(self.wb_regional_supply_block.build_status())
 
-    def handle_wb_regional_calculate_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return asdict(self.wb_regional_supply_block.calculate(payload))
+    def handle_wb_regional_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str | None = None,
+    ) -> dict[str, Any]:
+        return asdict(
+            self.wb_regional_supply_block.calculate(
+                self._with_canonical_warehouse_exclusions(
+                    payload,
+                    user_key=user_key,
+                )
+            )
+        )
 
     def handle_wb_regional_district_recommendation_request(self, district_key: str) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_district_recommendation(district_key)
@@ -3141,8 +3191,34 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_regional_recommendations_zip_request(self) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_all_recommendations_archive()
 
-    def handle_wb_regional_planning_options_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.wb_regional_supply_planning_block.build_options(payload)
+    def handle_wb_regional_planning_options_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str | None = None,
+    ) -> dict[str, Any]:
+        return self.wb_regional_supply_planning_block.build_options(
+            self._with_canonical_warehouse_exclusions(
+                payload,
+                user_key=user_key,
+            )
+        )
+
+    def _with_canonical_warehouse_exclusions(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str | None,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        if user_key:
+            settings = self.sku_management_block.get_warehouse_exclusion_settings(
+                user_key=user_key
+            )
+            result["excluded_wb_warehouse_ids"] = list(
+                settings["excluded_wb_warehouse_ids"]
+            )
+        return result
 
     def handle_supplier_shipments_list_request(self, *, supplier_safe: bool = False) -> dict[str, Any]:
         if supplier_safe:
