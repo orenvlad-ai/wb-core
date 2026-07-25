@@ -353,6 +353,9 @@ class WebCoreOpsDiagnostics:
                     "commit": commit,
                     "commit_available": bool(commit),
                     "deployed_at": str(deploy_metadata.get("deployed_at") or ""),
+                    "deployment_complete": bool(
+                        deploy_metadata.get("deployment_complete")
+                    ),
                     "version_source": "repo_owned_deploy_metadata" if deploy_metadata else ("git_checkout" if commit else "unavailable"),
                     "server_name": "webcore-data-mcp",
                     "ops_diagnostics_contract": "webcore_ops_diagnostics_v1",
@@ -1224,7 +1227,11 @@ def _deploy_metadata(root: Path) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         return {}
     deployed_at = str(payload.get("deployed_at") or "")[:64]
-    return {"commit": commit, "deployed_at": deployed_at}
+    return {
+        "commit": commit,
+        "deployed_at": deployed_at,
+        "deployment_complete": payload.get("deployment_complete") is True,
+    }
 
 
 def _mcp_call_summary(path: Path) -> dict[str, Any]:

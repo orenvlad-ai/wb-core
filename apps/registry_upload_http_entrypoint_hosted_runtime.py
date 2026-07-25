@@ -896,7 +896,14 @@ def deploy_current_checkout(
     ]
     mkdir_command = _remote_shell_command(target, f"mkdir -p {shlex.quote(target.target_dir)}")
     chown_target_dir_command = _remote_shell_command(target, f"chown -R root:root {shlex.quote(target.target_dir)}")
-    deploy_metadata_command = _build_deploy_metadata_command(target)
+    deploy_metadata_command = _build_deploy_metadata_command(
+        target,
+        deployment_complete=False,
+    )
+    deploy_completion_metadata_command = _build_deploy_metadata_command(
+        target,
+        deployment_complete=True,
+    )
     restart_command = _remote_shell_command(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
@@ -932,6 +939,7 @@ def deploy_current_checkout(
             "rsync": rsync_plan,
             "chown_target_dir": chown_target_dir_command,
             "deploy_metadata": deploy_metadata_command,
+            "deploy_completion_metadata": deploy_completion_metadata_command,
             "seller_portal_recovery_os_dependencies": seller_recovery_os_dependencies_command,
             "seller_portal_owner_runtime_os_dependencies": seller_owner_os_dependencies_command,
             "runtime_pip_install": runtime_pip_install_command,
@@ -989,6 +997,7 @@ def deploy_current_checkout(
                 failed_stage=stage
                 if stage in {"daemon-reload", "restart", "probes", "readback"}
                 else "sync",
+                require_deployment_complete=False,
             )
             summary["transport_reconciliation"] = reconciliation
             if not bool(reconciliation.get("healthy")):
@@ -1030,6 +1039,16 @@ def deploy_current_checkout(
         run_stage("readback", status_command)
     # Read back the same contract after all managed-unit operations.
     run_stage("readback", auth_env_preflight_command)
+    # The exact SHA markers are written before dependency/schema work so an
+    # interrupted rollout is observable, but only this final atomic metadata
+    # update proves that every required deploy stage completed.  A disconnect
+    # during this write remains fail-closed; the halted reconciler may accept
+    # it later only when the completed marker is actually readable.
+    run_stage(
+        "metadata-complete",
+        deploy_completion_metadata_command,
+        allow_transport_reconciliation=False,
+    )
     return summary
 
 
@@ -1130,15 +1149,20 @@ def _build_autoanswers_prepare_capacity_command(target: HostedRuntimeTarget) -> 
     return _remote_shell_command(target, command)
 
 
-def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
+def _build_deploy_metadata_command(
+    target: HostedRuntimeTarget,
+    *,
+    deployment_complete: bool,
+) -> list[str]:
     commit = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("deploy requires a valid current checkout commit")
     payload = json.dumps(
         {
-            "schema_version": "wb_core_deploy_metadata_v1",
+            "schema_version": "wb_core_deploy_metadata_v2",
             "commit": commit,
             "deployed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "deployment_complete": bool(deployment_complete),
         },
         ensure_ascii=True,
         sort_keys=True,

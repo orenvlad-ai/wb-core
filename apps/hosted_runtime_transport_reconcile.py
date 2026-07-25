@@ -38,6 +38,7 @@ DEFAULT_ATTEMPTS = 3
 class ReconcileEvidence:
     metadata_sha: str
     runtime_sha: str
+    deployment_complete: bool
     unit: str
     main_pid: int
     probe_statuses: tuple[int, ...]
@@ -48,13 +49,20 @@ class ReconcileEvidence:
     def mixed_deployment(self) -> bool:
         return bool(self.metadata_sha and self.runtime_sha and self.metadata_sha != self.runtime_sha)
 
-    def healthy_for(self, expected_sha: str, expected_target_id: str) -> bool:
+    def healthy_for(
+        self,
+        expected_sha: str,
+        expected_target_id: str,
+        *,
+        require_deployment_complete: bool,
+    ) -> bool:
         return (
             self.target_id == expected_target_id
             and self.auth_env_ok
             and self.metadata_sha == expected_sha
             and self.runtime_sha == expected_sha
             and not self.mixed_deployment
+            and (self.deployment_complete or not require_deployment_complete)
             and self.unit == "active"
             and self.main_pid > 0
             and bool(self.probe_statuses)
@@ -97,6 +105,8 @@ def _remote_command(target: HostedRuntimeTarget, operation: str) -> list[str]:
             "set +e; d=" + target_dir + "; "
             "meta=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"commit\"])' "
             '"$d/.wb-core-deploy.json" 2>/dev/null); '
+            "complete=$(python3 -c 'import json,sys; print(\"true\" if json.load(open(sys.argv[1])).get(\"deployment_complete\") is True else \"false\")' "
+            '"$d/.wb-core-deploy.json" 2>/dev/null); '
             'runtime=$(tr -d "\\r\\n" < "$d/.wb-core-runtime-sha" 2>/dev/null); '
             f"unit=$(systemctl is-active {service} 2>/dev/null); "
             f"pid=$(systemctl show {service} -p MainPID --value 2>/dev/null); "
@@ -107,13 +117,14 @@ def _remote_command(target: HostedRuntimeTarget, operation: str) -> list[str]:
             'probes=""; for p in ' + path_words + "; do "
             "code=$(curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:8765${p}\" 2>/dev/null); "
             'probes="${probes}${probes:+,}${code:-000}"; done; '
-            "python3 - \"$meta\" \"$runtime\" \"$unit\" \"$pid\" \"$probes\" \"$auth\" "
+            "python3 - \"$meta\" \"$runtime\" \"$complete\" \"$unit\" \"$pid\" \"$probes\" \"$auth\" "
             + target_id
             + " <<'PY'\n"
             "import json,sys\n"
             "print(json.dumps({'metadata_sha':sys.argv[1], 'runtime_sha':sys.argv[2], "
-            "'unit':sys.argv[3], 'main_pid':sys.argv[4], 'probe_statuses':sys.argv[5], "
-            "'auth_env_ok':sys.argv[6] == 'true', 'target_id':sys.argv[7]}, sort_keys=True))\nPY"
+            "'deployment_complete':sys.argv[3] == 'true', 'unit':sys.argv[4], "
+            "'main_pid':sys.argv[5], 'probe_statuses':sys.argv[6], "
+            "'auth_env_ok':sys.argv[7] == 'true', 'target_id':sys.argv[8]}, sort_keys=True))\nPY"
         )
     elif operation == "daemon-reload":
         shell = "systemctl daemon-reload"
@@ -145,6 +156,7 @@ def _parse_evidence(payload: str) -> ReconcileEvidence:
     return ReconcileEvidence(
         metadata_sha=str(raw.get("metadata_sha") or "").strip().lower(),
         runtime_sha=str(raw.get("runtime_sha") or "").strip().lower(),
+        deployment_complete=bool(raw.get("deployment_complete")),
         unit=str(raw.get("unit") or "").strip(),
         main_pid=main_pid,
         probe_statuses=statuses,
@@ -166,6 +178,7 @@ def reconcile(
     merge: str,
     failed_stage: str = "readback",
     attempts: int = DEFAULT_ATTEMPTS,
+    require_deployment_complete: bool = True,
     runner: Runner = _default_runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
@@ -186,7 +199,11 @@ def reconcile(
         if readback.returncode == 0:
             evidence = _parse_evidence(readback.stdout)
             history.append({"attempt": attempt, "operation": "readback", **evidence.__dict__})
-            if evidence.healthy_for(expected, target.target_id):
+            if evidence.healthy_for(
+                expected,
+                target.target_id,
+                require_deployment_complete=require_deployment_complete,
+            ):
                 return {
                     "status": "reconciled",
                     "transport": "transport-indeterminate",
@@ -207,6 +224,10 @@ def reconcile(
                 or evidence.runtime_sha != expected
                 or evidence.mixed_deployment
                 or not evidence.auth_env_ok
+                or (
+                    require_deployment_complete
+                    and not evidence.deployment_complete
+                )
             ):
                 break
             if failed_stage in SAFE_RETRY_STAGES or evidence.unit != "active" or evidence.main_pid <= 0:

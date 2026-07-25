@@ -38,6 +38,7 @@ def _evidence(
     metadata: str = MERGE,
     runtime: str = MERGE,
     *,
+    deployment_complete: bool = True,
     unit: str = "active",
     pid: int = 42,
     probes: str = "401,303",
@@ -45,6 +46,7 @@ def _evidence(
     return {
         "metadata_sha": metadata,
         "runtime_sha": runtime,
+        "deployment_complete": deployment_complete,
         "unit": unit,
         "main_pid": str(pid),
         "probe_statuses": probes,
@@ -93,6 +95,13 @@ def main() -> None:
     healthy = ScenarioRunner([_result(payload=_evidence())])
     assert _run(healthy)["healthy"] is True
     assert healthy.operations == ["readback"]
+
+    incomplete = ScenarioRunner(
+        [_result(payload=_evidence(deployment_complete=False))]
+    )
+    result = _run(incomplete)
+    assert result["status"] == "halted" and result["healthy"] is False
+    assert incomplete.operations == ["readback"]
 
     # Disconnect before metadata and after metadata cannot be healed by service retries.
     before_metadata = ScenarioRunner([_result(payload=_evidence(OLD, OLD))])

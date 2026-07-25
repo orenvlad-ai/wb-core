@@ -422,7 +422,13 @@ Archived MCP compatibility publication gate:
 - the DB read path must use SQLite `mode=ro` and `PRAGMA query_only=ON`;
 - no MCP tool may expose arbitrary SQL, shell/SSH, arbitrary filesystem browsing, upstream sync/backfill/refresh/load, restart, supplier write/upload/rematch/price-check, runtime file download, secrets, storage-state content, raw env or raw payload dumps;
 - OAuth authorization codes are one-time, short-lived and stored outside Git under runtime state; access tokens are short-lived, HMAC-signed, audience-bound to `WEBCORE_DATA_MCP_RESOURCE_URL`, scope-bound and never logged or printed.
-- the canonical deploy writes `.wb-core-deploy.json` only through the repo-owned runner after rsync; `deploy_state` must read that safe file and expose the active 40-character commit plus deploy timestamp even though `.git` is excluded from production;
+- the canonical deploy writes schema-v2 `.wb-core-deploy.json` only through
+  the repo-owned runner after rsync. Its early atomic record exposes the exact
+  40-character commit with `deployment_complete=false`; only after dependency,
+  schema/backup, managed-unit, restart and readback stages succeed does the
+  runner atomically replace it with `deployment_complete=true`. `deploy_state`
+  exposes the commit, timestamp and completion bit even though `.git` is
+  excluded from production;
 - while the compatibility unit remains in the deploy manifest, canonical deploy installs/enables/restarts `wb-core-data-mcp.service`; explicit compatibility-maintenance verification covers authenticated initialize/list/direct business/ops calls, concurrent latency and commit equality;
 - a connector refresh in the ChatGPT UI is relevant only to an explicitly scoped archived-compatibility maintenance task, never to ordinary data acquisition.
 
