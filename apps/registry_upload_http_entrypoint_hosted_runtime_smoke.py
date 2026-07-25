@@ -1139,6 +1139,22 @@ def main() -> None:
                 raise AssertionError(
                     "nginx public route allowlist must include WB warehouse exclusion options"
                 )
+            exclusion_settings_routes = {
+                item["path"]: item
+                for item in nginx_routes.get("routes", [])
+                if item["path"]
+                == "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings"
+            }
+            if not exclusion_settings_routes:
+                raise AssertionError(
+                    "nginx public route allowlist must include WB warehouse exclusion settings"
+                )
+            if exclusion_settings_routes[
+                "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings"
+            ].get("methods") != ["GET", "POST"]:
+                raise AssertionError(
+                    "WB warehouse exclusion settings route must publish GET and POST"
+                )
             if (
                 "/v1/sheet-vitrina-v1/settings/auto-updates"
                 not in {item["path"] for item in nginx_routes.get("routes", [])}
