@@ -3797,6 +3797,7 @@ def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
         evidence_dir=evidence_dir,
         headless=not bool(args.headed),
         expected_state=expected_state,
+        verify_limit_save=bool(args.verify_limit_save),
     )
     _print_json(
         {
@@ -4393,7 +4394,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     autoanswers_ui_flow = subparsers.add_parser(
         "autoanswers-ui-flow",
-        help="Run authenticated read-only production Playwright acceptance for WB autoanswers.",
+        help="Run authenticated production Playwright acceptance for WB autoanswers.",
     )
     autoanswers_ui_flow.add_argument("--evidence-dir", required=True)
     autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
@@ -4402,6 +4403,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--expected-state",
         choices=("off-force", "off-unforced", "manual", "auto_all"),
         default="off-force",
+    )
+    autoanswers_ui_flow.add_argument(
+        "--verify-limit-save",
+        action="store_true",
+        help=(
+            "Opt in to one safe same-value limit save with exact readback; "
+            "the default flow remains read-only."
+        ),
     )
     autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 

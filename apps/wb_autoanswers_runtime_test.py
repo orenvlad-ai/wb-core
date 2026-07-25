@@ -15,6 +15,7 @@ from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
     SCHEMA_VERSION,
+    autoanswers_settings_revision,
     classify_feedback_content,
     content_version_hash,
     wb_observation_hash,
@@ -1683,6 +1684,195 @@ class RuntimeTest(unittest.TestCase):
         self.assertTrue(self.repo.budget_status()["warning"])
         self.assertIsNone(self.repo.claim_processing_job(worker_id="w2"))
         self.assertEqual(self.repo.progress_status()["stop_reason"], "hourly_budget_reached")
+
+    def test_daily_limit_raise_resumes_same_run_and_persists_after_restart(self) -> None:
+        for feedback_id in ("daily-first", "daily-second"):
+            self.repo.upsert_feedback(
+                feedback(feedback_id),
+                source_stream="history",
+                run_kind="backfill",
+            )
+        self.repo.update_settings(
+            hourly_cap_usd="0.10",
+            daily_cap_usd="0.10",
+            monthly_cap_usd="1.00",
+            actor_id="admin",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        run_id = applied["sweep"]["transition_run_id"]
+        run_cap = applied["sweep"]["run_max_usd"]
+        self.repo.reconcile_policy_sweep_once(worker_id="sweep", batch_size=25)
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.assertIsNotNone(first)
+        self.repo.settle_budget(first["processing_key"], actual_cost_usd="0.10")
+        self.repo.complete_generation(
+            first["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        self.clock.advance(3601)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.assertEqual(
+            self.repo.progress_status()["stop_reason"],
+            "daily_budget_reached",
+        )
+
+        self.repo.update_settings(daily_cap_usd="0.50", actor_id="admin")
+        resumed = self.repo.claim_processing_job(worker_id="worker")
+        self.assertIsNotNone(resumed)
+        self.assertEqual(resumed["transition_run_id"], run_id)
+        readback = self.repo.reconciliation_status()
+        self.assertEqual(readback["transition_run_id"], run_id)
+        self.assertEqual(readback["run_max_usd"], run_cap)
+        self.assertEqual(self.repo.settings().daily_cap_usd, 0.5)
+
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env=self.env,
+        )
+        self.assertEqual(restarted.settings().daily_cap_usd, 0.5)
+        self.assertEqual(
+            restarted.reconciliation_status()["transition_run_id"],
+            run_id,
+        )
+        self.assertEqual(restarted.reconciliation_status()["run_max_usd"], run_cap)
+
+    def test_lowering_below_usage_preserves_usage_and_pause(self) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="draft_only",
+            hourly_cap_usd="1.00",
+            daily_cap_usd="1.00",
+            monthly_cap_usd="1.00",
+            actor_id="admin",
+        )
+        for feedback_id in ("lower-first", "lower-second"):
+            self.insert_new(feedback_id)
+            self.repo.enqueue_processing(
+                feedback_id,
+                trigger_source="automatic",
+                actor_id="sync",
+            )
+        first = self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(first["processing_key"], actual_cost_usd="0.20")
+        self.repo.complete_generation(
+            first["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        self.clock.advance(3601)
+        before = self.repo.budget_status()["daily_actual_usd"]
+        self.repo.update_settings(
+            hourly_cap_usd="0.10",
+            daily_cap_usd="0.10",
+            actor_id="admin",
+        )
+        self.assertEqual(self.repo.budget_status()["daily_actual_usd"], before)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+        self.assertEqual(
+            self.repo.progress_status()["stop_reason"],
+            "daily_budget_reached",
+        )
+
+    def test_limit_update_does_not_clear_stronger_gate_or_change_run_cap(self) -> None:
+        self.repo.upsert_feedback(
+            feedback("gate-run"),
+            source_stream="history",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_paid_reviews=3,
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        with self.repo.transaction() as conn:
+            self.repo._set_stop_reason(  # noqa: SLF001 - exact safety regression
+                conn,
+                "budget_state_unknown",
+                details={"evidence": "fixture"},
+                at=self.clock(),
+            )
+        self.repo.update_settings(daily_cap_usd="6.00", actor_id="admin")
+        self.assertEqual(
+            self.repo.progress_status()["stop_reason"],
+            "budget_state_unknown",
+        )
+        readback = self.repo.reconciliation_status()
+        self.assertEqual(
+            readback["transition_run_id"],
+            applied["sweep"]["transition_run_id"],
+        )
+        self.assertEqual(readback["run_max_paid_reviews"], 3)
+
+    def test_concurrent_limit_updates_accept_only_one_settings_revision(self) -> None:
+        initial = self.repo.settings()
+        revision = autoanswers_settings_revision(initial)
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+
+        def update(value: str) -> None:
+            barrier.wait()
+            try:
+                self.repo.update_settings(
+                    daily_cap_usd=value,
+                    expected_policy_epoch=initial.policy_epoch,
+                    expected_settings_revision=revision,
+                    actor_id=f"admin-{value}",
+                )
+                outcomes.append("saved")
+            except AutoanswersRuntimeError as exc:
+                outcomes.append(exc.code)
+
+        threads = [
+            threading.Thread(target=update, args=(value,))
+            for value in ("6.00", "7.00")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertCountEqual(
+            outcomes,
+            ["saved", "settings_revision_stale"],
+        )
+        self.assertIn(self.repo.settings().daily_cap_usd, {6.0, 7.0})
+
+    def test_operator_limit_validation_rejects_nonfinite_unsafe_and_conflicting_values(self) -> None:
+        invalid_changes = (
+            {"hourly_cap_usd": "NaN"},
+            {"hourly_cap_usd": "0"},
+            {"hourly_cap_usd": "10.01"},
+            {"daily_cap_usd": "50.01"},
+            {"monthly_cap_usd": "500.01"},
+            {"max_paid_reviews_per_hour": 201},
+            {"global_paid_review_concurrency": 5},
+            {"max_inflight_role_calls": 9},
+            {"max_materialized_processing_jobs": 101},
+            {"hourly_cap_usd": "6.00", "daily_cap_usd": "5.00"},
+            {
+                "global_paid_review_concurrency": 4,
+                "max_materialized_processing_jobs": 3,
+            },
+        )
+        for change in invalid_changes:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.repo.update_settings(actor_id="admin", **change)
 
     def test_local_list_defaults_to_50_and_supports_server_pagination_filters(self) -> None:
         for index in range(55):

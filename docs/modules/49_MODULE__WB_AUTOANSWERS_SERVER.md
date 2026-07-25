@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "The current runtime adds schema-v7 rolling run admission, literal cross-stage priority, bounded opaque-boundary retries and content-bearing five-star recovery while preserving the owner-confirmed initial snapshot, frozen bundle and existing run cap."
+update_note: "The current runtime adds server-validated persistent operator-limit controls with optimistic readback and next-tick budget resume while preserving schema-v7 rolling admission, the frozen bundle and the owner-confirmed active run cap."
 ---
 
 # WB Autoanswers Server v1
@@ -191,6 +191,36 @@ Current valid drafts are reused, in-flight jobs are not duplicated, stale result
 
 Defaults are `$0.50/hour`, `$5/day`, `$50/month`, 20 paid reviews/hour, paid-review concurrency 1, in-flight role-call concurrency 1, queue depth 5 and a `$0.10` atomic review reservation after removal of repeated media bytes. `BEGIN IMMEDIATE` makes reservation/claim concurrency-safe. Actual settled usage plus archived regeneration/failed-call cost and append-only corrections is retained per review. The reservation records the provider-call boundary: retry, timeout, terminal failure and lease loss release unused capacity, while a lease lost after provider entry latches paid processing fail-closed as `budget_state_unknown` until cost reconciliation.
 
+The admin-only operator settings envelope is server-owned and applies to the
+existing persisted schema-v7 settings row:
+
+| Limit | Minimum | Maximum |
+| --- | ---: | ---: |
+| USD/hour | `$0.01` | `$10.00` |
+| USD/day | `$0.01` | `$50.00` |
+| USD/month | `$0.01` | `$500.00` |
+| paid reviews/hour | `1` | `200` |
+| concurrent paid reviews | `1` | `4` |
+| concurrent role calls | `1` | `8` |
+| materialized processing queue depth | `1` | `100` |
+
+Every value must be finite and positive. Monetary limits additionally satisfy
+`hour <= day <= month`; both concurrency limits must not exceed the processing
+queue depth. The server rejects zero, negative, fractional integer values,
+`NaN`, infinities, out-of-envelope and contradictory combinations. Settings
+survive service restart and deploy because the UI and API mutate only the
+server-owned SQLite row; no browser-local state is authoritative.
+
+Global limit changes do not create a new transition run, change its immutable
+initial membership or modify its owner-confirmed `run_max_usd` /
+`run_max_paid_reviews`. A scheduler claim always re-evaluates current global
+budget settings. Therefore a run paused only by `hourly_budget_reached`,
+`daily_budget_reached` or `monthly_budget_reached` resumes on the next normal
+worker tick after a sufficient increase. A decrease below already consumed or
+reserved usage preserves all evidence and leaves the corresponding pause in
+place. Run caps, `budget_state_unknown`, provider quota, holds, reservations and
+other safety gates remain effective and are never cleared by a settings write.
+
 The legacy incident's unsupported `$1.00` settlement is removed from confirmed actual by an append-only adjustment but remains displayed as `Legacy без usage` and conservatively held against the applicable caps. It is never silently relabelled as measured provider cost. A current provider-started crash boundary is reconciled only by `budget_reconciliation_v1`: the read-only plan binds the exact reservation/job evidence and maximum per-review reservation into a fingerprint; apply appends the conservative hold and audit, then clears `budget_state_unknown` only after readback proves no unresolved boundary. It never writes zero or guessed actual cost.
 
 The reconciliation plan also exposes its pre-change digest, exact affected-row
@@ -263,7 +293,7 @@ and zero unresolved provider-cost boundaries. The release appends one audit
 event and is idempotent. It does not clear `reservation_missing`,
 `budget_state_unknown`, quota or other provider/safety latches.
 
-The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. It also shows immutable initial membership, admitted-since-start totals by content class and rating, current exact total, last admission refresh/batch, current literal priority bucket and pause/error reason. Queue progress uses the full current admitted set and is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`. Ordinary budget/rate/backoff pauses render as the yellow `Работает · штатная пауза`, even if the one-shot service's last exit presentation is error; genuine lifecycle drift and fatal reasons remain red.
+The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. The main Autoanswers card has a visible `Настроить лимиты` action which opens one opaque dark modal for all seven global limits. The former technical disclosure links to that same modal instead of duplicating controls. An hourly/daily/monthly budget pause adds `Увеличить лимит`, opens the same modal, focuses the corresponding field and shows `used + reserved / current / new`. The modal displays the active transition-run cap separately as read-only with an explanation that an ordinary global-settings save cannot enlarge it. It also shows immutable initial membership, admitted-since-start totals by content class and rating, current exact total, last admission refresh/batch, current literal priority bucket and pause/error reason. Queue progress uses the full current admitted set and is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`. Ordinary budget/rate/backoff pauses render as the yellow `Работает · штатная пауза`, even if the one-shot service's last exit presentation is error; genuine lifecycle drift and fatal reasons remain red.
 
 Policy v3 classifies a current version as `content_bearing` when trimmed text, pros, cons, any non-empty tag, photo or video exists. Canonical media rows and `has_photo`/`has_video` are conservative positive evidence. Only a review with none of those surfaces and a rating 1–5 is `rating_only`; malformed or contradictory data is `indeterminate` and fails closed to review. True `rating_only` continues to use the unchanged owner-approved v2 template contract, costs `$0` and never invokes Node/OpenAI. The frozen v1.4.2 prefilter is not modified.
 
@@ -285,7 +315,7 @@ Exact publication evidence is committed before transport. Every HTTP success/err
 
 ## UI and API
 
-Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v4`; local list/filter/detail/settings expose the canonical classification, rolling membership/current-priority evidence, exact all/content progress counters and server-owned lifecycle. Settings POST requires `expected_policy_epoch`; automated apply additionally requires its preview. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
+Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v4`; local list/filter/detail/settings expose the canonical classification, rolling membership/current-priority evidence, exact all/content progress counters and server-owned lifecycle. Settings GET includes `settings_revision` and the authoritative operator-limit bounds. Every settings POST requires `expected_policy_epoch`; a global-limit mutation additionally requires the exact `expected_settings_revision`. The server hashes the complete persisted settings projection, rejects a stale epoch or revision, performs a fresh repository read after the write and returns only exact requested fields in `confirmed_limits`. The client reports success only when that readback equals every requested value. Automated apply additionally requires its preview and cannot be combined with a global-limit mutation. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
 
 The first `Отзывы → Отзывы` screen reads SQLite immediately, defaults to 50 rows and uses server pagination/filters, including `Без ответа Wildberries`, server-side `Ответ системы` states and `content_bearing`/`rating_only`/`indeterminate` classification. Table system replies remain in a fixed-height dark internal scroller with a copy-only button. Missing replies have a compact neutral state. The obsolete independent `Исторический backlog` control is hidden and disabled; its legacy backend routes fail closed so it cannot bypass the capped preview-bound transition action.
 
@@ -377,6 +407,13 @@ background worker progress but performs zero business mutations itself. It
 still requires compact/narrow/dark render and zero 5xx/page/console errors. Any
 publication proof comes only from normal policy-allowed flow and mandatory WB
 readback.
+
+The default production UI Flow remains read-only. For this limit-control LOOP,
+the explicit `--verify-limit-save` flag additionally opens the modal from the
+main card, captures its opaque dark render, submits exactly the seven current
+values once, confirms the new settings revision and exact readback, and proves
+that every global value and the active transition-run cap stayed unchanged.
+It never substitutes a dangerous value or creates a preview/run.
 
 Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v7 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 

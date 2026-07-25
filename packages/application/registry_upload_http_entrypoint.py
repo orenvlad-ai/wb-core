@@ -39,7 +39,12 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
+from packages.application.wb_autoanswers_runtime import (
+    AutoanswersRepository,
+    AutoanswersRuntimeError,
+    autoanswers_operator_limits_contract,
+    autoanswers_settings_revision,
+)
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
@@ -207,6 +212,30 @@ from packages.contracts.supplier_shipments import (
     TRADE_DOCUMENT_TYPE_CONTRACT,
     TRADE_DOCUMENT_TYPE_INVOICE,
 )
+
+
+AUTOANSWERS_OPERATOR_LIMIT_FIELDS = frozenset(
+    {
+        "hourly_cap_usd",
+        "daily_cap_usd",
+        "monthly_cap_usd",
+        "max_paid_reviews_per_hour",
+        "global_paid_review_concurrency",
+        "max_inflight_role_calls",
+        "max_materialized_processing_jobs",
+    }
+)
+
+
+def _autoanswers_confirmed_limits(
+    settings: Any,
+    requested_fields: Iterable[str],
+) -> dict[str, Any]:
+    return {
+        field: getattr(settings, field)
+        for field in sorted(set(requested_fields))
+        if field in AUTOANSWERS_OPERATOR_LIMIT_FIELDS
+    }
 
 
 def _timestamp_as_utc(value: str) -> datetime:
@@ -1656,6 +1685,8 @@ class RegistryUploadHttpEntrypoint:
             "contract_name": "sheet_vitrina_v1_feedback_autoanswers_settings",
             "contract_version": AUTOANSWERS_CONTRACT_VERSION,
             "settings": asdict(settings),
+            "settings_revision": autoanswers_settings_revision(settings),
+            "limits_contract": autoanswers_operator_limits_contract(),
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),
@@ -1667,17 +1698,42 @@ class RegistryUploadHttpEntrypoint:
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
         current = self.autoanswers_repository.settings()
+        requested_limit_fields = AUTOANSWERS_OPERATOR_LIMIT_FIELDS.intersection(
+            payload.keys()
+        )
         if isinstance(payload.get("expected_policy_epoch"), bool):
-            raise ValueError("expected_policy_epoch must be an integer")
+            raise ValueError("Ожидаемый policy epoch должен быть целым числом")
         try:
             expected_policy_epoch = int(payload.get("expected_policy_epoch"))
         except (TypeError, ValueError) as exc:
-            raise ValueError("expected_policy_epoch must be an integer") from exc
+            raise ValueError(
+                "Ожидаемый policy epoch должен быть целым числом"
+            ) from exc
         if expected_policy_epoch != int(current.policy_epoch):
             raise AutoanswersRuntimeError(
-                "Autoanswers settings changed; reload before applying",
+                "Настройки Autoanswers уже изменились. Обновите данные и повторите сохранение.",
                 code="policy_epoch_stale",
             )
+        if requested_limit_fields:
+            for field in requested_limit_fields:
+                if payload.get(field) is None or isinstance(payload.get(field), bool):
+                    raise ValueError(
+                        "Все редактируемые лимиты должны быть заполнены числами"
+                    )
+            expected_settings_revision = str(
+                payload.get("expected_settings_revision") or ""
+            ).strip()
+            if not expected_settings_revision:
+                raise ValueError(
+                    "Не удалось подтвердить версию настроек. Обновите данные и повторите сохранение."
+                )
+            if expected_settings_revision != autoanswers_settings_revision(
+                current
+            ):
+                raise AutoanswersRuntimeError(
+                    "Лимиты Autoanswers уже изменились. Обновите данные и повторите сохранение.",
+                    code="settings_revision_stale",
+                )
         suspended_by_master, master_policy = self._autoanswers_master_suspension(
             require_confirmed=True
         )
@@ -1687,6 +1743,10 @@ class RegistryUploadHttpEntrypoint:
             if selector_state != "off" and selector_state not in AUTOANSWER_MODES:
                 raise ValueError("unsupported autoanswers selector state")
             if selector_state in {"draft_only", "auto_safe", "auto_all"}:
+                if requested_limit_fields:
+                    raise ValueError(
+                        "Сначала сохраните глобальные лимиты отдельно, затем примените автоматический режим"
+                    )
                 transition = self.autoanswers_repository.apply_mode_transition(
                     selector_state,
                     actor_id=actor_id,
@@ -1731,6 +1791,12 @@ class RegistryUploadHttpEntrypoint:
                         "max_materialized_processing_jobs"
                     ),
                     warning_ratio=payload.get("warning_ratio"),
+                    expected_policy_epoch=expected_policy_epoch,
+                    expected_settings_revision=(
+                        expected_settings_revision
+                        if requested_limit_fields
+                        else None
+                    ),
                     actor_id=actor_id,
                 )
         else:
@@ -1752,8 +1818,30 @@ class RegistryUploadHttpEntrypoint:
                 max_inflight_role_calls=payload.get("max_inflight_role_calls"),
                 max_materialized_processing_jobs=payload.get("max_materialized_processing_jobs"),
                 warning_ratio=payload.get("warning_ratio"),
+                expected_policy_epoch=expected_policy_epoch,
+                expected_settings_revision=(
+                    expected_settings_revision
+                    if requested_limit_fields
+                    else None
+                ),
                 actor_id=actor_id,
             )
+        settings = self.autoanswers_repository.settings()
+        confirmed_limits = _autoanswers_confirmed_limits(
+            settings,
+            requested_limit_fields,
+        )
+        for field, confirmed in confirmed_limits.items():
+            requested = payload[field]
+            try:
+                matches = float(confirmed) == float(requested)
+            except (TypeError, ValueError, OverflowError):
+                matches = False
+            if not matches:
+                raise AutoanswersRuntimeError(
+                    "Сервер сохранил другое значение лимита. Обновите данные перед повторной попыткой.",
+                    code="settings_readback_unconfirmed",
+                )
         if reconciliation is None:
             reconciliation = self.autoanswers_repository.reconciliation_status()
         try:
@@ -1789,6 +1877,9 @@ class RegistryUploadHttpEntrypoint:
         )
         return {
             "settings": asdict(settings),
+            "settings_revision": autoanswers_settings_revision(settings),
+            "limits_contract": autoanswers_operator_limits_contract(),
+            "confirmed_limits": confirmed_limits,
             "budget": self.autoanswers_repository.budget_status(),
             "selector_state": settings.mode if settings.master_enabled else "off",
             "runtime": self.autoanswers_repository.operational_status(),

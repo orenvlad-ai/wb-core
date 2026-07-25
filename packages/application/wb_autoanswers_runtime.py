@@ -71,6 +71,14 @@ DEFAULT_GLOBAL_PAID_REVIEW_CONCURRENCY = 1
 DEFAULT_MAX_INFLIGHT_ROLE_CALLS = 1
 DEFAULT_MAX_MATERIALIZED_PROCESSING_JOBS = 5
 DEFAULT_WARNING_RATIO = Decimal("0.70")
+MIN_OPERATOR_BUDGET_CAP_USD = Decimal("0.01")
+MAX_OPERATOR_HOURLY_CAP_USD = Decimal("10.00")
+MAX_OPERATOR_DAILY_CAP_USD = Decimal("50.00")
+MAX_OPERATOR_MONTHLY_CAP_USD = Decimal("500.00")
+MAX_OPERATOR_PAID_REVIEWS_PER_HOUR = 200
+MAX_OPERATOR_PAID_REVIEW_CONCURRENCY = 4
+MAX_OPERATOR_INFLIGHT_ROLE_CALLS = 8
+MAX_OPERATOR_MATERIALIZED_PROCESSING_JOBS = 100
 # Conservative upper reservation covers the frozen pipeline's bounded normal
 # path plus two rewrite/validator cycles.  Settlement releases the difference.
 DEFAULT_JOB_RESERVATION_USD = Decimal("0.10")
@@ -435,9 +443,147 @@ def _force_off_from_env(env: Mapping[str, str] | None = None) -> bool:
 
 def _money(value: Any) -> Decimal:
     try:
-        return Decimal(str(value or "0")).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+        amount = Decimal(str(value or "0"))
+        if not amount.is_finite():
+            raise ValueError("money value must be finite")
+        return amount.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
     except Exception as exc:
         raise ValueError(f"invalid money value: {value}") from exc
+
+
+def autoanswers_operator_limits_contract() -> dict[str, Any]:
+    """Return the server-owned editable-limit bounds exposed to operators."""
+
+    return {
+        "contract_name": "wb_autoanswers_operator_limits_v1",
+        "fields": {
+            "hourly_cap_usd": {
+                "minimum": float(MIN_OPERATOR_BUDGET_CAP_USD),
+                "maximum": float(MAX_OPERATOR_HOURLY_CAP_USD),
+                "step": 0.01,
+            },
+            "daily_cap_usd": {
+                "minimum": float(MIN_OPERATOR_BUDGET_CAP_USD),
+                "maximum": float(MAX_OPERATOR_DAILY_CAP_USD),
+                "step": 0.01,
+            },
+            "monthly_cap_usd": {
+                "minimum": float(MIN_OPERATOR_BUDGET_CAP_USD),
+                "maximum": float(MAX_OPERATOR_MONTHLY_CAP_USD),
+                "step": 0.01,
+            },
+            "max_paid_reviews_per_hour": {
+                "minimum": 1,
+                "maximum": MAX_OPERATOR_PAID_REVIEWS_PER_HOUR,
+                "step": 1,
+            },
+            "global_paid_review_concurrency": {
+                "minimum": 1,
+                "maximum": MAX_OPERATOR_PAID_REVIEW_CONCURRENCY,
+                "step": 1,
+            },
+            "max_inflight_role_calls": {
+                "minimum": 1,
+                "maximum": MAX_OPERATOR_INFLIGHT_ROLE_CALLS,
+                "step": 1,
+            },
+            "max_materialized_processing_jobs": {
+                "minimum": 1,
+                "maximum": MAX_OPERATOR_MATERIALIZED_PROCESSING_JOBS,
+                "step": 1,
+            },
+        },
+        "relationships": [
+            "hourly_cap_usd <= daily_cap_usd <= monthly_cap_usd",
+            "global_paid_review_concurrency <= max_materialized_processing_jobs",
+            "max_inflight_role_calls <= max_materialized_processing_jobs",
+        ],
+        "active_run_cap_mutable": False,
+    }
+
+
+def autoanswers_settings_revision(settings: AutoanswersSettings) -> str:
+    """Hash only the complete persisted settings projection."""
+
+    persisted = {
+        key: getattr(settings, key)
+        for key in (
+            "master_enabled",
+            "mode",
+            "enable_epoch",
+            "policy_epoch",
+            "enabled_at",
+            "daily_cap_usd",
+            "monthly_cap_usd",
+            "hourly_cap_usd",
+            "max_paid_reviews_per_hour",
+            "global_paid_review_concurrency",
+            "max_inflight_role_calls",
+            "max_materialized_processing_jobs",
+            "warning_ratio",
+            "max_reservation_per_review_usd",
+            "policy_version",
+            "updated_at",
+        )
+    }
+    encoded = json.dumps(
+        persisted,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _autoanswers_settings_from_row(
+    row: Mapping[str, Any],
+    *,
+    env: Mapping[str, str],
+) -> AutoanswersSettings:
+    force_off = _force_off_from_env(env)
+    enabled = bool(row["master_enabled"])
+    return AutoanswersSettings(
+        master_enabled=enabled,
+        force_off=force_off,
+        effective_enabled=enabled and not force_off,
+        mode=str(row["mode"]),
+        enable_epoch=int(row["enable_epoch"]),
+        policy_epoch=int(row["policy_epoch"]),
+        enabled_at=str(row["enabled_at"]) if row["enabled_at"] else None,
+        daily_cap_usd=float(row["daily_cap_usd"]),
+        monthly_cap_usd=float(row["monthly_cap_usd"]),
+        hourly_cap_usd=float(row["hourly_cap_usd"]),
+        max_paid_reviews_per_hour=int(row["max_paid_reviews_per_hour"]),
+        global_paid_review_concurrency=int(row["global_paid_review_concurrency"]),
+        max_inflight_role_calls=int(row["max_inflight_role_calls"]),
+        max_materialized_processing_jobs=int(
+            row["max_materialized_processing_jobs"]
+        ),
+        warning_ratio=float(row["warning_ratio"]),
+        max_reservation_per_review_usd=float(
+            row["max_reservation_per_review_usd"]
+        ),
+        policy_version=str(row["policy_version"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _bounded_operator_integer(value: Any, *, label: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label}: укажите целое число от 1 до {maximum}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{label}: укажите целое число от 1 до {maximum}"
+        ) from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label}: укажите целое число от 1 до {maximum}")
+    if isinstance(value, str) and str(parsed) != value.strip().lstrip("+"):
+        raise ValueError(f"{label}: укажите целое число от 1 до {maximum}")
+    if parsed < 1 or parsed > maximum:
+        raise ValueError(f"{label}: допустимо от 1 до {maximum}")
+    return parsed
 
 
 def _progress_percent(numerator: int, denominator: int) -> float | None:
@@ -1375,27 +1521,9 @@ class AutoanswersRepository:
             row = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton = 1").fetchone()
         if row is None:
             raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
-        force_off = _force_off_from_env(self.env)
-        enabled = bool(row["master_enabled"])
-        return AutoanswersSettings(
-            master_enabled=enabled,
-            force_off=force_off,
-            effective_enabled=enabled and not force_off,
-            mode=str(row["mode"]),
-            enable_epoch=int(row["enable_epoch"]),
-            policy_epoch=int(row["policy_epoch"]),
-            enabled_at=str(row["enabled_at"]) if row["enabled_at"] else None,
-            daily_cap_usd=float(row["daily_cap_usd"]),
-            monthly_cap_usd=float(row["monthly_cap_usd"]),
-            hourly_cap_usd=float(row["hourly_cap_usd"]),
-            max_paid_reviews_per_hour=int(row["max_paid_reviews_per_hour"]),
-            global_paid_review_concurrency=int(row["global_paid_review_concurrency"]),
-            max_inflight_role_calls=int(row["max_inflight_role_calls"]),
-            max_materialized_processing_jobs=int(row["max_materialized_processing_jobs"]),
-            warning_ratio=float(row["warning_ratio"]),
-            max_reservation_per_review_usd=float(row["max_reservation_per_review_usd"]),
-            policy_version=str(row["policy_version"]),
-            updated_at=str(row["updated_at"]),
+        return _autoanswers_settings_from_row(
+            row,
+            env=self.env,
         )
 
     def update_settings(
@@ -1411,6 +1539,8 @@ class AutoanswersRepository:
         max_inflight_role_calls: int | None = None,
         max_materialized_processing_jobs: int | None = None,
         warning_ratio: Any | None = None,
+        expected_policy_epoch: int | None = None,
+        expected_settings_revision: str | None = None,
         actor_id: str,
     ) -> AutoanswersSettings:
         actor = _clean_text(actor_id)
@@ -1421,6 +1551,27 @@ class AutoanswersRepository:
             current = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton = 1").fetchone()
             if current is None:
                 raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
+            current_settings = _autoanswers_settings_from_row(
+                current,
+                env=self.env,
+            )
+            if (
+                expected_policy_epoch is not None
+                and int(expected_policy_epoch) != current_settings.policy_epoch
+            ):
+                raise AutoanswersRuntimeError(
+                    "Настройки Autoanswers уже изменились. Обновите данные и повторите сохранение.",
+                    code="policy_epoch_stale",
+                )
+            if (
+                expected_settings_revision is not None
+                and str(expected_settings_revision)
+                != autoanswers_settings_revision(current_settings)
+            ):
+                raise AutoanswersRuntimeError(
+                    "Лимиты Autoanswers уже изменились. Обновите данные и повторите сохранение.",
+                    code="settings_revision_stale",
+                )
             next_master = bool(current["master_enabled"]) if master_enabled is None else bool(master_enabled)
             if next_master and not bool(current["master_enabled"]) and _force_off_from_env(self.env):
                 raise AutoanswersRuntimeError(
@@ -1431,16 +1582,74 @@ class AutoanswersRepository:
             daily = _money(current["daily_cap_usd"] if daily_cap_usd is None else daily_cap_usd)
             monthly = _money(current["monthly_cap_usd"] if monthly_cap_usd is None else monthly_cap_usd)
             hourly = _money(current["hourly_cap_usd"] if hourly_cap_usd is None else hourly_cap_usd)
-            paid_per_hour = int(current["max_paid_reviews_per_hour"] if max_paid_reviews_per_hour is None else max_paid_reviews_per_hour)
-            paid_concurrency = int(current["global_paid_review_concurrency"] if global_paid_review_concurrency is None else global_paid_review_concurrency)
-            role_concurrency = int(current["max_inflight_role_calls"] if max_inflight_role_calls is None else max_inflight_role_calls)
-            materialized_limit = int(current["max_materialized_processing_jobs"] if max_materialized_processing_jobs is None else max_materialized_processing_jobs)
+            paid_per_hour = _bounded_operator_integer(
+                current["max_paid_reviews_per_hour"]
+                if max_paid_reviews_per_hour is None
+                else max_paid_reviews_per_hour,
+                label="Платных отзывов в час",
+                maximum=MAX_OPERATOR_PAID_REVIEWS_PER_HOUR,
+            )
+            paid_concurrency = _bounded_operator_integer(
+                current["global_paid_review_concurrency"]
+                if global_paid_review_concurrency is None
+                else global_paid_review_concurrency,
+                label="Одновременных платных отзывов",
+                maximum=MAX_OPERATOR_PAID_REVIEW_CONCURRENCY,
+            )
+            role_concurrency = _bounded_operator_integer(
+                current["max_inflight_role_calls"]
+                if max_inflight_role_calls is None
+                else max_inflight_role_calls,
+                label="Одновременных role calls",
+                maximum=MAX_OPERATOR_INFLIGHT_ROLE_CALLS,
+            )
+            materialized_limit = _bounded_operator_integer(
+                current["max_materialized_processing_jobs"]
+                if max_materialized_processing_jobs is None
+                else max_materialized_processing_jobs,
+                label="Глубина processing queue",
+                maximum=MAX_OPERATOR_MATERIALIZED_PROCESSING_JOBS,
+            )
             ratio = Decimal(str(current["warning_ratio"] if warning_ratio is None else warning_ratio))
-            if hourly <= 0 or daily <= 0 or monthly <= 0 or daily < hourly or monthly < daily:
-                raise ValueError("budget caps must be positive and hourly <= daily <= monthly")
-            if min(paid_per_hour, paid_concurrency, role_concurrency, materialized_limit) < 1:
-                raise ValueError("throughput limits must be positive")
-            if ratio <= 0 or ratio >= 1:
+            if (
+                hourly < MIN_OPERATOR_BUDGET_CAP_USD
+                or hourly > MAX_OPERATOR_HOURLY_CAP_USD
+            ):
+                raise ValueError(
+                    "USD в час: допустимо от 0,01 до "
+                    f"{MAX_OPERATOR_HOURLY_CAP_USD:.2f}"
+                )
+            if (
+                daily < MIN_OPERATOR_BUDGET_CAP_USD
+                or daily > MAX_OPERATOR_DAILY_CAP_USD
+            ):
+                raise ValueError(
+                    "USD в день: допустимо от 0,01 до "
+                    f"{MAX_OPERATOR_DAILY_CAP_USD:.2f}"
+                )
+            if (
+                monthly < MIN_OPERATOR_BUDGET_CAP_USD
+                or monthly > MAX_OPERATOR_MONTHLY_CAP_USD
+            ):
+                raise ValueError(
+                    "USD в месяц: допустимо от 0,01 до "
+                    f"{MAX_OPERATOR_MONTHLY_CAP_USD:.2f}"
+                )
+            if daily < hourly or monthly < daily:
+                raise ValueError(
+                    "Лимиты противоречат друг другу: USD в час ≤ USD в день ≤ USD в месяц"
+                )
+            if paid_concurrency > materialized_limit:
+                raise ValueError(
+                    "Глубина processing queue не может быть меньше числа "
+                    "одновременных платных отзывов"
+                )
+            if role_concurrency > materialized_limit:
+                raise ValueError(
+                    "Глубина processing queue не может быть меньше числа "
+                    "одновременных role calls"
+                )
+            if not ratio.is_finite() or ratio <= 0 or ratio >= 1:
                 raise ValueError("warning_ratio must be between 0 and 1")
             epoch = int(current["enable_epoch"])
             policy_epoch = int(current["policy_epoch"])
