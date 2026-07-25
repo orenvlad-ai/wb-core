@@ -84,6 +84,15 @@ python3 apps/wb_autoanswers_rolling_recovery.py apply \
   --expected-fingerprint sha256:<exact-plan>
 ```
 
+The fingerprint binds the exact candidate projections, run/count scope and
+verified backup identity. Live publication/cost/hold aggregates are captured
+in the separate `pre_change_digest`; unrelated activity before apply may
+change that digest without invalidating unchanged target approval. Apply still
+acquires `BEGIN IMMEDIATE`, captures the current non-target snapshot and rolls
+back unless the same snapshot survives all bounded writes. This separation
+keeps the runner usable while the automatic queue is live without weakening
+target drift or non-target protection.
+
 The runner accepts only current exact unanswered, unpublished rows with no
 cost/publication/revision conflict. For the Node incident it may select more
 than the newest observed failure when older exact terminal rows were adopted

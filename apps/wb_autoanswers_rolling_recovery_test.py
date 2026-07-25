@@ -65,6 +65,11 @@ class RollingRecoveryTest(unittest.TestCase):
                 source_stream="archive",
                 run_kind="backfill",
             )
+            repo.upsert_feedback(
+                feedback("unrelated-rating", rating=5),
+                source_stream="archive",
+                run_kind="backfill",
+            )
             preview = repo.preview_mode_transition(
                 "auto_all",
                 actor_id="admin",
@@ -130,7 +135,30 @@ class RollingRecoveryTest(unittest.TestCase):
                 )
             self.assertTrue(plan["coverage_confirmed"])
             self.assertTrue(plan["schema_backup"]["verified"])
-            before = dict(plan["non_target_snapshot"])
+            repo.reconcile_policy_sweep_once(worker_id="reconcile")
+            unrelated = repo.claim_processing_job(worker_id="worker")
+            self.assertEqual(unrelated["feedback_id"], "unrelated-rating")
+            repo.complete_rating_only_template(
+                unrelated["processing_key"],
+                worker_id="worker",
+            )
+            with _open(runtime_dir, read_only=True) as conn:
+                drifted_plan = build_plan(
+                    conn,
+                    runtime_dir=runtime_dir,
+                    transition_run_id=run_id,
+                    expected_empty=1,
+                    expected_node=1,
+                )
+            self.assertEqual(
+                plan["plan_fingerprint"],
+                drifted_plan["plan_fingerprint"],
+            )
+            self.assertNotEqual(
+                plan["pre_change_digest"],
+                drifted_plan["pre_change_digest"],
+            )
+            before_apply = dict(drifted_plan["non_target_snapshot"])
             applied_recovery = apply_plan(
                 runtime_dir,
                 transition_run_id=run_id,
@@ -147,6 +175,7 @@ class RollingRecoveryTest(unittest.TestCase):
                     """
                     SELECT feedback_id,state,last_error_code,attempts
                     FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                    WHERE feedback_id IN ('node-exit','tagged-five')
                     ORDER BY feedback_id
                     """
                 ).fetchall()
@@ -173,7 +202,7 @@ class RollingRecoveryTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(revisions, 2)
-            self.assertEqual(publications, 0)
+            self.assertEqual(publications, 1)
             self.assertEqual(legacy_holds, 1)
 
             with _open(runtime_dir, read_only=True) as conn:
@@ -185,7 +214,7 @@ class RollingRecoveryTest(unittest.TestCase):
                     expected_node=0,
                 )
             self.assertFalse(any(after_plan["candidates"].values()))
-            self.assertEqual(before, after_plan["non_target_snapshot"])
+            self.assertEqual(before_apply, after_plan["non_target_snapshot"])
             replay = apply_plan(
                 runtime_dir,
                 transition_run_id=run_id,

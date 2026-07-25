@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Fingerprint-bound recovery for content-bearing skips and one opaque exit.
+"""Fingerprint-bound recovery for content-bearing skips and opaque exits.
 
 Dry-run/readback use SQLite ``mode=ro`` plus ``query_only``.  Apply requires
 the verified pre-v7 schema backup, changes only exact unpublished candidates,
 archives their prior projection, preserves cost/uncertainty/audit evidence,
-and creates no provider call, cost event, publication row or WB write.
+and creates no provider call, cost event, publication row or WB write.  The
+approval fingerprint binds only target evidence plus the verified backup;
+mutable unrelated aggregates are captured separately and protected by an
+apply-time transaction-local before/after invariant.
 """
 
 from __future__ import annotations
@@ -235,7 +238,7 @@ def build_plan(
 ) -> dict[str, Any]:
     candidates = _candidates(conn, transition_run_id=transition_run_id)
     backup = _verified_backup(runtime_dir)
-    identity = {
+    target_identity = {
         "contract": CONTRACT,
         "transition_run_id": transition_run_id,
         "expected": {
@@ -243,18 +246,25 @@ def build_plan(
             "node_process_exit_1": int(expected_node),
         },
         "candidates": candidates,
-        "non_target_snapshot": _non_target(conn),
         "schema_backup": backup,
     }
-    fingerprint = _fingerprint(identity)
+    non_target_snapshot = _non_target(conn)
+    fingerprint = _fingerprint(target_identity)
+    pre_change_digest = _fingerprint(
+        {
+            **target_identity,
+            "non_target_snapshot": non_target_snapshot,
+        }
+    )
     counts = {key: len(rows) for key, rows in candidates.items()}
     return {
-        **identity,
+        **target_identity,
+        "non_target_snapshot": non_target_snapshot,
         "captured_at": _now(),
         "candidate_counts": counts,
-        "coverage_confirmed": counts == identity["expected"],
+        "coverage_confirmed": counts == target_identity["expected"],
         "plan_fingerprint": fingerprint,
-        "pre_change_digest": fingerprint,
+        "pre_change_digest": pre_change_digest,
         "expected_affected_records": {
             "processing_jobs_requeued": sum(counts.values()),
             "job_revisions_appended": sum(counts.values()),
@@ -453,6 +463,7 @@ def apply_plan(
         "status": "reconciled",
         "idempotent": False,
         "plan_fingerprint": expected_fingerprint,
+        "pre_change_digest": plan["pre_change_digest"],
         "processing_keys": recovered,
         "affected_records": plan["expected_affected_records"],
         "non_target_invariants_preserved": True,
