@@ -13,6 +13,9 @@ from packages.application.supplier_expense_allocation import (  # noqa: E402
     project_supplier_document_expense_allocation,
     project_supplier_order_expense_allocation,
 )
+from packages.application.warehouse_functional import (  # noqa: E402
+    supplier_cost_summary_fields,
+)
 
 
 def main() -> None:
@@ -91,6 +94,41 @@ def main() -> None:
         raise AssertionError(
             f"fingerprint drift belongs to cost freshness, not allocation: {drift_projection}"
         )
+    freshness_breakdown = {
+        **uncertified_breakdown,
+        "expenses_complete": True,
+        "capital_rub": "900",
+        "average_unit_cost_rub": "90",
+        "component_controls": [],
+        "cost_replay": {
+            "queue_id": "queue-1",
+            "status": "queued",
+        },
+    }
+    if (
+        supplier_cost_summary_fields(freshness_breakdown)["cost_freshness"][
+            "status"
+        ]
+        != "awaiting_recalculation"
+        or project_supplier_order_expense_allocation(freshness_breakdown)[
+            "status"
+        ]
+        != "all"
+    ):
+        raise AssertionError(
+            "fully allocated arithmetic must remain green while cost replay is queued"
+        )
+    freshness_breakdown["cost_replay"] = {
+        "queue_id": "queue-1",
+        "status": "running",
+    }
+    if (
+        supplier_cost_summary_fields(freshness_breakdown)["cost_freshness"][
+            "status"
+        ]
+        != "recalculating"
+    ):
+        raise AssertionError("running target queue must have independent cost freshness")
     print("supplier_expense_allocation_smoke: OK")
 
 

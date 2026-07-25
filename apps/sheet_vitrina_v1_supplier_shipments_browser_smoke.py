@@ -496,7 +496,7 @@ def main() -> None:
                 if exact_cost_value in {"—", "-", "0", "0,00 ₽"}:
                     raise AssertionError(f"documents tab exact cost tile must show money value, got {exact_cost_value!r}")
                 expect(exact_cost_tile).to_have_attribute(
-                    "title", "Предварительная себестоимость — не все расходы учтены"
+                    "title", "Себестоимость ожидает пересчёта"
                 )
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel .document-label-primary")).to_contain_text("26GN390")

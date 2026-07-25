@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
@@ -5929,9 +5929,21 @@ class RegistryUploadDbBackedRuntime:
                 purchase_price_yuan = float(purchase_price_yuan)
             factory_box_size = item.get("factory_box_size")
             if factory_box_size not in (None, ""):
-                factory_box_size = int(factory_box_size)
-                if factory_box_size <= 0:
-                    raise ValueError("factory_box_size must be positive")
+                try:
+                    box_value = Decimal(str(factory_box_size))
+                except (InvalidOperation, ValueError):
+                    raise ValueError(
+                        "factory_box_size must be a positive integer"
+                    ) from None
+                if (
+                    not box_value.is_finite()
+                    or box_value <= 0
+                    or box_value != box_value.to_integral_value()
+                ):
+                    raise ValueError(
+                        "factory_box_size must be a positive integer"
+                    )
+                factory_box_size = int(box_value)
             else:
                 factory_box_size = None
             prepared_items.append(

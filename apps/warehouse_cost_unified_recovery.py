@@ -84,12 +84,12 @@ def main(argv: list[str] | None = None) -> int:
         runtime_dir=Path(args.runtime_dir).resolve()
     )
     if args.apply and args.fingerprint:
-        existing = _load_audit(runtime, args.fingerprint)
-        if existing is not None:
+        existing = _load_audit_record(runtime, args.fingerprint)
+        if existing is not None and existing["status"] == "complete":
             print(
                 json.dumps(
                     {
-                        **existing,
+                        **dict(existing.get("report") or {}),
                         "applied": False,
                         "idempotent": True,
                     },
@@ -99,7 +99,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-    plan = build_plan(runtime, args)
+        if existing is not None and existing["status"] in {"running", "failed"}:
+            plan = dict(existing["plan"])
+            if str(plan.get("fingerprint") or "") != str(args.fingerprint):
+                raise ValueError("stored unified recovery plan fingerprint changed")
+        else:
+            plan = build_plan(runtime, args)
+    else:
+        plan = build_plan(runtime, args)
     if not args.apply:
         print(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
@@ -262,176 +269,247 @@ def apply_plan(
             "idempotent": True,
         }
     _ensure_audit_schema(runtime)
+    prior_audit = _load_audit_record(
+        runtime, str(plan["fingerprint"])
+    )
+    resuming = bool(
+        prior_audit
+        and prior_audit.get("status") in {"running", "failed"}
+    )
+    _start_audit(runtime, plan)
     started = datetime.now(timezone.utc)
-    steps: dict[str, Any] = {}
-    with warehouse_functional_write_lock(
-        runtime.runtime_dir,
-        timeout_seconds=300,
-    ) as lock_info:
-        fresh = build_plan(runtime, args)
-        if str(fresh["fingerprint"]) != str(plan["fingerprint"]):
-            raise ValueError("unified recovery source changed after dry-run")
+    audit = _load_audit_record(runtime, str(plan["fingerprint"])) or {}
+    steps: dict[str, Any] = dict(audit.get("steps") or {})
+    try:
+        with warehouse_functional_write_lock(
+            runtime.runtime_dir,
+            timeout_seconds=300,
+        ) as lock_info:
+            fresh = build_plan(runtime, args)
+            if not resuming:
+                if str(fresh["fingerprint"]) != str(plan["fingerprint"]):
+                    raise ValueError("unified recovery source changed after dry-run")
+            else:
+                _validate_resume_invariants(plan, fresh)
 
-        bank_plan = dict(plan["bank"])
-        if bank_plan.get("would_change"):
-            document = runtime.load_supplier_financial_document(
-                supplier_order_id=args.shipment_id,
-                document_id=args.statement_document_id,
-            )
-            if document is None:
-                raise ValueError("bank statement disappeared before apply")
-            normalized = dict(document.get("normalized_parse") or {})
-            refreshed_import = dict(bank_plan["fresh_statement_import"])
-            refreshed_import["target_revision"] = str(
-                bank_plan["target_revision"]
-            )
-            refreshed_import["import_status"] = "preview_pending"
-            refreshed_import["confirmed_operation_ids"] = sorted(
-                {
-                    str(value)
-                    for value in bank_plan.get("already_imported_operation_ids")
-                    or []
-                    if str(value)
-                }
-            )
-            runtime.save_supplier_financial_document(
-                document={
-                    **document,
-                    "updated_at": _now(),
-                    "normalized_parse": {
-                        **normalized,
-                        "statement_import": refreshed_import,
-                    },
-                },
-                expense_lines=[
-                    dict(item) for item in document.get("expense_lines") or []
-                ],
-            )
-            steps["bank"] = (
-                SupplierFinancialDocumentsBlock(runtime=runtime)
-                .confirm_bank_fee_statement_import(
-                    args.shipment_id,
-                    args.statement_document_id,
-                    selected_operation_ids=[
-                        str(bank_plan["logical_fee_id"])
-                    ],
-                )
-            )
-        else:
-            steps["bank"] = {"applied": False, "idempotent": True}
-
-        box_plan = dict(plan["box"])
-        if box_plan.get("would_change"):
-            with sqlite3.connect(runtime.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                ensure_wb_supply_box_correction_schema(conn)
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for nm_id in box_plan.get("box_size_updates") or []:
-                        updated = conn.execute(
-                            """
-                            UPDATE sheet_vitrina_v1_nomenclature_items
-                            SET factory_box_size=?,updated_at=?
-                            WHERE nm_id=? AND factory_box_size IS NULL
-                            """,
-                            (
-                                int(args.factory_box_size),
-                                _now(),
-                                int(nm_id),
-                            ),
-                        )
-                        if int(updated.rowcount or 0) != 1:
-                            raise ValueError(
-                                f"factory box size drift for nmID {nm_id}"
-                            )
-                    steps["box"] = apply_unique_box_correction(
-                        conn,
-                        supply_id=str(args.box_supply_id),
-                        source_revision=str(box_plan["source_revision"]),
-                        solution=box_plan["solution"],
-                        actor=str(args.actor),
-                        created_at=_now(),
+            bank_plan = dict(plan["bank"])
+            if "bank" not in steps:
+                if bank_plan.get("would_change"):
+                    document = runtime.load_supplier_financial_document(
+                        supplier_order_id=args.shipment_id,
+                        document_id=args.statement_document_id,
                     )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
-        else:
-            steps["box"] = {"applied": False, "idempotent": True}
+                    if document is None:
+                        raise ValueError("bank statement disappeared before apply")
+                    normalized = dict(document.get("normalized_parse") or {})
+                    refreshed_import = dict(bank_plan["fresh_statement_import"])
+                    refreshed_import["target_revision"] = str(
+                        bank_plan["target_revision"]
+                    )
+                    refreshed_import["import_status"] = "preview_pending"
+                    refreshed_import["confirmed_operation_ids"] = sorted(
+                        {
+                            str(value)
+                            for value in bank_plan.get(
+                                "already_imported_operation_ids"
+                            )
+                            or []
+                            if str(value)
+                        }
+                    )
+                    runtime.save_supplier_financial_document(
+                        document={
+                            **document,
+                            "updated_at": _now(),
+                            "normalized_parse": {
+                                **normalized,
+                                "statement_import": refreshed_import,
+                            },
+                        },
+                        expense_lines=[
+                            dict(item)
+                            for item in document.get("expense_lines") or []
+                        ],
+                    )
+                    steps["bank"] = (
+                        SupplierFinancialDocumentsBlock(runtime=runtime)
+                        .confirm_bank_fee_statement_import(
+                            args.shipment_id,
+                            args.statement_document_id,
+                            selected_operation_ids=[
+                                str(bank_plan["logical_fee_id"])
+                            ],
+                        )
+                    )
+                else:
+                    steps["bank"] = {"applied": False, "idempotent": True}
+                _checkpoint_audit(runtime, plan, steps)
 
-        records = {
-            _record_supply_id(item): item
-            for item in runtime.list_wb_supplies_cache_records()
-        }
-        ledger = FfStockLedgerBlock(runtime=runtime)
-        physical_results = []
-        for item in plan["physical"]["supplies"]:
-            supply_id = str(item["supply_id"])
-            if item["already_debited"]:
-                physical_results.append(
-                    {"supply_id": supply_id, "idempotent": True}
+            box_plan = dict(plan["box"])
+            if "box" not in steps:
+                if box_plan.get("would_change"):
+                    with sqlite3.connect(runtime.db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        ensure_wb_supply_box_correction_schema(conn)
+                        conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            for nm_id in box_plan.get("box_size_updates") or []:
+                                updated = conn.execute(
+                                    """
+                                    UPDATE sheet_vitrina_v1_nomenclature_items
+                                    SET factory_box_size=?,updated_at=?
+                                    WHERE nm_id=? AND factory_box_size IS NULL
+                                    """,
+                                    (
+                                        int(args.factory_box_size),
+                                        _now(),
+                                        int(nm_id),
+                                    ),
+                                )
+                                if int(updated.rowcount or 0) != 1:
+                                    existing_size = conn.execute(
+                                        """
+                                        SELECT factory_box_size
+                                        FROM sheet_vitrina_v1_nomenclature_items
+                                        WHERE nm_id=?
+                                        """,
+                                        (int(nm_id),),
+                                    ).fetchone()
+                                    if (
+                                        existing_size is None
+                                        or int(existing_size["factory_box_size"] or 0)
+                                        != int(args.factory_box_size)
+                                    ):
+                                        raise ValueError(
+                                            f"factory box size drift for nmID {nm_id}"
+                                        )
+                            steps["box"] = apply_unique_box_correction(
+                                conn,
+                                supply_id=str(args.box_supply_id),
+                                source_revision=str(box_plan["source_revision"]),
+                                solution=box_plan["solution"],
+                                actor=str(args.actor),
+                                created_at=_now(),
+                            )
+                            conn.commit()
+                        except Exception:
+                            conn.rollback()
+                            raise
+                else:
+                    steps["box"] = {"applied": False, "idempotent": True}
+                _checkpoint_audit(runtime, plan, steps)
+
+            if "physical" not in steps:
+                records = {
+                    _record_supply_id(item): item
+                    for item in runtime.list_wb_supplies_cache_records()
+                }
+                ledger = FfStockLedgerBlock(runtime=runtime)
+                physical_results = []
+                for item in plan["physical"]["supplies"]:
+                    supply_id = str(item["supply_id"])
+                    if item.get("already_debited"):
+                        physical_results.append(
+                            {"supply_id": supply_id, "idempotent": True}
+                        )
+                        continue
+                    record = records.get(supply_id)
+                    if record is None:
+                        raise ValueError(
+                            f"selected WB supply disappeared before apply: {supply_id}"
+                        )
+                    result = ledger.record_wb_supply_debit(record) or {}
+                    if result.get("skip_reason") == "wb_supply_already_debited":
+                        result = {
+                            **result,
+                            "supply_id": supply_id,
+                            "idempotent": True,
+                        }
+                    if (
+                        not result.get("operation_id")
+                        and not result.get("idempotent")
+                    ):
+                        raise ValueError(
+                            f"physical debit was not created for {supply_id}: "
+                            + str(result.get("skip_reason") or "unknown")
+                        )
+                    physical_results.append(result)
+                steps["physical"] = physical_results
+                _checkpoint_audit(runtime, plan, steps)
+
+            if "factual_date" not in steps:
+                correction = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
+                job = correction.create_job(
+                    shipment_id=str(args.shipment_id),
+                    new_actual_shipment_date=str(args.actual_shipment_date),
+                    actor=str(args.actor),
                 )
-                continue
-            record = records.get(supply_id)
-            if record is None:
-                raise ValueError(
-                    f"selected WB supply disappeared before apply: {supply_id}"
+                if str(job.get("status") or "") == "zero_change":
+                    steps["factual_date"] = job
+                else:
+                    steps["factual_date"] = correction.run_job(
+                        str(job["correction_id"])
+                    )
+                factual_status = str(
+                    (steps["factual_date"] or {}).get("status") or ""
                 )
-            result = ledger.record_wb_supply_debit(record) or {}
-            if not result.get("operation_id"):
-                raise ValueError(
-                    f"physical debit was not created for {supply_id}: "
-                    + str(result.get("skip_reason") or "unknown")
+                if factual_status not in {"success", "zero_change"}:
+                    raise ValueError(
+                        "factual-date correction did not succeed: "
+                        + str(
+                            (steps["factual_date"] or {}).get(
+                                "error_message"
+                            )
+                            or factual_status
+                        )
+                    )
+                _checkpoint_audit(runtime, plan, steps)
+
+            stable_sources = [
+                f"supplier_shipment:{args.shipment_id}",
+                f"supplier_costs:{args.shipment_id}",
+                *[
+                    f"wb_supply:{supply_id}"
+                    for supply_id in sorted(
+                        {str(value) for value in args.supply_id}
+                    )
+                ],
+            ]
+            if args.box_supply_id:
+                stable_sources.append(f"wb_supply:{args.box_supply_id}")
+            if "functional" not in steps:
+                warehouse = WarehouseFunctionalBlock(runtime=runtime)
+                functional_plan = warehouse.build_targeted_recovery_plan(
+                    affected_nm_ids=plan["scope"]["affected_nm_ids"],
+                    stable_source_ids=stable_sources,
                 )
-            physical_results.append(result)
-        steps["physical"] = physical_results
+                steps["functional"] = warehouse.apply_plan(
+                    functional_plan,
+                    confirm_fingerprint=str(
+                        functional_plan["plan_fingerprint"]
+                    ),
+                )
+                _checkpoint_audit(runtime, plan, steps)
 
-        correction = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
-        job = correction.create_job(
-            shipment_id=str(args.shipment_id),
-            new_actual_shipment_date=str(args.actual_shipment_date),
-            actor=str(args.actor),
-        )
-        if str(job.get("status") or "") == "zero_change":
-            steps["factual_date"] = job
-        else:
-            steps["factual_date"] = correction.run_job(
-                str(job["correction_id"])
-            )
+            if "economics" not in steps:
+                economics_plan = build_functional_economics_backfill_plan(runtime)
+                steps["economics"] = apply_functional_economics_backfill_plan(
+                    runtime,
+                    economics_plan,
+                    confirm_fingerprint=str(
+                        economics_plan["plan_fingerprint"]
+                    ),
+                    backup_dir=(
+                        runtime.runtime_dir
+                        / "backups"
+                        / "targeted-economics"
+                    ).resolve(),
+                    target_scoped_undo=True,
+                )
+                _checkpoint_audit(runtime, plan, steps)
 
-        stable_sources = [
-            f"supplier_shipment:{args.shipment_id}",
-            f"supplier_costs:{args.shipment_id}",
-            *[
-                f"wb_supply:{supply_id}"
-                for supply_id in sorted({str(value) for value in args.supply_id})
-            ],
-        ]
-        if args.box_supply_id:
-            stable_sources.append(f"wb_supply:{args.box_supply_id}")
-        warehouse = WarehouseFunctionalBlock(runtime=runtime)
-        functional_plan = warehouse.build_targeted_recovery_plan(
-            affected_nm_ids=plan["scope"]["affected_nm_ids"],
-            stable_source_ids=stable_sources,
-        )
-        steps["functional"] = warehouse.apply_plan(
-            functional_plan,
-            confirm_fingerprint=str(functional_plan["plan_fingerprint"]),
-        )
-
-        economics_plan = build_functional_economics_backfill_plan(runtime)
-        steps["economics"] = apply_functional_economics_backfill_plan(
-            runtime,
-            economics_plan,
-            confirm_fingerprint=str(economics_plan["plan_fingerprint"]),
-            backup_dir=(
-                runtime.runtime_dir / "backups" / "targeted-economics"
-            ).resolve(),
-            target_scoped_undo=True,
-        )
-
-        after = build_plan(runtime, args)
-        report = {
+            after = build_plan(runtime, args)
+            report = {
             "contract_name": str(plan["contract_name"]),
             "plan_fingerprint": str(plan["fingerprint"]),
             "applied_at": _now(),
@@ -465,12 +543,15 @@ def apply_plan(
                 "full_database_copy": False,
                 "finance_raw_rows_read": 0,
             },
-        }
-        if after["would_change"]:
-            raise ValueError(
-                "unified recovery post-apply readback is not a no-op"
-            )
-        _save_audit(runtime, report)
+            }
+            if after["would_change"]:
+                raise ValueError(
+                    "unified recovery post-apply readback is not a no-op"
+                )
+            _save_audit(runtime, report)
+    except Exception as exc:
+        _mark_audit_failed(runtime, plan, steps, exc)
+        raise
     return {
         **report,
         "mode": "apply",
@@ -666,6 +747,32 @@ def _physical_plan(
         ).fetchall()
         if len(debit) > 1:
             raise ValueError(f"duplicate physical debits for supply {supply_id}")
+        debit_composition: dict[int, Decimal] = {}
+        if debit:
+            debit_composition = {
+                int(raw["nm_id"]): -Decimal(str(raw["quantity"]))
+                for raw in conn.execute(
+                    """
+                    SELECT nm_id,SUM(quantity_delta) quantity
+                    FROM sheet_vitrina_v1_ff_stock_operation_lines
+                    WHERE operation_id=?
+                    GROUP BY nm_id
+                    """,
+                    (str(debit[0]["operation_id"]),),
+                )
+            }
+            expected_debit = {
+                nm_id: Decimal(quantity)
+                for nm_id, quantity in composition.items()
+            }
+            if (
+                debit_composition != expected_debit
+                or Decimal(str(debit[0]["total_quantity_delta"]))
+                != -sum(expected_debit.values(), ZERO)
+            ):
+                raise ValueError(
+                    f"physical debit composition changed for supply {supply_id}"
+                )
         reservation = {
             int(raw["nm_id"]): Decimal(str(raw["quantity"]))
             for raw in conn.execute(
@@ -687,6 +794,10 @@ def _physical_plan(
             raise ValueError(
                 f"physical reserve identity changed for supply {supply_id}"
             )
+        if debit and reservation:
+            raise ValueError(
+                f"fulfilled physical debit still has a reserve for supply {supply_id}"
+            )
         supplies.append(
             {
                 "supply_id": supply_id,
@@ -702,6 +813,10 @@ def _physical_plan(
                 "debit_operation_id": (
                     str(debit[0]["operation_id"]) if debit else ""
                 ),
+                "debit_composition": {
+                    str(key): _money(value)
+                    for key, value in sorted(debit_composition.items())
+                },
             }
         )
     return {
@@ -958,24 +1073,49 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
 
 
 def _ensure_audit_schema(runtime: RegistryUploadDbBackedRuntime) -> None:
+    runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {AUDIT_TABLE}(
                 plan_fingerprint TEXT PRIMARY KEY,
-                applied_at TEXT NOT NULL,
-                report_json TEXT NOT NULL
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                applied_at TEXT,
+                plan_json TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                error TEXT
             )
             """
         )
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({AUDIT_TABLE})")
+        }
+        additions = {
+            "status": "TEXT NOT NULL DEFAULT 'complete'",
+            "started_at": "TEXT NOT NULL DEFAULT ''",
+            "updated_at": "TEXT NOT NULL DEFAULT ''",
+            "plan_json": "TEXT NOT NULL DEFAULT '{}'",
+            "steps_json": "TEXT NOT NULL DEFAULT '{}'",
+            "error": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE {AUDIT_TABLE} ADD COLUMN {name} {declaration}"
+                )
         conn.commit()
 
 
-def _load_audit(
+def _load_audit_record(
     runtime: RegistryUploadDbBackedRuntime,
     fingerprint: str,
 ) -> dict[str, Any] | None:
     with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
         exists = conn.execute(
             """
             SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
@@ -985,10 +1125,104 @@ def _load_audit(
         if not exists:
             return None
         row = conn.execute(
-            f"SELECT report_json FROM {AUDIT_TABLE} WHERE plan_fingerprint=?",
+            f"SELECT * FROM {AUDIT_TABLE} WHERE plan_fingerprint=?",
             (fingerprint,),
         ).fetchone()
-    return _loads(row[0], {}) if row else None
+    if row is None:
+        return None
+    item = dict(row)
+    return {
+        "plan_fingerprint": str(item.get("plan_fingerprint") or ""),
+        "status": str(item.get("status") or ""),
+        "started_at": str(item.get("started_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "applied_at": str(item.get("applied_at") or ""),
+        "plan": _loads(item.get("plan_json"), {}),
+        "steps": _loads(item.get("steps_json"), {}),
+        "report": _loads(item.get("report_json"), {}),
+        "error": str(item.get("error") or ""),
+    }
+
+
+def _start_audit(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+) -> None:
+    now = _now()
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            f"""
+            INSERT INTO {AUDIT_TABLE}(
+                plan_fingerprint,status,started_at,updated_at,applied_at,
+                plan_json,steps_json,report_json,error
+            ) VALUES(?,'running',?,?,NULL,?,'{{}}','{{}}',NULL)
+            ON CONFLICT(plan_fingerprint) DO UPDATE SET
+                status=CASE
+                    WHEN {AUDIT_TABLE}.status='complete' THEN 'complete'
+                    ELSE 'running'
+                END,
+                updated_at=excluded.updated_at,
+                error=CASE
+                    WHEN {AUDIT_TABLE}.status='complete'
+                    THEN {AUDIT_TABLE}.error
+                    ELSE NULL
+                END
+            """,
+            (
+                str(plan["fingerprint"]),
+                now,
+                now,
+                _json_value(plan),
+            ),
+        )
+        conn.commit()
+
+
+def _checkpoint_audit(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+    steps: Mapping[str, Any],
+) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        updated = conn.execute(
+            f"""
+            UPDATE {AUDIT_TABLE}
+            SET status='running',updated_at=?,steps_json=?,error=NULL
+            WHERE plan_fingerprint=? AND status IN ('running','failed')
+            """,
+            (
+                _now(),
+                _json_value(steps),
+                str(plan["fingerprint"]),
+            ),
+        )
+        if int(updated.rowcount or 0) != 1:
+            raise ValueError("unified recovery audit journal changed")
+        conn.commit()
+
+
+def _mark_audit_failed(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+    steps: Mapping[str, Any],
+    exc: Exception,
+) -> None:
+    _ensure_audit_schema(runtime)
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            f"""
+            UPDATE {AUDIT_TABLE}
+            SET status='failed',updated_at=?,steps_json=?,error=?
+            WHERE plan_fingerprint=? AND status<>'complete'
+            """,
+            (
+                _now(),
+                _json_value(steps),
+                str(exc).replace("\n", " ")[:1000],
+                str(plan["fingerprint"]),
+            ),
+        )
+        conn.commit()
 
 
 def _save_audit(
@@ -996,25 +1230,72 @@ def _save_audit(
     report: Mapping[str, Any],
 ) -> None:
     with sqlite3.connect(runtime.db_path) as conn:
-        conn.execute(
+        updated = conn.execute(
             f"""
-            INSERT INTO {AUDIT_TABLE}(
-                plan_fingerprint,applied_at,report_json
-            ) VALUES(?,?,?)
+            UPDATE {AUDIT_TABLE}
+            SET status='complete',updated_at=?,applied_at=?,
+                steps_json=?,report_json=?,error=NULL
+            WHERE plan_fingerprint=? AND status='running'
             """,
             (
-                str(report["plan_fingerprint"]),
+                _now(),
                 str(report["applied_at"]),
-                json.dumps(
-                    dict(report),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ),
+                _json_value(report.get("steps") or {}),
+                _json_value(report),
+                str(report["plan_fingerprint"]),
             ),
         )
+        if int(updated.rowcount or 0) != 1:
+            raise ValueError("unified recovery audit could not complete")
         conn.commit()
+
+
+def _validate_resume_invariants(
+    original: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    if dict(original.get("scope") or {}) != dict(current.get("scope") or {}):
+        raise ValueError("unified recovery scope changed during resume")
+    original_shipment = dict(original.get("shipment") or {})
+    current_shipment = dict(current.get("shipment") or {})
+    if (
+        str(original_shipment.get("planned_date") or "")
+        != str(current_shipment.get("planned_date") or "")
+        or str(current_shipment.get("actual_date_before") or "")
+        not in {
+            str(original_shipment.get("actual_date_before") or ""),
+            str(original_shipment.get("actual_date_after") or ""),
+        }
+    ):
+        raise ValueError("unified recovery shipment identity changed during resume")
+    original_supplies = {
+        str(item.get("supply_id") or ""): str(
+            item.get("source_revision") or ""
+        )
+        for item in (original.get("physical") or {}).get("supplies") or []
+    }
+    current_supplies = {
+        str(item.get("supply_id") or ""): str(
+            item.get("source_revision") or ""
+        )
+        for item in (current.get("physical") or {}).get("supplies") or []
+    }
+    if original_supplies != current_supplies:
+        raise ValueError("unified recovery WB supply revisions changed during resume")
+    if str((original.get("box") or {}).get("source_revision") or "") != str(
+        (current.get("box") or {}).get("source_revision") or ""
+    ):
+        raise ValueError("unified recovery box evidence changed during resume")
+
+
+def _json_value(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _loads(value: Any, fallback: Any) -> Any:

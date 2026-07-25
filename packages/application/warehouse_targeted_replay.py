@@ -874,6 +874,74 @@ class WarehouseTargetedSupplierReplay:
                     """,
                     (version_id, base_version_id),
                 )
+                snapshot = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_warehouse_wb_snapshots
+                    WHERE version_id=?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (base_version_id,),
+                ).fetchone()
+                if snapshot is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                            snapshot_id,version_id,fetched_at,snapshot_date,
+                            requested_nm_ids_json,pagination_complete,page_count,
+                            page_offsets_json,raw_row_count,raw_rows_digest,
+                            raw_rows_json,items_json,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            "wbsnap_target_"
+                            + fingerprint.removeprefix("sha256:")[:20],
+                            version_id,
+                            snapshot["fetched_at"],
+                            snapshot["snapshot_date"],
+                            snapshot["requested_nm_ids_json"],
+                            snapshot["pagination_complete"],
+                            snapshot["page_count"],
+                            snapshot["page_offsets_json"],
+                            snapshot["raw_row_count"],
+                            snapshot["raw_rows_digest"],
+                            snapshot["raw_rows_json"],
+                            snapshot["items_json"],
+                            now,
+                        ),
+                    )
+                for unmatched in conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_warehouse_unmatched_doprinato
+                    WHERE version_id=? ORDER BY unmatched_id
+                    """,
+                    (base_version_id,),
+                ).fetchall():
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_unmatched_doprinato(
+                            unmatched_id,version_id,source_id,business_date,nm_id,
+                            quantity,matched_quantity,reason,provenance_json,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            "unmatched_target_"
+                            + _hash(
+                                {
+                                    "version_id": version_id,
+                                    "base_id": unmatched["unmatched_id"],
+                                }
+                            )[:20],
+                            version_id,
+                            unmatched["source_id"],
+                            unmatched["business_date"],
+                            unmatched["nm_id"],
+                            unmatched["quantity"],
+                            unmatched["matched_quantity"],
+                            unmatched["reason"],
+                            unmatched["provenance_json"],
+                            now,
+                        ),
+                    )
                 conn.execute(
                     """
                     INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
@@ -912,6 +980,105 @@ class WarehouseTargetedSupplierReplay:
                         now,
                     ),
                 )
+                for stage in sorted(
+                    {
+                        str(item["warehouse_key"])
+                        for item in conn.execute(
+                            """
+                            SELECT DISTINCT warehouse_key
+                            FROM sheet_vitrina_v1_warehouse_functional_balances
+                            WHERE version_id=?
+                            """,
+                            (version_id,),
+                        ).fetchall()
+                    }
+                ):
+                    document_id = (
+                        "whdoc_target_"
+                        + _hash({"version_id": version_id, "stage": stage})[:20]
+                    )
+                    stage_rows = conn.execute(
+                        """
+                        SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
+                        WHERE version_id=? AND warehouse_key=?
+                        ORDER BY nm_id
+                        """,
+                        (version_id, stage),
+                    ).fetchall()
+                    quantity = sum(
+                        (_decimal(item["quantity"]) for item in stage_rows),
+                        ZERO,
+                    )
+                    capital = sum(
+                        (_decimal(item["capital_rub"]) for item in stage_rows),
+                        ZERO,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_functional_documents(
+                            document_id,version_id,warehouse_key,document_type,
+                            occurred_at,source_id,source_fingerprint,quantity,
+                            capital_rub,provenance_json,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            document_id,
+                            version_id,
+                            stage,
+                            "targeted_supplier_replay",
+                            now,
+                            publication_id,
+                            _fingerprint(
+                                [
+                                    {
+                                        "nm_id": int(item["nm_id"]),
+                                        "quantity": item["quantity"],
+                                        "capital_rub": item["capital_rub"],
+                                        "provenance_json": item["provenance_json"],
+                                    }
+                                    for item in stage_rows
+                                ]
+                            ),
+                            _text(quantity),
+                            _text(capital),
+                            _json(
+                                {
+                                    "base_version_id": base_version_id,
+                                    "stable_source_id": (
+                                        f"supplier_shipment:{shipment_id}"
+                                    ),
+                                    "targeted_replay": True,
+                                }
+                            ),
+                            now,
+                        ),
+                    )
+                    for item in stage_rows:
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_warehouse_functional_document_lines(
+                                line_id,document_id,version_id,nm_id,quantity,
+                                wac_rub,capital_rub,provenance_json,created_at
+                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                "whdocline_target_"
+                                + _hash(
+                                    {
+                                        "document_id": document_id,
+                                        "nm_id": int(item["nm_id"]),
+                                    }
+                                )[:20],
+                                document_id,
+                                version_id,
+                                int(item["nm_id"]),
+                                item["quantity"],
+                                item["wac_rub"],
+                                item["capital_rub"],
+                                item["provenance_json"],
+                                now,
+                            ),
+                        )
                 after_digest = _fingerprint(
                     _active_target_rows(
                         conn,

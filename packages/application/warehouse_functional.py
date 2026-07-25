@@ -438,6 +438,7 @@ def load_supplier_flow_cost_state(
         )
         stable_ids = [
             f"supplier_shipment:{shipment_id}",
+            f"supplier_costs:{shipment_id}",
             *[
                 f"supplier_financial_document:{document_id}"
                 for document_id in document_ids
@@ -696,6 +697,7 @@ def load_supplier_line_cost_breakdown(
         )
         active_version_id = str(active["version_id"]) if active is not None else ""
         active_fingerprints: tuple[str, str] | None = None
+        cost_replay: dict[str, Any] = {}
         if active is not None:
             certified_row = _effective_supplier_cost_state(
                 conn,
@@ -707,14 +709,31 @@ def load_supplier_line_cost_breakdown(
                     str(certified_row["source_fingerprint"]),
                     str(certified_row["calculation_fingerprint"]),
                 )
+        if "sheet_vitrina_v1_warehouse_targeted_recalc_queue" in tables:
+            replay_row = conn.execute(
+                """
+                SELECT queue_id,stable_source_id,source_revision,status,
+                       requested_at,started_at,finished_at,error
+                FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                WHERE stable_source_id IN (?,?)
+                ORDER BY requested_at DESC,queue_id DESC LIMIT 1
+                """,
+                (
+                    f"supplier_costs:{selected_id}",
+                    f"supplier_shipment:{selected_id}",
+                ),
+            ).fetchone()
+            cost_replay = dict(replay_row) if replay_row is not None else {}
     allocation = _supplier_cost_allocations(sources).get(selected_id)
     if allocation is None:
         return {}
-    return _supplier_allocation_with_certification(
+    result = _supplier_allocation_with_certification(
         allocation,
         active_version_id=active_version_id,
         active_fingerprints=active_fingerprints,
     )
+    result["cost_replay"] = cost_replay
+    return result
 
 
 def load_supplier_cost_summary_fields(
@@ -807,6 +826,7 @@ def load_supplier_cost_summary_fields(
         ).fetchone()
         active_version_id = str(active["version_id"]) if active is not None else ""
         active_fingerprints_by_shipment: dict[str, tuple[str, str]] = {}
+        cost_replay_by_shipment: dict[str, dict[str, Any]] = {}
         if active is not None:
             active_fingerprints_by_shipment = {
                 shipment_id: (
@@ -819,6 +839,24 @@ def load_supplier_cost_summary_fields(
                     shipment_ids=selected_ids,
                 ).items()
             }
+        if "sheet_vitrina_v1_warehouse_targeted_recalc_queue" in tables:
+            for row in conn.execute(
+                """
+                SELECT queue_id,stable_source_id,source_revision,status,
+                       requested_at,started_at,finished_at,error
+                FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                WHERE stable_source_id LIKE 'supplier_costs:%'
+                   OR stable_source_id LIKE 'supplier_shipment:%'
+                ORDER BY requested_at DESC,queue_id DESC
+                """
+            ).fetchall():
+                stable_source_id = str(row["stable_source_id"] or "")
+                shipment_id = stable_source_id.split(":", 1)[-1]
+                if (
+                    shipment_id in selected
+                    and shipment_id not in cost_replay_by_shipment
+                ):
+                    cost_replay_by_shipment[shipment_id] = dict(row)
     allocations = _supplier_cost_allocations(sources)
     shipments_by_id = {
         str(item.get("shipment_id") or ""): item for item in sources["shipments"]
@@ -863,6 +901,9 @@ def load_supplier_cost_summary_fields(
             )
             if allocation is not None
             else {}
+        )
+        canonical_allocation["cost_replay"] = cost_replay_by_shipment.get(
+            shipment_id, {}
         )
         canonical_summary = supplier_cost_summary_fields(canonical_allocation)
         result[shipment_id] = {
@@ -1118,7 +1159,13 @@ class WarehouseLine:
 
     @property
     def wac(self) -> Decimal | None:
-        return self.capital / self.quantity if self.quantity > ZERO else None
+        if (
+            self.quantity <= ZERO
+            or self.cost_covered_quantity < self.quantity
+            or self.capital <= ZERO
+        ):
+            return None
+        return self.capital / self.quantity
 
 
 def moving_weighted_average(
@@ -2046,8 +2093,16 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
         }
     controls = list(canonical.get("component_controls") or [])
     certification = dict(canonical.get("certification") or {})
+    cost_replay = dict(canonical.get("cost_replay") or {})
+    replay_status = str(cost_replay.get("status") or "")
     cost_freshness = (
-        "current_certified"
+        "recalculating"
+        if replay_status == "running"
+        else "awaiting_recalculation"
+        if replay_status == "queued"
+        else "recalculation_error"
+        if replay_status in {"error", "failed"}
+        else "current_certified"
         if certification.get("certified")
         else "awaiting_recalculation"
         if bool(canonical.get("expenses_complete"))
@@ -2092,10 +2147,16 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
             "label": (
                 "Себестоимость актуальна и сертифицирована"
                 if cost_freshness == "current_certified"
+                else "Себестоимость пересчитывается"
+                if cost_freshness == "recalculating"
+                else "Ошибка пересчёта себестоимости"
+                if cost_freshness == "recalculation_error"
                 else "Себестоимость ожидает пересчёта"
                 if cost_freshness == "awaiting_recalculation"
                 else "Себестоимость предварительная"
             ),
+            "queue_id": str(cost_replay.get("queue_id") or ""),
+            "error": str(cost_replay.get("error") or "")[:500],
         },
         "exact_cost_blockers": [],
         "exact_cost_warnings": [],
@@ -2144,10 +2205,25 @@ def reconcile_discrepancies(
             continue
         pool = pools.setdefault(
             nm_id,
-            {"nm_id": nm_id, "quantity": ZERO, "capital": ZERO, "receipts": [], "matches": []},
+            {
+                "nm_id": nm_id,
+                "quantity": ZERO,
+                "capital": ZERO,
+                "cost_covered_quantity": ZERO,
+                "receipts": [],
+                "matches": [],
+            },
         )
         pool["quantity"] += quantity
         pool["capital"] += capital
+        covered = (
+            _decimal(raw.get("cost_covered_quantity"))
+            if raw.get("cost_covered_quantity") is not None
+            else quantity
+            if capital > ZERO
+            else ZERO
+        )
+        pool["cost_covered_quantity"] += min(covered, quantity)
         pool["receipts"].append(dict(raw))
 
     unmatched: list[dict[str, Any]] = []
@@ -2165,12 +2241,36 @@ def reconcile_discrepancies(
         matched = min(quantity, available)
         unmatched_qty = quantity - matched
         if matched > ZERO and pool is not None:
-            wac = pool["capital"] / pool["quantity"]
+            coverage_share = (
+                pool["cost_covered_quantity"] / pool["quantity"]
+                if pool["quantity"] > ZERO
+                else ZERO
+            )
+            matched_covered = matched * coverage_share
+            wac = (
+                pool["capital"] / pool["quantity"]
+                if coverage_share >= Decimal("1") and pool["capital"] > ZERO
+                else None
+            )
+            matched_capital = (
+                matched * pool["capital"] / pool["quantity"]
+                if pool["quantity"] > ZERO
+                else ZERO
+            )
             pool["quantity"] -= matched
-            pool["capital"] -= matched * wac
-            pool["matches"].append({**raw, "matched_quantity": _text(matched), "wac": _text(wac)})
+            pool["capital"] -= matched_capital
+            pool["cost_covered_quantity"] -= matched_covered
+            pool["matches"].append(
+                {
+                    **raw,
+                    "matched_quantity": _text(matched),
+                    "matched_cost_covered_quantity": _text(matched_covered),
+                    "wac": _text(wac) if wac is not None else None,
+                }
+            )
         else:
             wac = None
+            matched_capital = ZERO
         if unmatched_qty > ZERO:
             unmatched.append(
                 {
@@ -2187,7 +2287,7 @@ def reconcile_discrepancies(
                     "matched_quantity": _text(matched),
                     "unmatched_quantity": _text(unmatched_qty),
                     "matched_wac_rub": _text(wac) if wac is not None else None,
-                    "matched_capital_rub": _text(matched * wac) if wac is not None else "0",
+                    "matched_capital_rub": _text(matched_capital),
                 }
             )
     balances = [
@@ -2195,7 +2295,16 @@ def reconcile_discrepancies(
             **pool,
             "quantity": _text(pool["quantity"]),
             "capital": _text(pool["capital"]),
-            "wac": _text(pool["capital"] / pool["quantity"]) if pool["quantity"] > ZERO else None,
+            "cost_covered_quantity": _text(
+                min(pool["cost_covered_quantity"], pool["quantity"])
+            ),
+            "wac": (
+                _text(pool["capital"] / pool["quantity"])
+                if pool["quantity"] > ZERO
+                and pool["cost_covered_quantity"] >= pool["quantity"]
+                and pool["capital"] > ZERO
+                else None
+            ),
         }
         for _, pool in sorted(pools.items())
         if pool["quantity"] > ZERO
@@ -4979,7 +5088,7 @@ class WarehouseFunctionalBlock:
                         {
                             "reservation_only": True,
                             "reservation_quantity": _text(reservation_quantity),
-                            "reservation_status": "waiting_for_goods_or_validated_costs",
+                            "reservation_status": "waiting_for_goods",
                             "physical_movement": False,
                         }
                     )
@@ -4987,6 +5096,7 @@ class WarehouseFunctionalBlock:
                 accepted_cost = ZERO
                 pre_acceptance_cost = ZERO
                 supply_cost_quality = "supply_specific_downstream_cost"
+                supply_cost_covered = False
                 if needs_supply_cost:
                     component = downstream_components.get((wb_supply_id, nm_id))
                     if component is None:
@@ -4995,10 +5105,22 @@ class WarehouseFunctionalBlock:
                         seed = cost_map.get(nm_id)
                         outbound_ff_wac = seed.ff_unit_cost if seed is not None else None
                     if outbound_ff_wac is None or outbound_ff_wac <= ZERO:
-                        raise WarehouseFunctionalError(
-                            f"WB supply {supply_id}:{nm_id} has no FF WAC at ledger debit"
+                        supply_cost_quality = "physical_movement_cost_unavailable"
+                        provenance.update(
+                            {
+                                "ff_wac_at_ledger_debit_rub": None,
+                                "downstream_cost_status": (
+                                    "available_without_base_cost"
+                                    if component is not None
+                                    else "pending"
+                                ),
+                                "cost_freshness": "unavailable",
+                                "cost_blockers": ["ff_base_cost_unavailable"],
+                                "known_capital_rub": "0",
+                                "synthetic_zero_cost": False,
+                            }
                         )
-                    if component is None:
+                    elif component is None:
                         # Quantity follows physical evidence.  Carry the known
                         # FF capital and mark only the missing add-ons as
                         # preliminary; a later cost revision enriches this
@@ -5006,6 +5128,7 @@ class WarehouseFunctionalBlock:
                         pre_acceptance_cost = outbound_ff_wac
                         accepted_cost = outbound_ff_wac
                         supply_cost_quality = "physical_movement_costs_pending"
+                        supply_cost_covered = True
                         provenance.update(
                             {
                                 "ff_wac_at_ledger_debit_rub": _text(outbound_ff_wac),
@@ -5029,6 +5152,7 @@ class WarehouseFunctionalBlock:
                                 "cost_freshness": "current",
                             }
                         )
+                        supply_cost_covered = True
                 source_fingerprint = _hash(
                     {
                         "revision": revision,
@@ -5074,7 +5198,7 @@ class WarehouseFunctionalBlock:
                             nm_id=nm_id,
                             quantity=open_qty,
                             capital=open_qty * pre_acceptance_cost,
-                            covered=open_qty,
+                            covered=open_qty if supply_cost_covered else ZERO,
                             quality=supply_cost_quality,
                             provenance={
                                 **provenance,
@@ -5083,6 +5207,9 @@ class WarehouseFunctionalBlock:
                                 "pre_acceptance_unit_cost_rub": _text(pre_acceptance_cost),
                                 "flow_quantity": _text(open_qty),
                                 "flow_capital_rub": _text(open_qty * pre_acceptance_cost),
+                                "cost_covered_quantity": _text(
+                                    open_qty if supply_cost_covered else ZERO
+                                ),
                             },
                         )
                     continue
@@ -5112,7 +5239,14 @@ class WarehouseFunctionalBlock:
                                 "nm_id": nm_id,
                                 "quantity": _text(quantity),
                                 "capital": _text(quantity * pre_acceptance_cost),
-                                "wac": _text(pre_acceptance_cost),
+                                "wac": (
+                                    _text(pre_acceptance_cost)
+                                    if supply_cost_covered
+                                    else None
+                                ),
+                                "cost_covered_quantity": _text(
+                                    quantity if supply_cost_covered else ZERO
+                                ),
                                 "provenance": {**provenance, "paid_acceptance_excluded": True},
                             }
                         )
@@ -5195,8 +5329,13 @@ class WarehouseFunctionalBlock:
                 nm_id=int(item["nm_id"]),
                 quantity=_decimal(item["quantity"]),
                 capital=_decimal(item["capital"]),
-                covered=_decimal(item["quantity"]),
-                quality="pooled_final_acceptance_discrepancy",
+                covered=_decimal(item.get("cost_covered_quantity")),
+                quality=(
+                    "pooled_final_acceptance_discrepancy"
+                    if _decimal(item.get("cost_covered_quantity"))
+                    >= _decimal(item["quantity"])
+                    else "pooled_discrepancy_cost_unavailable"
+                ),
                 provenance={
                     "receipts": item["receipts"],
                     "doprinato_matches": item["matches"],
@@ -5309,7 +5448,11 @@ class WarehouseFunctionalBlock:
                     {
                         "nm_id": int(item["nm_id"]),
                         "quantity": str(item["quantity"]),
-                        "wac_rub": str(item["wac"]),
+                        "wac_rub": (
+                            str(item["wac"])
+                            if item.get("wac") is not None
+                            else None
+                        ),
                         "capital_rub": str(item["capital"]),
                         "provenance": dict(item.get("provenance") or {}),
                     }

@@ -12,6 +12,7 @@ import sys
 import threading
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
+from unittest.mock import patch
 from urllib import request as urllib_request
 import zipfile
 import zlib
@@ -842,6 +843,11 @@ def _assert_vtb_statement_parser_and_preview() -> None:
         or sum(int(item.get("atomic_count") or 0) for item in logical_groups) != 5
         or grouped_transfer.get("amount") != "78113.66"
         or grouped_transfer.get("atomic_count") != 2
+        or {
+            str(item.get("operation_status") or "")
+            for item in grouped_transfer.get("atomic_rows") or []
+        }
+        != {"new"}
         or currency_control_vat != {"vat_included"}
         or preview.get("fee_totals_by_currency", {}).get("RUB") != "97519.20"
     ):
@@ -968,11 +974,15 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             str(item.get("logical_fee_id") or "")
             for item in logical_groups
         ]
-        confirmed = block.confirm_bank_fee_statement_import(
-            "sup_financial",
-            document_id,
-            selected_operation_ids=selected_ids,
-        )
+        with patch(
+            "packages.application.warehouse_functional.enqueue_warehouse_targeted_recalculation",
+            side_effect=RuntimeError("injected replay queue failure"),
+        ):
+            confirmed = block.confirm_bank_fee_statement_import(
+                "sup_financial",
+                document_id,
+                selected_operation_ids=selected_ids,
+            )
         repeated = block.confirm_bank_fee_statement_import(
             "sup_financial",
             document_id,
@@ -1004,6 +1014,10 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             or not repeated.get("idempotent")
             or repeated.get("cny_fee_rows_for_ledger")
             or len(confirmed.get("expense_lines") or []) != 5
+            or (
+                confirmed.get("warehouse_targeted_recalculation") or {}
+            ).get("status")
+            != "replay_error"
         ):
             raise AssertionError(
                 "selected logical groups must import five atomic rows and repeat as no-op: "

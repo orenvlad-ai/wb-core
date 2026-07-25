@@ -87,6 +87,8 @@ Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3
 
 Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All active direct consumers, including товарный капитал, его рентабельность, web-vitrina, Finance, Partner, Proxy 3 and `Управление SKU`, call the same temporal functional projection; independent retro maps and hidden fallback to 1C/legacy cost are prohibited.
 
+Late transit, FF services, storage, paid WB acceptance, supplier financial rows and bank commissions bind to the originating shipment/supply cost layer. Transit/services/storage allocate over the full corrected sent composition; paid acceptance allocates over accepted quantity. Their business date is source provenance, not upload time. A late component queues one coalesced affected-SKU revision and rebuilds dependent WAC/capital/COGS/Finance/Proxy history without another physical movement. Confirmed zero is distinct from missing/not-requested/updating/not-found/source-error/session-expired; every unknown state stays `null`, never `0 ₽`.
+
 Supplier financial-document exclusion is an active-source correction, not a
 presentation filter. Excluded parent documents and their expense lines are
 absent before supplier FF layer materialization, so the active same-SHA source

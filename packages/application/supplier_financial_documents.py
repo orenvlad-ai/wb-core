@@ -1728,14 +1728,25 @@ class SupplierFinancialDocumentsBlock:
             or header.get("invoice_date")
             or self.timestamp_factory()
         )[:10]
-        return enqueue_warehouse_targeted_recalculation(
-            runtime=self.runtime,
-            stable_source_id=f"supplier_costs:{supplier_order_id}",
-            source_revision=revision,
-            effective_date=effective_date,
-            affected_nm_ids=nm_ids,
-            requested_at=self.timestamp_factory(),
-        )
+        stable_source_id = f"supplier_costs:{supplier_order_id}"
+        try:
+            return enqueue_warehouse_targeted_recalculation(
+                runtime=self.runtime,
+                stable_source_id=stable_source_id,
+                source_revision=revision,
+                effective_date=effective_date,
+                affected_nm_ids=nm_ids,
+                requested_at=self.timestamp_factory(),
+            )
+        except Exception as exc:  # noqa: BLE001 - the confirmed cost row must remain saved.
+            return {
+                "status": "replay_error",
+                "presentation_status": "Ошибка пересчёта",
+                "stable_source_id": stable_source_id,
+                "source_revision": revision,
+                "affected_nm_ids": sorted(set(nm_ids)),
+                "error": str(exc).replace("\n", " ")[:500],
+            }
 
     def _materialize_own_capital_expense_events(
         self, supplier_order_id: str
@@ -5224,11 +5235,14 @@ def _logical_fee_group_states(
     groups: list[dict[str, Any]],
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    status_by_operation = {
-        str(item.get("semantic_operation_id") or ""): str(
-            item.get("operation_status") or ""
-        )
+    row_by_operation = {
+        str(item.get("semantic_operation_id") or ""): dict(item)
         for item in rows
+        if str(item.get("semantic_operation_id") or "")
+    }
+    status_by_operation = {
+        operation_id: str(item.get("operation_status") or "")
+        for operation_id, item in row_by_operation.items()
     }
     result = []
     for group in groups:
@@ -5248,6 +5262,10 @@ def _logical_fee_group_states(
         result.append(
             {
                 **group,
+                "atomic_rows": [
+                    row_by_operation.get(operation_id, {})
+                    for operation_id in group["atomic_operation_ids"]
+                ],
                 "operation_status": status,
                 "import_allowed": status == "new",
                 "selected_by_default": False,

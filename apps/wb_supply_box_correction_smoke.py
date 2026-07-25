@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.wb_supply_box_correction import (
     apply_unique_box_correction,
+    rollback_unique_box_correction,
     solve_unique_box_correction,
 )
 
@@ -237,6 +238,36 @@ def main() -> None:
         WHERE operation_type='box_correction'
         """
     ).fetchone()[0] == 1
+    conn.execute("BEGIN IMMEDIATE")
+    rolled_back = rollback_unique_box_correction(
+        conn,
+        manifest_digest=applied["rollback_manifest_digest"],
+        actor="smoke",
+        rolled_back_at="2026-07-25T12:00:02Z",
+    )
+    conn.commit()
+    assert rolled_back["rolled_back"] is True
+    balances_after_rollback = {
+        int(row["nm_id"]): int(row["quantity"])
+        for row in conn.execute(
+            """
+            SELECT nm_id,SUM(quantity_delta) quantity
+            FROM sheet_vitrina_v1_ff_stock_operation_lines
+            GROUP BY nm_id
+            """
+        )
+    }
+    assert balances_after_rollback == {
+        nm_id: quantity + 500 - declared[nm_id]
+        for nm_id, quantity in declared.items()
+    }
+    repeated_rollback = rollback_unique_box_correction(
+        conn,
+        manifest_digest=applied["rollback_manifest_digest"],
+        actor="smoke",
+        rolled_back_at="2026-07-25T12:00:03Z",
+    )
+    assert repeated_rollback["idempotent"] is True
     print("wb_supply_box_correction_smoke: OK")
 
 

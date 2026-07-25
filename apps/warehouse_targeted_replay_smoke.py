@@ -171,9 +171,25 @@ def main() -> None:
                 """,
                 (active["version_id"],),
             ).fetchone()
+            active_snapshot = conn.execute(
+                """
+                SELECT raw_rows_digest FROM sheet_vitrina_v1_warehouse_wb_snapshots
+                WHERE version_id=?
+                """,
+                (active["version_id"],),
+            ).fetchone()
+            active_documents = conn.execute(
+                """
+                SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_functional_documents
+                WHERE version_id=?
+                """,
+                (active["version_id"],),
+            ).fetchone()[0]
             assert header["actual_shipment_date"] == "2026-07-21"
             assert china["quantity"] == "10"
             assert non_target["quantity"] == "5"
+            assert active_snapshot["raw_rows_digest"] == "sha256:wb-snapshot"
+            assert active_documents == 2
 
         with patch(
             "packages.application.warehouse_targeted_replay.load_supplier_line_cost_breakdown",
@@ -303,6 +319,21 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
             (SHIPMENT_ID, NOW),
         )
         conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                snapshot_id,version_id,fetched_at,snapshot_date,
+                requested_nm_ids_json,pagination_complete,page_count,
+                page_offsets_json,raw_row_count,raw_rows_digest,
+                raw_rows_json,items_json,created_at
+            ) VALUES(
+                'snapshot-base','base',?,'2026-07-25','[101]',1,1,
+                '[0]',1,'sha256:wb-snapshot','[{"nmID":101}]',
+                '[{"nm_id":101}]',?
+            )
+            """,
+            (NOW, NOW),
+        )
+        conn.execute(
             "INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,'base',?)",
             (NOW,),
         )
@@ -333,6 +364,15 @@ def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
             "UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='base' WHERE slot=1"
         )
         conn.commit()
+        queue_before = conn.execute(
+            """
+            SELECT queue_id,stable_source_id,source_revision,effective_date,
+                   affected_nm_ids_json,status,requested_at,started_at,
+                   finished_at,error
+            FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+            ORDER BY queue_id
+            """
+        ).fetchall()
     failing = SupplierShipmentFactualCorrectionBlock(
         runtime=runtime,
         timestamp_factory=lambda: "2026-07-25T10:02:00Z",
@@ -376,6 +416,16 @@ def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
             ).fetchone()[0]
             == "base"
         )
+        queue_after = conn.execute(
+            """
+            SELECT queue_id,stable_source_id,source_revision,effective_date,
+                   affected_nm_ids_json,status,requested_at,started_at,
+                   finished_at,error
+            FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+            ORDER BY queue_id
+            """
+        ).fetchall()
+        assert queue_after == queue_before
 
 
 def _lock_is_shared(runtime: RegistryUploadDbBackedRuntime) -> None:

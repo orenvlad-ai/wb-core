@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-43-FF-STOCK-LEDGER-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать canonical contract server-owned FF quantity and reservation ledgers: единый пользовательский физический/зарезервированный/доступный остаток в `Остатки -> Склады и себестоимость -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, guarded WB movements и расчётный источник `Остатки ФФ`."
-scope: "Operator supply contour for FF quantity operations and WB-supply reservations plus the reused balance source for the unified warehouse screen: runtime SQLite operation/reservation headers and lines, previews, original manual Excel storage, protected legacy HTTP routes, operator audit journal, idempotent supplier/WB movements, validated downstream-cost guard and factory-order/WB regional stock_ff source. The canonical cost calculation itself, FIFO, accounting stock, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
+scope: "Operator supply contour for FF quantity operations and physically justified WB-supply reservations plus the reused balance source for the unified warehouse screen: runtime SQLite operation/reservation headers and lines, previews, original manual Excel storage, protected legacy HTTP routes, operator audit journal, idempotent supplier/WB movements, identity/availability guards and factory-order/WB regional stock_ff source. Cost freshness is independent and cannot reserve physically available goods."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -34,19 +34,20 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/ff-stocks/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file"
 related_runners:
-  - "apps/ff_reservations_transit_cost_recovery.py"
+  - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
+  - "apps/warehouse_targeted_replay_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus a separate append-only reservation ledger. An eligible WB supply is debited atomically only when its whole composition is physically available and every SKU has validated downstream cost; otherwise its exact revision is reserved without negative quantity/capital. Supplier receipt automatically rechecks reservations. Manual Excel documents require preview then explicit confirm, and ordinary WB operations retain checkpoint/activation guards. A separate repo-owned v2 runner remains bounded to historical WB supply `40561872`."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus a separate append-only reservation ledger. An eligible confirmed WB supply is debited atomically when its exact whole composition is physically available; missing transit/services/storage/paid-acceptance cost changes only cost freshness and never creates a reserve. Reservation is limited to physical shortage or unresolved composition/identity. Supplier receipt automatically rechecks reservations. Manual Excel documents require preview then explicit confirm, and ordinary WB operations retain checkpoint/activation guards."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -63,8 +64,8 @@ The old `Остатки ФФ` navigation item is a compatibility transition to `
 - manual receipt documents add quantity;
 - manual writeoff documents subtract quantity;
 - supplier shipment acceptance on ФФ adds quantity;
-- eligible WB supplies subtract quantity only after the WB auto-writeoff checkpoint exists, the supply is not part of the baseline-known historical cache, the ledger is activated by a positive non-WB receipt/correction, the whole composition is available and validated downstream cost exists for every SKU;
-- an eligible but not yet fulfillable WB supply creates or adjusts a reservation keyed by its exact supply revision and `nmID`; reservation quantity is not a physical movement and carries no WAC/capital.
+- eligible WB supplies subtract quantity only after the WB auto-writeoff checkpoint exists, the supply is not part of the baseline-known historical cache, the ledger is activated by a positive non-WB receipt/correction, identity/composition are exact and the whole composition is physically available;
+- an eligible but physically unavailable or identity-ambiguous WB supply creates or adjusts a reservation keyed by its exact supply revision and `nmID`; missing cost alone cannot create a reservation. Reservation quantity is not a physical movement and carries no WAC/capital.
 
 Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
 
@@ -157,11 +158,11 @@ If composition/status changes before the first writeoff, one idempotent reservat
 Future-arrival reservation contract:
 - the whole WB supply composition is the atomic unit; no partial fulfillment is inferred from packed/accepted counters without authoritative partial-shipment evidence;
 - insufficient physical availability creates/updates a reservation and never creates negative FF quantity/capital or an FF→WB movement;
-- missing/pending downstream cost may keep the reservation waiting and does not block unrelated official WB snapshot/publication;
-- sufficient physical availability plus validated positive FF/pre-acceptance cost for every SKU creates the physical debit and reservation `fulfill` in the same transaction, fixing FF moving WAC at that moment;
+- missing/pending downstream cost never creates or keeps a cost-only reservation and does not block the physical debit or unrelated official WB snapshot/publication;
+- sufficient physical availability creates the physical debit and reservation `fulfill` in the same transaction. Known FF capital is carried; missing add-ons make WAC/capital preliminary or unavailable with an explicit reason, never synthetic zero;
 - physical debit and reservation-fulfill operation IDs are deterministic hashes of the canonical supply source/revision and operation type; retries cannot manufacture a second identity for the same movement;
 - a factual supplier FF receipt immediately reconciles active reservations, with no extra operator action;
-- actual movement without validated downstream cost remains fail closed.
+- repeat cost replay enriches the existing movement and cannot create another quantity debit or reservation.
 - validated positive supplemental Seller Portal transit evidence enters the same canonical supply cost layer as official/approved downstream components and triggers bounded reconciliation for that supply; it is never inferred from display text or a tariff formula. One missing cost cannot prevent fulfillment of another fully proven reservation.
 
 Activation and balance guards:

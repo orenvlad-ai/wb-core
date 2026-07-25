@@ -1150,25 +1150,33 @@
       }
 
       function exactCostTooltip(row) {
+        const freshness = row && row.cost_freshness && typeof row.cost_freshness === "object"
+          ? row.cost_freshness
+          : {};
+        const freshnessLabel = String(freshness.label || "").trim();
         if (row && row.exact_landed_cost_per_unit_rub !== null && row.exact_landed_cost_per_unit_rub !== undefined && row.exact_landed_cost_per_unit_rub !== "") {
           const certification = row.supplier_cost_breakdown && row.supplier_cost_breakdown.certification;
-          return certification && certification.status_label_ru
+          return freshnessLabel || (certification && certification.status_label_ru
             ? String(certification.status_label_ru)
             : (row.exact_cost_status === "certified"
               ? "Все расходы учтены / Подтверждено документами"
-              : "Предварительная себестоимость — не все расходы учтены");
+              : "Предварительная себестоимость — не все расходы учтены"));
         }
         const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
-        return blockers.length ? blockers.join("; ") : "точная себестоимость недоступна";
+        return blockers.length
+          ? blockers.join("; ")
+          : (freshnessLabel || "точная себестоимость недоступна");
       }
 
       function renderExactCostValue(row) {
         const display = formatRegistryMoney(row && row.exact_landed_cost_per_unit_rub);
-        if (display === "—") {
-          return escapeHtml(display);
-        }
+        const freshness = row && row.cost_freshness && typeof row.cost_freshness === "object"
+          ? row.cost_freshness
+          : {};
+        const freshnessLabel = String(freshness.label || "").trim();
         const className = row && row.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete";
-        return '<span class="' + className + '">' + escapeHtml(display) + '</span>';
+        return '<span class="' + className + '">' + escapeHtml(display) + '</span>' +
+          (freshnessLabel ? '<small>' + escapeHtml(freshnessLabel) + '</small>' : "");
       }
 
       function formatAmount(value, currency) {
@@ -2017,6 +2025,7 @@
           exact_landed_cost_total_rub: detail.exact_landed_cost_total_rub,
           exact_landed_cost_per_unit_rub: detail.exact_landed_cost_per_unit_rub,
           exact_cost_status: detail.exact_cost_status,
+          cost_freshness: detail.cost_freshness,
           exact_cost_blockers: detail.exact_cost_blockers,
           exact_cost_warnings: detail.exact_cost_warnings,
           lines: draftLines.map((line) => {
@@ -2295,6 +2304,7 @@
         const canonicalPerUnit = {
           ...rawPerUnit,
           exact_cost_status: rawPerUnit.exact_cost_status || "unavailable",
+          cost_freshness: rawPerUnit.cost_freshness || null,
           exact_cost_blockers: rawPerUnit.exact_cost_blockers || [],
           supplier_cost_breakdown: rawPerUnit.supplier_cost_breakdown || null
         };

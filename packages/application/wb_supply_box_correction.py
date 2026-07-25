@@ -33,6 +33,9 @@ def ensure_wb_supply_box_correction_schema(conn: sqlite3.Connection) -> None:
             applied_at TEXT,
             ff_adjustment_operation_id TEXT,
             rollback_manifest_json TEXT NOT NULL DEFAULT '{{}}',
+            rollback_manifest_digest TEXT NOT NULL DEFAULT '',
+            rollback_operation_id TEXT,
+            rolled_back_at TEXT,
             UNIQUE(supply_id,source_revision)
         )
         """
@@ -50,6 +53,21 @@ def ensure_wb_supply_box_correction_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             f"ALTER TABLE {BOX_CORRECTION_TABLE} "
             "ADD COLUMN rollback_manifest_json TEXT NOT NULL DEFAULT '{{}}'"
+        )
+    if "rollback_manifest_digest" not in existing:
+        conn.execute(
+            f"ALTER TABLE {BOX_CORRECTION_TABLE} "
+            "ADD COLUMN rollback_manifest_digest TEXT NOT NULL DEFAULT ''"
+        )
+    if "rollback_operation_id" not in existing:
+        conn.execute(
+            f"ALTER TABLE {BOX_CORRECTION_TABLE} "
+            "ADD COLUMN rollback_operation_id TEXT"
+        )
+    if "rolled_back_at" not in existing:
+        conn.execute(
+            f"ALTER TABLE {BOX_CORRECTION_TABLE} "
+            "ADD COLUMN rolled_back_at TEXT"
         )
 
 
@@ -318,6 +336,14 @@ def apply_unique_box_correction(
             str(debit_rows[0]["operation_id"]) if debit_rows else ""
         ),
     }
+    rollback_manifest_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            rollback_manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     if debit_rows:
         debit_operation_id = str(debit_rows[0]["operation_id"])
         debited = {
@@ -439,8 +465,9 @@ def apply_unique_box_correction(
             declared_composition_json,accepted_composition_json,
             corrected_composition_json,box_deltas_json,solution_count,
             plan_fingerprint,actor,created_at,applied_at,
-            ff_adjustment_operation_id,rollback_manifest_json
-        ) VALUES(?,?,?,'applied',?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ff_adjustment_operation_id,rollback_manifest_json,
+            rollback_manifest_digest
+        ) VALUES(?,?,?,'applied',?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             correction_id,
@@ -475,6 +502,7 @@ def apply_unique_box_correction(
             created_at,
             adjustment_operation_id or None,
             json.dumps(rollback_manifest, ensure_ascii=False, sort_keys=True),
+            rollback_manifest_digest,
         ),
     )
     return {
@@ -484,6 +512,193 @@ def apply_unique_box_correction(
         "ff_adjustment_operation_id": adjustment_operation_id,
         "physical_adjustment": adjustment,
         "rollback_manifest": rollback_manifest,
+        "rollback_manifest_digest": rollback_manifest_digest,
+    }
+
+
+def rollback_unique_box_correction(
+    conn: sqlite3.Connection,
+    *,
+    manifest_digest: str,
+    actor: str,
+    rolled_back_at: str,
+) -> dict[str, Any]:
+    """Deactivate one correction and append the exact inverse FF movement."""
+
+    ensure_wb_supply_box_correction_schema(conn)
+    digest = str(manifest_digest or "").strip()
+    if not digest.startswith("sha256:"):
+        raise ValueError("exact box-correction rollback manifest is required")
+    row = conn.execute(
+        f"""
+        SELECT * FROM {BOX_CORRECTION_TABLE}
+        WHERE rollback_manifest_digest=?
+        """,
+        (digest,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("box-correction rollback manifest was not found")
+    if str(row["status"] or "") == "rolled_back":
+        return {
+            "rolled_back": False,
+            "idempotent": True,
+            "correction_id": str(row["correction_id"]),
+            "rollback_operation_id": str(row["rollback_operation_id"] or ""),
+        }
+    if str(row["status"] or "") != "applied":
+        raise ValueError("box correction is not in an applied state")
+    later = conn.execute(
+        f"""
+        SELECT correction_id FROM {BOX_CORRECTION_TABLE}
+        WHERE supply_id=? AND status='applied' AND correction_id<>?
+        LIMIT 1
+        """,
+        (str(row["supply_id"]), str(row["correction_id"])),
+    ).fetchone()
+    if later is not None:
+        raise ValueError("box correction rollback rejected: a successor is active")
+
+    manifest = json.loads(str(row["rollback_manifest_json"] or "{}"))
+    actual_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if actual_digest != digest:
+        raise ValueError("box-correction rollback manifest digest changed")
+
+    adjustment_operation_id = str(row["ff_adjustment_operation_id"] or "")
+    rollback_operation_id = ""
+    if adjustment_operation_id:
+        adjustment_rows = conn.execute(
+            """
+            SELECT line_no,nm_id,quantity_delta
+            FROM sheet_vitrina_v1_ff_stock_operation_lines
+            WHERE operation_id=? ORDER BY line_no
+            """,
+            (adjustment_operation_id,),
+        ).fetchall()
+        if not adjustment_rows:
+            raise ValueError("box-correction FF adjustment evidence is missing")
+        inverse = {
+            int(item["nm_id"]): -Decimal(str(item["quantity_delta"]))
+            for item in adjustment_rows
+        }
+        balances = {
+            int(item["nm_id"]): Decimal(str(item["quantity"]))
+            for item in conn.execute(
+                """
+                SELECT nm_id,SUM(quantity_delta) quantity
+                FROM sheet_vitrina_v1_ff_stock_operation_lines
+                GROUP BY nm_id
+                """
+            ).fetchall()
+        }
+        negative = {
+            nm_id: str(balances.get(nm_id, Decimal("0")) + delta)
+            for nm_id, delta in inverse.items()
+            if balances.get(nm_id, Decimal("0")) + delta < 0
+        }
+        if negative:
+            raise ValueError(
+                "box-correction rollback has insufficient physical FF stock: "
+                + json.dumps(negative, sort_keys=True)
+            )
+        rollback_operation_id = (
+            "ffso_box_rb_" + digest.removeprefix("sha256:")[:21]
+        )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+                operation_id,operation_type,source_type,source_key,
+                source_object_id,source_object_label,created_at,created_by,
+                sku_count,total_quantity_delta,total_quantity_abs,warnings_json,
+                diagnostics_json,source_filename,source_content_type,
+                source_file_sha256,source_file_blob
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+            """,
+            (
+                rollback_operation_id,
+                "box_correction_rollback",
+                "wb_supply_box_correction",
+                f"wb_supply_box_correction_rollback:{row['supply_id']}:{digest[-16:]}",
+                str(row["supply_id"]),
+                str(row["supply_id"]),
+                rolled_back_at,
+                actor,
+                len(inverse),
+                float(sum(inverse.values(), Decimal("0"))),
+                float(sum((abs(value) for value in inverse.values()), Decimal("0"))),
+                "[]",
+                json.dumps(
+                    {
+                        "correction_id": str(row["correction_id"]),
+                        "rollback_manifest_digest": digest,
+                        "supersedes_operation_id": adjustment_operation_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "",
+                "",
+                "",
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+                operation_id,line_no,nm_id,barcode,sku,nomenclature_name,
+                comment,group_name,quantity_delta,raw_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                (
+                    rollback_operation_id,
+                    index,
+                    nm_id,
+                    "",
+                    "",
+                    "",
+                    "rollback whole-box supply composition correction",
+                    "",
+                    float(delta),
+                    json.dumps(
+                        {
+                            "rollback_manifest_digest": digest,
+                            "supersedes_operation_id": adjustment_operation_id,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
+                for index, (nm_id, delta) in enumerate(
+                    sorted(inverse.items()), start=1
+                )
+            ],
+        )
+    updated = conn.execute(
+        f"""
+        UPDATE {BOX_CORRECTION_TABLE}
+        SET status='rolled_back',rolled_back_at=?,rollback_operation_id=?
+        WHERE correction_id=? AND status='applied'
+        """,
+        (
+            rolled_back_at,
+            rollback_operation_id or None,
+            str(row["correction_id"]),
+        ),
+    )
+    if int(updated.rowcount or 0) != 1:
+        raise ValueError("box correction changed before rollback")
+    return {
+        "rolled_back": True,
+        "idempotent": False,
+        "correction_id": str(row["correction_id"]),
+        "rollback_operation_id": rollback_operation_id,
+        "rollback_manifest_digest": digest,
     }
 
 
