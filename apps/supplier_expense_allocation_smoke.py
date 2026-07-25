@@ -13,6 +13,9 @@ from packages.application.supplier_expense_allocation import (  # noqa: E402
     project_supplier_document_expense_allocation,
     project_supplier_order_expense_allocation,
 )
+from packages.application.warehouse_functional import (  # noqa: E402
+    supplier_cost_summary_fields,
+)
 
 
 def main() -> None:
@@ -64,9 +67,13 @@ def main() -> None:
         uncertified_breakdown,
     )
     order_without_gate = project_supplier_order_expense_allocation(uncertified_breakdown)
-    if full_document["status"] != "all" or order_without_gate["status"] != "partial":
+    if (
+        full_document["status"] != "all"
+        or order_without_gate["status"] != "all"
+        or not order_without_gate["diagnostics"]["independent_of_cost_freshness"]
+    ):
         raise AssertionError(
-            f"document may be fully allocated while order stays non-green before certification: {full_document} {order_without_gate}"
+            f"allocation arithmetic must remain fully allocated before cost certification: {full_document} {order_without_gate}"
         )
 
     certified_breakdown = _breakdown(
@@ -74,7 +81,7 @@ def main() -> None:
         certified=True,
     )
     certified_order = project_supplier_order_expense_allocation(certified_breakdown)
-    if certified_order["status"] != "all" or not certified_order["diagnostics"]["fingerprints_match"]:
+    if certified_order["status"] != "all":
         raise AssertionError(f"certified all projection mismatch: {certified_order}")
 
     fingerprint_drift = _breakdown(
@@ -83,8 +90,45 @@ def main() -> None:
     )
     fingerprint_drift["certification"]["certified_calculation_fingerprint"] = "sha256:stale"
     drift_projection = project_supplier_order_expense_allocation(fingerprint_drift)
-    if drift_projection["status"] != "partial" or drift_projection["diagnostics"]["fingerprints_match"]:
-        raise AssertionError(f"fingerprint drift must remove green order status: {drift_projection}")
+    if drift_projection["status"] != "all":
+        raise AssertionError(
+            f"fingerprint drift belongs to cost freshness, not allocation: {drift_projection}"
+        )
+    freshness_breakdown = {
+        **uncertified_breakdown,
+        "expenses_complete": True,
+        "capital_rub": "900",
+        "average_unit_cost_rub": "90",
+        "component_controls": [],
+        "cost_replay": {
+            "queue_id": "queue-1",
+            "status": "queued",
+        },
+    }
+    if (
+        supplier_cost_summary_fields(freshness_breakdown)["cost_freshness"][
+            "status"
+        ]
+        != "awaiting_recalculation"
+        or project_supplier_order_expense_allocation(freshness_breakdown)[
+            "status"
+        ]
+        != "all"
+    ):
+        raise AssertionError(
+            "fully allocated arithmetic must remain green while cost replay is queued"
+        )
+    freshness_breakdown["cost_replay"] = {
+        "queue_id": "queue-1",
+        "status": "running",
+    }
+    if (
+        supplier_cost_summary_fields(freshness_breakdown)["cost_freshness"][
+            "status"
+        ]
+        != "recalculating"
+    ):
+        raise AssertionError("running target queue must have independent cost freshness")
     print("supplier_expense_allocation_smoke: OK")
 
 

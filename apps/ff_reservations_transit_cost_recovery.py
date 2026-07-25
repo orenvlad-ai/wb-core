@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded transit-cost evidence and FF reservation recovery for four WB supplies."""
+"""Legacy read-only transit diagnostic for four WB supplies.
+
+The former apply coupled physical movement to positive transit-cost evidence
+and copied the whole SQLite store.  Both contracts are superseded by
+``warehouse_cost_unified_recovery.py`` and must not be reachable from this
+entrypoint.
+"""
 
 from __future__ import annotations
 
@@ -62,22 +68,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--backup-dir", default="")
     args = parser.parse_args(argv)
-    runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
-    plan = build_plan(runtime, fetch_evidence=True)
-    if not args.apply:
-        print(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2))
-        return 0
-    if str(args.fingerprint or "") != str(plan["fingerprint"]):
-        raise ValueError("apply requires the exact current dry-run fingerprint")
-    if not plan.get("apply_allowed"):
-        raise ValueError("approved transit-cost evidence is incomplete; apply remains fail-closed")
-    backup_root = (
-        Path(args.backup_dir)
-        if args.backup_dir
-        else runtime.runtime_dir / "backups" / "ff-transit-reservation-recovery"
+    if args.apply:
+        raise ValueError(
+            "legacy transit/reservation apply is disabled; use "
+            "apps/warehouse_cost_unified_recovery.py with its exact dry-run fingerprint"
+        )
+    print(
+        json.dumps(
+            {
+                "mode": "diagnostic",
+                "would_change": False,
+                "legacy_apply_disabled": True,
+                "canonical_runner": "apps/warehouse_cost_unified_recovery.py",
+                "reason": (
+                    "legacy full-database snapshot planning is disabled; "
+                    "run the canonical query-only targeted dry-run"
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
     )
-    result = apply_plan(runtime, plan, backup_root=backup_root)
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 
 
@@ -317,10 +329,11 @@ def apply_plan(
     *,
     backup_root: Path,
 ) -> dict[str, Any]:
-    if not plan.get("would_change"):
-        return {**dict(plan), "mode": "apply", "applied": False, "idempotent": True}
-    with warehouse_functional_write_lock(runtime.runtime_dir):
-        return _apply_plan_locked(runtime, plan, backup_root=backup_root)
+    del runtime, plan, backup_root
+    raise ValueError(
+        "legacy transit/reservation apply is disabled; use "
+        "apps/warehouse_cost_unified_recovery.py with its exact dry-run fingerprint"
+    )
 
 
 def _apply_plan_locked(

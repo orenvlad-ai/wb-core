@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
 
 from packages.application.our_wb_costs import (  # noqa: E402
     TRANSIT_DIRECT_ZERO_CONFIRMED,
+    TRANSIT_NOT_FOUND,
+    TRANSIT_SESSION_EXPIRED,
+    TRANSIT_SOURCE_ERROR,
+    TRANSIT_UPDATING,
     WB_COST_STATUS_CONFIRMED,
     WB_COST_STATUS_ESTIMATED,
     OurWbCostBlock,
@@ -101,7 +105,7 @@ def main() -> None:
         )
         if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
             raise AssertionError("transit supply without cost must materialize one fail-closed layer")
-        _assert_transit_supply_cost(runtime, expected_status="transit_missing", expected_per_unit=None)
+        _assert_transit_supply_cost(runtime, expected_status="not_requested", expected_per_unit=None)
         runtime.upsert_wb_supply_transit_cost_enrichment(
             {
                 "supply_id": "transit_enriched",
@@ -126,7 +130,7 @@ def main() -> None:
             )
         _assert_transit_supply_cost(
             runtime,
-            expected_status="transit_missing",
+            expected_status="not_requested",
             expected_per_unit=None,
         )
         runtime.upsert_wb_supply_transit_cost_enrichment(
@@ -263,6 +267,29 @@ def main() -> None:
         )
         if direct.status != TRANSIT_DIRECT_ZERO_CONFIRMED or direct.per_unit != 0:
             raise AssertionError(f"40431461-like direct supply must be direct_zero_confirmed, got {direct}")
+        for source_status, expected in (
+            ("running", TRANSIT_UPDATING),
+            ("not_found", TRANSIT_NOT_FOUND),
+            ("failed", TRANSIT_SOURCE_ERROR),
+            ("session_expired", TRANSIT_SESSION_EXPIRED),
+        ):
+            classified = classify_wb_supply_transit(
+                {
+                    "supply_id": "transit-state-" + source_status,
+                    "has_transit_cost_marker": 1,
+                    "transit_warehouse_id": 10,
+                    "seller_portal_transit_cost_status": source_status,
+                },
+                denominator=100,
+            )
+            if (
+                classified.status != expected
+                or classified.amount_total is not None
+                or classified.per_unit is not None
+            ):
+                raise AssertionError(
+                    f"transit state {source_status} became cost evidence: {classified}"
+                )
 
         _assert_proxy_profit_3_evaluator()
 
@@ -524,8 +551,13 @@ def _assert_transit_supply_cost(
             f"transit enrichment canonical status mismatch: {dict(row) if row else None}"
         )
     if expected_per_unit is None:
-        if row["transit_amount_total"] is not None or str(row["missing_reason"] or "") != (
+        if (
+            row["transit_amount_total"] is not None
+            or row["transit_per_unit_rub"] is not None
+            or row["our_wb_unit_cost_rub"] is not None
+            or str(row["missing_reason"] or "") != (
             "transit_marker_present_but_cost_missing"
+            )
         ):
             raise AssertionError(f"missing transit cost must remain fail-closed: {dict(row)}")
     else:

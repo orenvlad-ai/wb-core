@@ -811,9 +811,20 @@ def _assert_http_routes_and_order_integration() -> None:
             if before_confirm_lines:
                 raise AssertionError(f"preview must not create expense lines before confirmation: {before_confirm_lines}")
             statement_document_id = str(statement_preview.get("document_id") or "")
+            selected_logical_fee_ids = [
+                str(item.get("logical_fee_id") or "")
+                for item in import_preview.get("logical_fee_groups") or []
+                if str(item.get("operation_status") or "") == "new"
+                and bool(item.get("import_allowed"))
+            ]
+            if len(selected_logical_fee_ids) != 3:
+                raise AssertionError(
+                    "bank statement preview must expose three unselected logical fee groups: "
+                    f"{import_preview}"
+                )
             confirm_status, confirmed_statement = _post_json(
                 f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
-                {},
+                {"selected_operation_ids": selected_logical_fee_ids},
             )
             if confirm_status != 200 or confirmed_statement.get("parse_status") != "confirmed":
                 raise AssertionError(f"statement confirm import changed: {confirm_status} {confirmed_statement}")

@@ -31,6 +31,13 @@ from packages.application.supplier_shipment_status import (
     supplier_business_today,
     validate_supplier_factual_dates,
 )
+from packages.application.warehouse_functional_lock import (
+    warehouse_functional_write_lock,
+)
+from packages.application.warehouse_targeted_replay import (
+    WarehouseTargetedReplayError,
+    WarehouseTargetedSupplierReplay,
+)
 
 
 CORRECTION_SOURCE = "operator_factual_date_correction"
@@ -63,7 +70,7 @@ FINANCIAL_DOCUMENT_CONFIRMATION_SOURCE = (
 MONEY_QUANT = Decimal("0.000001")
 CORRECTION_TABLE = "sheet_vitrina_v1_supplier_shipment_factual_corrections"
 ACTIVE_CORRECTION_STATUSES = {"queued", "running"}
-FINAL_CORRECTION_STATUSES = {"success", "error"}
+FINAL_CORRECTION_STATUSES = {"success", "needs_review", "error"}
 VOLATILE_CANONICAL_COLUMNS = {"calculated_at", "created_at", "superseded_at"}
 ProgressEmitter = Callable[[str], None]
 PROTECTED_COLLATERAL_TABLES = (
@@ -231,45 +238,53 @@ class SupplierShipmentFactualCorrectionBlock:
         self._set_job_state(
             correction_id,
             status="running",
-            phase="saving",
-            progress_text="Сохраняем изменение",
+            phase="waiting_for_recalculation",
+            progress_text="Ожидает освобождения пересчёта",
             started=True,
         )
-        _emit(emit, "Сохраняем изменение")
+        _emit(emit, "Ожидает освобождения пересчёта")
         try:
-            self._set_job_state(
-                correction_id,
-                status="running",
-                phase="recalculating",
-                progress_text="Пересчитываем зависимые данные",
-            )
-            _emit(emit, "Пересчитываем зависимые данные")
-            dry_run = self.dry_run(
-                shipment_id=shipment_id,
-                new_actual_shipment_date=new_value,
-                actor=actor,
-                expected_old_value=str(job["old_value"]),
-                require_cross_cutover_rebuild=True,
-            )
-            self._set_job_state(
-                correction_id,
-                status="running",
-                phase="verifying",
-                progress_text="Проверяем результат",
-                apply_fingerprint=str(dry_run["fingerprint"]),
-                report=dry_run,
-            )
-            _emit(emit, "Проверяем результат")
-            result = self.apply(
-                shipment_id=shipment_id,
-                new_actual_shipment_date=new_value,
-                actor=actor,
-                fingerprint=str(dry_run["fingerprint"]),
-                backup_dir=self.runtime.runtime_dir / "backups" / "supplier_factual_date_corrections",
-                expected_old_value=str(job["old_value"]),
-                correction_id=correction_id,
-                require_cross_cutover_rebuild=True,
-            )
+            with warehouse_functional_write_lock(
+                self.runtime.runtime_dir,
+                timeout_seconds=300,
+            ) as lock_info:
+                self._set_job_state(
+                    correction_id,
+                    status="running",
+                    phase="recalculating",
+                    progress_text="Пересчитываем зависимые данные",
+                )
+                _emit(emit, "Пересчитываем зависимые данные")
+                dry_run = self.dry_run(
+                    shipment_id=shipment_id,
+                    new_actual_shipment_date=new_value,
+                    actor=actor,
+                    expected_old_value=str(job["old_value"]),
+                    require_cross_cutover_rebuild=True,
+                )
+                dry_run.setdefault("performance", {})[
+                    "lock_wait_ms"
+                ] = lock_info["wait_ms"]
+                self._set_job_state(
+                    correction_id,
+                    status="running",
+                    phase="verifying",
+                    progress_text="Проверяем результат",
+                    apply_fingerprint=str(dry_run["fingerprint"]),
+                    report=dry_run,
+                )
+                _emit(emit, "Проверяем результат")
+                result = self.apply(
+                    shipment_id=shipment_id,
+                    new_actual_shipment_date=new_value,
+                    actor=actor,
+                    fingerprint=str(dry_run["fingerprint"]),
+                    backup_dir=self.runtime.runtime_dir / "backups" / "supplier_factual_date_corrections",
+                    expected_old_value=str(job["old_value"]),
+                    correction_id=correction_id,
+                    require_cross_cutover_rebuild=True,
+                    lock_wait_ms=int(lock_info["wait_ms"]),
+                )
             self._set_job_state(
                 correction_id,
                 status="success",
@@ -282,11 +297,24 @@ class SupplierShipmentFactualCorrectionBlock:
             return self.get_job(correction_id)
         except Exception as exc:
             safe_message = _safe_error_message(exc)
+            needs_review = isinstance(exc, WarehouseTargetedReplayError) and any(
+                marker in safe_message
+                for marker in (
+                    "target_source_identity_missing",
+                    "target blocker",
+                    "ambiguous",
+                    "identity",
+                )
+            )
             self._set_job_state(
                 correction_id,
-                status="error",
-                phase="failed",
-                progress_text="Изменение не применено",
+                status="needs_review" if needs_review else "error",
+                phase="requires_review" if needs_review else "failed",
+                progress_text=(
+                    "Требует разбора"
+                    if needs_review
+                    else "Ошибка пересчёта"
+                ),
                 error_code=type(exc).__name__,
                 error_message=safe_message,
                 completed=True,
@@ -306,6 +334,16 @@ class SupplierShipmentFactualCorrectionBlock:
         historical_status_change: Mapping[str, Any] | None = None,
         financial_document_confirmation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if (
+            historical_status_change is None
+            and financial_document_confirmation is None
+            and self._targeted_replay_available()
+        ):
+            return self._targeted_dry_run(
+                shipment_id=shipment_id,
+                new_actual_shipment_date=new_actual_shipment_date,
+                expected_old_value=expected_old_value,
+            )
         with self._candidate(
             shipment_id=shipment_id,
             new_actual_shipment_date=new_actual_shipment_date,
@@ -363,8 +401,35 @@ class SupplierShipmentFactualCorrectionBlock:
         require_cross_cutover_rebuild: bool = True,
         historical_status_change: Mapping[str, Any] | None = None,
         financial_document_confirmation: Mapping[str, Any] | None = None,
+        lock_wait_ms: int = 0,
     ) -> dict[str, Any]:
         approved_fingerprint = _required_text(fingerprint, "fingerprint")
+        if (
+            historical_status_change is None
+            and financial_document_confirmation is None
+            and self._targeted_replay_available()
+        ):
+            plan = self._targeted_dry_run(
+                shipment_id=shipment_id,
+                new_actual_shipment_date=new_actual_shipment_date,
+                expected_old_value=expected_old_value,
+            )
+            if str(plan["fingerprint"]) != approved_fingerprint:
+                raise ValueError("apply requires the exact current targeted dry-run fingerprint")
+            replay = WarehouseTargetedSupplierReplay(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+                failure_injector=self.failure_injector,
+            )
+            with warehouse_functional_write_lock(
+                self.runtime.runtime_dir,
+                timeout_seconds=300,
+            ) as nested_lock:
+                return replay.apply(
+                    plan,
+                    confirm_fingerprint=approved_fingerprint,
+                    lock_wait_ms=max(lock_wait_ms, int(nested_lock["wait_ms"])),
+                )
         backup_root = Path(backup_dir)
         with self._candidate(
             shipment_id=shipment_id,
@@ -684,6 +749,49 @@ class SupplierShipmentFactualCorrectionBlock:
                 "backup": backup,
                 "post_run": post,
             }
+
+    def _targeted_dry_run(
+        self,
+        *,
+        shipment_id: str,
+        new_actual_shipment_date: Any,
+        expected_old_value: str | None,
+    ) -> dict[str, Any]:
+        selected_id = _required_text(shipment_id, "shipment_id")
+        header = self._raw_header(selected_id)
+        if header is None:
+            raise ValueError(f"supplier shipment not found: {selected_id}")
+        operation_timestamp = self.timestamp_factory()
+        resolution = validate_supplier_factual_dates(
+            actual_shipment_date=new_actual_shipment_date,
+            actual_ff_acceptance_date=header.get("actual_ff_acceptance_date"),
+            business_today=supplier_business_today(timestamp=operation_timestamp),
+            historical_status_exception=header.get("historical_status_exception"),
+        )
+        replay = WarehouseTargetedSupplierReplay(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+            failure_injector=self.failure_injector,
+        )
+        return replay.build_plan(
+            shipment_id=selected_id,
+            new_actual_shipment_date=str(new_actual_shipment_date or "").strip(),
+            new_order_status=resolution.order_status,
+            expected_old_value=expected_old_value,
+        )
+
+    def _targeted_replay_available(self) -> bool:
+        with _connect(self.runtime.db_path) as conn:
+            if not _table_exists(
+                conn, "sheet_vitrina_v1_warehouse_functional_active"
+            ):
+                return False
+            return (
+                conn.execute(
+                    "SELECT 1 FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()
+                is not None
+            )
 
     def get_job(self, correction_id: str) -> dict[str, Any]:
         correction_id = _required_text(correction_id, "correction_id")

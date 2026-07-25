@@ -426,6 +426,37 @@
       margin-top: 4px;
       overflow-wrap: anywhere;
     }
+    #bankFeeStatementPreview:not([hidden]) {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+      padding: 20px;
+      background: rgba(3, 6, 12, 0.78);
+      backdrop-filter: blur(4px);
+    }
+    #bankFeeStatementPreview .finance-summary-card {
+      width: min(720px, 100%);
+      max-height: min(82vh, 760px);
+      overflow: auto;
+      padding: 18px;
+      border: 1px solid rgba(177, 139, 255, 0.28);
+      border-radius: 10px;
+      background: #11141d;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+    }
+    #bankFeePreviewContent {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    #bankFeePreviewContent details small {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+    }
     .warning-list {
       margin: 10px 0 0;
       padding-left: 18px;
@@ -674,12 +705,12 @@
             <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
             <div id="documentPackageReceipts" class="package-receipts" aria-live="polite"></div>
           </div>
-          <div id="bankFeeStatementPreview" class="finance-summary-stack" hidden>
+          <div id="bankFeeStatementPreview" class="finance-summary-stack" role="dialog" aria-modal="true" aria-labelledby="bankFeePreviewTitle" hidden>
             <div class="finance-summary-card">
               <h4 id="bankFeePreviewTitle">Preview импорта комиссий</h4>
               <div id="bankFeePreviewContent" class="finance-fields"></div>
               <div class="document-actions">
-                <button id="confirmBankFeeImportButton" class="primary compact" type="button">Подтвердить импорт</button>
+                <button id="confirmBankFeeImportButton" class="primary compact" type="button">Импортировать выбранные</button>
                 <button id="cancelBankFeeImportButton" class="compact" type="button">Отмена</button>
               </div>
             </div>
@@ -914,6 +945,8 @@
       let financialExpenseLines = [];
       let financialSummary = null;
       let pendingBankFeePreview = null;
+      let dismissedBankFeePreviewDocumentId = "";
+      let storedBankFeePreviewOpen = false;
       let selectedFinancialDocumentId = "";
       let pendingDeepLinkShipmentId = String(queryParams.get("shipment_id") || "").trim();
       let pendingDeepLinkTab = String(queryParams.get("tab") || "").trim();
@@ -1117,25 +1150,33 @@
       }
 
       function exactCostTooltip(row) {
+        const freshness = row && row.cost_freshness && typeof row.cost_freshness === "object"
+          ? row.cost_freshness
+          : {};
+        const freshnessLabel = String(freshness.label || "").trim();
         if (row && row.exact_landed_cost_per_unit_rub !== null && row.exact_landed_cost_per_unit_rub !== undefined && row.exact_landed_cost_per_unit_rub !== "") {
           const certification = row.supplier_cost_breakdown && row.supplier_cost_breakdown.certification;
-          return certification && certification.status_label_ru
+          return freshnessLabel || (certification && certification.status_label_ru
             ? String(certification.status_label_ru)
             : (row.exact_cost_status === "certified"
               ? "Все расходы учтены / Подтверждено документами"
-              : "Предварительная себестоимость — не все расходы учтены");
+              : "Предварительная себестоимость — не все расходы учтены"));
         }
         const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
-        return blockers.length ? blockers.join("; ") : "точная себестоимость недоступна";
+        return blockers.length
+          ? blockers.join("; ")
+          : (freshnessLabel || "точная себестоимость недоступна");
       }
 
       function renderExactCostValue(row) {
         const display = formatRegistryMoney(row && row.exact_landed_cost_per_unit_rub);
-        if (display === "—") {
-          return escapeHtml(display);
-        }
+        const freshness = row && row.cost_freshness && typeof row.cost_freshness === "object"
+          ? row.cost_freshness
+          : {};
+        const freshnessLabel = String(freshness.label || "").trim();
         const className = row && row.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete";
-        return '<span class="' + className + '">' + escapeHtml(display) + '</span>';
+        return '<span class="' + className + '">' + escapeHtml(display) + '</span>' +
+          (freshnessLabel ? '<small>' + escapeHtml(freshnessLabel) + '</small>' : "");
       }
 
       function formatAmount(value, currency) {
@@ -1984,6 +2025,7 @@
           exact_landed_cost_total_rub: detail.exact_landed_cost_total_rub,
           exact_landed_cost_per_unit_rub: detail.exact_landed_cost_per_unit_rub,
           exact_cost_status: detail.exact_cost_status,
+          cost_freshness: detail.cost_freshness,
           exact_cost_blockers: detail.exact_cost_blockers,
           exact_cost_warnings: detail.exact_cost_warnings,
           lines: draftLines.map((line) => {
@@ -2022,6 +2064,8 @@
         financialExpenseLines = [];
         financialSummary = null;
         pendingBankFeePreview = null;
+        dismissedBankFeePreviewDocumentId = "";
+        storedBankFeePreviewOpen = false;
         selectedFinancialDocumentId = "";
         documentPackageReceipts.innerHTML = "";
         renderBankFeePreview();
@@ -2260,6 +2304,7 @@
         const canonicalPerUnit = {
           ...rawPerUnit,
           exact_cost_status: rawPerUnit.exact_cost_status || "unavailable",
+          cost_freshness: rawPerUnit.cost_freshness || null,
           exact_cost_blockers: rawPerUnit.exact_cost_blockers || [],
           supplier_cost_breakdown: rawPerUnit.supplier_cost_breakdown || null
         };
@@ -2438,6 +2483,8 @@
               return;
             }
             selectedFinancialDocumentId = row.dataset.financialDocumentRow || "";
+            dismissedBankFeePreviewDocumentId = "";
+            storedBankFeePreviewOpen = true;
             renderFinancialDocuments();
           });
         });
@@ -2715,7 +2762,15 @@
       }
 
       function activeBankFeePreview() {
-        return pendingBankFeePreview || storedBankFeePreview();
+        if (pendingBankFeePreview) {
+          return pendingBankFeePreview;
+        }
+        const stored = storedBankFeePreview();
+        return storedBankFeePreviewOpen
+          && stored
+          && stored.document_id !== dismissedBankFeePreviewDocumentId
+          ? stored
+          : null;
       }
 
       function renderBankFeePreview() {
@@ -2732,9 +2787,26 @@
         bankFeePreviewTitle.textContent = storedReview
           ? "Операции выписки · выбор оператора"
           : "Preview импорта комиссий";
-        cancelBankFeeImportButton.hidden = storedReview;
+        cancelBankFeeImportButton.hidden = false;
+        cancelBankFeeImportButton.textContent = storedReview ? "Закрыть" : "Отмена";
         const anchors = Array.isArray(preview.payment_anchors) ? preview.payment_anchors : [];
         const fees = Array.isArray(preview.matched_fee_rows) ? preview.matched_fee_rows : [];
+        const logicalGroups = Array.isArray(preview.logical_fee_groups) && preview.logical_fee_groups.length
+          ? preview.logical_fee_groups
+          : fees.map((row) => ({
+              logical_fee_id: row.logical_fee_id || row.semantic_operation_id,
+              operation_status: row.operation_status,
+              import_allowed: row.import_allowed,
+              date_from: row.operation_date,
+              date_to: row.operation_date,
+              fee_category: row.fee_category,
+              amount: row.amount,
+              currency: row.currency,
+              matched_anchor_operation_number: row.matched_anchor_operation_number,
+              reference: row.logical_fee_reference || row.bank_document_number || "",
+              atomic_count: 1,
+              atomic_rows: [row]
+            }));
         const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
         const totals = preview.fee_totals_by_currency || {};
         const statusLabels = {
@@ -2743,43 +2815,70 @@
           "conflict": "Конфликт",
           "needs_review": "Требует выбора"
         };
-        const feeText = fees.length
-          ? fees.map((row) => {
-            const operationId = String(row.semantic_operation_id || "");
-            const disabled = row.import_allowed === false || row.operation_status === "already_imported";
-            const checked = row.selected_by_default === true && !disabled;
-            const status = row.operation_status || "needs_review";
+        const selectableGroups = logicalGroups.filter((row) => (
+          row.operation_status === "new" && row.import_allowed !== false
+        ));
+        const nonSelectableGroups = logicalGroups.filter((row) => (
+          row.operation_status !== "new" || row.import_allowed === false
+        ));
+        const feeText = selectableGroups.length
+          ? selectableGroups.map((row) => {
+            const operationId = String(row.logical_fee_id || "");
+            const status = "new";
+            const dateRange = row.date_from === row.date_to
+              ? (row.date_from || "дата не распознана")
+              : [row.date_from, row.date_to].filter(Boolean).join("–");
             const details = [
-              row.operation_date || "дата не распознана",
-              row.account_number || "счёт не распознан",
+              dateRange,
               row.currency || "валюта не распознана",
               financialCategoryLabels[row.fee_category] || row.fee_category || "Комиссия",
               formatAmount(row.amount, row.currency),
               "платёж №" + (row.matched_anchor_operation_number || "—"),
+              row.reference ? "ref " + row.reference : "",
               statusLabels[status] || status
             ].filter(Boolean).join(" · ");
+            const atomicRows = Array.isArray(row.atomic_rows) ? row.atomic_rows : [];
+            const atomicDetails = atomicRows.length > 1
+              ? '<details><summary>' + escapeHtml(String(atomicRows.length)) + ' банковских списания</summary>' +
+                atomicRows.map((atomic) => '<small>' + escapeHtml([
+                  atomic.operation_date || "—",
+                  formatAmount(atomic.amount, atomic.currency),
+                  atomic.bank_document_number || ""
+                ].filter(Boolean).join(" · ")) + '</small>').join("") + '</details>'
+              : "";
             return [
               '<label class="finance-field" data-bank-fee-status="' + escapeHtml(status) + '">',
-              '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '"' +
-                (checked ? " checked" : "") + (disabled ? " disabled" : "") + '>',
+              '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '">',
               '<span><strong>' + escapeHtml(details) + '</strong>',
-              '<small>' + escapeHtml(row.payment_purpose || "") + '</small>',
-              row.review_warning ? '<small>' + escapeHtml(row.review_warning) + '</small>' : "",
-              '<small>' + escapeHtml((Array.isArray(row.match_reasons) ? row.match_reasons.join(", ") : "") || "Основание сопоставления отсутствует") + '</small>',
+              atomicDetails,
               '</span></label>'
             ].join("");
           }).join("")
-          : "Комиссии для этого payment anchor не найдены.";
+          : "Новых комиссий для выбора нет.";
+        const reviewBlocks = [
+          nonSelectableGroups.length
+            ? '<details><summary>Уже импортированные и требующие разбора (' + nonSelectableGroups.length + ')</summary>' +
+              nonSelectableGroups.map((row) => '<small>' + escapeHtml([
+                financialCategoryLabels[row.fee_category] || row.fee_category || "Комиссия",
+                formatAmount(row.amount, row.currency),
+                statusLabels[row.operation_status] || row.operation_status
+              ].join(" · ")) + '</small>').join("") + '</details>'
+            : "",
+          Array.isArray(preview.weak_candidates) && preview.weak_candidates.length
+            ? '<details><summary>Слабые совпадения (' + preview.weak_candidates.length + ')</summary></details>'
+            : "",
+          Array.isArray(preview.ignored_rows) && preview.ignored_rows.length
+            ? '<details><summary>Игнорированные строки (' + preview.ignored_rows.length + ')</summary></details>'
+            : ""
+        ].join("");
         const totalsText = Object.keys(totals).length
           ? Object.keys(totals).sort().map((currency) => formatAmount(totals[currency], currency)).join(", ")
           : "—";
         bankFeePreviewContent.innerHTML = [
-          '<div class="finance-field"><span>Payment anchor</span><strong>' + escapeHtml(anchors.map((item) => "#" + (item.operation_number || item.document_number || item.document_id || "-") + " · " + (item.amount_cny_display || "-") + " CNY").join("; ") || "—") + '</strong></div>',
-          '<div class="finance-field"><span>Комиссии к импорту</span><strong>' + feeText + '</strong></div>',
+          '<div class="finance-field"><span>Новые логические комиссии</span><strong>' + feeText + '</strong></div>',
           '<div class="finance-field"><span>Итого</span><strong>' + escapeHtml(totalsText) + '</strong></div>',
-          '<div class="finance-field"><span>Игнорировано строк</span><strong>' + escapeHtml(String(preview.ignored_row_count || 0)) + '</strong></div>',
-          '<div class="finance-field"><span>Confidence</span><strong>' + escapeHtml(preview.match_confidence || "—") + '</strong></div>',
-          '<div class="finance-field"><span>Warnings</span><strong>' + escapeHtml(warnings.join("; ") || "—") + '</strong></div>'
+          reviewBlocks,
+          warnings.length ? '<details><summary>Предупреждения (' + warnings.length + ')</summary><small>' + escapeHtml(warnings.join("; ")) + '</small></details>' : ""
         ].join("");
         const selectedInputs = bankFeePreviewContent.querySelectorAll("[data-bank-fee-operation]:checked");
         confirmBankFeeImportButton.disabled = !selectedInputs.length;
@@ -2947,6 +3046,8 @@
               lastDocumentId = result.document_id || lastDocumentId;
               if (result.preview_required && result.document_id) {
                 pendingBankFeePreview = result;
+                dismissedBankFeePreviewDocumentId = "";
+                storedBankFeePreviewOpen = false;
                 renderBankFeePreview();
               }
             }
@@ -3069,6 +3170,8 @@
             body: JSON.stringify({ selected_operation_ids: selectedOperationIds })
           });
           pendingBankFeePreview = null;
+          dismissedBankFeePreviewDocumentId = documentId;
+          storedBankFeePreviewOpen = false;
           renderBankFeePreview();
           await loadFinancialDocuments({ selectedDocumentId: documentId });
           await refreshCurrentShipmentCostProof();
@@ -3080,6 +3183,11 @@
       }
 
       function cancelBankFeePreview() {
+        const previewPayload = activeBankFeePreview();
+        if (previewPayload && previewPayload.stored_review) {
+          dismissedBankFeePreviewDocumentId = previewPayload.document_id || "";
+          storedBankFeePreviewOpen = false;
+        }
         pendingBankFeePreview = null;
         renderBankFeePreview();
         setMessage(financialDocumentsMessage, "Импорт комиссий отменён; expense lines не созданы.", "");
@@ -3474,13 +3582,17 @@
             });
             return currentShipment;
           }
-          if (correction.status === "error") {
+          if (correction.status === "error" || correction.status === "needs_review") {
             setFactualCorrectionBlocking(false);
             currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
               headers: { Accept: "application/json" }
             });
             renderCard();
-            throw new Error(correction.error_message || "Не удалось сохранить изменение. Прежняя версия сохранена.");
+            throw new Error(correction.error_message || (
+              correction.status === "needs_review"
+                ? "Требует разбора. Прежняя версия сохранена."
+                : "Ошибка пересчёта. Прежняя версия сохранена."
+            ));
           }
           await waitForCorrectionPoll();
           correction = await fetchJson(correctionStatusPath(shipmentId), {

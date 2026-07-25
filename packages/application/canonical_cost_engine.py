@@ -29,6 +29,7 @@ from packages.application.supplier_financial_document_exact_policy import (
 from packages.application.supplier_shipment_status import (
     HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
 )
+from packages.application.warehouse_event_order import ff_operation_replay_sort_key
 
 
 CUTOVER_DATE = "2026-07-01"
@@ -4630,9 +4631,9 @@ def _source_anomaly_preflight_conn(
                     line["quantity_delta"]
                 )
     canonical_operations.sort(
-        key=lambda item: (
-            item[0], str(item[1].get("created_at") or ""),
-            str(item[1].get("operation_id") or ""),
+        key=lambda item: ff_operation_replay_sort_key(
+            item[1],
+            business_date=item[0],
         )
     )
     for effective, operation in canonical_operations:

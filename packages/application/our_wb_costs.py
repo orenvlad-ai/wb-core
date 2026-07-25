@@ -36,6 +36,11 @@ SUPPLIER_FF_STATUS_NEEDS_REVIEW = "needs_review"
 
 TRANSIT_DIRECT_ZERO_CONFIRMED = "direct_zero_confirmed"
 TRANSIT_CONFIRMED = "transit_confirmed"
+TRANSIT_NOT_REQUESTED = "not_requested"
+TRANSIT_UPDATING = "updating"
+TRANSIT_NOT_FOUND = "not_found"
+TRANSIT_SOURCE_ERROR = "source_error"
+TRANSIT_SESSION_EXPIRED = "session_expired"
 TRANSIT_MISSING = "transit_missing"
 TRANSIT_UNKNOWN_ROUTE = "unknown_route"
 
@@ -1153,15 +1158,26 @@ class OurWbCostBlock:
         sku_ff_cost = _optional_float((ff_line or {}).get("sku_ff_unit_cost_rub"))
         if sku_ff_cost is None:
             our_cost = None
+            pre_acceptance_cost = None
             source_status = WB_COST_STATUS_NEEDS_REVIEW
             missing_reason = "missing_supplier_ff_cost_layer"
         else:
             transit_per_unit = transit.per_unit
             if transit_per_unit is None:
-                transit_per_unit = 0.0
-            pre_acceptance_cost = sku_ff_cost + transit_per_unit + services_per_unit + storage_per_unit
-            our_cost = pre_acceptance_cost + acceptance_per_accepted_unit
-            if transit.status == TRANSIT_MISSING or transit.status == TRANSIT_UNKNOWN_ROUTE:
+                pre_acceptance_cost = None
+                our_cost = None
+            else:
+                pre_acceptance_cost = (
+                    sku_ff_cost
+                    + transit_per_unit
+                    + services_per_unit
+                    + storage_per_unit
+                )
+                our_cost = pre_acceptance_cost + acceptance_per_accepted_unit
+            if transit.status not in {
+                TRANSIT_CONFIRMED,
+                TRANSIT_DIRECT_ZERO_CONFIRMED,
+            }:
                 source_status = WB_COST_STATUS_PENDING
                 missing_reason = transit.missing_reason or "transit_cost_pending"
             elif not quantity_is_final_accepted:
@@ -1189,7 +1205,7 @@ class OurWbCostBlock:
             "sku_ff_unit_cost_rub": sku_ff_cost,
             "transit_cost_status": transit.status,
             "transit_amount_total": transit.amount_total,
-            "transit_per_unit_rub": transit.per_unit if transit.per_unit is not None else 0.0,
+            "transit_per_unit_rub": transit.per_unit,
             "ff_upload_id": _optional_text(",".join(str(item) for item in upload_ids) if upload_ids else None),
             "ff_services_amount_total": services_total,
             "ff_services_per_unit_rub": services_per_unit,
@@ -1345,32 +1361,75 @@ def classify_wb_supply_transit(
         or supply_row.get("transit_warehouse_id")
         or str(supply_row.get("transit_warehouse_name") or "").strip()
     )
-    official_cost = _optional_float(supply_row.get("transit_cost") or supply_row.get("transitCost"))
-    official_total = _optional_float(supply_row.get("cost_total") or supply_row.get("costTotal"))
-    acceptance_cost = _optional_float(supply_row.get("acceptance_cost") or supply_row.get("acceptanceCost"))
+    official_cost = _optional_float(
+        supply_row.get("transit_cost")
+        if supply_row.get("transit_cost") is not None
+        else supply_row.get("transitCost")
+    )
+    official_total = _optional_float(
+        supply_row.get("cost_total")
+        if supply_row.get("cost_total") is not None
+        else supply_row.get("costTotal")
+    )
+    acceptance_cost = _optional_float(
+        supply_row.get("acceptance_cost")
+        if supply_row.get("acceptance_cost") is not None
+        else supply_row.get("acceptanceCost")
+    )
     if official_cost is None and official_total is not None:
         official_cost = max(official_total - (acceptance_cost or 0.0), 0.0)
     effective_cost = _optional_float(supply_row.get("effective_transit_cost_total"))
     seller_portal_cost = _optional_float(
-        supply_row.get("seller_portal_transit_cost_total") or supply_row.get("seller_portal_transit_cost")
+        supply_row.get("seller_portal_transit_cost_total")
+        if supply_row.get("seller_portal_transit_cost_total") is not None
+        else supply_row.get("seller_portal_transit_cost")
     )
     cost_source = str(supply_row.get("cost_evidence") or supply_row.get("effective_transit_cost_source") or "")
     if not cost_source and official_total is not None:
         cost_source = "official_cost_total_minus_acceptance_cost"
     qty = _positive_number(denominator)
+    acquisition_status = str(
+        supply_row.get("seller_portal_transit_cost_status") or ""
+    ).strip()
     if has_transit_marker:
         amount = official_cost
         if amount is None:
             amount = effective_cost if effective_cost is not None else seller_portal_cost
         if amount is not None:
             return TransitCostClassification(
-                status=TRANSIT_CONFIRMED,
+                status=(
+                    TRANSIT_DIRECT_ZERO_CONFIRMED
+                    if amount == 0
+                    else TRANSIT_CONFIRMED
+                ),
                 amount_total=amount,
                 per_unit=amount / qty if qty > 0 else None,
                 evidence=cost_source or "transit_marker_with_cost",
             )
+        status_by_acquisition = {
+            "queued": TRANSIT_UPDATING,
+            "running": TRANSIT_UPDATING,
+            "starting": TRANSIT_UPDATING,
+            "not_found": TRANSIT_NOT_FOUND,
+            "failed": TRANSIT_SOURCE_ERROR,
+            "error": TRANSIT_SOURCE_ERROR,
+            "session_expired": TRANSIT_SESSION_EXPIRED,
+        }
+        if acquisition_status in status_by_acquisition:
+            status = status_by_acquisition[acquisition_status]
+            return TransitCostClassification(
+                status=status,
+                amount_total=None,
+                per_unit=None,
+                evidence="seller_portal:" + acquisition_status,
+                missing_reason=status,
+            )
         return TransitCostClassification(
-            status=TRANSIT_MISSING,
+            status=(
+                TRANSIT_MISSING
+                if acquisition_status
+                else TRANSIT_NOT_REQUESTED
+            ),
             amount_total=None,
             per_unit=None,
             evidence="transit_marker_without_cost",
@@ -1381,7 +1440,11 @@ def classify_wb_supply_transit(
         or str(supply_row.get("warehouse_display") or "").strip()
         or supply_row.get("warehouse_id")
     )
-    zero_cost_evidence = not has_transit_marker and official_cost in {None, 0}
+    zero_cost_evidence = (
+        not has_transit_marker
+        and official_total is not None
+        and official_cost == 0
+    )
     if route_known and zero_cost_evidence:
         return TransitCostClassification(
             status=TRANSIT_DIRECT_ZERO_CONFIRMED,

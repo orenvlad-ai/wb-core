@@ -496,7 +496,7 @@ def main() -> None:
                 if exact_cost_value in {"—", "-", "0", "0,00 ₽"}:
                     raise AssertionError(f"documents tab exact cost tile must show money value, got {exact_cost_value!r}")
                 expect(exact_cost_tile).to_have_attribute(
-                    "title", "Предварительная себестоимость — не все расходы учтены"
+                    "title", "Себестоимость ожидает пересчёта"
                 )
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel .document-label-primary")).to_contain_text("26GN390")
@@ -516,40 +516,36 @@ def main() -> None:
                     has_text="VTB-REVIEW",
                 ).first
                 expect(statement_row).to_be_visible()
-                statement_row.click()
+                if frame.locator("#bankFeeStatementPreview").is_hidden():
+                    statement_row.click()
                 expect(frame.locator("#bankFeePreviewTitle")).to_have_text(
                     "Операции выписки · выбор оператора"
                 )
-                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("Уже импортирована")
-                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("Требует выбора")
-                expect(frame.locator("#bankFeePreviewContent")).to_contain_text("40802810012480001092")
+                expect(frame.locator("#bankFeePreviewContent")).to_contain_text(
+                    "Уже импортированные и требующие разбора"
+                )
                 expect(frame.locator("#bankFeePreviewContent")).to_contain_text("платёж №11")
                 expect(frame.locator("#bankFeePreviewContent")).to_contain_text(
-                    "Несколько строк имеют одинаковую связь с платежом; нужен явный выбор оператора."
+                    "2 банковских списания"
                 )
-                ambiguous_20k = frame.locator(
-                    "#bankFeePreviewContent [data-bank-fee-status='needs_review']",
-                    has_text=re.compile(r"20\s*000,00 RUB"),
+                logical_transfer = frame.locator(
+                    "#bankFeePreviewContent [data-bank-fee-status='new']",
+                    has_text=re.compile(r"78\s*113,66 RUB"),
                 )
-                ambiguous_58113 = frame.locator(
-                    "#bankFeePreviewContent [data-bank-fee-status='needs_review']",
-                    has_text=re.compile(r"58\s*113,66 RUB"),
-                )
-                expect(ambiguous_20k).to_be_visible()
-                expect(ambiguous_58113).to_be_visible()
-                expect(ambiguous_20k.locator("input")).not_to_be_checked()
-                expect(ambiguous_58113.locator("input")).not_to_be_checked()
-                expect(ambiguous_20k.locator("input")).to_be_enabled()
-                expect(ambiguous_58113.locator("input")).to_be_enabled()
-                expect(
-                    frame.locator("#bankFeePreviewContent [data-bank-fee-status='already_imported'] input")
-                ).to_be_disabled()
+                expect(logical_transfer).to_be_visible()
+                expect(logical_transfer).to_contain_text("20 000,00 RUB")
+                expect(logical_transfer).to_contain_text("58 113,66 RUB")
+                expect(logical_transfer.locator("input")).not_to_be_checked()
+                expect(logical_transfer.locator("input")).to_be_enabled()
+                expect(frame.locator("#bankFeePreviewContent input")).to_have_count(1)
                 expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
-                ambiguous_20k.locator("input").check()
+                logical_transfer.locator("input").check()
                 expect(frame.locator("#confirmBankFeeImportButton")).to_be_enabled()
-                ambiguous_20k.locator("input").uncheck()
+                logical_transfer.locator("input").uncheck()
                 expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
-                expect(frame.locator("#cancelBankFeeImportButton")).to_be_hidden()
+                expect(frame.locator("#cancelBankFeeImportButton")).to_have_text("Закрыть")
+                frame.locator("#cancelBankFeeImportButton").click()
+                expect(frame.locator("#bankFeeStatementPreview")).to_be_hidden()
                 expect(frame.locator("#supplierOrderDocumentsTable thead")).to_contain_text("Распределение расходов")
                 frame.locator("#financialDocumentsColumnChooser > summary").click()
                 counterparty_toggle = frame.locator("#financialDocumentsColumnChooser input[value='counterparty']")
@@ -1237,7 +1233,7 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
     shipment_id = str(shipments[0].get("shipment_id") or "")
     if not shipment_id:
         raise AssertionError(f"cannot seed bank fee review for shipment without id: {shipments[0]}")
-    review_warning = "Несколько строк имеют одинаковую связь с платежом; нужен явный выбор оператора."
+    review_warning = "Одна ранее импортированная комиссия скрыта из основного списка."
     account_number = "40802810012480001092"
     runtime.save_supplier_financial_document(
         document={
@@ -1273,7 +1269,7 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
                             "operation_date": "2026-07-19",
                             "account_number": account_number,
                             "currency": "RUB",
-                            "fee_category": "transfer_fee",
+                            "fee_category": "currency_control_fee",
                             "amount": "948.60",
                             "matched_anchor_operation_number": "11",
                             "operation_status": "already_imported",
@@ -1287,10 +1283,10 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
                             "operation_date": "2026-07-20",
                             "account_number": account_number,
                             "currency": "RUB",
-                            "fee_category": "transfer_fee",
+                            "fee_category": "bank_transfer_fee",
                             "amount": "20000.00",
                             "matched_anchor_operation_number": "11",
-                            "operation_status": "needs_review",
+                            "operation_status": "new",
                             "import_allowed": True,
                             "selected_by_default": False,
                             "payment_purpose": "Комиссия по валютному контролю, платёж №11",
@@ -1302,15 +1298,60 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
                             "operation_date": "2026-07-21",
                             "account_number": account_number,
                             "currency": "RUB",
-                            "fee_category": "currency_control_fee",
+                            "fee_category": "bank_transfer_fee",
                             "amount": "58113.66",
                             "matched_anchor_operation_number": "11",
-                            "operation_status": "needs_review",
+                            "operation_status": "new",
                             "import_allowed": True,
                             "selected_by_default": False,
                             "payment_purpose": "Комиссия по документу платежа №11",
                             "review_warning": review_warning,
                             "match_reasons": ["номер платежа", "назначение платежа"],
+                        },
+                    ],
+                    "logical_fee_groups": [
+                        {
+                            "logical_fee_id": "browser-vtb-imported-logical",
+                            "operation_status": "already_imported",
+                            "import_allowed": False,
+                            "selected_by_default": False,
+                            "date_from": "2026-07-19",
+                            "date_to": "2026-07-19",
+                            "fee_category": "currency_control_fee",
+                            "amount": "948.60",
+                            "currency": "RUB",
+                            "matched_anchor_operation_number": "11",
+                            "reference": "130623",
+                            "atomic_count": 1,
+                            "atomic_rows": [],
+                        },
+                        {
+                            "logical_fee_id": "browser-vtb-transfer-logical",
+                            "operation_status": "new",
+                            "import_allowed": True,
+                            "selected_by_default": False,
+                            "date_from": "2026-07-20",
+                            "date_to": "2026-07-21",
+                            "fee_category": "bank_transfer_fee",
+                            "amount": "78113.66",
+                            "currency": "RUB",
+                            "matched_anchor_operation_number": "11",
+                            "reference": "244189",
+                            "atomic_count": 2,
+                            "atomic_rows": [
+                                {
+                                    "operation_date": "2026-07-20",
+                                    "amount": "20000.00",
+                                    "currency": "RUB",
+                                    "bank_document_number": "244189",
+                                },
+                                {
+                                    "operation_date": "2026-07-21",
+                                    "amount": "58113.66",
+                                    "currency": "RUB",
+                                    "bank_document_number": "244189",
+                                },
+                            ],
                         },
                     ],
                     "fee_totals_by_currency": {"RUB": "79062.26"},

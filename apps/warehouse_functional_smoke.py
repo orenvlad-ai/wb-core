@@ -88,6 +88,7 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     _warehouse_input_manifest_digest,
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
+    rollback_target_scoped_functional_economics,
 )
 from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
 from apps.warehouse_functional_runner import _verify_cutover_external_recheck  # noqa: E402
@@ -109,6 +110,7 @@ def main() -> None:
     _test_paid_acceptance_cost_boundary()
     _test_financial_document_eligibility()
     _test_discrepancy_pool()
+    _test_unavailable_cost_is_not_zero_wac()
     _test_cutover_ff_debit_coverage()
     _test_equal_timestamp_ff_receipt_ordering()
     _test_frozen_cost_map()
@@ -1181,6 +1183,45 @@ def _test_discrepancy_pool() -> None:
         and Decimal(str(exact_unmatched[0]["quantity"])) == Decimal("249")
         and int(exact_unmatched[0]["nm_id"]) == 391661710,
         "40985996 short receipt 253 is never netted with +249 of another SKU",
+    )
+
+
+def _test_unavailable_cost_is_not_zero_wac() -> None:
+    line = WarehouseLine(
+        warehouse_key="FF_TO_WB",
+        nm_id=10,
+        quantity=Decimal("10"),
+        capital=Decimal("0"),
+        cost_covered_quantity=Decimal("0"),
+        quality="physical_movement_cost_unavailable",
+        provenance={"cost_blockers": ["ff_base_cost_unavailable"]},
+    )
+    payload = _line_payload(line)
+    _assert(
+        payload["quantity"] == "10"
+        and payload["wac_rub"] is None
+        and payload["capital_rub"] == "0"
+        and payload["cost_covered_quantity"] == "0",
+        "unknown base cost keeps physical quantity but never publishes a synthetic zero WAC",
+    )
+    balances, unmatched = reconcile_discrepancies(
+        discrepancies=[
+            {
+                "source_id": "unknown-cost",
+                "nm_id": 10,
+                "quantity": "4",
+                "capital": "0",
+                "cost_covered_quantity": "0",
+            }
+        ],
+        doprinato=[],
+    )
+    _assert(
+        not unmatched
+        and balances[0]["quantity"] == "4"
+        and balances[0]["wac"] is None
+        and balances[0]["cost_covered_quantity"] == "0",
+        "unknown discrepancy cost remains unavailable instead of zero-valued",
     )
 
 
@@ -4059,8 +4100,33 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         dry_run,
         confirm_fingerprint=dry_run["plan_fingerprint"],
         backup_dir=root / "economics-backups",
+        target_scoped_undo=True,
     )
     _assert(applied["database_written"] is True, "functional economics backfill applies atomically")
+    _assert(
+        applied["backup"]["full_database_copy"] is False
+        and applied["backup"]["copy_bytes"] == 0,
+        "targeted economics publication records exact before-images without a database copy",
+    )
+    rolled_back = rollback_target_scoped_functional_economics(
+        runtime,
+        manifest_digest=applied["rollback_manifest_digest"],
+    )
+    _assert(
+        rolled_back["rolled_back"] is True,
+        "targeted economics before-images restore exactly",
+    )
+    restored_plan = build_functional_economics_backfill_plan(runtime)
+    _assert(
+        restored_plan["plan_fingerprint"] == dry_run["plan_fingerprint"],
+        "targeted economics rollback restores the reviewed source revision",
+    )
+    applied = apply_functional_economics_backfill_plan(
+        runtime,
+        restored_plan,
+        confirm_fingerprint=restored_plan["plan_fingerprint"],
+        backup_dir=root / "economics-backups",
+    )
     repeated = build_functional_economics_backfill_plan(runtime)
     _assert(repeated["changed_snapshot_count"] == 0, "functional economics backfill is idempotent")
     with sqlite3.connect(runtime.db_path) as conn:

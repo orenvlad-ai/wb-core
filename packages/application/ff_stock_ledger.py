@@ -5,11 +5,16 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import sqlite3
 from typing import Any, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.wb_supply_box_correction import (
+    corrected_goods,
+    load_active_box_correction,
+)
 from packages.contracts.supplier_shipments import (
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_MATCHED,
@@ -583,6 +588,19 @@ class FfStockLedgerBlock:
             raw_goods = normalized.get("raw_goods")
         if not isinstance(raw_goods, list) or not raw_goods:
             return {"skip_reason": "wb_supply_goods_missing", "supply_id": supply_id, "source_key": source_key}
+        with sqlite3.connect(self.runtime.db_path) as box_conn:
+            box_conn.row_factory = sqlite3.Row
+            box_correction = load_active_box_correction(box_conn, supply_id)
+        if box_correction is not None:
+            raw_goods = corrected_goods(
+                raw_goods,
+                {
+                    int(key): int(value)
+                    for key, value in dict(
+                        box_correction.get("corrected_composition") or {}
+                    ).items()
+                },
+            )
         lines, warnings = _wb_supply_goods_lines(raw_goods, self._nomenclature_by_nm())
         if warnings:
             return {
@@ -676,7 +694,7 @@ class FfStockLedgerBlock:
             normalized=normalized,
             lines=lines,
         )
-        if negative_preview or not downstream_state["validated"]:
+        if negative_preview:
             desired = {
                 int(item.get("nm_id") or 0): abs(float(item.get("quantity_delta") or 0.0))
                 for item in lines
@@ -685,22 +703,14 @@ class FfStockLedgerBlock:
                 supply_id=supply_id,
                 supply_revision=supply_revision,
                 desired=desired,
-                reason=(
-                    "waiting_for_goods"
-                    if negative_preview
-                    else "waiting_for_validated_downstream_costs"
-                ),
+                reason="waiting_for_goods",
                 diagnostics={
                     "negative_nm_ids": negative_preview[:20],
                     "downstream_cost_state": downstream_state,
                 },
             )
             return {
-                "skip_reason": (
-                    "wb_supply_reserved_waiting_for_goods"
-                    if negative_preview
-                    else "wb_supply_reserved_waiting_for_validated_downstream_costs"
-                ),
+                "skip_reason": "wb_supply_reserved_waiting_for_goods",
                 "supply_id": supply_id,
                 "source_key": source_key,
                 "source_timestamp": source_dt.isoformat(),
@@ -709,7 +719,7 @@ class FfStockLedgerBlock:
                 "negative_nm_ids": negative_preview[:20],
                 "downstream_cost_state": downstream_state,
                 "reservation": reservation,
-                "reservation_status": "Ожидает поступления" if negative_preview else "Ожидает подтверждения расходов",
+                "reservation_status": "Ожидает поступления",
                 "total_quantity": total_quantity,
             }
         if 0 < total_quantity < 250:
@@ -791,7 +801,14 @@ class FfStockLedgerBlock:
             lines=lines,
             expected_balances=expected_balances,
             reservation_transition=reservation_transition,
-            expected_downstream_costs=downstream_state.get("guard") or {},
+            # Cost evidence is an independent optimistic guard.  Missing or
+            # pending costs must not turn a physically possible movement into
+            # a reservation; a validated layer is guarded when present.
+            expected_downstream_costs=(
+                downstream_state.get("guard") or {}
+                if downstream_state["validated"]
+                else {}
+            ),
         )
         operation["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
         return operation
@@ -838,7 +855,10 @@ class FfStockLedgerBlock:
             reasons: list[str] = []
             if float(row.get("sku_ff_unit_cost_rub") or 0.0) <= 0:
                 reasons.append("missing_supplier_ff_cost_layer")
-            if str(row.get("transit_cost_status") or "") in {"transit_missing", "unknown_route"}:
+            if str(row.get("transit_cost_status") or "") not in {
+                "transit_confirmed",
+                "direct_zero_confirmed",
+            }:
                 reasons.append(str(row.get("missing_reason") or row.get("transit_cost_status") or "transit_missing"))
             if float(row.get("pre_acceptance_unit_cost_rub") or 0.0) <= 0:
                 reasons.append("pre_acceptance_unit_cost_missing")

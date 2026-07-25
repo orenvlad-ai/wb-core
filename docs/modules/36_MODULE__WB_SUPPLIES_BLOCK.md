@@ -52,7 +52,7 @@ related_endpoints:
   - "DELETE /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}/payment-validation.pdf"
 related_runners:
-  - "apps/ff_reservations_transit_cost_recovery.py"
+  - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
@@ -73,6 +73,7 @@ related_runners:
   - "apps/wb_supplies_transit_cost_enrichment_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py"
+  - "apps/wb_supply_box_correction_smoke.py"
   - "apps/sheet_vitrina_v1_fulfillment_services_smoke.py"
   - "apps/sheet_vitrina_v1_fulfillment_services_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
@@ -306,7 +307,7 @@ Candidate rules:
 
 The worker uses the shared Seller Portal storage-state path/lock contract, navigates to `/supplies-management/all-supplies`, searches by supply id, waits for `listSupplies` and `supply/cost` network JSON, joins by `data.{supplyID}`, and extracts `costInSupplierCurrency.amountWithVat` before falling back to `cost`.
 
-`apps/ff_reservations_transit_cost_recovery.py` is the bounded production recovery for exact supplies `41058085`, `41058204`, `41058408` and `41058611`. Dry-run is query-only and accepts only a positive canonical official WB transit fact or, when official cost is absent, Seller Portal network JSON obtained through the same read-only adapter. It pins current cache revisions, full compositions, active reservations, affected/non-target ledger digests, exact total quantity and the `40985996` SKU-discrepancy invariant. Apply is allowed only when all four positive costs are proven and the projected physical FF delta is exactly `-43 000`; it creates a verified backup, optimistically rechecks every fingerprint, stores only supplemental enrichment rows, rematerializes canonical costs, performs normal atomic reservation fulfillment and requires repeat reconciliation to be a no-op. It never writes WB, guesses a tariff or nets shortages across SKU.
+`apps/ff_reservations_transit_cost_recovery.py` remains a legacy read-only diagnostic; its apply entrypoint is disabled because it copied the monolithic database and incorrectly gated physical movement on positive transit evidence. The reviewed production path is `apps/warehouse_cost_unified_recovery.py`: its query-only dry-run pins the explicit supplies and exact compositions, projects physical availability independently from cost, and its exact-fingerprint apply performs idempotent physical debits plus one targeted cost publication under the shared lock. Missing transit stays an explicit cost-freshness state and never a physical reservation reason.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status?run_id=...`
 
@@ -452,6 +453,8 @@ Columns:
 
 `Транзит` renders the current `effective_cost_total` amount plus `₽/шт`. The second line is the per-unit calculation, not a service/source label such as `Seller Portal`. Provenance remains available in backend fields.
 
+Transit source state is explicit and lossless: confirmed positive, confirmed zero, not requested, updating, not found, source error, session expired, awaiting recalculation, included or recalculation error. `NULL`, no response, `not found`, source error and session expiry never become `0 ₽`; confirmed zero requires a successful source response that proves zero. A partially successful enrichment persists every successful row even when sibling supplies fail.
+
 `Услуги ФФ` renders active approved Fulfillment amount with allocated STORAGE included plus `₽/шт`. Rows without approved matched Fulfillment upload lines render `—`. When storage allocation exists, the cell adds `в т.ч. хранение: X ₽/шт`. Failed, unmatched, duplicate and deleted Fulfillment uploads do not enter this column.
 
 Per-unit denominator priority for both `Транзит` and `Услуги ФФ`:
@@ -526,6 +529,8 @@ Supply composition UI:
 - it shows supply header, composition status, totals and a goods table with `nmID`, barcode, vendorCode, size/color, added/accepted/unloading/ready quantities;
 - no mutations or Seller Portal actions are available from this panel.
 
+Final acceptance keeps declared FF composition as plan and gross per-nmID evidence as fact. Factory box size is a positive per-SKU nomenclature field, not a global hardcode. Automatic correction is allowed only when whole-box deltas preserve total sent quantity, every corrected sent quantity is at least accepted quantity, the minimum replacement count has exactly one deterministic solution and final status/evidence are current. The applied row stores declared/accepted/corrected compositions, gross shortage/surplus, box deltas, source revision, fingerprint and exact rollback manifest. If an earlier FF debit exists, one append-only compensation returns the missing box SKU and debits the substituted box SKU; rollback appends the inverse. Ambiguous/non-final evidence remains `Требуется сопоставить пересорт`. `Допринято` reduces discrepancy only for the same nmID and surplus never becomes negative stock.
+
 # 8. Diagnostics And Smokes
 
 Live diagnostics:
@@ -597,7 +602,7 @@ The warehouse opening consumer is separate from the cost-engine movement consume
 
 Module 45 consumes normalized WB goods/accepted evidence without changing this module's read-only WB boundary. Unknown nmID may remain upstream/cache evidence but atomically blocks FF writeoff, cost allocation and capital movement until authoritative nomenclature exists.
 
-For an ordinary supply, `FF → WB = max(packed - accepted, 0)` until final acceptance, but only after an actual canonical FF debit. An eligible supply created before its goods arrive at FF stays in the separate append-only reservation ledger: it neither reduces physical FF nor enters FF→WB, and reservation-only missing transit/cost evidence cannot block the independent official WB snapshot. Once the whole composition is available and every SKU has validated downstream cost, one transaction creates the physical debit and closes the reservation; actual movement without that cost proof remains fail closed. Accepted quantity is never manually added to WB: official contour snapshot owns WB quantity. At final acceptance the transit layer closes and positive `packed - final accepted` enters the separate pooled `Расхождения приёмки WB` warehouse by SKU. `Допринято` never repeats the FF debit; it consumes only a positive discrepancy of the same SKU, while surplus becomes transitional unmatched audit. Planned quantity/date, upload date, ambiguous identity and fabricated zero are forbidden substitutes.
+For an ordinary supply, `FF → WB = max(packed - accepted, 0)` until final acceptance, but only after an actual canonical FF debit. An eligible supply created before its goods arrive at FF stays in the separate append-only reservation ledger: it neither reduces physical FF nor enters FF→WB. Once its exact whole composition is physically available, one transaction creates the physical debit and closes the reservation regardless of transit/services/storage/paid-acceptance cost freshness; missing cost stays null with a preliminary/unavailable reason. Identity/composition ambiguity remains a local physical blocker. Accepted quantity is never manually added to WB: official contour snapshot owns WB quantity. At final acceptance the transit layer closes and positive `packed - final accepted` enters the separate pooled `Расхождения приёмки WB` warehouse by SKU. `Допринято` never repeats the FF debit; it consumes only a positive discrepancy of the same SKU, while surplus becomes transitional unmatched audit. Planned quantity/date, upload date, ambiguous identity and fabricated zero are forbidden substitutes.
 
 Since `2026-07-01`, the cost layer used by that movement is the immutable functional snapshot of the exact `ff_stock_ledger` debit, not the latest FF cost line by nmID. Accepted quantity contributes inbound capital only with accepted status, final accepted quantity and factual accepted date. Transit/accepted Fulfillment add-ons attach to the same supply/SKU component graph; paid WB acceptance applies only to accepted units and is excluded from discrepancy cost. Discrepancy matching after final acceptance is pooled by exact nmID and never requires impossible factory-lot identity after FF mixing.
 

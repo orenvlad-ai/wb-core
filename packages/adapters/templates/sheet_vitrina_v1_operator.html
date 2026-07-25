@@ -10789,8 +10789,10 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          if (payload.deleted !== true) {
-            throw new Error("backend не подтвердил удаление canonical CNY document");
+          const mutationConfirmed = payload.deleted === true ||
+            (payload.archived === true && payload.audit_record_retained === true);
+          if (!mutationConfirmed) {
+            throw new Error("backend не подтвердил удаление или архивирование canonical CNY document");
           }
           const reloaded = await loadCnyAccount({ preserveMessage: true, preserveDataOnError: true });
           if (!reloaded) {

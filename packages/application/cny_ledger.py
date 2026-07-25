@@ -101,7 +101,12 @@ class CnyLedgerBlock:
             "status": "ok",
             "summary": _ledger_summary(documents, operations, replay_state),
             "documents": documents,
-            "conversions": [_conversion_row(item) for item in documents if item.get("document_type") == CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE],
+            "conversions": [
+                _conversion_row(item)
+                for item in documents
+                if item.get("document_type") == CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE
+                and str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
+            ],
             "ledger_operations": operations,
             "replay": replay_state,
             "diagnostics": _ledger_diagnostics(operations, replay_state),
@@ -1041,14 +1046,25 @@ class CnyLedgerBlock:
         revision = "sha256:" + hashlib.sha256(
             json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
-        return enqueue_warehouse_targeted_recalculation(
-            runtime=self.runtime,
-            stable_source_id=f"cny_document:{document.get('document_id')}",
-            source_revision=revision,
-            effective_date=str(document.get("operation_date") or now)[:10],
-            affected_nm_ids=nm_ids,
-            requested_at=now,
-        )
+        stable_source_id = f"cny_document:{document.get('document_id')}"
+        try:
+            return enqueue_warehouse_targeted_recalculation(
+                runtime=self.runtime,
+                stable_source_id=stable_source_id,
+                source_revision=revision,
+                effective_date=str(document.get("operation_date") or now)[:10],
+                affected_nm_ids=nm_ids,
+                requested_at=now,
+            )
+        except Exception as exc:  # noqa: BLE001 - source mutation remains independently durable.
+            return {
+                "status": "replay_error",
+                "presentation_status": "Ошибка пересчёта",
+                "stable_source_id": stable_source_id,
+                "source_revision": revision,
+                "affected_nm_ids": sorted(nm_ids),
+                "error": str(exc).replace("\n", " ")[:500],
+            }
 
     def _sync_supplier_payment_documents_from_financial_documents(self, *, now: str) -> None:
         if not hasattr(self.runtime, "list_supplier_financial_documents_all"):

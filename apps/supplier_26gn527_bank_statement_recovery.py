@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Bounded parse-and-confirm recovery for the 26GN527 VTB statement."""
+"""Legacy read-only diagnostic for the superseded 26GN527 recovery plan.
+
+Production apply moved to ``warehouse_cost_unified_recovery.py`` so bank fees,
+physical movements, factual dates and their one targeted replay share one exact
+manifest.  Keeping an independent apply here would reintroduce a full-database
+backup and multiple cost replays.
+"""
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -22,20 +27,10 @@ from apps.recovery_file_utils import file_sha256  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
-from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
-    RegistryUploadHttpEntrypoint,
-)
-from packages.application.supplier_shipment_factual_correction import (  # noqa: E402
-    _sqlite_backup as create_verified_sqlite_backup,
-    restore_verified_supplier_backup,
-)
 from packages.application.supplier_financial_documents import (  # noqa: E402
     SupplierFinancialDocumentsBlock,
     build_bank_fee_statement_import_preview,
     parse_financial_document_pdf,
-)
-from packages.application.warehouse_functional_lock import (  # noqa: E402
-    warehouse_functional_write_lock,
 )
 
 
@@ -47,31 +42,21 @@ EXPECTED_DEFAULT_AMOUNTS = ["4788.83", "948.60", "13668.11"]
 EXPECTED_DEFAULT_TOTAL = "19405.54"
 EXPECTED_REVIEW_AMOUNTS = ["20000.00", "58113.66"]
 EXPECTED_ALL_TOTAL = "97519.20"
-AUDIT_TABLE = "sheet_vitrina_v1_supplier_26gn527_vtb_recovery_audit"
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--fingerprint", default="")
-    parser.add_argument("--backup-dir", default="")
     args = parser.parse_args(argv)
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
     plan = build_plan(runtime)
     if not args.apply:
         print(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
-    if str(args.fingerprint or "") != str(plan["fingerprint"]):
-        raise ValueError("apply requires the exact current dry-run fingerprint")
-    backup_root = (
-        Path(args.backup_dir)
-        if args.backup_dir
-        else runtime.runtime_dir / "backups" / "supplier-26gn527-vtb-recovery"
+    raise ValueError(
+        "legacy 26GN527 apply is disabled; use "
+        "apps/warehouse_cost_unified_recovery.py with its exact dry-run fingerprint"
     )
-    result = apply_plan(runtime, plan, backup_root=backup_root)
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
-    return 0
 
 
 def build_plan(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
@@ -272,145 +257,6 @@ def _build_plan_from_snapshot(
         "mode": "dry_run",
         "would_change": bool(selected_ids),
         "fingerprint": "sha256:" + _hash(plan_material),
-    }
-
-
-def apply_plan(
-    runtime: RegistryUploadDbBackedRuntime,
-    plan: Mapping[str, Any],
-    *,
-    backup_root: Path,
-) -> dict[str, Any]:
-    if not plan.get("would_change"):
-        return {**dict(plan), "mode": "apply", "applied": False, "idempotent": True}
-    with warehouse_functional_write_lock(runtime.runtime_dir):
-        return _apply_plan_locked(runtime, plan, backup_root=backup_root)
-
-
-def _apply_plan_locked(
-    runtime: RegistryUploadDbBackedRuntime,
-    plan: Mapping[str, Any],
-    *,
-    backup_root: Path,
-) -> dict[str, Any]:
-    current = build_plan(runtime)
-    if str(current["fingerprint"]) != str(plan["fingerprint"]):
-        raise ValueError("26GN527 source changed after dry-run")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup_path = backup_root / f"registry_upload.26gn527.{stamp}.sqlite3"
-    backup = create_verified_sqlite_backup(runtime.db_path, backup_path)
-    source = runtime.load_supplier_financial_document(
-        supplier_order_id=SHIPMENT_ID,
-        document_id=SOURCE_DOCUMENT_ID,
-    ) or {}
-    source_path = _resolve_source_file_path(runtime.runtime_dir, source)
-    document_id = ""
-    preview: dict[str, Any] = {}
-    created_document_path: Path | None = None
-    try:
-        block = SupplierFinancialDocumentsBlock(runtime=runtime)
-        preview = block.upload_bank_fee_statement_preview(
-            SHIPMENT_ID,
-            file_bytes=source_path.read_bytes(),
-            uploaded_filename=str(
-                source.get("original_filename") or source_path.name
-            ),
-            uploaded_content_type=str(
-                source.get("file_content_type") or "application/pdf"
-            ),
-        )
-        document_id = str(preview.get("document_id") or "")
-        if not bool(preview.get("idempotent")):
-            created_document_path = Path(str(preview.get("stored_file_path") or ""))
-        applied_at = (
-            datetime.now(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        entrypoint = RegistryUploadHttpEntrypoint(
-            runtime_dir=runtime.runtime_dir,
-            runtime=runtime,
-            activated_at_factory=lambda: applied_at,
-        )
-        confirmed = (
-            entrypoint.handle_supplier_financial_document_confirm_import_request(
-                SHIPMENT_ID,
-                document_id,
-                selected_operation_ids=list(
-                    plan.get("selected_operation_ids") or []
-                ),
-            )
-        )
-        repeated = (
-            entrypoint.handle_supplier_financial_document_confirm_import_request(
-                SHIPMENT_ID,
-                document_id,
-                selected_operation_ids=list(
-                    plan.get("selected_operation_ids") or []
-                ),
-            )
-        )
-        with sqlite3.connect(runtime.db_path) as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {AUDIT_TABLE}(
-                    recovery_id TEXT PRIMARY KEY,
-                    plan_fingerprint TEXT NOT NULL UNIQUE,
-                    applied_at TEXT NOT NULL,
-                    backup_path TEXT NOT NULL,
-                    document_id TEXT NOT NULL,
-                    report_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                f"""INSERT INTO {AUDIT_TABLE}(
-                        recovery_id,plan_fingerprint,applied_at,backup_path,document_id,report_json
-                    ) VALUES(?,?,?,?,?,?)""",
-                (
-                    "s527_"
-                    + str(plan["fingerprint"]).split(":", 1)[-1][:24],
-                    str(plan["fingerprint"]),
-                    applied_at,
-                    str(backup_path),
-                    document_id,
-                    json.dumps(
-                        dict(plan), ensure_ascii=False, sort_keys=True
-                    ),
-                ),
-            )
-            conn.commit()
-        post = build_plan(runtime)
-        if post.get("would_change"):
-            raise ValueError(
-                "26GN527 recovery did not become an idempotent no-op"
-            )
-        if any(
-            amount in EXPECTED_REVIEW_AMOUNTS
-            for amount in post.get("already_imported_amounts") or []
-        ):
-            raise ValueError("ambiguous statement rows were imported")
-    except Exception:
-        restore_verified_supplier_backup(backup_path, runtime.db_path)
-        if (
-            created_document_path is not None
-            and created_document_path.is_file()
-            and runtime.runtime_dir.resolve()
-            in created_document_path.resolve().parents
-        ):
-            created_document_path.unlink()
-        raise
-    return {
-        **dict(plan),
-        "mode": "apply",
-        "applied": True,
-        "document_id": document_id,
-        "backup": backup,
-        "confirmed_expense_line_count": len(confirmed.get("expense_lines") or []),
-        "repeat_confirm_idempotent": bool(repeated.get("idempotent")),
-        "post_apply": post,
     }
 
 

@@ -281,6 +281,7 @@ def apply_functional_economics_backfill_plan(
     confirm_fingerprint: str,
     backup_dir: Any,
     verified_backup: Mapping[str, Any] | None = None,
+    target_scoped_undo: bool = False,
 ) -> dict[str, Any]:
     normalized = json.loads(json.dumps(dict(plan), ensure_ascii=False))
     fingerprint = str(normalized.get("plan_fingerprint") or "")
@@ -307,7 +308,16 @@ def apply_functional_economics_backfill_plan(
             expected_business_date=operation_business_date,
         )
         if verified_backup is not None
-        else None
+        else (
+            {
+                "kind": "target_scoped_before_image",
+                "integrity_check": "ok",
+                "full_database_copy": False,
+                "copy_bytes": 0,
+            }
+            if target_scoped_undo
+            else None
+        )
     )
     if not normalized.get("updates"):
         return {**fresh, "status": "applied", "idempotent": True, "database_written": False}
@@ -327,6 +337,25 @@ def apply_functional_economics_backfill_plan(
         raise FunctionalEconomicsBackfillError(
             "functional economics apply crossed the canonical business-date boundary during backup"
         )
+    if target_scoped_undo:
+        with _connect(runtime.db_path) as schema_conn:
+            schema_conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                sheet_vitrina_v1_functional_economics_undo_manifests(
+                    manifest_digest TEXT PRIMARY KEY,
+                    plan_fingerprint TEXT NOT NULL UNIQUE,
+                    before_images_json TEXT NOT NULL,
+                    after_images_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    rolled_back_at TEXT
+                )
+                """
+            )
+            schema_conn.commit()
+    before_images: list[dict[str, Any]] = []
+    after_images: list[dict[str, Any]] = []
     with _connect(runtime.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -363,6 +392,20 @@ def apply_functional_economics_backfill_plan(
                 ).fetchone()
                 if before is None or "sha256:" + _sha(str(before["plan_json"])) != item["before_plan_sha256"]:
                     raise FunctionalEconomicsBackfillError("ready snapshot drifted before atomic backfill")
+                before_images.append(
+                    {
+                        "bundle_version": str(item["bundle_version"]),
+                        "as_of_date": str(item["as_of_date"]),
+                        "plan_json": str(before["plan_json"]),
+                    }
+                )
+                after_images.append(
+                    {
+                        "bundle_version": str(item["bundle_version"]),
+                        "as_of_date": str(item["as_of_date"]),
+                        "plan_json": str(item["after_plan_json"]),
+                    }
+                )
                 cursor = conn.execute(
                     """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
                        WHERE bundle_version=? AND as_of_date=? AND plan_json=?""",
@@ -385,6 +428,39 @@ def apply_functional_economics_backfill_plan(
                     raise FunctionalEconomicsBackfillError(
                         "functional economics in-transaction readback failed"
                     )
+            if target_scoped_undo:
+                manifest_material = {
+                    "plan_fingerprint": fingerprint,
+                    "before_images": before_images,
+                    "after_images": after_images,
+                }
+                manifest_digest = "sha256:" + _hash(manifest_material)
+                conn.execute(
+                    """
+                    INSERT INTO
+                    sheet_vitrina_v1_functional_economics_undo_manifests(
+                        manifest_digest,plan_fingerprint,before_images_json,
+                        after_images_json,status,created_at,rolled_back_at
+                    ) VALUES(?,?,?,?,'ready',?,NULL)
+                    """,
+                    (
+                        manifest_digest,
+                        fingerprint,
+                        json.dumps(
+                            before_images,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        json.dumps(
+                            after_images,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        operation_business_date,
+                    ),
+                )
             if current_business_date_iso() != operation_business_date:
                 raise FunctionalEconomicsBackfillError(
                     "functional economics apply crossed the canonical business-date boundary before commit"
@@ -408,6 +484,96 @@ def apply_functional_economics_backfill_plan(
         "applied_snapshot_count": len(normalized["updates"]),
         "backup": backup,
         "applied_plan_fingerprint": fingerprint,
+        "rollback_manifest_digest": (
+            manifest_digest if target_scoped_undo else ""
+        ),
+    }
+
+
+def rollback_target_scoped_functional_economics(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    manifest_digest: str,
+) -> dict[str, Any]:
+    """Restore exact ready-snapshot before images without a database copy."""
+
+    selected_digest = str(manifest_digest or "").strip()
+    if not selected_digest.startswith("sha256:"):
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics rollback manifest is required"
+        )
+    with _connect(runtime.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            manifest = conn.execute(
+                """
+                SELECT * FROM
+                sheet_vitrina_v1_functional_economics_undo_manifests
+                WHERE manifest_digest=?
+                """,
+                (selected_digest,),
+            ).fetchone()
+            if manifest is None:
+                raise FunctionalEconomicsBackfillError(
+                    "functional economics rollback manifest was not found"
+                )
+            if str(manifest["status"]) == "rolled_back":
+                return {
+                    "rolled_back": False,
+                    "idempotent": True,
+                    "manifest_digest": selected_digest,
+                }
+            before_images = json.loads(str(manifest["before_images_json"]))
+            after_images = json.loads(str(manifest["after_images_json"]))
+            after_by_key = {
+                (str(item["bundle_version"]), str(item["as_of_date"])): str(
+                    item["plan_json"]
+                )
+                for item in after_images
+            }
+            for item in before_images:
+                key = (
+                    str(item["bundle_version"]),
+                    str(item["as_of_date"]),
+                )
+                current = conn.execute(
+                    """
+                    SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version=? AND as_of_date=?
+                    """,
+                    key,
+                ).fetchone()
+                if current is None or str(current["plan_json"]) != after_by_key.get(
+                    key, ""
+                ):
+                    raise FunctionalEconomicsBackfillError(
+                        "functional economics rollback rejected: snapshot changed"
+                    )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_ready_snapshots
+                    SET plan_json=?
+                    WHERE bundle_version=? AND as_of_date=?
+                    """,
+                    (str(item["plan_json"]), *key),
+                )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_functional_economics_undo_manifests
+                SET status='rolled_back',rolled_back_at=?
+                WHERE manifest_digest=? AND status='ready'
+                """,
+                (current_business_date_iso(), selected_digest),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return {
+        "rolled_back": True,
+        "idempotent": False,
+        "manifest_digest": selected_digest,
+        "restored_snapshot_count": len(before_images),
     }
 
 

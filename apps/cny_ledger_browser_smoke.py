@@ -219,18 +219,28 @@ def main() -> None:
                 status_code, status_payload = _get_json(f"{base_url}{DEFAULT_CNY_ACCOUNT_PATH}")
                 if status_code != 200:
                     raise AssertionError(f"CNY read model failed after browser delete: {status_code} {status_payload}")
+                archived_rows = [
+                    item
+                    for item in status_payload.get("documents") or []
+                    if str(item.get("document_id") or "") == direct_one_id
+                ]
+                if len(archived_rows) != 1 or str(archived_rows[0].get("status") or "") != "excluded":
+                    raise AssertionError(
+                        f"browser archive must retain one excluded canonical audit row: {status_payload}"
+                    )
                 if any(
                     str(item.get("document_id") or "") == direct_one_id
-                    for item in status_payload.get("documents") or []
+                    for item in status_payload.get("conversions") or []
                 ):
-                    raise AssertionError(f"browser-deleted canonical document remained after GET: {status_payload}")
+                    raise AssertionError(f"archived conversion remained in the active read model: {status_payload}")
                 if any(
                     str(item.get("source_document_id") or "") == direct_one_id
                     for item in status_payload.get("ledger_operations") or []
                 ):
                     raise AssertionError(f"browser-deleted document operations remained after replay: {status_payload}")
-                if runtime.load_cny_document(direct_one_id) is not None:
-                    raise AssertionError("browser delete removed only the row, not the canonical CNY document")
+                archived_document = runtime.load_cny_document(direct_one_id)
+                if archived_document is None or archived_document.get("status") != "excluded":
+                    raise AssertionError("browser archive did not retain the excluded canonical audit document")
                 if runtime.load_cny_document(str(source_owned.get("document_id") or "")) is None or not source_file.is_file():
                     raise AssertionError("direct delete must not affect the source-owned CNY document or its file")
 

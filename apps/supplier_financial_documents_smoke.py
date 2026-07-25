@@ -12,6 +12,7 @@ import sys
 import threading
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
+from unittest.mock import patch
 from urllib import request as urllib_request
 import zipfile
 import zlib
@@ -764,9 +765,9 @@ def _assert_vtb_statement_parser_and_preview() -> None:
 Владелец счета: Тест
 Входящий остаток на 29.06.2026: 20000.00
 Дата № ВО Контрагент Обороты, RUR Назначение
-30.06.2026 130623 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 948.60 0.00 Комиссия за ВК по платежу №7 на сумму 59921.25 CNY.
+30.06.2026 130623 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 948.60 0.00 Комиссия за ВК по платежу №7 на сумму 59921.25 CNY. Включая НДС.
 30.06.2026 443906 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 13668.11 0.00 Комиссия за перевод (SWIFT) №7 на сумму 59921.25 CNY.
-20.07.2026 50149 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 4788.83 0.00 Комиссия за ВК по платежу №11 на сумму 339553.75 CNY.
+20.07.2026 50149 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 4788.83 0.00 Комиссия за ВК по платежу №11 на сумму 339553.75 CNY. Включая НДС.
 20.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 20000.00 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
 21.07.2026 244189 02 7702070139 044525187 30101810700000000187 БАНК ВТБ 58113.66 0.00 Комиссия за перевод (SWIFT) №11 на сумму 339553.75 CNY.
 30.06.2026 37 01 7728486029 044525092 40702810470010357554 ЛОГИСТ 5000.00 0.00 Счёт на оплату №121 от 29 июня 2026 г.
@@ -819,10 +820,35 @@ def _assert_vtb_statement_parser_and_preview() -> None:
         for item in fees
         if item.get("operation_status") == "needs_review"
     )
+    logical_groups = list(preview.get("logical_fee_groups") or [])
+    grouped_transfer = next(
+        (
+            item
+            for item in logical_groups
+            if item.get("fee_category") == "bank_transfer_fee"
+            and item.get("matched_anchor_operation_number") == "11"
+        ),
+        {},
+    )
+    currency_control_vat = {
+        str(item.get("vat_semantics") or "")
+        for item in fees
+        if item.get("fee_category") == "currency_control_fee"
+    }
     if (
         amounts != sorted(["948.60", "13668.11", "4788.83", "20000", "58113.66"])
-        or selected != sorted(["948.60", "13668.11", "4788.83"])
-        or review != sorted(["20000", "58113.66"])
+        or selected
+        or review
+        or len(logical_groups) != 4
+        or sum(int(item.get("atomic_count") or 0) for item in logical_groups) != 5
+        or grouped_transfer.get("amount") != "78113.66"
+        or grouped_transfer.get("atomic_count") != 2
+        or {
+            str(item.get("operation_status") or "")
+            for item in grouped_transfer.get("atomic_rows") or []
+        }
+        != {"new"}
+        or currency_control_vat != {"vat_included"}
         or preview.get("fee_totals_by_currency", {}).get("RUB") != "97519.20"
     ):
         raise AssertionError(f"VTB exact preview changed: {preview}")
@@ -917,16 +943,46 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             runtime=runtime,
             timestamp_factory=lambda: "2026-07-24T09:00:00Z",
         )
-        selected_ids = [
-            str(item.get("semantic_operation_id") or "")
-            for item in fees
-            if item.get("selected_by_default")
-        ]
-        confirmed = block.confirm_bank_fee_statement_import(
-            "sup_financial",
-            document_id,
-            selected_operation_ids=selected_ids,
+        stored_before_confirm = runtime.load_supplier_financial_document(
+            supplier_order_id="sup_financial",
+            document_id=document_id,
+        ) or {}
+        normalized_before_confirm = dict(
+            stored_before_confirm.get("normalized_parse") or {}
         )
+        import_before_confirm = dict(
+            normalized_before_confirm.get("statement_import") or {}
+        )
+        import_before_confirm["target_revision"] = (
+            block._bank_fee_preview_revision(
+                "sup_financial",
+                statement_file_sha256="a" * 64,
+                exclude_document_id=document_id,
+            )
+        )
+        runtime.save_supplier_financial_document(
+            document={
+                **stored_before_confirm,
+                "normalized_parse": {
+                    **normalized_before_confirm,
+                    "statement_import": import_before_confirm,
+                },
+            },
+            expense_lines=[],
+        )
+        selected_ids = [
+            str(item.get("logical_fee_id") or "")
+            for item in logical_groups
+        ]
+        with patch(
+            "packages.application.warehouse_functional.enqueue_warehouse_targeted_recalculation",
+            side_effect=RuntimeError("injected replay queue failure"),
+        ):
+            confirmed = block.confirm_bank_fee_statement_import(
+                "sup_financial",
+                document_id,
+                selected_operation_ids=selected_ids,
+            )
         repeated = block.confirm_bank_fee_statement_import(
             "sup_financial",
             document_id,
@@ -952,14 +1008,19 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             if item.get("operation_status") == "needs_review"
         )
         if (
-            imported_amounts != sorted(["948.6", "13668.11", "4788.83"])
-            or review_after != sorted(["20000", "58113.66"])
+            imported_amounts
+            != sorted(["948.6", "13668.11", "4788.83", "20000.0", "58113.66"])
+            or review_after
             or not repeated.get("idempotent")
             or repeated.get("cny_fee_rows_for_ledger")
-            or len(confirmed.get("expense_lines") or []) != 3
+            or len(confirmed.get("expense_lines") or []) != 5
+            or (
+                confirmed.get("warehouse_targeted_recalculation") or {}
+            ).get("status")
+            != "replay_error"
         ):
             raise AssertionError(
-                "selected confirm must import only exact defaults and repeat as no-op: "
+                "selected logical groups must import five atomic rows and repeat as no-op: "
                 + repr(
                     {
                         "confirmed": confirmed,

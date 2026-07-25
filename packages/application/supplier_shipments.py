@@ -122,6 +122,7 @@ NOMENCLATURE_XLSX_HEADERS = [
     "Группа",
     "Match key",
     "Цена закупки, ¥",
+    "Заводской короб, шт.",
     "Совместимые модели",
     "Ключи совместимости",
     "Обновлено",
@@ -1110,14 +1111,25 @@ class SupplierShipmentsBlock:
                 default=str,
             ).encode("utf-8")
         ).hexdigest()
-        return enqueue_warehouse_targeted_recalculation(
-            runtime=self.runtime,
-            stable_source_id=f"supplier_shipment:{shipment_id}",
-            source_revision=revision,
-            effective_date=effective_date,
-            affected_nm_ids=nm_ids,
-            requested_at=self.timestamp_factory(),
-        )
+        stable_source_id = f"supplier_shipment:{shipment_id}"
+        try:
+            return enqueue_warehouse_targeted_recalculation(
+                runtime=self.runtime,
+                stable_source_id=stable_source_id,
+                source_revision=revision,
+                effective_date=effective_date,
+                affected_nm_ids=nm_ids,
+                requested_at=self.timestamp_factory(),
+            )
+        except Exception as exc:  # noqa: BLE001 - source mutation remains independently durable.
+            return {
+                "status": "replay_error",
+                "presentation_status": "Ошибка пересчёта",
+                "stable_source_id": stable_source_id,
+                "source_revision": revision,
+                "affected_nm_ids": nm_ids,
+                "error": str(exc).replace("\n", " ")[:500],
+            }
 
     def _record_ff_stock_receipt(self, shipment_detail: Mapping[str, Any]) -> dict[str, Any] | None:
         return FfStockLedgerBlock(
@@ -1986,13 +1998,14 @@ class SupplierShipmentsBlock:
                     str(item.get("group_label") or item.get("group_key") or ""),
                     str(item.get("match_key") or ""),
                     item.get("purchase_price_yuan") if item.get("purchase_price_yuan") is not None else "",
+                    item.get("factory_box_size") if item.get("factory_box_size") is not None else "",
                     str(item.get("compatible_models_text") or ""),
                     ", ".join(str(key) for key in item.get("compatible_model_keys") or [] if str(key or "").strip()),
                     str(item.get("updated_at") or ""),
                 ]
             )
         worksheet.freeze_panes = "A2"
-        for index, width in enumerate([24, 12, 12, 14, 22, 34, 18, 18, 34, 36, 22, 22, 20, 34, 22, 28, 18, 34, 34, 24], start=1):
+        for index, width in enumerate([24, 12, 12, 14, 22, 34, 18, 18, 34, 36, 22, 22, 20, 34, 22, 28, 18, 22, 34, 34, 24], start=1):
             worksheet.column_dimensions[worksheet.cell(row=1, column=index).column_letter].width = width
         output = BytesIO()
         workbook.save(output)
@@ -4200,6 +4213,10 @@ def _normalize_nomenclature_payload(
         payload.get("purchase_price_yuan"),
         field_name="nomenclature purchase_price_yuan",
     )
+    factory_box_size = _optional_positive_integer(
+        payload.get("factory_box_size"),
+        field_name="nomenclature factory_box_size",
+    )
     barcode = _normalize_barcode(payload.get("barcode") or payload.get("primary_barcode"))
     barcodes = _normalize_barcode_list([barcode, *_raw_barcode_list(payload.get("barcodes"))])
     if not barcode and barcodes:
@@ -4239,6 +4256,7 @@ def _normalize_nomenclature_payload(
         "product_type": product_type,
         "match_key": match_key,
         "purchase_price_yuan": purchase_price_yuan,
+        "factory_box_size": factory_box_size,
         "aliases": _normalize_alias_list(payload.get("aliases")),
         "compatible_models_text": compatible_models_text,
         "compatible_model_keys": compatible_model_keys,
@@ -4658,6 +4676,7 @@ def _new_nomenclature_item_from_wb_card(
         "product_type": group_key,
         "match_key": f"{group_key}|{match_suffix}" if match_suffix and group_key not in {"extra", "other"} else "",
         "purchase_price_yuan": None,
+        "factory_box_size": None,
         "aliases": [],
         "compatible_models_text": "",
         "compatible_model_keys": [],
@@ -4869,6 +4888,9 @@ def _nomenclature_import_header_keys(header_row: tuple[Any, ...]) -> list[str]:
         "цена закупки, ¥": "purchase_price_yuan",
         "цена закупки": "purchase_price_yuan",
         "purchase_price_yuan": "purchase_price_yuan",
+        "заводской короб, шт.": "factory_box_size",
+        "заводской короб": "factory_box_size",
+        "factory_box_size": "factory_box_size",
         "совместимые модели": "compatible_models_text",
         "compatible_models_text": "compatible_models_text",
         "ключи совместимости": "compatible_model_keys",
@@ -4981,6 +5003,16 @@ def _normalize_nomenclature_import_row(
             raise ValueError(f"Строка {row_number}: {exc}") from exc
     else:
         purchase_price_yuan = base.get("purchase_price_yuan")
+    if "factory_box_size" in row_values:
+        try:
+            factory_box_size = _optional_positive_integer(
+                row_values.get("factory_box_size"),
+                field_name="Заводской короб, шт.",
+            )
+        except ValueError as exc:
+            raise ValueError(f"Строка {row_number}: {exc}") from exc
+    else:
+        factory_box_size = base.get("factory_box_size")
 
     item_id = str(base.get("item_id") or raw_item_id or ("nom_" + uuid4().hex))
     created_at = str(base.get("created_at") or now)
@@ -5008,6 +5040,7 @@ def _normalize_nomenclature_import_row(
             "product_type": product_type,
             "match_key": match_key,
             "purchase_price_yuan": purchase_price_yuan,
+            "factory_box_size": factory_box_size,
             "compatible_models_text": compatible_models_text,
             "compatible_model_keys": compatible_model_keys_source,
         },
@@ -5093,6 +5126,22 @@ def _optional_nonnegative_number(value: Any, *, field_name: str) -> float | None
     return parsed
 
 
+def _optional_positive_integer(value: Any, *, field_name: str) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{field_name} must be a positive integer") from None
+    if not parsed.is_finite() or parsed <= 0 or parsed != parsed.to_integral_value():
+        raise ValueError(f"{field_name} must be a positive integer")
+    return int(parsed)
+
+
 def _cell_text(value: Any) -> str:
     if value is None:
         return ""
@@ -5125,6 +5174,7 @@ def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, A
         "product_type",
         "match_key",
         "purchase_price_yuan",
+        "factory_box_size",
         "aliases",
         "compatible_models_text",
         "compatible_model_keys",
@@ -5241,6 +5291,7 @@ def _nomenclature_item_match_payload(
         "nomenclature_name": str(projected_item.get("nomenclature_name") or projected_item.get("internal_name") or ""),
         "compatible_model_keys": _infer_compatible_model_keys(projected_item),
         "purchase_price_yuan": projected_item.get("purchase_price_yuan"),
+        "factory_box_size": projected_item.get("factory_box_size"),
     }
 
 

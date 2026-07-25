@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
@@ -5927,6 +5927,25 @@ class RegistryUploadDbBackedRuntime:
             purchase_price_yuan = item.get("purchase_price_yuan")
             if purchase_price_yuan is not None:
                 purchase_price_yuan = float(purchase_price_yuan)
+            factory_box_size = item.get("factory_box_size")
+            if factory_box_size not in (None, ""):
+                try:
+                    box_value = Decimal(str(factory_box_size))
+                except (InvalidOperation, ValueError):
+                    raise ValueError(
+                        "factory_box_size must be a positive integer"
+                    ) from None
+                if (
+                    not box_value.is_finite()
+                    or box_value <= 0
+                    or box_value != box_value.to_integral_value()
+                ):
+                    raise ValueError(
+                        "factory_box_size must be a positive integer"
+                    )
+                factory_box_size = int(box_value)
+            else:
+                factory_box_size = None
             prepared_items.append(
                 {
                     "item_id": item_id,
@@ -5960,6 +5979,7 @@ class RegistryUploadDbBackedRuntime:
                     "product_type": str(item.get("product_type") or ""),
                     "match_key": str(item.get("match_key") or ""),
                     "purchase_price_yuan": purchase_price_yuan,
+                    "factory_box_size": factory_box_size,
                     "aliases_json": json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
                     "compatible_models_text": str(item.get("compatible_models_text") or ""),
                     "compatible_model_keys_json": json.dumps(
@@ -6003,6 +6023,7 @@ class RegistryUploadDbBackedRuntime:
                         product_type,
                         match_key,
                         purchase_price_yuan,
+                        factory_box_size,
                         aliases_json,
                         compatible_models_text,
                         compatible_model_keys_json,
@@ -6010,7 +6031,7 @@ class RegistryUploadDbBackedRuntime:
                         created_at,
                         updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(item_id) DO UPDATE SET
                         is_active = excluded.is_active,
                         is_hidden = excluded.is_hidden,
@@ -6036,6 +6057,7 @@ class RegistryUploadDbBackedRuntime:
                         product_type = excluded.product_type,
                         match_key = excluded.match_key,
                         purchase_price_yuan = excluded.purchase_price_yuan,
+                        factory_box_size = excluded.factory_box_size,
                         aliases_json = excluded.aliases_json,
                         compatible_models_text = excluded.compatible_models_text,
                         compatible_model_keys_json = excluded.compatible_model_keys_json,
@@ -6068,6 +6090,7 @@ class RegistryUploadDbBackedRuntime:
                         prepared["product_type"],
                         prepared["match_key"],
                         prepared["purchase_price_yuan"],
+                        prepared["factory_box_size"],
                         prepared["aliases_json"],
                         prepared["compatible_models_text"],
                         prepared["compatible_model_keys_json"],
@@ -8027,6 +8050,7 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "product_type": row["product_type"] or "",
         "match_key": row["match_key"] or "",
         "purchase_price_yuan": row["purchase_price_yuan"],
+        "factory_box_size": row["factory_box_size"],
         "aliases": [str(item) for item in _loads_json_list(row["aliases_json"]) if str(item or "").strip()],
         "compatible_models_text": row["compatible_models_text"] or "",
         "compatible_model_keys": [
@@ -9333,7 +9357,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             sku_ff_unit_cost_rub REAL,
             transit_cost_status TEXT NOT NULL,
             transit_amount_total REAL,
-            transit_per_unit_rub REAL NOT NULL DEFAULT 0,
+            transit_per_unit_rub REAL,
             ff_upload_id TEXT,
             ff_services_amount_total REAL NOT NULL DEFAULT 0,
             ff_services_per_unit_rub REAL NOT NULL DEFAULT 0,
@@ -9506,6 +9530,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             product_type TEXT NOT NULL,
             match_key TEXT NOT NULL,
             purchase_price_yuan REAL,
+            factory_box_size INTEGER,
             aliases_json TEXT NOT NULL,
             compatible_models_text TEXT NOT NULL DEFAULT '',
             compatible_model_keys_json TEXT NOT NULL DEFAULT '[]',
@@ -9595,6 +9620,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_nomenclature_items",
+        column_name="factory_box_size",
+        column_sql="INTEGER",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_nomenclature_items",
         column_name="compatible_models_text",
         column_sql="TEXT NOT NULL DEFAULT ''",
     )
@@ -9635,6 +9666,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON sheet_vitrina_v1_nomenclature_items(nm_id, vendor_code)
         """
     )
+    _ensure_nullable_wb_transit_cost(conn)
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_auto_update_state",
@@ -9831,6 +9863,81 @@ def _ensure_column(
         return False
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
     return True
+
+
+def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
+    """Remove the legacy false-zero constraint from the small derived table."""
+
+    table_name = "sheet_vitrina_v1_wb_supply_cost_layers"
+    info = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    transit = next(
+        (row for row in info if str(row["name"]) == "transit_per_unit_rub"),
+        None,
+    )
+    if transit is None or int(transit["notnull"] or 0) == 0:
+        return
+    legacy_name = table_name + "__legacy_notnull_transit"
+    columns = [str(row["name"]) for row in info]
+    quoted = ",".join('"' + value.replace('"', '""') + '"' for value in columns)
+    conn.execute("SAVEPOINT migrate_nullable_wb_transit")
+    try:
+        conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_name}")
+        conn.execute(
+            f"""
+            CREATE TABLE {table_name} (
+                wb_supply_cost_layer_id TEXT PRIMARY KEY,
+                wb_supply_id TEXT NOT NULL,
+                cache_key TEXT,
+                nm_id INTEGER NOT NULL,
+                accepted_qty REAL NOT NULL DEFAULT 0,
+                qty_denominator REAL NOT NULL DEFAULT 0,
+                supply_date TEXT,
+                accepted_date TEXT,
+                supplier_ff_cost_layer_id TEXT,
+                supplier_ff_cost_layer_line_id TEXT,
+                sku_ff_unit_cost_rub REAL,
+                transit_cost_status TEXT NOT NULL,
+                transit_amount_total REAL,
+                transit_per_unit_rub REAL,
+                ff_upload_id TEXT,
+                ff_services_amount_total REAL NOT NULL DEFAULT 0,
+                ff_services_per_unit_rub REAL NOT NULL DEFAULT 0,
+                ff_storage_amount_total REAL NOT NULL DEFAULT 0,
+                ff_storage_per_unit_rub REAL NOT NULL DEFAULT 0,
+                pre_acceptance_unit_cost_rub REAL,
+                wb_acceptance_amount_total REAL NOT NULL DEFAULT 0,
+                wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT 0,
+                our_wb_unit_cost_rub REAL,
+                source_status TEXT NOT NULL,
+                component_status_json TEXT NOT NULL DEFAULT '{{}}',
+                missing_reason TEXT,
+                calculated_at TEXT NOT NULL,
+                inputs_hash TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                is_current INTEGER NOT NULL DEFAULT 1,
+                supersedes_id TEXT,
+                superseded_at TEXT,
+                UNIQUE(wb_supply_id,nm_id,version)
+            )
+            """
+        )
+        conn.execute(
+            f"INSERT INTO {table_name}({quoted}) SELECT {quoted} FROM {legacy_name}"
+        )
+        conn.execute(f"DROP TABLE {legacy_name}")
+        conn.execute(
+            f"""CREATE UNIQUE INDEX sheet_vitrina_v1_wb_supply_cost_layers_current
+                ON {table_name}(wb_supply_id,nm_id) WHERE is_current=1"""
+        )
+        conn.execute(
+            f"""CREATE INDEX sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm
+                ON {table_name}(supply_date,nm_id,source_status)"""
+        )
+        conn.execute("RELEASE SAVEPOINT migrate_nullable_wb_transit")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT migrate_nullable_wb_transit")
+        conn.execute("RELEASE SAVEPOINT migrate_nullable_wb_transit")
+        raise
 
 
 def _optional_float(value: Any) -> float | None:

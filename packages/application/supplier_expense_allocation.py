@@ -113,7 +113,7 @@ def project_supplier_document_expense_allocation(
 def project_supplier_order_expense_allocation(
     canonical_breakdown: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Aggregate canonical document controls and retain the certification gate."""
+    """Aggregate document arithmetic independently of cost publication state."""
 
     controls = [
         dict(item)
@@ -127,24 +127,10 @@ def project_supplier_order_expense_allocation(
     allocated_amounts = [_optional_decimal(item.get("allocated_amount_rub")) for item in controls]
     eligible_amount = _sum_known(eligible_amounts)
     allocated_amount = _sum_known(allocated_amounts)
-    certification = dict(canonical_breakdown.get("certification") or {})
     controls_summary = dict(canonical_breakdown.get("controls") or {})
     reasons: list[str] = []
     for item in controls:
         reasons.extend(_reason_texts(item.get("incomplete_reasons") or []))
-    for blocker in canonical_breakdown.get("blockers") or []:
-        reasons.extend(_reason_texts([blocker]))
-    fingerprints_match = bool(
-        certification.get("source_fingerprint_matches")
-        and str(certification.get("source_fingerprint") or "")
-        == str(certification.get("certified_source_fingerprint") or "")
-        and str(certification.get("calculation_fingerprint") or "")
-        == str(certification.get("certified_calculation_fingerprint") or "")
-    )
-    if eligible_documents and not bool(certification.get("certified")):
-        reasons.append("Полнота расходов ещё не сертифицирована")
-    if eligible_documents and not fingerprints_match:
-        reasons.append("Текущие source/calculation fingerprints не совпадают с сертифицированными")
     conservation_ok = bool(
         controls_summary.get("document_allocation_conserved")
         and controls_summary.get("document_counted_once")
@@ -168,9 +154,6 @@ def project_supplier_order_expense_allocation(
         "all"
         if documents_all
         and conservation_ok
-        and fingerprints_match
-        and bool(certification.get("certified"))
-        and not list(canonical_breakdown.get("blockers") or [])
         else "partial"
         if allocated_components > 0 or (allocated_amount is not None and allocated_amount > 0)
         else "none"
@@ -184,9 +167,8 @@ def project_supplier_order_expense_allocation(
         allocated_amount_rub=allocated_amount,
         reasons=_bounded_reasons(reasons),
         extra={
-            "certified": bool(certification.get("certified")),
-            "fingerprints_match": fingerprints_match,
             "conservation_ok": conservation_ok,
+            "independent_of_cost_freshness": True,
         },
     )
 

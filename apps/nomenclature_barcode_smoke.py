@@ -210,10 +210,25 @@ def _application_runtime_xlsx_smoke() -> None:
                 "product_type": "clean",
                 "match_key": "clean|iphone_14",
                 "purchase_price_yuan": "1.2",
+                "factory_box_size": "250",
             }
         )["item"]
-        if manual["barcode"] != "1000000000001" or manual["barcode_source"] != "manual" or manual["barcode_status"] != "manual":
+        if (
+            manual["barcode"] != "1000000000001"
+            or manual["barcode_source"] != "manual"
+            or manual["barcode_status"] != "manual"
+            or manual["factory_box_size"] != 250
+        ):
             raise AssertionError(f"manual barcode must be authoritative, got {manual}")
+        try:
+            block.update_nomenclature_item(
+                manual["item_id"], {"factory_box_size": "250.5"}
+            )
+        except ValueError as exc:
+            if "positive integer" not in str(exc):
+                raise
+        else:
+            raise AssertionError("fractional factory box size must fail closed")
         block.sync_nomenclature_item_barcode(manual["item_id"])
         preserved = runtime.load_nomenclature_item(manual["item_id"])
         if preserved["barcode"] != "1000000000001" or source.calls:
