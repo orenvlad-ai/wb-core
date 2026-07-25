@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -15,6 +16,12 @@ from packages.application.wb_supply_box_correction import (
     apply_unique_box_correction,
     rollback_unique_box_correction,
     solve_unique_box_correction,
+)
+from packages.application.warehouse_functional import (
+    BOX_CORRECTION_TABLE,
+    _current_wb_supply_revisions,
+    _functional_local_source_view,
+    _supply_revisions,
 )
 
 
@@ -45,6 +52,11 @@ def _schema(conn: sqlite3.Connection) -> None:
             nomenclature_name TEXT NOT NULL,comment TEXT NOT NULL,
             group_name TEXT NOT NULL,quantity_delta REAL NOT NULL,
             raw_json TEXT NOT NULL,PRIMARY KEY(operation_id,line_no)
+        );
+        CREATE TABLE sheet_vitrina_v1_wb_supplies(
+            supply_id TEXT PRIMARY KEY,status_id INTEGER NOT NULL,
+            normalized_row_json TEXT NOT NULL,raw_goods_hash TEXT NOT NULL,
+            raw_goods_json TEXT NOT NULL,updated_date TEXT
         );
         """
     )
@@ -190,6 +202,30 @@ def main() -> None:
         source_object_id="40985996",
         lines={nm_id: -quantity for nm_id, quantity in declared.items()},
     )
+    raw_goods = [
+        {
+            "nmID": nm_id,
+            "quantity": quantity,
+            "acceptedQuantity": accepted[nm_id],
+        }
+        for nm_id, quantity in sorted(declared.items())
+    ]
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_supplies(
+            supply_id,status_id,normalized_row_json,raw_goods_hash,
+            raw_goods_json,updated_date
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            "40985996",
+            5,
+            "{}",
+            "fresh-official-goods",
+            json.dumps(raw_goods, ensure_ascii=False, sort_keys=True),
+            "2026-07-25",
+        ),
+    )
     conn.commit()
 
     conn.execute("BEGIN IMMEDIATE")
@@ -238,6 +274,34 @@ def main() -> None:
         WHERE operation_type='box_correction'
         """
     ).fetchone()[0] == 1
+    supplies = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id"
+        )
+    ]
+    corrections = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT * FROM {BOX_CORRECTION_TABLE}
+            WHERE status='applied'
+            ORDER BY supply_id,applied_at,correction_id
+            """
+        )
+    ]
+    corrected_revisions = _current_wb_supply_revisions(conn)
+    expected_revisions = _supply_revisions(
+        _functional_local_source_view(
+            {
+                "wb_supplies": supplies,
+                "box_corrections": corrections,
+            }
+        )["wb_supplies"]
+    )
+    assert corrected_revisions == expected_revisions
+    assert corrected_revisions != _supply_revisions(supplies)
+    assert corrected_revisions == _current_wb_supply_revisions(conn)
     conn.execute("BEGIN IMMEDIATE")
     rolled_back = rollback_unique_box_correction(
         conn,
