@@ -824,12 +824,11 @@ def _assert_vtb_statement_parser_and_preview() -> None:
         if item.get("operation_status") == "needs_review"
     )
     logical_groups = list(preview.get("logical_fee_groups") or [])
-    grouped_transfer = next(
+    grouped_payment_11 = next(
         (
             item
             for item in logical_groups
-            if item.get("fee_category") == "bank_transfer_fee"
-            and item.get("matched_anchor_operation_number") == "11"
+            if item.get("matched_anchor_operation_number") == "11"
         ),
         {},
     )
@@ -842,13 +841,15 @@ def _assert_vtb_statement_parser_and_preview() -> None:
         amounts != sorted(["948.60", "13668.11", "4788.83", "20000", "58113.66"])
         or selected
         or review
-        or len(logical_groups) != 4
+        or len(logical_groups) != 2
         or sum(int(item.get("atomic_count") or 0) for item in logical_groups) != 5
-        or grouped_transfer.get("amount") != "78113.66"
-        or grouped_transfer.get("atomic_count") != 2
+        or grouped_payment_11.get("amount") != "82902.49"
+        or grouped_payment_11.get("atomic_count") != 3
+        or set(grouped_payment_11.get("fee_categories") or [])
+        != {"bank_transfer_fee", "currency_control_fee"}
         or {
             str(item.get("operation_status") or "")
-            for item in grouped_transfer.get("atomic_rows") or []
+            for item in grouped_payment_11.get("atomic_rows") or []
         }
         != {"new"}
         or currency_control_vat != {"vat_included"}
@@ -871,6 +872,10 @@ def _assert_vtb_statement_parser_and_preview() -> None:
         existing_operation_ids=operation_ids,
     )
     second_rows = list(second_order_preview.get("matched_fee_rows") or [])
+    second_groups = list(
+        second_order_preview.get("logical_fee_groups") or []
+    )
+    payment_9_group = second_groups[0] if len(second_groups) == 1 else {}
     if (
         sorted(str(item.get("amount") or "") for item in second_rows)
         != ["12574.81", "951.08"]
@@ -882,6 +887,11 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             for item in second_rows
         }
         != {"9"}
+        or len(second_groups) != 1
+        or payment_9_group.get("amount") != "13525.89"
+        or payment_9_group.get("atomic_count") != 2
+        or set(payment_9_group.get("fee_categories") or [])
+        != {"bank_transfer_fee", "currency_control_fee"}
     ):
         raise AssertionError(
             "same source must expose only the 26GN582 payment #9 fees: "
@@ -1003,7 +1013,7 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             expense_lines=[],
         )
         selected_ids = [
-            str(item.get("logical_fee_id") or "")
+            str((item.get("atomic_operation_ids") or [""])[0])
             for item in logical_groups
         ]
         with patch(
@@ -2664,6 +2674,58 @@ def _assert_parser_reclassification_staging() -> None:
         ):
             raise AssertionError(
                 f"re-uploaded staged bank statement must be an exact no-op: {repeated}"
+            )
+        preview_path = (
+            runtime_dir
+            / "supplier_financial_previews"
+            / f"{result['document_id']}.json"
+        )
+        stale_payload = json.loads(preview_path.read_text(encoding="utf-8"))
+        stale_import = dict(
+            dict(
+                stale_payload["document"].get("normalized_parse") or {}
+            ).get("statement_import")
+            or {}
+        )
+        stale_import.pop("logical_grouping_version", None)
+        stale_payload["document"]["normalized_parse"]["statement_import"] = (
+            stale_import
+        )
+        preview_path.write_text(
+            json.dumps(stale_payload, ensure_ascii=False, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        refreshed_preview = block.preview_document_upload(
+            "sup_financial",
+            file_bytes=source_bytes,
+            uploaded_filename="vtb-reclassification.pdf",
+            uploaded_content_type="application/pdf",
+        )
+        refreshed = block.confirm_document_upload(
+            "sup_financial",
+            confirmation_token=str(
+                refreshed_preview["confirmation_token"]
+            ),
+        )
+        refreshed_path = (
+            runtime_dir
+            / "supplier_financial_previews"
+            / f"{refreshed['document_id']}.json"
+        )
+        if (
+            refreshed.get("idempotent")
+            or refreshed.get("document_id") == result.get("document_id")
+            or (
+                refreshed.get("import_preview") or {}
+            ).get("logical_grouping_version")
+            != "payment_anchor_currency_v1"
+            or preview_path.exists()
+            or not refreshed_path.is_file()
+        ):
+            raise AssertionError(
+                "stale inactive grouping preview must be replaced from the "
+                f"content-addressed source: {refreshed}"
             )
 
 

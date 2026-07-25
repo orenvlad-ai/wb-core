@@ -1243,7 +1243,7 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
             "original_filename": "browser-vtb-review.pdf",
             "stored_file_path": "",
             "file_content_type": "application/pdf",
-            "file_sha256": "browser-vtb-review-sha",
+            "file_sha256": "b" * 64,
             "uploaded_at": "2026-05-30T08:00:00Z",
             "updated_at": "2026-05-30T08:00:00Z",
             "parse_status": "parsed",

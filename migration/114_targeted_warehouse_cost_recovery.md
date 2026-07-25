@@ -26,7 +26,7 @@ Transit states preserve positive, confirmed zero, not-requested, updating, not-f
 
 Whole-box correction uses per-SKU factory box size. Only one final minimum whole-box solution can apply. Gross cross-SKU evidence remains separate before correction. Apply and rollback use append-only FF compensation and exact manifest digests. Subsequent functional plan and optimistic apply gates both fingerprint the same corrected supply view plus its correction identity; the gate never compares a corrected plan to the uncorrected persisted raw-goods digest.
 
-Bank import separates payment anchors, logical fees and atomic bank rows. One logical fee may contain several atomic debits. VAT follows purpose semantics. The confirmation UI lists only new logical groups, starts with every checkbox clear, discloses atomic rows and keeps imported/conflict/weak/ignored evidence in collapsed non-selectable blocks. Server target-revision drift rejects confirmation.
+Bank import separates payment anchors, logical fees and atomic bank rows. One logical group is the complete set of same-currency atomic tariff debits matched to one exact payment anchor, including mixed VK/SWIFT categories and distinct bank references; fallback reference/category grouping applies only without an anchor. VAT follows purpose semantics. The confirmation UI lists only new logical groups, starts with every checkbox clear, discloses atomic rows and keeps imported/conflict/weak/ignored evidence in collapsed non-selectable blocks. Server target-revision drift rejects confirmation.
 
 ## Unified production runner
 
