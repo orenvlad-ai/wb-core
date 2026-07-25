@@ -28,6 +28,7 @@ from apps.wb_autoanswers_runtime_test import feedback
 class FakeAutoanswersLifecycle:
     def __init__(self, repository: object) -> None:
         self.repository = repository
+        self.reconcile_calls = 0
 
     def status(self, *, suspended_by_master: bool) -> dict:
         settings = self.repository.settings()
@@ -65,6 +66,7 @@ class FakeAutoanswersLifecycle:
         }
 
     def reconcile(self, **kwargs: object) -> dict:
+        self.reconcile_calls += 1
         return self.status(
             suspended_by_master=bool(kwargs.get("suspended_by_master"))
         )
@@ -186,6 +188,9 @@ class HttpUiTest(unittest.TestCase):
 
     def test_limit_update_requires_fresh_settings_revision_and_returns_exact_readback(self) -> None:
         initial = self.app.handle_sheet_feedbacks_autoanswers_settings_request()
+        lifecycle = self.app.autoanswers_lifecycle
+        self.assertIsInstance(lifecycle, FakeAutoanswersLifecycle)
+        lifecycle.reconcile_calls = 0
         saved = self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(
             {
                 "expected_policy_epoch": initial["settings"]["policy_epoch"],
@@ -214,6 +219,11 @@ class HttpUiTest(unittest.TestCase):
         )
         self.assertNotEqual(saved["settings_revision"], initial["settings_revision"])
         self.assertEqual(
+            lifecycle.reconcile_calls,
+            0,
+            "limit-only save must not restart or reconcile the active lifecycle",
+        )
+        self.assertEqual(
             saved["limits_contract"]["fields"]["hourly_cap_usd"]["maximum"],
             10.0,
         )
@@ -237,6 +247,11 @@ class HttpUiTest(unittest.TestCase):
                 "expected_policy_epoch": saved["settings"]["policy_epoch"],
             },
             actor_id="admin",
+        )
+        self.assertEqual(
+            lifecycle.reconcile_calls,
+            1,
+            "mode mutations keep the existing lifecycle reconciliation",
         )
         with self.assertRaises(AutoanswersRuntimeError) as policy_stale:
             self.app.handle_sheet_feedbacks_autoanswers_settings_update_request(

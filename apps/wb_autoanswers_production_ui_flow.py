@@ -363,9 +363,17 @@ def run_autoanswers_ui_flow(
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-autoanswers-limits-result]');
-                  return node && node.textContent.includes('Сохранено и подтверждено сервером');
+                  return node && node.textContent.trim() &&
+                    !node.textContent.includes('Сохраняем и читаем значения обратно с сервера');
                 }""",
                 timeout=120_000,
+            )
+            save_result = limits_modal.locator(
+                "[data-autoanswers-limits-result]"
+            ).inner_text().strip()
+            _assert(
+                "Сохранено и подтверждено сервером" in save_result,
+                "limits save failed: " + save_result,
             )
         limits_modal.locator("[data-autoanswers-close-limits]").last.click()
         limits_modal.wait_for(state="hidden", timeout=30_000)
