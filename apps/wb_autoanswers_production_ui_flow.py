@@ -167,13 +167,30 @@ def run_autoanswers_ui_flow(
         page.locator('[data-feedbacks-subpanel="server-reviews"]:not([hidden])').wait_for(timeout=60_000)
         expected_title = {
             "manual": "Ручной режим",
-            "auto_all": "Работает",
         }.get(expected_state, "Автоответы выключены")
-        page.wait_for_function(
-            "title => document.querySelector('[data-autoanswers-master-status]').textContent.trim() === title",
-            arg=expected_title,
-            timeout=60_000,
-        )
+        if expected_state == "auto_all":
+            page.wait_for_function(
+                "() => document.querySelector('[data-autoanswers-master-status]').textContent.trim().startsWith('Работает')",
+                timeout=60_000,
+            )
+        else:
+            page.wait_for_function(
+                "title => document.querySelector('[data-autoanswers-master-status]').textContent.trim() === title",
+                arg=expected_title,
+                timeout=60_000,
+            )
+        master_status = page.locator("[data-autoanswers-master-status]")
+        master_status_text = master_status.inner_text().strip()
+        master_status_class = str(master_status.get_attribute("class") or "")
+        if expected_state == "auto_all":
+            _assert(
+                master_status_text.startswith("Работает"),
+                "Full-mode operator status must remain a running presentation",
+            )
+            _assert(
+                "is-on" in master_status_class or "is-starting" in master_status_class,
+                "Full-mode operator status must not use an error presentation",
+            )
         if expected_state == "off-force":
             page.wait_for_function(
                 "document.querySelector('[data-autoanswers-settings-note]').textContent.includes('WB_AUTOANSWERS_FORCE_OFF=true')",
@@ -311,10 +328,42 @@ def run_autoanswers_ui_flow(
                 page.locator(f'[data-autoanswers-filter="{filter_name}"]').count() == 1,
                 f"feedback filter {filter_name} must be rendered exactly once",
             )
+        queue_metrics = page.locator("[data-autoanswers-queue-metrics]")
+        queue_metric_count = queue_metrics.locator(".autoanswers-queue-metric").count()
+        queue_metric_labels = {
+            label.strip()
+            for label in queue_metrics.locator(".autoanswers-queue-metric span").all_inner_texts()
+        }
+        required_queue_metric_labels = {
+            "Всего в scope",
+            "Без ответа WB",
+            "Опубликованы",
+            "Ошибки",
+            "Осталось",
+            "С содержанием",
+            "Пустых осталось",
+            "Начальный состав",
+            "Добавлено после старта",
+            "Добавлено с содержанием",
+            "Добавлено пустых",
+            "Сейчас в запуске",
+            "Добавлено в последний раз",
+            "Вне текущего run",
+        }
+        _assert(queue_metric_count >= 27, "queue dashboard metrics are incomplete")
         _assert(
-            page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count() == 21,
-            "queue dashboard metrics are incomplete",
+            required_queue_metric_labels.issubset(queue_metric_labels),
+            "queue dashboard misses required rolling/operator metrics",
         )
+        queue_context_text = page.locator("[data-autoanswers-queue-context]").inner_text()
+        for marker in (
+            "начальный состав",
+            "добавлено +",
+            "сейчас",
+            "приоритет",
+            "очередь обновлена",
+        ):
+            _assert(marker in queue_context_text, f"queue context misses {marker}")
         _assert(
             page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count() == 2,
             "preparation/publication progress bars are missing",
@@ -344,6 +393,18 @@ def run_autoanswers_ui_flow(
             "progress cards need distinct visual treatment",
         )
         progress = dict(runtime_before.get("progress") or {})
+        rolling = dict(progress.get("rolling_admission") or {})
+        if expected_state == "auto_all":
+            _assert(
+                int(rolling.get("current_total") or 0)
+                == int(rolling.get("initial_membership") or 0)
+                + int(rolling.get("admitted_since_start") or 0),
+                "rolling current total does not reconcile",
+            )
+            _assert(
+                bool(str(rolling.get("last_refresh_at") or "").strip()),
+                "rolling admission refresh timestamp is missing",
+            )
         stage_specs = (
             ("all_preparation", page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").nth(0)),
             ("all_publication", page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").nth(1)),
@@ -760,6 +821,10 @@ def run_autoanswers_ui_flow(
             "force_off": setting_values["force_off"],
             "effective_enabled": setting_values["effective_enabled"],
             "mode": setting_values["mode"],
+            "operator_status": {
+                "text": master_status_text,
+                "class": master_status_class,
+            },
         },
         "expected_state": expected_state,
         "jobs_unchanged": jobs_unchanged,
@@ -788,6 +853,19 @@ def run_autoanswers_ui_flow(
             "rating_only_total": int(progress.get("rating_only_total") or 0),
             "indeterminate_total": int(progress.get("indeterminate_total") or 0),
             "rating_only_excluded_from_content_card": True,
+            "queue_metric_count": queue_metric_count,
+            "queue_metric_labels": sorted(queue_metric_labels),
+            "rolling_admission": {
+                "initial_membership": int(rolling.get("initial_membership") or 0),
+                "admitted_since_start": int(rolling.get("admitted_since_start") or 0),
+                "admitted_by_class": dict(rolling.get("admitted_by_class") or {}),
+                "admitted_by_rating": dict(rolling.get("admitted_by_rating") or {}),
+                "current_total": int(rolling.get("current_total") or 0),
+                "last_refresh_at": str(rolling.get("last_refresh_at") or ""),
+                "current_priority_bucket": str(
+                    rolling.get("current_priority_bucket") or ""
+                ),
+            },
         },
         "screenshots": {
             "desktop": str(desktop_screenshot_path),

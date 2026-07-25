@@ -59,6 +59,14 @@ regeneration participates in the global barrier. This prevents a human-only
 1-star media/error row from deadlocking claimable automatic 2–5-star work
 while preserving the row and its review reason.
 
+The production UI acceptance validates the named rolling/operator metrics
+(`initial membership`, admissions by class, current total, last refresh and
+priority bucket) instead of pinning the dashboard to its pre-rolling metric
+count. A normal Full-mode budget pause is accepted only through the visible
+warning presentation whose status still starts with `Работает`; a red/fatal
+surface, missing rolling truth, `5xx`, page error or console error remains a
+failed LOOP gate.
+
 ## Opaque Node boundary and affected-row recovery
 
 After provider entry, invalid/no child JSON with
