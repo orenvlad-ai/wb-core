@@ -1379,6 +1379,36 @@ class SupplierFinancialDocumentsBlock:
                 )
                 if str(item.get("document_id") or "") != exclude_document_id
             ],
+            "cny_payment_documents": [
+                {
+                    "document_id": str(item.get("document_id") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "status": str(item.get("status") or ""),
+                    "file_sha256": str(item.get("file_sha256") or ""),
+                    "natural_key": str(item.get("natural_key") or ""),
+                    "linked_financial_document_id": str(
+                        item.get("linked_financial_document_id") or ""
+                    ),
+                    "operation_date": str(item.get("operation_date") or ""),
+                    "operation_datetime": str(
+                        item.get("operation_datetime") or ""
+                    ),
+                    "document_number": str(
+                        item.get("document_number") or ""
+                    ),
+                    "cny_amount": str(item.get("cny_amount") or ""),
+                    "parsed_payload": dict(
+                        item.get("parsed_payload") or {}
+                    ),
+                }
+                for item in self.runtime.list_cny_documents()
+                if (
+                    str(item.get("document_type") or "")
+                    == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                    and str(item.get("source_order_id") or "").strip()
+                    == str(supplier_order_id or "").strip()
+                )
+            ],
         }
         return "sha256:" + hashlib.sha256(
             json.dumps(material, sort_keys=True, separators=(",", ":")).encode()

@@ -32,6 +32,8 @@ Bank import separates payment anchors, logical fees and atomic bank rows. One lo
 
 `apps/warehouse_cost_unified_recovery.py` is dry-run by default. Apply requires the exact current fingerprint and uses the shared warehouse lock. Scope includes one supplier shipment/invoice/date, one statement, explicit commission atomic amounts/counts/total, explicit WB supplies and optional final unique box correction. The dry-run reports exact identities, before/after FF projections, active version/queue and bounded I/O with `copy_bytes=0` and `finance_raw_rows_read=0`.
 
+Bank-statement matching uses the same payment-anchor source as the operator flow, including linked supplier-payment documents in the CNY ledger. Those target-scoped CNY payment revisions participate in the stale-preview fingerprint, so changing an anchor after preview is rejected before any recovery write.
+
 Before the first write the runner persists the reviewed plan in a durable audit journal. Bank, box, physical, factual-date, functional and economics steps checkpoint independently. A crash between mutation and checkpoint is recovered by rerunning the same fingerprint: every step has deterministic identities and re-entry is a no-op or resumes after exact scope/source-revision validation. Completion requires post-apply readback to be a no-op. The legacy standalone 26GN527 apply is disabled.
 
 The former transit/reservation entrypoint cannot build its monolithic snapshot even in CLI diagnostic mode and its imported apply helper fails closed. It only points operators to the canonical targeted runner.

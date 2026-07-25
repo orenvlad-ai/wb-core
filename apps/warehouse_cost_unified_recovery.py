@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,7 +141,12 @@ def build_plan(
         if actual_before not in {"", str(args.actual_shipment_date)}:
             raise ValueError("supplier shipment actual date has unexpected drift")
 
-        bank = _bank_plan(conn, args=args, shipment=shipment)
+        bank = _bank_plan(
+            conn,
+            runtime=runtime,
+            args=args,
+            shipment=shipment,
+        )
         physical = _physical_plan(conn, args=args, tables=tables)
         box = _box_plan(conn, args=args, tables=tables)
         ff_balance = _ff_balance(conn)
@@ -567,6 +572,7 @@ def apply_plan(
 def _bank_plan(
     conn: sqlite3.Connection,
     *,
+    runtime: RegistryUploadDbBackedRuntime,
     args: argparse.Namespace,
     shipment: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -580,30 +586,12 @@ def _bank_plan(
     if document is None:
         raise ValueError("target bank statement document was not found")
     statement = _loads(document["normalized_parse_json"], {})
-    documents = [
-        dict(row)
-        for row in conn.execute(
-            """
-            SELECT * FROM sheet_vitrina_v1_supplier_financial_documents
-            WHERE supplier_order_id=?
-            ORDER BY document_date DESC,uploaded_at DESC,document_id
-            """,
-            (args.shipment_id,),
+    financial_documents = SupplierFinancialDocumentsBlock(runtime=runtime)
+    payment_documents = (
+        financial_documents._supplier_order_payment_documents(
+            str(args.shipment_id)
         )
-    ]
-    payment_documents = []
-    for raw in documents:
-        if str(raw.get("document_type") or "") != "bank_transfer_application":
-            continue
-        payment_documents.append(
-            {
-                **raw,
-                "normalized_parse": _loads(
-                    raw.get("normalized_parse_json"), {}
-                ),
-                "raw_parse": _loads(raw.get("raw_parse_json"), {}),
-            }
-        )
+    )
     expense_rows = [
         dict(row)
         for row in conn.execute(
@@ -667,10 +655,9 @@ def _bank_plan(
         args.expected_bank_total
     ):
         raise ValueError("bank commission total changed")
-    target_revision = _bank_target_revision(
-        shipment=shipment,
-        documents=documents,
-        statement_document_id=str(args.statement_document_id),
+    target_revision = financial_documents._bank_fee_preview_revision(
+        str(args.shipment_id),
+        exclude_document_id=str(args.statement_document_id),
         statement_file_sha256=str(document["file_sha256"] or ""),
     )
     new_atomic = [
@@ -989,40 +976,6 @@ def _ff_balance(conn: sqlite3.Connection) -> dict[int, Decimal]:
             """
         )
     }
-
-
-def _bank_target_revision(
-    *,
-    shipment: Mapping[str, Any],
-    documents: Iterable[Mapping[str, Any]],
-    statement_document_id: str,
-    statement_file_sha256: str,
-) -> str:
-    material = {
-        "shipment": {
-            key: (shipment.get("header") or {}).get(key)
-            for key in (
-                "shipment_id",
-                "invoice_no",
-                "invoice_date",
-                "updated_at",
-            )
-        },
-        "statement_file_sha256": statement_file_sha256,
-        "documents": [
-            {
-                "document_id": str(item.get("document_id") or ""),
-                "updated_at": str(item.get("updated_at") or ""),
-                "parse_status": str(item.get("parse_status") or ""),
-                "file_sha256": str(item.get("file_sha256") or ""),
-            }
-            for item in documents
-            if str(item.get("document_id") or "") != statement_document_id
-        ],
-    }
-    return "sha256:" + hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
 
 
 def _goods_composition(
