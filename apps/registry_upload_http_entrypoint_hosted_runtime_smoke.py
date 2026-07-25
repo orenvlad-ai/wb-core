@@ -755,10 +755,12 @@ def main() -> None:
         "?embedded=operator&shipment_id=" not in sqlite_contention_ui_source
         or "&tab=documents" not in sqlite_contention_ui_source
         or "&tab=financial" in sqlite_contention_ui_source
+        or "normalized_group_text.casefold()" not in sqlite_contention_ui_source
     ):
         raise AssertionError(
             "SQLite contention UI flow must use the operator-embedded supplier "
-            "documents deep-link contract"
+            "documents deep-link contract and case-insensitive visual text "
+            "assertions"
         )
     rollback_plan_args = hosted_runtime.build_arg_parser().parse_args(
         ["autoanswers-store-rollback-plan"]
