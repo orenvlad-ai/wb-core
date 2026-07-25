@@ -11,6 +11,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -21,6 +22,7 @@ if str(ROOT) not in sys.path:
 import apps.warehouse_functional_runner as functional_runner  # noqa: E402
 import packages.application.warehouse_functional_economics_backfill as economics_backfill  # noqa: E402
 import packages.application.calculation_parameters as calculation_parameters  # noqa: E402
+import packages.application.registry_upload_db_backed_runtime as db_runtime_module  # noqa: E402
 from packages.application.calculation_parameters import (  # noqa: E402
     CalculationParametersBlock,
     ensure_calculation_parameters_schema,
@@ -191,6 +193,78 @@ def main() -> int:
                 raise AssertionError(
                     f"settings publication overlapped warehouse synchronization: {settings_results}"
                 )
+
+        contention_runtime_dir = root / "contention-runtime"
+        contention_runtime_dir.mkdir()
+        contention_db = contention_runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(contention_db) as conn:
+            conn.execute("CREATE TABLE writes(id TEXT PRIMARY KEY)")
+            conn.commit()
+        with db_runtime_module._connect(contention_db) as conn:
+            default_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        if default_busy_timeout != db_runtime_module.DEFAULT_SQLITE_BUSY_TIMEOUT_MS:
+            raise AssertionError("default runtime SQLite busy timeout drifted")
+
+        blocker = sqlite3.connect(contention_db)
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("INSERT INTO writes VALUES('blocker')")
+        writer_started = threading.Event()
+        writer_results: list[object] = []
+
+        def write_after_contention() -> None:
+            writer_started.set()
+            started = time.monotonic()
+            try:
+                with db_runtime_module.registry_runtime_sqlite_busy_timeout(120_000):
+                    with db_runtime_module._connect(contention_db) as conn:
+                        if conn.execute("PRAGMA busy_timeout").fetchone()[0] != 120_000:
+                            raise AssertionError("warehouse busy timeout was not applied")
+                        conn.execute("INSERT INTO writes VALUES('warehouse')")
+                        conn.commit()
+                writer_results.append(round((time.monotonic() - started) * 1000, 3))
+            except Exception as exc:  # pragma: no cover - asserted by parent thread
+                writer_results.append(exc)
+
+        writer_thread = threading.Thread(target=write_after_contention)
+        writer_thread.start()
+        if not writer_started.wait(timeout=2):
+            raise AssertionError("contending warehouse writer did not start")
+        time.sleep(0.1)
+        blocker.commit()
+        blocker.close()
+        writer_thread.join(timeout=5)
+        if writer_thread.is_alive() or len(writer_results) != 1:
+            raise AssertionError("warehouse writer did not finish after contention")
+        if isinstance(writer_results[0], Exception) or float(writer_results[0]) < 75:
+            raise AssertionError(
+                f"warehouse writer did not wait for the competing transaction: {writer_results}"
+            )
+        with db_runtime_module._connect(contention_db) as conn:
+            if conn.execute("PRAGMA busy_timeout").fetchone()[0] != 5_000:
+                raise AssertionError("warehouse busy timeout leaked outside its process context")
+            if conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] != 2:
+                raise AssertionError("contended warehouse write was lost")
+
+        phase_timings: dict[str, float] = {}
+        try:
+            functional_runner._run_sync_phase(
+                "publish_functional_version",
+                phase_timings,
+                lambda: (_ for _ in ()).throw(
+                    sqlite3.OperationalError("database is locked")
+                ),
+            )
+        except RuntimeError as exc:
+            if (
+                "warehouse_sync_sqlite_write_wait_expired" not in str(exc)
+                or "phase=publish_functional_version" not in str(exc)
+                or "database is locked" in str(exc)
+            ):
+                raise AssertionError("SQLite contention reason was not bounded") from exc
+        else:
+            raise AssertionError("SQLite contention did not fail closed")
+        if "publish_functional_version" not in phase_timings:
+            raise AssertionError("failed phase timing was not retained")
 
         wal_runtime_dir = root / "wal-runtime"
         wal_runtime_dir.mkdir()

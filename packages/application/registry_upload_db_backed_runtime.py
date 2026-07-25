@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import hashlib
@@ -72,6 +74,30 @@ ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
 DB_FILENAME = "registry_upload_runtime.sqlite3"
+DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000
+MAX_SQLITE_BUSY_TIMEOUT_MS = 300_000
+_SQLITE_BUSY_TIMEOUT_MS: ContextVar[int | None] = ContextVar(
+    "registry_upload_sqlite_busy_timeout_ms",
+    default=None,
+)
+
+
+@contextmanager
+def registry_runtime_sqlite_busy_timeout(timeout_ms: int | None):
+    """Temporarily bound write contention for one runtime command process."""
+
+    if timeout_ms is not None:
+        timeout_ms = int(timeout_ms)
+        if not DEFAULT_SQLITE_BUSY_TIMEOUT_MS <= timeout_ms <= MAX_SQLITE_BUSY_TIMEOUT_MS:
+            raise ValueError(
+                "registry runtime SQLite busy timeout must be between "
+                f"{DEFAULT_SQLITE_BUSY_TIMEOUT_MS} and {MAX_SQLITE_BUSY_TIMEOUT_MS} ms"
+            )
+    token = _SQLITE_BUSY_TIMEOUT_MS.set(timeout_ms)
+    try:
+        yield
+    finally:
+        _SQLITE_BUSY_TIMEOUT_MS.reset(token)
 
 
 @dataclass(frozen=True)
@@ -8472,8 +8498,10 @@ def _to_namespace(value: Any) -> Any:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    timeout_ms = _SQLITE_BUSY_TIMEOUT_MS.get() or DEFAULT_SQLITE_BUSY_TIMEOUT_MS
+    conn = sqlite3.connect(db_path, timeout=timeout_ms / 1000.0)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
