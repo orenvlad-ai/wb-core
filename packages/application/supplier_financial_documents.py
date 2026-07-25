@@ -140,6 +140,7 @@ BANK_CONTROL_REFRESH_FIELDS = (
     "contract_date",
 )
 BANK_FEE_STATEMENT_PARSER_VERSION = "supplier_vtb_bank_fee_statement_parser_v2"
+BANK_FEE_LOGICAL_GROUPING_VERSION = "payment_anchor_currency_v1"
 PACKING_LIST_PARSER_VERSION = "supplier_packing_list_parser_v1"
 BINARY_FINANCIAL_DOCUMENT_EXTENSIONS = {".xls", ".xlsx"}
 BANK_FEE_CATEGORIES = {
@@ -1311,6 +1312,13 @@ class SupplierFinancialDocumentsBlock:
             raise ValueError("financial document is not a bank fee statement")
         normalized = dict(document.get("normalized_parse") or {})
         statement_import = dict(normalized.get("statement_import") or {})
+        if (
+            str(statement_import.get("logical_grouping_version") or "")
+            != BANK_FEE_LOGICAL_GROUPING_VERSION
+        ):
+            raise ValueError(
+                "stale bank fee preview: logical grouping contract changed"
+            )
         expected_revision = str(statement_import.get("target_revision") or "")
         source_sha256 = str(document.get("file_sha256") or "")
         if (
@@ -2246,6 +2254,20 @@ class SupplierFinancialDocumentsBlock:
         document = payload.get("document")
         if not isinstance(document, Mapping):
             raise ValueError("bank statement preview payload is invalid")
+        statement_import = dict(
+            dict(document.get("normalized_parse") or {}).get(
+                "statement_import"
+            )
+            or {}
+        )
+        if (
+            str(statement_import.get("logical_grouping_version") or "")
+            != BANK_FEE_LOGICAL_GROUPING_VERSION
+        ):
+            path.unlink(missing_ok=True)
+            raise ValueError(
+                "bank statement preview contract changed; upload it again"
+            )
         return dict(document)
 
     def _find_bank_fee_preview(
@@ -2276,7 +2298,25 @@ class SupplierFinancialDocumentsBlock:
                     == source_sha256
                     and isinstance(payload.get("document"), Mapping)
                 ):
-                    return dict(payload["document"])
+                    document = dict(payload["document"])
+                    statement_import = dict(
+                        dict(document.get("normalized_parse") or {}).get(
+                            "statement_import"
+                        )
+                        or {}
+                    )
+                    if (
+                        str(
+                            statement_import.get(
+                                "logical_grouping_version"
+                            )
+                            or ""
+                        )
+                        != BANK_FEE_LOGICAL_GROUPING_VERSION
+                    ):
+                        path.unlink(missing_ok=True)
+                        continue
+                    return document
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
         return None
@@ -5535,6 +5575,7 @@ def build_bank_fee_statement_import_preview(
             best_confidence = confidence
     return {
         "status": status,
+        "logical_grouping_version": BANK_FEE_LOGICAL_GROUPING_VERSION,
         "payment_anchors": anchor_payloads,
         "matched_fee_rows": matched_fee_rows,
         "logical_fee_groups": _logical_fee_group_states(
@@ -5624,13 +5665,29 @@ def _logical_bank_fee_groups(
     for row in rows:
         reference = _logical_bank_fee_reference(row)
         semantic_id = str(row.get("semantic_operation_id") or "")
-        if reference:
+        anchor_document_id = str(
+            row.get("matched_anchor_document_id") or ""
+        )
+        anchor_operation_number = str(
+            row.get("matched_anchor_operation_number") or ""
+        )
+        currency = str(row.get("currency") or "").upper()
+        if anchor_document_id or anchor_operation_number:
+            # A payment is the operator's atomic selection boundary.  VTB may
+            # debit that payment through several tariff categories and bank
+            # document numbers (for example VK + SWIFT); selecting only one
+            # would leave the payment's bank cost partially assigned.
+            key = (
+                "payment_anchor",
+                anchor_document_id,
+                anchor_operation_number,
+                currency,
+            )
+        elif reference:
             key = (
                 "reference",
-                str(row.get("matched_anchor_document_id") or ""),
-                str(row.get("matched_anchor_operation_number") or ""),
                 str(row.get("fee_category") or ""),
-                str(row.get("currency") or "").upper(),
+                currency,
                 reference,
             )
         else:
@@ -5666,6 +5723,20 @@ def _logical_bank_fee_groups(
         vat_semantics = sorted(
             {_bank_fee_vat_semantics(item) for item in atomic_rows}
         )
+        fee_categories = sorted(
+            {
+                str(item.get("fee_category") or "")
+                for item in atomic_rows
+                if str(item.get("fee_category") or "")
+            }
+        )
+        references = sorted(
+            {
+                _logical_bank_fee_reference(item)
+                for item in atomic_rows
+                if _logical_bank_fee_reference(item)
+            }
+        )
         group = {
             "logical_fee_id": logical_id,
             "matched_anchor_document_id": str(
@@ -5674,12 +5745,18 @@ def _logical_bank_fee_groups(
             "matched_anchor_operation_number": str(
                 atomic_rows[0].get("matched_anchor_operation_number") or ""
             ),
-            "fee_category": str(atomic_rows[0].get("fee_category") or ""),
+            "fee_category": (
+                fee_categories[0]
+                if len(fee_categories) == 1
+                else "bank_fee_group"
+            ),
+            "fee_categories": fee_categories,
             "currency": currency,
             "amount": _decimal_to_storage(amount),
             "date_from": dates[0] if dates else "",
             "date_to": dates[-1] if dates else "",
-            "reference": key[-1] if key[0] == "reference" else "",
+            "reference": references[0] if len(references) == 1 else "",
+            "references": references,
             "vat_semantics": vat_semantics,
             "atomic_count": len(atomic_rows),
             "atomic_operation_ids": [
