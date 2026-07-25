@@ -29,6 +29,14 @@ from packages.application.warehouse_archival_estimate import (
     overlay_opening_cost_rows,
 )
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+from packages.application.warehouse_event_order import (
+    ff_operation_replay_sort_key as _ff_operation_replay_sort_key,
+)
+from packages.application.wb_supply_box_correction import (
+    BOX_CORRECTION_TABLE,
+    corrected_goods,
+    ensure_wb_supply_box_correction_schema,
+)
 from packages.application.warehouse_stocks import (
     INACTIVE_SUPPLIER_STATUSES,
     WB_FINAL_ACCEPTED_STATUS_ID,
@@ -232,6 +240,111 @@ def enqueue_warehouse_targeted_recalculation(
     runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
     with _connect(runtime.db_path) as conn:
         ensure_warehouse_functional_schema(conn)
+        queued = conn.execute(
+            """
+            SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+            WHERE stable_source_id=? AND status='queued'
+            ORDER BY requested_at,queue_id LIMIT 1
+            """,
+            (stable_id,),
+        ).fetchone()
+        if queued is not None:
+            combined_nm_ids = sorted(
+                set(nm_ids)
+                | {
+                    int(item)
+                    for item in _loads(
+                        queued["affected_nm_ids_json"], []
+                    )
+                    if int(item) > 0
+                }
+            )
+            same_revision = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                WHERE stable_source_id=? AND source_revision=? AND queue_id<>?
+                ORDER BY requested_at,queue_id LIMIT 1
+                """,
+                (stable_id, revision, str(queued["queue_id"])),
+            ).fetchone()
+            if same_revision is not None:
+                merged_nm_ids = sorted(
+                    set(combined_nm_ids)
+                    | {
+                        int(item)
+                        for item in _loads(
+                            same_revision["affected_nm_ids_json"], []
+                        )
+                        if int(item) > 0
+                    }
+                )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    SET effective_date=MIN(effective_date,?),
+                        affected_nm_ids_json=?,
+                        requested_at=CASE
+                            WHEN status='complete' THEN requested_at
+                            ELSE ?
+                        END,
+                        error=CASE
+                            WHEN status='complete' THEN error
+                            ELSE NULL
+                        END
+                    WHERE queue_id=?
+                    """,
+                    (
+                        business_date,
+                        _json(merged_nm_ids),
+                        now,
+                        str(same_revision["queue_id"]),
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    SET status='complete',finished_at=?,
+                        error='superseded by identical coalesced revision'
+                    WHERE queue_id=? AND status='queued'
+                    """,
+                    (now, str(queued["queue_id"])),
+                )
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    WHERE queue_id=?
+                    """,
+                    (str(same_revision["queue_id"]),),
+                ).fetchone()
+                return dict(row) if row else {
+                    "queue_id": str(same_revision["queue_id"]),
+                    "status": str(same_revision["status"]),
+                }
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                SET source_revision=?,effective_date=MIN(effective_date,?),
+                    affected_nm_ids_json=?,requested_at=?,error=NULL
+                WHERE queue_id=? AND status='queued'
+                """,
+                (
+                    revision,
+                    business_date,
+                    _json(combined_nm_ids),
+                    now,
+                    str(queued["queue_id"]),
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE queue_id=?",
+                (str(queued["queue_id"]),),
+            ).fetchone()
+            return dict(row) if row else {
+                "queue_id": str(queued["queue_id"]),
+                "status": "queued",
+            }
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_warehouse_targeted_recalc_queue(
                    queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,
@@ -267,9 +380,13 @@ def load_supplier_flow_cost_state(
         }
         if "sheet_vitrina_v1_warehouse_functional_active" not in tables:
             return {}
-        active = conn.execute(
-            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-        ).fetchone()
+        active = (
+            conn.execute(
+                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+            ).fetchone()
+            if "sheet_vitrina_v1_warehouse_functional_active" in tables
+            else None
+        )
         if active is None:
             return {}
         stored_rows = conn.execute(
@@ -496,6 +613,7 @@ def load_supplier_line_cost_breakdown(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     shipment_id: str,
+    actual_shipment_date_override: str | None = None,
 ) -> dict[str, Any]:
     """Expose the exact canonical supplier allocation used by warehouse replay.
 
@@ -507,8 +625,7 @@ def load_supplier_line_cost_breakdown(
     selected_id = str(shipment_id or "").strip()
     if not selected_id:
         return {}
-    with _connect(runtime.db_path) as conn:
-        ensure_warehouse_functional_schema(conn)
+    with _connect_readonly(runtime.db_path) as conn:
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -563,9 +680,20 @@ def load_supplier_line_cost_breakdown(
                 else []
             ),
         }
-        active = conn.execute(
-            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-        ).fetchone()
+        if actual_shipment_date_override is not None and sources["shipments"]:
+            # Targeted factual-date preview must remain query-only.  Apply the
+            # proposed business date to the in-memory target row only; no
+            # disposable full-database candidate is needed.
+            sources["shipments"][0]["actual_shipment_date"] = (
+                str(actual_shipment_date_override or "").strip() or None
+            )
+        active = (
+            conn.execute(
+                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+            ).fetchone()
+            if "sheet_vitrina_v1_warehouse_functional_active" in tables
+            else None
+        )
         active_version_id = str(active["version_id"]) if active is not None else ""
         active_fingerprints: tuple[str, str] | None = None
         if active is not None:
@@ -1906,6 +2034,10 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
             "exact_landed_cost_total_rub": None,
             "exact_landed_cost_per_unit_rub": None,
             "exact_cost_status": "unavailable",
+            "cost_freshness": {
+                "status": "unavailable",
+                "label": "Себестоимость недоступна",
+            },
             "exact_cost_blockers": [
                 str(item.get("reason_ru") or item.get("code") or "Недостающие данные")
                 for item in blockers
@@ -1914,6 +2046,13 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
         }
     controls = list(canonical.get("component_controls") or [])
     certification = dict(canonical.get("certification") or {})
+    cost_freshness = (
+        "current_certified"
+        if certification.get("certified")
+        else "awaiting_recalculation"
+        if bool(canonical.get("expenses_complete"))
+        else "preliminary"
+    )
     return {
         "exact_bank_fees_rub": float(sum(
             (
@@ -1942,8 +2081,22 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
             else None
         ),
         "exact_cost_status": (
-            "certified" if certification.get("certified") else "provisional"
+            "certified"
+            if certification.get("certified")
+            else "pending"
+            if cost_freshness == "awaiting_recalculation"
+            else "provisional"
         ),
+        "cost_freshness": {
+            "status": cost_freshness,
+            "label": (
+                "Себестоимость актуальна и сертифицирована"
+                if cost_freshness == "current_certified"
+                else "Себестоимость ожидает пересчёта"
+                if cost_freshness == "awaiting_recalculation"
+                else "Себестоимость предварительная"
+            ),
+        },
         "exact_cost_blockers": [],
         "exact_cost_warnings": [],
     }
@@ -2981,6 +3134,61 @@ class WarehouseFunctionalBlock:
         if self.readback().get("status") != "ready":
             raise WarehouseFunctionalError("functional cutover must be applied before emergency rebuild")
         return self._build_plan(kind="emergency_rebuild", wb_payload=self._last_good_wb_payload())
+
+    def build_targeted_recovery_plan(
+        self,
+        *,
+        affected_nm_ids: Iterable[int],
+        stable_source_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        """Reconcile bounded local mutations against the immutable last-good WB snapshot."""
+
+        if self.readback().get("status") != "ready":
+            raise WarehouseFunctionalError(
+                "functional cutover must be applied before targeted recovery"
+            )
+        nm_ids = sorted(
+            {int(value) for value in affected_nm_ids if int(value) > 0}
+        )
+        if not nm_ids:
+            raise WarehouseFunctionalError(
+                "targeted recovery requires affected SKU identities"
+            )
+        plan = self._build_plan(
+            kind="targeted_recovery",
+            wb_payload=self._last_good_wb_payload(),
+        )
+        unrelated = [
+            dict(item)
+            for item in (plan.get("diff") or {}).get("lines") or []
+            if int(item.get("nm_id") or 0) not in set(nm_ids)
+        ]
+        if unrelated:
+            raise WarehouseFunctionalError(
+                "targeted recovery would change non-target warehouse rows: "
+                + ",".join(
+                    f"{item.get('warehouse_key')}:{item.get('nm_id')}"
+                    for item in unrelated[:20]
+                )
+            )
+        plan["target_scope"] = {
+            "affected_nm_ids": nm_ids,
+            "stable_source_ids": sorted(
+                {
+                    str(value).strip()
+                    for value in stable_source_ids
+                    if str(value).strip()
+                }
+            ),
+            "non_target_changed_line_count": 0,
+            "wb_snapshot_source": "last_good_immutable",
+            "finance_raw_rows_read": 0,
+            "copy_bytes": 0,
+            "full_database_copy": False,
+            "complexity": "O(operational warehouse sources + affected publication)",
+        }
+        plan["plan_fingerprint"] = _fingerprint(plan)
+        return plan
 
     def _build_plan(
         self,
@@ -4778,14 +4986,11 @@ class WarehouseFunctionalBlock:
                     needs_supply_cost = False
                 accepted_cost = ZERO
                 pre_acceptance_cost = ZERO
+                supply_cost_quality = "supply_specific_downstream_cost"
                 if needs_supply_cost:
                     component = downstream_components.get((wb_supply_id, nm_id))
                     if component is None:
                         component = downstream_components.get((supply_id, nm_id))
-                    if component is None:
-                        raise WarehouseFunctionalError(
-                            f"WB supply {supply_id}:{nm_id} has no validated downstream cost state"
-                        )
                     if outbound_ff_wac is None and (cutover_mode or absorbed):
                         seed = cost_map.get(nm_id)
                         outbound_ff_wac = seed.ff_unit_cost if seed is not None else None
@@ -4793,19 +4998,37 @@ class WarehouseFunctionalBlock:
                         raise WarehouseFunctionalError(
                             f"WB supply {supply_id}:{nm_id} has no FF WAC at ledger debit"
                         )
-                    pre_acceptance_cost, accepted_cost = compose_supply_costs(
-                        outbound_ff_wac=outbound_ff_wac,
-                        pre_acceptance_addon=component["pre_acceptance_addon"],
-                        acceptance_addon=component["acceptance_addon"],
-                    )
-                    provenance.update(
-                        {
-                            "ff_wac_at_ledger_debit_rub": _text(outbound_ff_wac),
-                            "downstream_pre_acceptance_addon_rub": _text(component["pre_acceptance_addon"]),
-                            "wb_paid_acceptance_addon_rub": _text(component["acceptance_addon"]),
-                            "downstream_cost_layer_fingerprint": component["inputs_hash"],
-                        }
-                    )
+                    if component is None:
+                        # Quantity follows physical evidence.  Carry the known
+                        # FF capital and mark only the missing add-ons as
+                        # preliminary; a later cost revision enriches this
+                        # same supply without another quantity movement.
+                        pre_acceptance_cost = outbound_ff_wac
+                        accepted_cost = outbound_ff_wac
+                        supply_cost_quality = "physical_movement_costs_pending"
+                        provenance.update(
+                            {
+                                "ff_wac_at_ledger_debit_rub": _text(outbound_ff_wac),
+                                "downstream_cost_status": "pending",
+                                "cost_freshness": "preliminary",
+                                "missing_cost_components": ["transit_or_downstream_services"],
+                            }
+                        )
+                    else:
+                        pre_acceptance_cost, accepted_cost = compose_supply_costs(
+                            outbound_ff_wac=outbound_ff_wac,
+                            pre_acceptance_addon=component["pre_acceptance_addon"],
+                            acceptance_addon=component["acceptance_addon"],
+                        )
+                        provenance.update(
+                            {
+                                "ff_wac_at_ledger_debit_rub": _text(outbound_ff_wac),
+                                "downstream_pre_acceptance_addon_rub": _text(component["pre_acceptance_addon"]),
+                                "wb_paid_acceptance_addon_rub": _text(component["acceptance_addon"]),
+                                "downstream_cost_layer_fingerprint": component["inputs_hash"],
+                                "cost_freshness": "current",
+                            }
+                        )
                 source_fingerprint = _hash(
                     {
                         "revision": revision,
@@ -4852,7 +5075,7 @@ class WarehouseFunctionalBlock:
                             quantity=open_qty,
                             capital=open_qty * pre_acceptance_cost,
                             covered=open_qty,
-                            quality="supply_specific_downstream_cost",
+                            quality=supply_cost_quality,
                             provenance={
                                 **provenance,
                                 "formula": "max(packed-accepted,0)",
@@ -5992,6 +6215,7 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ensure_wb_supply_box_correction_schema(conn)
     ensure_archival_estimate_schema(conn)
 
 
@@ -6073,6 +6297,7 @@ def _source_rows(
         "historical_wb_daily_quantities": "SELECT as_of_date,nm_id,physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE stage='WB' AND as_of_date>='2026-07-01' ORDER BY as_of_date,nm_id",
         "archival_estimate_active": "SELECT version.version_id,version.effective_date,version.unit_cost_rub,version.quality,version.owner_approval_reference,version.manifest_digest,version.production_dry_run_plan_sha256,version.source_digest,version.plan_fingerprint,row.nm_id,row.unit_cost_rub row_unit_cost_rub,row.quality row_quality,row.lineage_json,row.row_fingerprint FROM sheet_vitrina_v1_warehouse_archival_estimate_active active JOIN sheet_vitrina_v1_warehouse_archival_estimate_versions version ON version.version_id=active.version_id JOIN sheet_vitrina_v1_warehouse_archival_estimate_rows row ON row.version_id=version.version_id WHERE active.slot=1 ORDER BY row.nm_id",
         "targeted_recalc_requests": "SELECT queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,status,requested_at,started_at FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE status IN ('queued','running') ORDER BY requested_at,queue_id",
+        "box_corrections": f"SELECT * FROM {BOX_CORRECTION_TABLE} WHERE status='applied' ORDER BY supply_id,applied_at,correction_id",
     }
     if "sheet_vitrina_v1_cny_documents" in tables:
         queries["cny_documents"] = (
@@ -6128,19 +6353,6 @@ def _source_rows(
         "ff_cost_layer_id": str((report.get("primary_shipment") or {}).get("ff_cost_layer_id") or ""),
     }
     return result
-
-
-def _ff_operation_replay_sort_key(operation: Mapping[str, Any]) -> tuple[str, int, str]:
-    """Keep same-second supplier receipts ahead of dependent FF outbounds."""
-    is_supplier_receipt = (
-        str(operation.get("source_type") or "") == "supplier_shipment"
-        and str(operation.get("operation_type") or "") == "auto_receipt"
-    )
-    return (
-        str(operation.get("created_at") or ""),
-        0 if is_supplier_receipt else 1,
-        str(operation.get("operation_id") or ""),
-    )
 
 
 def _ready_snapshot_recovery_rows(
@@ -6426,6 +6638,37 @@ def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     normalized = dict(sources)
+    corrections_by_supply = {
+        str(item.get("supply_id") or ""): dict(item)
+        for item in normalized.get("box_corrections") or []
+    }
+    corrected_supplies: list[dict[str, Any]] = []
+    for raw_supply in normalized.get("wb_supplies") or []:
+        supply = dict(raw_supply)
+        correction = corrections_by_supply.get(str(supply.get("supply_id") or ""))
+        if correction is not None:
+            composition = {
+                int(key): int(value)
+                for key, value in _loads(
+                    correction.get("corrected_composition_json"), {}
+                ).items()
+            }
+            goods = (
+                list(supply.get("raw_goods") or [])
+                if isinstance(supply.get("raw_goods"), list)
+                else _loads(supply.get("raw_goods_json"), [])
+            )
+            adjusted = corrected_goods(goods, composition)
+            supply["raw_goods"] = adjusted
+            supply["raw_goods_json"] = _json(adjusted)
+            supply["box_correction"] = {
+                "correction_id": str(correction.get("correction_id") or ""),
+                "plan_fingerprint": str(
+                    correction.get("plan_fingerprint") or ""
+                ),
+            }
+        corrected_supplies.append(supply)
+    normalized["wb_supplies"] = corrected_supplies
     active_financial_documents = [
         dict(item)
         for item in normalized.get("financial_documents") or []
@@ -7799,6 +8042,22 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        f"file:{path.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+        conn.close()
+        raise WarehouseFunctionalError(
+            "warehouse query-only read could not enable SQLite query_only"
+        )
     return conn
 
 

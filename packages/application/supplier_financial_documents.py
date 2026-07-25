@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -1100,6 +1101,11 @@ class SupplierFinancialDocumentsBlock:
         )
         now = self.timestamp_factory()
         document_id = "fdoc_" + uuid4().hex
+        preview["target_revision"] = self._bank_fee_preview_revision(
+            supplier_order_id,
+            statement_file_sha256=file_sha256,
+            exclude_document_id=document_id,
+        )
         stored_file_path = self._write_document_file(
             supplier_order_id=supplier_order_id,
             document_id=document_id,
@@ -1174,23 +1180,29 @@ class SupplierFinancialDocumentsBlock:
             raise ValueError("financial document is not a bank fee statement")
         normalized = dict(document.get("normalized_parse") or {})
         statement_import = dict(normalized.get("statement_import") or {})
+        expected_revision = str(statement_import.get("target_revision") or "")
+        current_revision = self._bank_fee_preview_revision(
+            supplier_order_id,
+            statement_file_sha256=str(document.get("file_sha256") or ""),
+            exclude_document_id=document_id,
+        )
+        if not expected_revision or current_revision != expected_revision:
+            raise ValueError(
+                "stale bank fee preview: payment or document revision changed"
+            )
         confirmed_operation_ids = {
             str(value)
             for value in statement_import.get("confirmed_operation_ids") or []
             if str(value)
         }
-        requested_operation_ids = (
+        requested_ids = (
             {
                 str(value).strip()
                 for value in selected_operation_ids
                 if str(value).strip()
             }
             if selected_operation_ids is not None
-            else {
-                str(item.get("semantic_operation_id") or "")
-                for item in statement_import.get("matched_fee_rows") or []
-                if bool(item.get("selected_by_default"))
-            }
+            else set()
         )
         all_matched_rows = [
             dict(item)
@@ -1203,7 +1215,21 @@ class SupplierFinancialDocumentsBlock:
             for item in all_matched_rows
             if str(item.get("semantic_operation_id") or "")
         }
-        unknown_ids = sorted(requested_operation_ids - set(rows_by_operation_id))
+        rows_by_logical_id: defaultdict[str, set[str]] = defaultdict(set)
+        for item in all_matched_rows:
+            logical_id = str(item.get("logical_fee_id") or "")
+            operation_id = str(item.get("semantic_operation_id") or "")
+            if logical_id and operation_id:
+                rows_by_logical_id[logical_id].add(operation_id)
+        requested_operation_ids: set[str] = set()
+        unknown_ids: list[str] = []
+        for selected_id in sorted(requested_ids):
+            if selected_id in rows_by_operation_id:
+                requested_operation_ids.add(selected_id)
+            elif selected_id in rows_by_logical_id:
+                requested_operation_ids.update(rows_by_logical_id[selected_id])
+            else:
+                unknown_ids.append(selected_id)
         if unknown_ids:
             raise ValueError(
                 "selected bank statement operations are not present in the exact preview: "
@@ -1244,6 +1270,13 @@ class SupplierFinancialDocumentsBlock:
         updated_import = {
             **statement_import,
             "matched_fee_rows": updated_preview_rows,
+            "logical_fee_groups": _logical_fee_group_states(
+                [
+                    dict(item)
+                    for item in statement_import.get("logical_fee_groups") or []
+                ],
+                updated_preview_rows,
+            ),
             "import_status": "confirmed_partial_or_complete",
             "confirmed_at": now,
             "confirmed_fee_count": len(confirmed_operation_ids),
@@ -1314,6 +1347,42 @@ class SupplierFinancialDocumentsBlock:
                 source_payload=payload,
             )
         return payload
+
+    def _bank_fee_preview_revision(
+        self,
+        supplier_order_id: str,
+        *,
+        statement_file_sha256: str,
+        exclude_document_id: str,
+    ) -> str:
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        material = {
+            "shipment": {
+                key: (shipment.get("header") or {}).get(key)
+                for key in (
+                    "shipment_id",
+                    "invoice_no",
+                    "invoice_date",
+                    "updated_at",
+                )
+            },
+            "statement_file_sha256": str(statement_file_sha256 or ""),
+            "documents": [
+                {
+                    "document_id": str(item.get("document_id") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "parse_status": str(item.get("parse_status") or ""),
+                    "file_sha256": str(item.get("file_sha256") or ""),
+                }
+                for item in self.runtime.list_supplier_financial_documents(
+                    supplier_order_id
+                )
+                if str(item.get("document_id") or "") != exclude_document_id
+            ],
+        }
+        return "sha256:" + hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def get_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
@@ -1637,6 +1706,22 @@ class SupplierFinancialDocumentsBlock:
                 default=str,
             ).encode("utf-8")
         ).hexdigest()
+        try:
+            from packages.application.warehouse_functional import (
+                load_supplier_line_cost_breakdown,
+            )
+
+            current_breakdown = load_supplier_line_cost_breakdown(
+                runtime=self.runtime,
+                shipment_id=supplier_order_id,
+            )
+            revision = str(
+                current_breakdown.get("source_fingerprint") or revision
+            )
+        except Exception:
+            # Saving the expense remains independent; the bounded fallback
+            # revision still queues a replay and exposes any read blocker.
+            pass
         effective_date = str(
             source_payload.get("document_date")
             or (source_payload.get("document") or {}).get("document_date")
@@ -1645,7 +1730,7 @@ class SupplierFinancialDocumentsBlock:
         )[:10]
         return enqueue_warehouse_targeted_recalculation(
             runtime=self.runtime,
-            stable_source_id=f"supplier_financial_document:{source_id}",
+            stable_source_id=f"supplier_costs:{supplier_order_id}",
             source_revision=revision,
             effective_date=effective_date,
             affected_nm_ids=nm_ids,
@@ -4905,18 +4990,14 @@ def build_bank_fee_statement_import_preview(
             continue
         ignored_rows.append(_statement_row_preview(row, reason=_ignored_statement_row_reason(row, anchors)))
     matched_fee_rows = _dedupe_statement_rows(matched_fee_rows)
+    matched_fee_rows, logical_fee_groups = _logical_bank_fee_groups(
+        matched_fee_rows
+    )
     existing_ids = set(existing_operation_ids or set())
     existing_by_reference = {
         str(key): {str(value) for value in values}
         for key, values in dict(existing_operation_index or {}).items()
     }
-    ambiguity_counts: dict[tuple[str, str], int] = {}
-    for row in matched_fee_rows:
-        key = (
-            str(row.get("matched_anchor_operation_number") or ""),
-            str(row.get("fee_category") or ""),
-        )
-        ambiguity_counts[key] = ambiguity_counts.get(key, 0) + 1
     matched_fee_rows = [
         _statement_preview_import_state(
             row,
@@ -4926,17 +5007,7 @@ def build_bank_fee_statement_import_preview(
                 existing_by_reference.get(_statement_reference_identity(row), set())
                 - {str(row.get("semantic_operation_id") or "")}
             ),
-            ambiguous=(
-                ambiguity_counts.get(
-                    (
-                        str(row.get("matched_anchor_operation_number") or ""),
-                        str(row.get("fee_category") or ""),
-                    ),
-                    0,
-                )
-                > 1
-                or bool(row.get("section_review_required"))
-            ),
+            ambiguous=bool(row.get("section_review_required")),
         )
         for row in matched_fee_rows
     ]
@@ -4956,7 +5027,6 @@ def build_bank_fee_statement_import_preview(
         "ready_to_confirm"
         if any(
             item.get("operation_status") == "new"
-            and bool(item.get("selected_by_default"))
             for item in matched_fee_rows
         )
         else "needs_review"
@@ -4965,7 +5035,7 @@ def build_bank_fee_statement_import_preview(
         warnings.append("Комиссии, привязанные к payment anchor заказа, не найдены")
     if any(item.get("operation_status") == "needs_review" for item in matched_fee_rows):
         warnings.append(
-            "Несколько комиссий совпали с одним платежом и категорией; строки показаны отдельно и не выбраны автоматически"
+            "Часть строк не имеет полного section context и вынесена в блок разбора"
         )
     totals = _fee_totals_by_currency(matched_fee_rows)
     confidence_order = {BANK_FEE_CONFIDENCE_STRONG: 3, BANK_FEE_CONFIDENCE_PROBABLE: 2, BANK_FEE_CONFIDENCE_WEAK: 1}
@@ -4978,6 +5048,10 @@ def build_bank_fee_statement_import_preview(
         "status": status,
         "payment_anchors": anchor_payloads,
         "matched_fee_rows": matched_fee_rows,
+        "logical_fee_groups": _logical_fee_group_states(
+            logical_fee_groups,
+            matched_fee_rows,
+        ),
         "ignored_rows": ignored_rows,
         "weak_candidates": weak_candidates,
         "fee_totals_by_currency": totals,
@@ -5011,8 +5085,8 @@ def _statement_preview_import_state(
         **dict(row),
         "operation_status": status,
         "already_imported": already_imported,
-        "selected_by_default": status == "new",
-        "import_allowed": status in {"new", "needs_review"},
+        "selected_by_default": False,
+        "import_allowed": status == "new",
         "review_warning": (
             "Та же банковская reference identity уже импортирована с другими semantic данными."
             if conflict
@@ -5024,6 +5098,162 @@ def _statement_preview_import_state(
             else ""
         ),
     }
+
+
+def _logical_bank_fee_reference(row: Mapping[str, Any]) -> str:
+    explicit = str(row.get("mt103_ref") or "").strip()
+    if explicit:
+        return re.sub(r"\s+", "", explicit).casefold()
+    purpose = str(row.get("payment_purpose") or "")
+    match = re.search(
+        r"(?:reference|ref\.?|реф(?:еренс)?|ссылк[аи])\s*[:№#-]?\s*(\d{4,})",
+        purpose,
+        flags=re.I,
+    )
+    if match:
+        return str(match.group(1))
+    # VTB splits one tariff charge into multiple debits while preserving the
+    # bank document/reference number (26GN527 uses 244189 on two dates).
+    return str(row.get("bank_document_number") or "").strip()
+
+
+def _bank_fee_vat_semantics(row: Mapping[str, Any]) -> str:
+    purpose = str(row.get("payment_purpose") or "").casefold()
+    if str(row.get("fee_category") or "") == EXPENSE_CATEGORY_CURRENCY_CONTROL_VAT:
+        return "separate_vat_component"
+    if "включая ндс" in purpose:
+        return "vat_included"
+    if re.search(r"ндс\s+не\s+облага", purpose):
+        return "vat_not_applicable"
+    return "not_stated"
+
+
+def _logical_bank_fee_groups(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    grouped: defaultdict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        reference = _logical_bank_fee_reference(row)
+        semantic_id = str(row.get("semantic_operation_id") or "")
+        if reference:
+            key = (
+                "reference",
+                str(row.get("matched_anchor_document_id") or ""),
+                str(row.get("matched_anchor_operation_number") or ""),
+                str(row.get("fee_category") or ""),
+                str(row.get("currency") or "").upper(),
+                reference,
+            )
+        else:
+            # Two rows of one category are not duplicates merely because their
+            # category matches.  Without a common reference they stay distinct
+            # logical commissions.
+            key = ("atomic", semantic_id)
+        grouped[key].append(dict(row))
+    annotated: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    for key, atomic_rows in sorted(grouped.items(), key=lambda item: item[0]):
+        logical_id = "bankfee_" + hashlib.sha256(
+            "|".join(key).encode("utf-8")
+        ).hexdigest()
+        dates = sorted(
+            str(item.get("operation_date") or "")
+            for item in atomic_rows
+            if str(item.get("operation_date") or "")
+        )
+        currency = str(atomic_rows[0].get("currency") or "").upper()
+        amount = sum(
+            (
+                _parse_decimal(
+                    item.get("amount")
+                    or item.get("debit_cny")
+                    or item.get("debit_rub")
+                )
+                or Decimal("0")
+                for item in atomic_rows
+            ),
+            Decimal("0"),
+        )
+        vat_semantics = sorted(
+            {_bank_fee_vat_semantics(item) for item in atomic_rows}
+        )
+        group = {
+            "logical_fee_id": logical_id,
+            "matched_anchor_document_id": str(
+                atomic_rows[0].get("matched_anchor_document_id") or ""
+            ),
+            "matched_anchor_operation_number": str(
+                atomic_rows[0].get("matched_anchor_operation_number") or ""
+            ),
+            "fee_category": str(atomic_rows[0].get("fee_category") or ""),
+            "currency": currency,
+            "amount": _decimal_to_storage(amount),
+            "date_from": dates[0] if dates else "",
+            "date_to": dates[-1] if dates else "",
+            "reference": key[-1] if key[0] == "reference" else "",
+            "vat_semantics": vat_semantics,
+            "atomic_count": len(atomic_rows),
+            "atomic_operation_ids": [
+                str(item.get("semantic_operation_id") or "")
+                for item in atomic_rows
+            ],
+            "atomic_rows": atomic_rows,
+        }
+        groups.append(group)
+        annotated.extend(
+            {
+                **item,
+                "logical_fee_id": logical_id,
+                "logical_fee_atomic_count": len(atomic_rows),
+                "logical_fee_amount": group["amount"],
+                "logical_fee_reference": group["reference"],
+                "vat_semantics": _bank_fee_vat_semantics(item),
+            }
+            for item in atomic_rows
+        )
+    annotated.sort(
+        key=lambda item: (
+            str(item.get("operation_date") or ""),
+            str(item.get("semantic_operation_id") or ""),
+        )
+    )
+    return annotated, groups
+
+
+def _logical_fee_group_states(
+    groups: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    status_by_operation = {
+        str(item.get("semantic_operation_id") or ""): str(
+            item.get("operation_status") or ""
+        )
+        for item in rows
+    }
+    result = []
+    for group in groups:
+        statuses = {
+            status_by_operation.get(operation_id, "needs_review")
+            for operation_id in group["atomic_operation_ids"]
+        }
+        status = (
+            "new"
+            if statuses == {"new"}
+            else "already_imported"
+            if statuses == {"already_imported"}
+            else "conflict"
+            if "conflict" in statuses
+            else "needs_review"
+        )
+        result.append(
+            {
+                **group,
+                "operation_status": status,
+                "import_allowed": status == "new",
+                "selected_by_default": False,
+            }
+        )
+    return result
 
 
 def _statement_reference_identity(row: Mapping[str, Any]) -> str:
@@ -7723,6 +7953,16 @@ def _bank_fee_expense_line_for_storage(
             "match_reasons": _string_list(row.get("match_reasons")),
             "matched_anchor_document_id": str(row.get("matched_anchor_document_id") or ""),
             "matched_anchor_operation_number": str(row.get("matched_anchor_operation_number") or ""),
+            "logical_fee_id": str(row.get("logical_fee_id") or ""),
+            "logical_fee_atomic_count": int(
+                row.get("logical_fee_atomic_count") or 1
+            ),
+            "logical_fee_reference": str(
+                row.get("logical_fee_reference") or ""
+            ),
+            "vat_semantics": str(
+                row.get("vat_semantics") or _bank_fee_vat_semantics(row)
+            ),
             "original_currency": currency,
             "cny_ledger_natural_key": _bank_fee_cny_natural_key(document_id=document_id, row=row) if currency == "CNY" else "",
             "rub_equivalent_status": "cny_ledger_pending" if currency == "CNY" else "direct_rub",

@@ -102,17 +102,26 @@ def main() -> None:
             next(item for item in runtime.list_wb_supplies_cache_records() if item["supply_id"] == "wait-cost")
         )
         _assert(
-            waiting_cost and waiting_cost.get("skip_reason")
-            == "wb_supply_reserved_waiting_for_validated_downstream_costs",
+            waiting_cost and waiting_cost.get("operation_id"),
             waiting_cost,
         )
-        _assert(_balance(runtime, nm_physical) == 10.0, "missing cost must fail physical movement closed")
+        _assert(
+            _balance(runtime, nm_physical) == 5.0,
+            "missing cost must not block a physically proven movement",
+        )
+        _assert(
+            runtime.list_ff_stock_reservations(supply_id="wait-cost") == [],
+            "cost-only reservation must not be created",
+        )
         _seed_valid_cost(runtime, "wait-cost", nm_physical)
         completed = block.record_wb_supply_debit(
             next(item for item in runtime.list_wb_supplies_cache_records() if item["supply_id"] == "wait-cost")
         )
-        _assert(completed and completed.get("operation_id"), completed)
-        _assert(_balance(runtime, nm_physical) == 5.0, "validated cost must allow the exact physical debit")
+        _assert(completed and completed.get("idempotent"), completed)
+        _assert(
+            _balance(runtime, nm_physical) == 5.0,
+            "late cost replay must not repeat the physical debit",
+        )
         _assert(runtime.list_ff_stock_reservations(supply_id="wait-cost") == [], "fulfilled reserve remained active")
 
         _save_supply(
@@ -219,7 +228,7 @@ def _test_four_supply_43000_atomic_fulfillment() -> None:
             runtime,
             "non-target-waiting",
             3,
-            [(target_nm, 10)],
+            [(activation_nm, 10)],
             revision="1",
         )
         waiting = block.record_wb_supply_debits(
@@ -230,23 +239,24 @@ def _test_four_supply_43000_atomic_fulfillment() -> None:
             for supply_id in targets
             for item in runtime.list_ff_stock_reservations(supply_id=supply_id)
         )
-        _assert(target_reserved == 43000.0, waiting)
+        _assert(target_reserved == 0.0, waiting)
         _assert(
-            _balance(runtime, target_nm) == 74500.0,
-            "waiting-for-cost reservations changed physical FF",
+            _balance(runtime, target_nm) == 31500.0,
+            "four cost-pending supplies must debit exactly 43,000 physical units",
         )
+        _assert(waiting["created_count"] == 4, waiting)
         for supply_id in targets:
             _seed_valid_cost(runtime, supply_id, target_nm)
         fulfilled = block.record_wb_supply_debits(
             runtime.list_wb_supplies_cache_records()
         )
-        _assert(fulfilled["created_count"] == 4, fulfilled)
+        _assert(fulfilled["created_count"] == 0, fulfilled)
         _assert(
-            len(set(fulfilled["created_operation_ids"])) == 4
+            len(set(waiting["created_operation_ids"])) == 4
             and all(
                 str(operation_id).startswith("ffso_")
                 and ":" not in str(operation_id)
-                for operation_id in fulfilled["created_operation_ids"]
+                for operation_id in waiting["created_operation_ids"]
             ),
             "physical debit identities must be deterministic source-derived IDs",
         )

@@ -64,9 +64,13 @@ def main() -> None:
         uncertified_breakdown,
     )
     order_without_gate = project_supplier_order_expense_allocation(uncertified_breakdown)
-    if full_document["status"] != "all" or order_without_gate["status"] != "partial":
+    if (
+        full_document["status"] != "all"
+        or order_without_gate["status"] != "all"
+        or not order_without_gate["diagnostics"]["independent_of_cost_freshness"]
+    ):
         raise AssertionError(
-            f"document may be fully allocated while order stays non-green before certification: {full_document} {order_without_gate}"
+            f"allocation arithmetic must remain fully allocated before cost certification: {full_document} {order_without_gate}"
         )
 
     certified_breakdown = _breakdown(
@@ -74,7 +78,7 @@ def main() -> None:
         certified=True,
     )
     certified_order = project_supplier_order_expense_allocation(certified_breakdown)
-    if certified_order["status"] != "all" or not certified_order["diagnostics"]["fingerprints_match"]:
+    if certified_order["status"] != "all":
         raise AssertionError(f"certified all projection mismatch: {certified_order}")
 
     fingerprint_drift = _breakdown(
@@ -83,8 +87,10 @@ def main() -> None:
     )
     fingerprint_drift["certification"]["certified_calculation_fingerprint"] = "sha256:stale"
     drift_projection = project_supplier_order_expense_allocation(fingerprint_drift)
-    if drift_projection["status"] != "partial" or drift_projection["diagnostics"]["fingerprints_match"]:
-        raise AssertionError(f"fingerprint drift must remove green order status: {drift_projection}")
+    if drift_projection["status"] != "all":
+        raise AssertionError(
+            f"fingerprint drift belongs to cost freshness, not allocation: {drift_projection}"
+        )
     print("supplier_expense_allocation_smoke: OK")
 
 

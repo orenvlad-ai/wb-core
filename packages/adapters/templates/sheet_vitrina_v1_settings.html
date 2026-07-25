@@ -259,6 +259,7 @@
                 <th class="col-name" data-column="nomenclature_name">Номенклатура</th>
                 <th class="col-type" data-column="group">Группа</th>
                 <th class="col-price" data-column="purchase_price_yuan">Цена закупки, ¥</th>
+                <th class="col-price" data-column="factory_box_size">Заводской короб, шт.</th>
                 <th class="col-updated" data-column="sync_status">Обновлено / sync status</th>
                 <th class="col-actions" data-column="actions">Действия</th>
                 <th class="col-match" data-column="match_key">Match key</th>
@@ -272,7 +273,7 @@
               </tr>
             </thead>
             <tbody id="nomenclatureRows">
-              <tr><td colspan="16">Справочник пуст.</td></tr>
+              <tr><td colspan="17">Справочник пуст.</td></tr>
             </tbody>
           </table>
         </div>
@@ -642,6 +643,7 @@
         {key: "nomenclature_name", label: "Номенклатура", defaultVisible: true},
         {key: "group", label: "Группа", defaultVisible: true},
         {key: "purchase_price_yuan", label: "Цена закупки, ¥", defaultVisible: true},
+        {key: "factory_box_size", label: "Заводской короб, шт.", defaultVisible: true},
         {key: "sync_status", label: "Обновлено / sync status", defaultVisible: true},
         {key: "actions", label: "Действия", defaultVisible: true},
         {key: "match_key", label: "Match key", defaultVisible: false},
@@ -910,6 +912,7 @@
           '<td data-column="nomenclature_name"><input class="wide" data-field="nomenclature_name" value="' + escapeHtml(item.nomenclature_name || "") + '"></td>',
           '<td data-column="group"><select class="type-select" data-field="product_type">' + productTypeOptions(item.product_type || defaultSkuGroupKey()) + '</select></td>',
           '<td data-column="purchase_price_yuan"><input class="price-input" data-field="purchase_price_yuan" inputmode="decimal" value="' + escapeHtml(item.purchase_price_yuan ?? "") + '"></td>',
+          '<td data-column="factory_box_size"><input class="price-input" data-field="factory_box_size" inputmode="numeric" value="' + escapeHtml(item.factory_box_size ?? "") + '"></td>',
           '<td data-column="sync_status">' + renderSyncStatus(item) + '</td>',
           '<td data-column="actions"><div class="actions-cell"><button class="icon-button save" type="button" data-save-item title="Сохранить" aria-label="Сохранить">✓</button><button class="icon-button" type="button" data-sync-barcode title="Обновить ШК по строке" aria-label="Обновить ШК по строке">↻</button>' + hiddenAction + '</div></td>',
           '<td data-column="match_key"><input class="wide" data-field="match_key" value="' + escapeHtml(item.match_key || "") + '"></td>',
@@ -1031,6 +1034,9 @@
         if (payload.purchase_price_yuan === "") {
           payload.purchase_price_yuan = null;
         }
+        if (payload.factory_box_size === "") {
+          payload.factory_box_size = null;
+        }
         return payload;
       }
 
@@ -1044,6 +1050,12 @@
           const numberValue = Number(String(payload.purchase_price_yuan).replace(",", "."));
           if (!Number.isFinite(numberValue) || numberValue < 0) {
             return "Цена закупки, ¥ должна быть числом >= 0.";
+          }
+        }
+        if (payload.factory_box_size !== null) {
+          const boxSize = Number(payload.factory_box_size);
+          if (!Number.isInteger(boxSize) || boxSize <= 0) {
+            return "Размер заводского короба должен быть целым числом > 0.";
           }
         }
         return "";
@@ -2735,6 +2747,7 @@
           product_type: defaultSkuGroupKey(),
           match_key: "",
           purchase_price_yuan: null,
+          factory_box_size: null,
           compatible_models_text: "",
           compatible_model_keys: [],
           updated_at: "-"

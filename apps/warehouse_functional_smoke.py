@@ -88,6 +88,7 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     _warehouse_input_manifest_digest,
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
+    rollback_target_scoped_functional_economics,
 )
 from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
 from apps.warehouse_functional_runner import _verify_cutover_external_recheck  # noqa: E402
@@ -4059,8 +4060,33 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         dry_run,
         confirm_fingerprint=dry_run["plan_fingerprint"],
         backup_dir=root / "economics-backups",
+        target_scoped_undo=True,
     )
     _assert(applied["database_written"] is True, "functional economics backfill applies atomically")
+    _assert(
+        applied["backup"]["full_database_copy"] is False
+        and applied["backup"]["copy_bytes"] == 0,
+        "targeted economics publication records exact before-images without a database copy",
+    )
+    rolled_back = rollback_target_scoped_functional_economics(
+        runtime,
+        manifest_digest=applied["rollback_manifest_digest"],
+    )
+    _assert(
+        rolled_back["rolled_back"] is True,
+        "targeted economics before-images restore exactly",
+    )
+    restored_plan = build_functional_economics_backfill_plan(runtime)
+    _assert(
+        restored_plan["plan_fingerprint"] == dry_run["plan_fingerprint"],
+        "targeted economics rollback restores the reviewed source revision",
+    )
+    applied = apply_functional_economics_backfill_plan(
+        runtime,
+        restored_plan,
+        confirm_fingerprint=restored_plan["plan_fingerprint"],
+        backup_dir=root / "economics-backups",
+    )
     repeated = build_functional_economics_backfill_plan(runtime)
     _assert(repeated["changed_snapshot_count"] == 0, "functional economics backfill is idempotent")
     with sqlite3.connect(runtime.db_path) as conn:

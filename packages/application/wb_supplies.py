@@ -621,10 +621,10 @@ class WbSuppliesBlock:
     def reconcile_functional_ff_state(self) -> dict[str, Any]:
         """Reconcile reservations or atomic physical debits from cached official supplies.
 
-        The caller must materialize current downstream cost layers first.  A
-        reservation-only supply is safe and does not require a transit cost;
-        an actual physical debit remains fail-closed until every SKU has a
-        validated downstream state.
+        Downstream cost layers are independent enrichment.  A physically
+        proven supply is debited even while transit/services are pending;
+        reservations remain reserved for physical shortage or identity
+        ambiguity.
         """
         checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
             reason="warehouse_functional_bounded_sync"
@@ -3301,7 +3301,7 @@ def _is_canonical_seller_portal_transit_enrichment(
         enrichment
         and str(enrichment.get("status") or "") == "success"
         and amount is not None
-        and amount > 0
+        and amount >= 0
         and str(enrichment.get("currency") or "").upper() == "RUB"
         and bool(enrichment.get("is_transit"))
         and str(enrichment.get("source") or "")
