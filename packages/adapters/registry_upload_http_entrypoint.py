@@ -325,6 +325,9 @@ DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-suppl
 DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH = (
     "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options"
 )
+DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH = (
+    "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings"
+)
 DEFAULT_OUR_WB_COST_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/wb-cost/recalculate"
 DEFAULT_OUR_WB_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/wb-cost/status"
 DEFAULT_OWN_PRODUCT_CAPITAL_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/product-capital/recalculate"
@@ -1147,6 +1150,27 @@ def _build_handler(
                     )
                     return
 
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    body = _load_request_payload(self)
+                    result = entrypoint.handle_wb_warehouse_exclusion_settings_save_request(
+                        body,
+                        user_key=_current_web_user_config_key(self),
+                    )
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        response_payload,
+                    )
+                    return
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
@@ -2258,7 +2282,10 @@ def _build_handler(
             if parsed.path == DEFAULT_FACTORY_ORDER_CALCULATE_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_factory_order_calculate_request(payload)
+                    result = entrypoint.handle_factory_order_calculate_request(
+                        payload,
+                        user_key=_current_web_user_config_key(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -2279,7 +2306,10 @@ def _build_handler(
             if parsed.path == DEFAULT_WB_REGIONAL_CALCULATE_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_wb_regional_calculate_request(payload)
+                    result = entrypoint.handle_wb_regional_calculate_request(
+                        payload,
+                        user_key=_current_web_user_config_key(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -2300,7 +2330,10 @@ def _build_handler(
             if parsed.path == DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_wb_regional_planning_options_request(payload)
+                    result = entrypoint.handle_wb_regional_planning_options_request(
+                        payload,
+                        user_key=_current_web_user_config_key(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -3854,7 +3887,9 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_wb_warehouse_exclusion_options_request()
+                    payload = entrypoint.handle_wb_warehouse_exclusion_options_request(
+                        user_key=_current_web_user_config_key(self)
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -3869,6 +3904,15 @@ def _build_handler(
                         {"error": f"WB warehouse exclusion options failed: {exc}"},
                     )
                     return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                payload = entrypoint.handle_wb_warehouse_exclusion_settings_request(
+                    user_key=_current_web_user_config_key(self)
+                )
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
@@ -7957,6 +8001,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "wb_warehouse_exclusion_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
+        "wb_warehouse_exclusion_settings_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
         "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
         "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
         "ff_stock_status_path": DEFAULT_FF_STOCKS_PATH,

@@ -198,7 +198,18 @@ def main() -> None:
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({
                     "settings": settings,
                     "rows": _rows(),
-                    "meta": {"writes_enabled": True},
+                    "meta": {
+                        "writes_enabled": True,
+                        "metric_policy": {
+                            "business_timezone": "Asia/Yekaterinburg",
+                            "cumulative_exact_date": "2026-07-24",
+                            "cumulative_no_fallback": True,
+                        },
+                        "warehouse_exclusion": {
+                            "excluded_wb_warehouse_ids": [101, 102],
+                            "names": ["Альфа", "Бета"],
+                        },
+                    },
                 }))
                 return
             route.fulfill(status=404, content_type="application/json", body='{"error":"not found"}')
@@ -219,6 +230,17 @@ def main() -> None:
         nearest_text = page.locator('[data-sku-cell="nearest_inbound"]').first.inner_text().replace("\xa0", " ")
         if "INV-071" not in nearest_text or "2 500 шт." not in nearest_text:
             raise AssertionError("nearest supplier invoice/date/SKU quantity must render compactly")
+        product_cell = page.locator('[data-sku-management-body] tr').first.locator('[data-sku-cell="product"]')
+        if "HIGH risk product" not in product_cell.inner_text() or "nmID 101" not in product_cell.inner_text() or "SKU-HIGH-INTERNAL" in product_cell.inner_text():
+            raise AssertionError("product cell must show title first, secondary nmID, and no internal SKU")
+        if page.locator('[data-sku-sort="product"]').inner_text().strip() != "Название / nmID":
+            raise AssertionError("compact product header is required")
+        if "В расчёте не участвуют склады: Альфа, Бета" not in page.locator("[data-sku-warehouse-exclusion-summary]").inner_text():
+            raise AssertionError("SKU surface must explain the canonical warehouse exclusions")
+        if "за 24.07" not in page.locator('[data-sku-sort="profit_rub"]').inner_text() or "за 24.07" not in page.locator('[data-sku-sort="ads_spend_rub"]').inner_text():
+            raise AssertionError("cumulative metric headers must expose exact D-2")
+        if "обновлено 25.07" not in page.locator('[data-sku-cell="seller_price"]').first.inner_text():
+            raise AssertionError("snapshot cells must expose last successful update")
 
         modal_styles = page.evaluate(
             """() => {
@@ -243,7 +265,7 @@ def main() -> None:
               };
             }"""
         )
-        if len(modal_styles["cards"]) != 3 or any(item != {"background": "rgb(23, 25, 31)", "opacity": "1"} for item in modal_styles["cards"]):
+        if len(modal_styles["cards"]) < 3 or any(item != {"background": "rgb(23, 25, 31)", "opacity": "1"} for item in modal_styles["cards"]):
             raise AssertionError(f"all operator modal cards must be fully opaque: {modal_styles}")
         if "0.76" not in modal_styles["backdrop"] or modal_styles["modalZ"] <= modal_styles["headerZ"]:
             raise AssertionError(f"modal backdrop/z-index contract mismatch: {modal_styles}")
@@ -251,6 +273,21 @@ def main() -> None:
             raise AssertionError(f"structured opaque sticky header is missing: {modal_styles}")
         if modal_styles["shellBorder"] != "solid" or modal_styles["rowSeparator"] != "solid" or not modal_styles["horizontalOverflow"]:
             raise AssertionError(f"table grid/scroll structure mismatch: {modal_styles}")
+        sticky = page.evaluate(
+            """() => {
+              const shell=document.querySelector('.sku-management-table-shell');
+              const header=document.querySelector('[data-sku-column="product"]');
+              const cell=document.querySelector('[data-sku-cell="product"]');
+              const before={headerLeft:header.getBoundingClientRect().left,cellLeft:cell.getBoundingClientRect().left};
+              shell.scrollLeft=640;
+              const after={headerLeft:header.getBoundingClientRect().left,cellLeft:cell.getBoundingClientRect().left};
+              const style=getComputedStyle(cell);
+              const point=document.elementFromPoint(cell.getBoundingClientRect().left+12,cell.getBoundingClientRect().top+12);
+              return {before,after,position:style.position,z:Number(style.zIndex),background:style.backgroundColor,topCell:point&&point.closest('[data-sku-cell]')&&point.closest('[data-sku-cell]').dataset.skuCell};
+            }"""
+        )
+        if sticky["before"] != sticky["after"] or sticky["position"] != "sticky" or sticky["z"] < 3 or sticky["background"] != "rgb(23, 27, 34)" or sticky["topCell"] != "product":
+            raise AssertionError(f"product column must stay opaque and above scrolled cells: {sticky}")
         page.locator("[data-sku-management-body] tr").first.hover()
         hover_background = page.locator("[data-sku-management-body] tr").first.locator("td").first.evaluate("node => getComputedStyle(node).backgroundColor")
         if hover_background != "rgb(29, 33, 41)":
@@ -274,6 +311,8 @@ def main() -> None:
         manager.locator("summary").click()
         if not manager.locator('[data-sku-column-visible="product"]').is_disabled():
             raise AssertionError("mandatory product column must not be accidentally hidden")
+        if not manager.locator('[data-sku-column-drag-handle="product"]').is_disabled() or manager.locator("[data-sku-column-row]").first.get_attribute("data-sku-column-row") != "product":
+            raise AssertionError("mandatory product column must not move away from the first position")
         if manager.locator('[data-sku-column-visible="first_problem_district"]').count():
             raise AssertionError("retired problem-district preference must be migrated out of the selector")
         manager.locator('[data-sku-column-visible="buyer_price"]').uncheck()
@@ -284,6 +323,8 @@ def main() -> None:
         reordered_ids = manager.locator("[data-sku-column-row]").evaluate_all("nodes => nodes.map(node => node.dataset.skuColumnRow)")
         if reordered_ids == original_ids:
             raise AssertionError("drag-and-drop must immediately reorder even a hidden column")
+        if reordered_ids[0] != "product":
+            raise AssertionError("reordering other columns must preserve product first")
         page.wait_for_timeout(700)
         if page.locator('[data-sku-sort="buyer_price"]').count() != 0:
             raise AssertionError("column selector must hide buyer price")
@@ -584,11 +625,11 @@ def _settings() -> dict[str, object]:
 
 def _rows() -> list[dict[str, object]]:
     options = [{"advert_id": 77, "campaign_name": "Search", "placement": "search", "current_bid_rub": 15}, {"advert_id": 78, "campaign_name": "Recommendations", "placement": "recommendations", "current_bid_rub": 17}]
-    common = {"quality": "complete", "quality_warnings": [], "buyer_price_source": "public_wb_card", "buyer_price_quality": "observed", "buyer_price_freshness": "2026-07-13", "spp_proxy": 0.136, "campaign_count": 2, "placement_count": 2, "current_bid": None, "ad_options": options, "ads_drr": 0.1, "ads_drr_attributed": 0.2, "funnel": {"view_count": 100, "openCount": 50, "cartCount": 20, "addToCartConversion": 0.4, "cartToOrderConversion": 0.5}, "orders": 10, "sales_rub": 9000, "profit_rub": 2000, "margin_pct": 0.22, "last_bid_change_at": "2026-07-01T10:00:00Z"}
+    common = {"quality": "complete", "quality_warnings": [], "buyer_price_source": "public_wb_card", "buyer_price_quality": "observed", "buyer_price_freshness": "2026-07-25", "buyer_price_updated_at": "2026-07-25T08:15:00Z", "seller_price_updated_at": "2026-07-25T08:00:00Z", "spp_proxy": 0.136, "spp_proxy_updated_at": "2026-07-25T08:15:00Z", "campaign_count": 2, "placement_count": 2, "campaigns_updated_at": "2026-07-25T08:20:00Z", "current_bid": None, "current_bid_updated_at": "2026-07-25T08:20:00Z", "ad_options": options, "ads_drr": 0.1, "ads_drr_attributed": 0.2, "ads_spend_rub": 1234, "funnel": {"view_count": 100, "openCount": 50, "cartCount": 20, "addToCartConversion": 0.4, "cartToOrderConversion": 0.5}, "orders": 10, "sales_rub": 9000, "profit_rub": 2000, "margin_pct": 0.22, "last_bid_change_at": "2026-07-01T10:00:00Z"}
     return [
-        {**common, "nm_id": 101, "sku": "HIGH", "name": "High risk", "risk": "high", "risk_rank": 2, "deficit_date": "2026-07-15", "coverage_pct": 20, "deficit_units": 80, "nearest_supplier_inbound": {"shipment_id": "shipment-071", "invoice_no": "INV-071", "arrival_date": "2026-08-18", "quantity": 2500, "date_source": "actual_shipment_date"}, "first_problem_district": "central", "reason": "near deficit", "seller_price": 950, "buyer_price": 777, "promo_label": "1 / 2", "promo_count": 1, "promo_participation": 1, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-13T10:00:00Z"},
-        {**common, "nm_id": 102, "sku": "LOW", "name": "Low risk", "risk": "low", "risk_rank": 0, "deficit_date": "2026-09-01", "coverage_pct": 140, "deficit_units": 0, "nearest_supplier_inbound": {"shipment_id": "shipment-020", "invoice_no": "INV-020", "arrival_date": "2026-07-29", "quantity": 120, "date_source": "planned_shipment_date"}, "first_problem_district": None, "reason": "no deficit", "seller_price": 700, "buyer_price": 650, "promo_label": "0 / 2", "promo_count": 0, "promo_participation": 0, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-01T10:00:00Z"},
-        {**common, "nm_id": 103, "sku": "UNKNOWN", "name": "Partial evidence", "risk": "unknown", "risk_rank": -1, "deficit_date": None, "coverage_pct": None, "deficit_units": None, "nearest_supplier_inbound": None, "first_problem_district": "unknown", "reason": "regional unknown", "quality": "partial", "quality_warnings": ["regional evidence missing"], "seller_price": 800, "buyer_price": None, "buyer_price_quality": "missing", "buyer_price_freshness": "", "promo_label": "н/д", "promo_count": None, "promo_participation": None, "promo_freshness": "", "last_price_change_at": ""},
+        {**common, "nm_id": 101, "sku": "SKU-HIGH-INTERNAL", "name": "HIGH risk product", "risk": "high", "risk_rank": 2, "deficit_date": "2026-07-15", "coverage_pct": 20, "deficit_units": 80, "nearest_supplier_inbound": {"shipment_id": "shipment-071", "invoice_no": "INV-071", "arrival_date": "2026-08-18", "quantity": 2500, "date_source": "actual_shipment_date"}, "first_problem_district": "central", "reason": "near deficit", "seller_price": 950, "buyer_price": 777, "promo_label": "1 / 2", "promo_count": 1, "promo_participation": 1, "promo_freshness": "2026-07-25T08:30:00Z", "last_price_change_at": "2026-07-13T10:00:00Z"},
+        {**common, "nm_id": 102, "sku": "SKU-LOW-INTERNAL", "name": "LOW risk product", "risk": "low", "risk_rank": 0, "deficit_date": "2026-09-01", "coverage_pct": 140, "deficit_units": 0, "nearest_supplier_inbound": {"shipment_id": "shipment-020", "invoice_no": "INV-020", "arrival_date": "2026-07-29", "quantity": 120, "date_source": "planned_shipment_date"}, "first_problem_district": None, "reason": "no deficit", "seller_price": 700, "buyer_price": 650, "promo_label": "0 / 2", "promo_count": 0, "promo_participation": 0, "promo_freshness": "2026-07-25T08:30:00Z", "last_price_change_at": "2026-07-01T10:00:00Z"},
+        {**common, "nm_id": 103, "sku": "SKU-UNKNOWN-INTERNAL", "name": "UNKNOWN evidence product", "risk": "unknown", "risk_rank": -1, "deficit_date": None, "coverage_pct": None, "deficit_units": None, "nearest_supplier_inbound": None, "first_problem_district": "unknown", "reason": "regional unknown", "quality": "partial", "quality_warnings": ["regional evidence missing"], "seller_price": 800, "buyer_price": None, "buyer_price_quality": "missing", "buyer_price_freshness": "", "buyer_price_updated_at": "", "promo_label": "н/д", "promo_count": None, "promo_participation": None, "promo_freshness": "", "last_price_change_at": ""},
     ]
 
 

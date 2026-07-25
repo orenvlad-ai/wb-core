@@ -298,6 +298,9 @@ def build_wb_warehouse_exclusion(
     selected = set(excluded_warehouse_ids)
     actual_by_nm = {int(item.nm_id): max(float(item.stock_total), 0.0) for item in items}
     excluded_by_nm: dict[int, float] = defaultdict(float)
+    excluded_by_nm_and_field: dict[int, dict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
     options_by_id: dict[int, dict[str, Any]] = {}
     selected_seen: set[int] = set()
     for row in warehouse_rows:
@@ -337,11 +340,20 @@ def build_wb_warehouse_exclusion(
         if int(warehouse_id) in selected:
             selected_seen.add(int(warehouse_id))
             excluded_by_nm[int(row.nm_id)] += quantity
+            region_field = REGION_TO_FIELD.get(
+                str(getattr(row, "region_name", "") or "").strip()
+            )
+            if region_field:
+                excluded_by_nm_and_field[int(row.nm_id)][region_field] += quantity
 
     options = []
     for warehouse_id, option in sorted(
         options_by_id.items(),
-        key=lambda item: (str(item[1]["warehouse_name"]).casefold(), item[0]),
+        key=lambda item: (
+            -float(item[1]["total_contour"]),
+            str(item[1]["warehouse_name"]).casefold(),
+            item[0],
+        ),
     ):
         if float(option["total_contour"]) <= 0 and warehouse_id not in selected:
             continue
@@ -383,10 +395,11 @@ def build_wb_warehouse_exclusion(
         )
 
     by_nm_id: dict[str, dict[str, Any]] = {}
+    item_by_nm = {int(item.nm_id): item for item in items}
     for nm_id, actual in sorted(actual_by_nm.items()):
         raw_excluded = max(float(excluded_by_nm.get(nm_id, 0.0)), 0.0)
         excluded = min(actual, raw_excluded)
-        by_nm_id[str(nm_id)] = {
+        row_contract: dict[str, Any] = {
             "nm_id": nm_id,
             "actual_stock_total_mp": round(actual, 6),
             "excluded_stock_total_mp": round(excluded, 6),
@@ -397,6 +410,19 @@ def build_wb_warehouse_exclusion(
                 6,
             ),
         }
+        stock_item = item_by_nm[nm_id]
+        for region_field in REGION_TO_FIELD.values():
+            actual_region = max(float(getattr(stock_item, region_field, 0.0)), 0.0)
+            raw_excluded_region = max(
+                float(excluded_by_nm_and_field[nm_id].get(region_field, 0.0)),
+                0.0,
+            )
+            excluded_region = min(actual_region, raw_excluded_region)
+            effective_region = max(actual_region - excluded_region, 0.0)
+            row_contract[f"actual_{region_field}"] = round(actual_region, 6)
+            row_contract[f"excluded_{region_field}"] = round(excluded_region, 6)
+            row_contract[f"effective_{region_field}"] = round(effective_region, 6)
+        by_nm_id[str(nm_id)] = row_contract
     actual_total = sum(float(row["actual_stock_total_mp"]) for row in by_nm_id.values())
     excluded_total = sum(float(row["excluded_stock_total_mp"]) for row in by_nm_id.values())
     effective_total = sum(float(row["effective_stock_total_mp"]) for row in by_nm_id.values())

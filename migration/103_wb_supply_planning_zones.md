@@ -134,8 +134,9 @@ confidence достоверных наблюдений; отсутствие н�
 Historical boolean `exclude_elektrostal_stock=true` читается только как
 compatibility evidence для `warehouseID=120762`. Current payload использует
 общий multi-select `excluded_wb_warehouse_ids` с stable numeric identity и
-применяет его одинаково в factory-order, WB regional calculations и read-only
-`Подобрать склады WB`: backend исключает эти IDs до ranking,
+хранит его в одном server-owned user config `wb_warehouse_exclusions`.
+Factory-order, WB regional calculations, read-only `Подобрать склады WB` и
+SKU-management forecast читают тот же record: backend исключает эти IDs до ranking,
 warehouse-specific probes и operator handoff. Если после исключений не осталось
 допустимых вариантов, API возвращает controlled
 `no_eligible_storage_warehouse_after_exclusions`, а не исключённый склад.
@@ -144,10 +145,14 @@ Selector
 official snapshot, но исключает из формул только physical stock, уже входивший
 в соответствующую действующую формулу. Selected ID сохраняется, если склад
 стал нулевым или временно исчез; удалить его может только пользователь.
+Selector сортирует присутствующие склады по `total_contour desc`, затем
+русскому названию и ID, а missing-selected выводит внизу.
 Result pins IDs, snapshot date/fingerprint and actual/excluded/effective
 reconciliation by `warehouseID + nmID`. WB regional exclusion happens before
 planning-zone aggregation and never removes demand history or changes the
-destination registry.
+destination registry. SKU-management additionally subtracts warehouse quantity
+from both total WB opening and mapped federal-district opening; incomplete
+warehouse evidence with a non-empty list fails closed instead of yielding zeros.
 
 `warehouseID=0` отображается как `Остальные — служебная группа WB`: это
 агрегированные остатки без привязки WB к конкретному складу. Группа может

@@ -96,6 +96,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
+    DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
     DEFAULT_WAREHOUSES_PATH,
 )
 from packages.application.warehouse_functional_maintenance import (
@@ -764,6 +765,15 @@ def collect_public_surface(
                 name="wb_warehouse_exclusion_options",
                 method="GET",
                 url=f"{base_url}{DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH}",
+                timeout_seconds=timeout_seconds,
+                auth_cookie=auth_cookie,
+            )
+        )
+        results.append(
+            _collect_http_probe(
+                name="wb_warehouse_exclusion_settings",
+                method="GET",
+                url=f"{base_url}{DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH}",
                 timeout_seconds=timeout_seconds,
                 auth_cookie=auth_cookie,
             )
@@ -5465,6 +5475,18 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "wb_warehouse_exclusion_settings":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "revision",
+                "excluded_wb_warehouse_ids",
+                "canonical_store",
+            ],
+        )
+        return evaluation
+
     if route == "auto_updates_status":
         evaluation["ok"], evaluation["detail"] = _validate_json_result(
             status,
@@ -6038,6 +6060,7 @@ results = [
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_warehouse_exclusion_options", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH!r}),
+    _collect("wb_warehouse_exclusion_settings", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH!r}),
     _collect("auto_updates_status", "GET", PAYLOAD["base_url"] + {DEFAULT_AUTO_UPDATES_PATH!r}),
     _collect("wb_supplies_list", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_SUPPLIES_PATH!r}),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),

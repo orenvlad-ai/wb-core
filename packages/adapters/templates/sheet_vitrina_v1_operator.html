@@ -5788,6 +5788,8 @@
       let selectedWbSupplyIds = normalizeWbSupplyOverlayIds(persistedOperatorUiState.selected_wb_supply_ids);
       let wbWarehouseExclusionLoading = false;
       let wbWarehouseExclusionPayload = null;
+      let wbWarehouseExclusionRevision = 0;
+      let wbWarehouseExclusionSettingsLoaded = false;
       let excludedWbWarehouseIds = normalizeWbWarehouseIds(
         persistedOperatorUiState.excluded_wb_warehouse_ids
       );
@@ -5877,7 +5879,8 @@
       }
 
       function normalizeWbWarehouseIds(value) {
-        const rawValues = Array.isArray(value) ? value : String(value || "").split(",");
+        const rawText = String(value ?? "").trim();
+        const rawValues = Array.isArray(value) ? value : (rawText ? rawText.split(",") : []);
         const result = [];
         rawValues.forEach((item) => {
           const value = Number(String(item ?? "").trim());
@@ -5937,6 +5940,74 @@
         writePersistedOperatorUiState({
           excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
         });
+        if (wbWarehouseExclusionSettingsLoaded) {
+          void saveWbWarehouseExclusionSettings().catch((error) => {
+            setWbWarehouseExclusionMessage(
+              "Не удалось сохранить единый список исключений: " +
+                (error instanceof Error ? error.message : String(error)),
+              "error"
+            );
+          });
+        }
+      }
+
+      async function loadWbWarehouseExclusionSettings() {
+        if (!config.wb_warehouse_exclusion_settings_path) {
+          return;
+        }
+        const legacyIds = excludedWbWarehouseIds.slice();
+        const response = await fetch(config.wb_warehouse_exclusion_settings_path, {
+          method: "GET",
+          headers: {"Accept": "application/json"},
+          cache: "no-store"
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+          throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+        }
+        wbWarehouseExclusionRevision = Number(payload.revision || 0);
+        if (payload.exists) {
+          excludedWbWarehouseIds = normalizeWbWarehouseIds(
+            payload.excluded_wb_warehouse_ids
+          );
+          writePersistedOperatorUiState({
+            excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
+          });
+          wbWarehouseExclusionSettingsLoaded = true;
+          return;
+        }
+        if (legacyIds.length) {
+          excludedWbWarehouseIds = legacyIds;
+          await saveWbWarehouseExclusionSettings();
+          return;
+        }
+        wbWarehouseExclusionSettingsLoaded = true;
+      }
+
+      async function saveWbWarehouseExclusionSettings() {
+        if (!config.wb_warehouse_exclusion_settings_path) {
+          return;
+        }
+        const response = await fetch(config.wb_warehouse_exclusion_settings_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({
+            base_revision: wbWarehouseExclusionRevision,
+            excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
+          })
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+          if (response.status === 409) {
+            await loadWbWarehouseExclusionSettings();
+          }
+          throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+        }
+        wbWarehouseExclusionRevision = Number(payload.revision || 0);
+        wbWarehouseExclusionSettingsLoaded = true;
       }
 
       function sortedWbSuppliesStatusIds(values) {
@@ -8811,6 +8882,13 @@
           }
         });
         const options = Array.from(optionsById.values()).sort((left, right) => {
+          if (Boolean(left.temporarily_missing) !== Boolean(right.temporarily_missing)) {
+            return left.temporarily_missing ? 1 : -1;
+          }
+          const byTotal = Number(right.total_contour || 0) - Number(left.total_contour || 0);
+          if (byTotal) {
+            return byTotal;
+          }
           const byName = String(left.warehouse_name || "").localeCompare(
             String(right.warehouse_name || ""),
             "ru"
@@ -14638,7 +14716,15 @@
       loadFactoryStatus();
       loadRegionalStatus();
       loadWbSupplyOverlayOptions({ silent: true });
-      loadWbWarehouseExclusionOptions();
+      void loadWbWarehouseExclusionSettings()
+        .catch((error) => {
+          setWbWarehouseExclusionMessage(
+            "Не удалось прочитать сохранённую настройку: " +
+              (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        })
+        .finally(() => loadWbWarehouseExclusionOptions());
     })();
   </script>
 </body>

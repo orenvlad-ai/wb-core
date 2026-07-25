@@ -17,7 +17,6 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_ads import AdsSafetyConfig, SheetVitrinaV1AdsBlock
 from packages.application.sku_management import (
-    BID_PARAMETER,
     PRICE_PARAMETER,
     ForecastInbound,
     ForecastSettings,
@@ -30,6 +29,7 @@ from packages.application.sku_management import (
 )
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.business_time import current_business_date_iso
+from packages.contracts.stocks_block import StocksWarehouseRow
 
 
 BUNDLE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -128,7 +128,35 @@ class FakeStocksBlock:
             stock_ru_south_caucasus=40.0,
             stock_ru_far_siberia=20.0,
         )
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=[item]))
+        warehouse_rows = [
+            StocksWarehouseRow(
+                nm_id=NM_ID, warehouse_id=101, warehouse_name="Альфа",
+                region_name="Центральный", quantity=20,
+                planning_zone_key="central_north", classification_status="mapped",
+                classification_source="fixture",
+            ),
+            StocksWarehouseRow(
+                nm_id=NM_ID, warehouse_id=102, warehouse_name="Бета",
+                region_name="Северо-Западный", quantity=30,
+                planning_zone_key="northwest", classification_status="mapped",
+                classification_source="fixture",
+            ),
+            StocksWarehouseRow(
+                nm_id=NM_ID, warehouse_id=103, warehouse_name="Гамма",
+                region_name="Приволжский", quantity=40,
+                planning_zone_key="volga", classification_status="mapped",
+                classification_source="fixture",
+            ),
+        ]
+        return SimpleNamespace(result=SimpleNamespace(
+            kind="success",
+            items=[item],
+            warehouse_rows=warehouse_rows,
+            snapshot_date=request.snapshot_date,
+            fetched_at="2026-07-13T08:00:00Z",
+            pagination_complete=True,
+            raw_rows_digest="sha256:sku-management-fixture",
+        ))
 
 
 class FakeSalesHistory:
@@ -141,8 +169,14 @@ class EmptySalesHistory:
         return {NM_ID: []}
 
 
+class IncompleteStocksBlock:
+    def execute(self, request):
+        return SimpleNamespace(result=SimpleNamespace(kind="incomplete", items=[]))
+
+
 def main() -> None:
     _forecast_checks()
+    _metric_date_policy_checks()
     _supplier_inbound_projection_checks()
     _price_configuration_checks()
     _wb_supply_double_count_check()
@@ -169,6 +203,63 @@ def main() -> None:
         if not entrypoint.sku_management_block.prices_block.safety.write_enabled or not entrypoint.sku_management_block.ads_block.safety.write_enabled:
             raise AssertionError("SKU management write flow must not depend on disabled-by-default legacy flags")
     print("sku_management_smoke: OK")
+
+
+def _metric_date_policy_checks() -> None:
+    class MetricRuntime:
+        def load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(self, *, column_date):
+            return SimpleNamespace(
+                date_columns=["2026-07-23", "2026-07-24", "2026-07-25"],
+                sheets=[
+                    SimpleNamespace(
+                        sheet_name="DATA_VITRINA",
+                        rows=[
+                            ["", f"SKU:{NM_ID}|orderSum", 10, 20, 999],
+                            ["", f"SKU:{NM_ID}|proxy_profit_rub", 1, None, 999],
+                        ],
+                    )
+                ],
+            )
+
+        def list_temporal_source_snapshot_dates(self, *, source_key):
+            return ["2026-07-23", "2026-07-24", "2026-07-25"]
+
+        def load_temporal_source_snapshot(self, *, source_key, snapshot_date):
+            if snapshot_date == "2026-07-25":
+                return SimpleNamespace(items=[]), "2026-07-25T08:00:00Z"
+            if source_key == "spp_proxy" and snapshot_date == "2026-07-24":
+                return SimpleNamespace(items=[SimpleNamespace(
+                    nm_id=NM_ID, public_buyer_price=777.0, spp_proxy=0.22
+                )]), "2026-07-24T08:30:00Z"
+            if source_key == "promo_by_price" and snapshot_date == "2026-07-24":
+                return SimpleNamespace(items=[SimpleNamespace(
+                    nm_id=NM_ID, promo_participation=1.0, promo_count_by_price=2.0
+                )]), "2026-07-24T09:00:00Z"
+            if source_key == "ads_compact" and snapshot_date == "2026-07-24":
+                return SimpleNamespace(result=SimpleNamespace(items=[SimpleNamespace(
+                    nm_id=NM_ID, ads_sum=321.0
+                )])), "2026-07-24T09:15:00Z"
+            return SimpleNamespace(items=[]), f"{snapshot_date}T08:00:00Z"
+
+    block = SkuManagementBlock(
+        runtime=MetricRuntime(),
+        runtime_dir=Path("/tmp"),
+        prices_block=object(),
+        ads_block=object(),
+        now_factory=lambda: datetime(2026, 7, 26, 8, 0, tzinfo=timezone.utc),
+    )
+    cumulative = block._commercial_projection([NM_ID], target_date="2026-07-24")[NM_ID]
+    if cumulative.get("orderSum") != 20 or cumulative.get("orderSum__date") != "2026-07-24":
+        raise AssertionError("cumulative metrics must read exact business D-2")
+    if "proxy_profit_rub" in cumulative:
+        raise AssertionError("missing exact D-2 value must not fall back to another day")
+    if cumulative.get("ads_sum") != 321 or cumulative.get("ads_sum__date") != "2026-07-24":
+        raise AssertionError("exact D-2 advertising spend must use ads_compact evidence")
+    snapshots = block._snapshot_projection([NM_ID])[NM_ID]
+    if snapshots.get("buyer_price_rub") != 777 or snapshots.get("buyer_price_rub__date") != "2026-07-24":
+        raise AssertionError("snapshot metrics must use the latest successful non-empty observation")
+    if snapshots.get("promo_participation") != 1 or snapshots.get("promo_participation__date") != "2026-07-24":
+        raise AssertionError("empty refresh attempt must not replace the latest successful promo fact")
 
 
 def _forecast_checks() -> None:
@@ -445,6 +536,8 @@ def _settings_and_table(block) -> None:
         raise AssertionError("retired filters must be removed from persisted active state")
     if saved["table"]["visible_columns"] != ["product", "risk"]:
         raise AssertionError("mandatory product must survive migration while retired columns are removed")
+    if saved["table"]["column_order"][0] != "product":
+        raise AssertionError("mandatory product must remain the first persisted column")
     serialized_table = json.dumps(saved["table"], sort_keys=True)
     if "first_problem_district" in serialized_table:
         raise AssertionError("retired presentation column must be removed from preferences")
@@ -454,6 +547,48 @@ def _settings_and_table(block) -> None:
     row = next(item for item in table["rows"] if item["nm_id"] == NM_ID)
     if row["seller_price"] != 900 or row["campaign_count"] != 1 or not row["ad_options"]:
         raise AssertionError(row)
+    warehouse_settings = block.save_warehouse_exclusion_settings(
+        user_key="operator",
+        payload={"base_revision": 0, "excluded_wb_warehouse_ids": [101, 102]},
+    )
+    if warehouse_settings["excluded_wb_warehouse_ids"] != [101, 102]:
+        raise AssertionError("warehouse exclusions must use one server-owned config")
+    entrypoint = object.__new__(RegistryUploadHttpEntrypoint)
+    entrypoint.sku_management_block = block
+    canonical_payload = entrypoint._with_canonical_warehouse_exclusions(
+        {"excluded_wb_warehouse_ids": [999]},
+        user_key="operator",
+    )
+    if canonical_payload["excluded_wb_warehouse_ids"] != [101, 102]:
+        raise AssertionError("supply calculations must override browser copies with canonical config")
+    evidence = block._collect_forecast_evidence(
+        active=block._active_skus(),
+        settings=ForecastSettings(),
+        excluded_warehouse_ids=(101, 102),
+    )[NM_ID]
+    if evidence["stock_wb"] != 130:
+        raise AssertionError(f"warehouse exclusions must change total SKU stock: {evidence}")
+    if evidence["districts"]["central"]["stock"] != 0 or evidence["districts"]["northwest"]["stock"] != 0:
+        raise AssertionError(f"warehouse exclusions must change regional SKU stock: {evidence}")
+    complete_stocks = block.stocks_block
+    block.stocks_block = IncompleteStocksBlock()
+    incomplete = block._collect_forecast_evidence(
+        active=block._active_skus(),
+        settings=ForecastSettings(),
+        excluded_warehouse_ids=(101,),
+    )[NM_ID]
+    block.stocks_block = complete_stocks
+    if incomplete["stock_wb"] is not None or not any(
+        "incomplete" in warning for warning in incomplete["warnings"]
+    ):
+        raise AssertionError("incomplete warehouse evidence must fail closed")
+    block.save_warehouse_exclusion_settings(
+        user_key="operator",
+        payload={
+            "base_revision": warehouse_settings["revision"],
+            "excluded_wb_warehouse_ids": [],
+        },
+    )
 
 
 def _price_write(block, runtime, prices_source) -> None:
@@ -476,20 +611,20 @@ def _price_write(block, runtime, prices_source) -> None:
         raise AssertionError("unavailable quarantine evidence must fail closed")
     prices_source.quarantine_error = False
 
-    original_commercial = block._commercial_projection
+    original_snapshot_projection = block._snapshot_projection
     original_table = block.prices_block.build_goods_table
     block.prices_block.build_goods_table = lambda params=None: {
         "rows": [{"nmID": NM_ID, "promoLabel": "0 / 5", "promoEligibleCount": 0, "promoCurrentCount": 5, "promoReason": "source=promo_by_price date=2026-07-13"}]
     }
-    block._commercial_projection = lambda nm_ids: {NM_ID: {"promo_participation": 0.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 0.0, "promo_count_by_price__date": "2026-07-13"}}
+    block._snapshot_projection = lambda nm_ids: {NM_ID: {"promo_participation": 0.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 0.0, "promo_count_by_price__date": "2026-07-13"}}
     no_participation = block.preview_price({"nm_id": NM_ID, "target_seller_price": 860}, actor="operator")["preview"]
     if "active_promo_participation" in no_participation["warnings"]:
         raise AssertionError("global current promo count must not be mistaken for this SKU's participation")
-    block._commercial_projection = lambda nm_ids: {NM_ID: {"promo_participation": 1.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 1.0, "promo_count_by_price__date": "2026-07-13"}}
+    block._snapshot_projection = lambda nm_ids: {NM_ID: {"promo_participation": 1.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 1.0, "promo_count_by_price__date": "2026-07-13"}}
     active_participation = block.preview_price({"nm_id": NM_ID, "target_seller_price": 860}, actor="operator")["preview"]
     if "active_promo_participation" not in active_participation["override_required_warnings"]:
         raise AssertionError("canonical per-SKU promo participation must require explicit price override")
-    block._commercial_projection = original_commercial
+    block._snapshot_projection = original_snapshot_projection
     block.prices_block.build_goods_table = original_table
 
     preview = block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")

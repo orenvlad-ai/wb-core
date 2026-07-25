@@ -394,6 +394,9 @@ def main() -> None:
                 "wb_warehouse_exclusion_options_path": (
                     registry_http_adapter.DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH
                 ),
+                "wb_warehouse_exclusion_settings_path": (
+                    registry_http_adapter.DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH
+                ),
                 "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
                 "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
                 "ff_stock_status_path": DEFAULT_FF_STOCKS_PATH,
