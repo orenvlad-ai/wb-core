@@ -386,7 +386,7 @@ def _run_sqlite_contention_ui_flow(
             normalized_base_url
             + "/sheet-vitrina-v1/supplier?shipment_id="
             + quote(target_id, safe="")
-            + "&tab=financial"
+            + "&tab=documents"
         )
         response = page.goto(
             supplier_url,
@@ -398,6 +398,10 @@ def _run_sqlite_contention_ui_flow(
             "supplier document response must be HTTP 200",
         )
         page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
+        page.locator(
+            "#financialDocumentsTabButton:not([hidden])"
+        ).wait_for(timeout=60_000)
+        page.locator("#financialDocumentsTabButton").click()
         page.locator("#financialDocumentsPanel:not([hidden])").wait_for(
             timeout=60_000
         )
