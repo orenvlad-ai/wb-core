@@ -224,9 +224,12 @@ class HttpUiTest(unittest.TestCase):
         self.assertIn("data-autoanswers-content-progress-bars", html)
         self.assertIn("Отзывы с содержанием", html)
         self.assertIn(
-            "Пустые отзывы начнут обрабатываться после завершения автоматически допустимых отзывов с содержанием.",
+            "Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые.",
             html,
         )
+        self.assertIn("Начальный состав", html)
+        self.assertIn("Добавлено после старта", html)
+        self.assertIn('" · приоритет " +', html)
         self.assertIn("data-autoanswers-stop-reason", html)
         self.assertIn("Без ответа Wildberries", html)
         self.assertIn('data-autoanswers-filter="system_answer"', html)

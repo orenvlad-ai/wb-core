@@ -246,7 +246,12 @@ class PublicationTest(unittest.TestCase):
         self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
 
         expected_content = [f"content-{rating}" for rating in range(1, 6)]
+        publication_order: list[str] = []
         for feedback_id in expected_content:
+            self.repo.reconcile_policy_sweep_once(
+                worker_id="reconcile",
+                batch_size=25,
+            )
             claimed = self.repo.claim_processing_job(worker_id="ai")
             self.assertEqual(claimed["feedback_id"], feedback_id)
             self.repo.settle_budget(
@@ -258,9 +263,6 @@ class PublicationTest(unittest.TestCase):
                 result=successful_result(),
                 worker_id="ai",
             )
-
-        publication_order: list[str] = []
-        for feedback_id in expected_content:
             publication = self.repo.claim_publication_job(worker_id="publication")
             self.assertEqual(publication["action"], "write")
             publication_order.append(str(publication["feedback_id"]))

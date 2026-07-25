@@ -84,6 +84,10 @@ def _assert_budget_hold() -> None:
         CREATE TABLE sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(
             processing_key TEXT, upper_bound_usd TEXT, created_at TEXT
         );
+        CREATE TABLE sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+            processing_key TEXT, attempt_number INTEGER, upper_bound_usd TEXT,
+            created_at TEXT
+        );
         CREATE TABLE sheet_vitrina_v1_wb_autoanswers_cost_events(
             processing_key TEXT, actual_cost_usd TEXT, incurred_at TEXT
         );
@@ -98,6 +102,8 @@ def _assert_budget_hold() -> None:
         );
         INSERT INTO sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
         VALUES ('a','0.10','2026-07-24T10:00:00Z'),('b','0.10','2026-07-24T10:01:00Z');
+        INSERT INTO sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+        VALUES ('c',1,'0.10','2026-07-24T10:01:30Z');
         INSERT INTO sheet_vitrina_v1_wb_autoanswers_cost_events
         VALUES ('paid','0.03','2026-07-24T10:02:00Z');
         """
@@ -111,10 +117,17 @@ def _assert_budget_hold() -> None:
     budget = _autoanswers_budget_monitor_state(conn, tables=tables)
     assert budget["budget_state"] == "conservative_unverified"
     assert budget["confirmed_actual_usd"] == 0.03
-    assert budget["uncertainty_hold_usd"] == 0.2
-    assert budget["uncertainty_hold_count"] == 2
+    assert budget["uncertainty_hold_usd"] == 0.3
+    assert budget["uncertainty_hold_count"] == 3
     assert budget["unresolved_uncertainty_count"] == 0
     assert "не подтверждённое списание" in budget["hold_explanation"]
+    legacy_budget = _autoanswers_budget_monitor_state(
+        conn,
+        tables=tables
+        - {"sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts"},
+    )
+    assert legacy_budget["uncertainty_hold_usd"] == 0.2
+    assert legacy_budget["uncertainty_hold_count"] == 2
 
 
 def _assert_ui_copy() -> None:

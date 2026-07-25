@@ -21,6 +21,7 @@ from packages.application.wb_autoanswers_media import (
 )
 from packages.application.wb_autoanswers_node_bridge import (
     NodeAutoanswersBridge,
+    NodeBoundaryError,
     build_frozen_raw_input,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
@@ -151,6 +152,21 @@ class UncertainMedia:
 class ForbiddenBridge:
     def run(self, **kwargs: object) -> dict:
         raise AssertionError("frozen AI must not run while media is uncertain")
+
+
+class OpaqueExitBridge:
+    def run(self, **kwargs: object) -> dict:
+        raise NodeBoundaryError(
+            "fixture opaque child exit",
+            code="node_process_exit_1",
+            retryable=True,
+            diagnostics={
+                "returncode": 1,
+                "stderr_bytes": 12,
+                "stderr_sha256": "a" * 64,
+                "raw_output_persisted": False,
+            },
+        )
 
 
 class MediaWorkerTest(unittest.TestCase):
@@ -439,6 +455,25 @@ process.stdout.write(JSON.stringify({images: content.filter((item) => item.type 
         self.assertIsNone(job["result_json"])
         self.assertTrue(job["media_uncertain"])
         self.assertTrue(job["regeneration_required"])
+
+    def test_opaque_child_exit_is_contained_and_worker_returns_retry_state(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="draft_only", actor_id="admin")
+        self.enqueue("opaque-worker")
+        worker = AutoanswersProcessingWorker(
+            repository=self.repo,
+            bridge=OpaqueExitBridge(),
+            media_processor=NoopMedia(),
+            worker_id="fixture-worker",
+        )
+        result = worker.run_once(execution_mode="live")
+        self.assertEqual(result["state"], "retryable_error")
+        self.assertTrue(result["bounded_retry"])
+        self.assertEqual(result["error_code"], "node_process_exit_1")
+        self.assertEqual(
+            result["uncertainty_accounting"],
+            "conservative_upper_bound",
+        )
+        self.assertEqual(self.repo.budget_status()["uncertainty_hold_count"], 1)
 
     def test_off_and_force_off_block_worker_before_node(self) -> None:
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):

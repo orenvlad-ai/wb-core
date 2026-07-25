@@ -26,6 +26,8 @@ from packages.contracts.wb_autoanswers import (
     AUTOANSWERS_CONTRACT_VERSION,
     AUTOANSWER_MODES,
     AUTO_SAFE_ROUTES,
+    AUTOMATIC_PRIORITY_INDETERMINATE,
+    AUTOMATIC_PRIORITY_RATING_ONLY,
     BACKFILL_FROM_DATE,
     CONTENT_CLASS_CONTENT_BEARING,
     CONTENT_CLASS_INDETERMINATE,
@@ -60,7 +62,7 @@ from packages.contracts.wb_autoanswers import (
 )
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_DAILY_CAP_USD = Decimal("5.00")
 DEFAULT_MONTHLY_CAP_USD = Decimal("50.00")
 DEFAULT_HOURLY_CAP_USD = Decimal("0.50")
@@ -78,7 +80,7 @@ RATING_ONLY_TEMPLATE_POLICY_VERSION = "owner-policy-2026-07-21-v2"
 DEFAULT_LEASE_SECONDS = 300
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v6"
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v7"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -599,7 +601,7 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v6(conn)
+            self._migrate_schema_v7(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
                 (SCHEMA_VERSION, iso_utc(self._now())),
@@ -1270,6 +1272,89 @@ class AutoanswersRepository:
             """
         )
 
+    @staticmethod
+    def _migrate_schema_v7(conn: sqlite3.Connection) -> None:
+        """Add rolling run membership and per-attempt uncertainty evidence."""
+
+        AutoanswersRepository._migrate_schema_v6(conn)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+                admission_id TEXT PRIMARY KEY,
+                sweep_id TEXT NOT NULL
+                    REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+                transition_run_id TEXT NOT NULL,
+                feedback_id TEXT NOT NULL,
+                content_version INTEGER NOT NULL,
+                content_version_hash TEXT NOT NULL,
+                content_classification TEXT NOT NULL,
+                rating INTEGER,
+                source_stream TEXT NOT NULL,
+                source_sync_run_id TEXT,
+                admission_source TEXT NOT NULL,
+                version_created_at TEXT NOT NULL,
+                admitted_at TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                UNIQUE(sweep_id, feedback_id, content_version),
+                FOREIGN KEY(feedback_id, content_version)
+                    REFERENCES sheet_vitrina_v1_wb_feedback_versions(feedback_id, content_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_rolling_admissions_run_priority
+            ON sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+                transition_run_id,
+                content_classification,
+                rating,
+                admitted_at,
+                feedback_id
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_rolling_admissions_feedback
+            ON sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+                feedback_id,
+                content_version,
+                sweep_id
+            );
+
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_rolling_state(
+                sweep_id TEXT PRIMARY KEY
+                    REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+                cursor_created_at TEXT NOT NULL,
+                cursor_feedback_id TEXT NOT NULL,
+                cursor_content_version INTEGER NOT NULL,
+                last_refresh_at TEXT,
+                last_batch_count INTEGER NOT NULL DEFAULT 0,
+                refresh_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+                uncertainty_id TEXT PRIMARY KEY,
+                processing_key TEXT NOT NULL
+                    REFERENCES sheet_vitrina_v1_wb_autoanswer_jobs(processing_key),
+                attempt_number INTEGER NOT NULL,
+                transition_run_id TEXT,
+                upper_bound_usd TEXT NOT NULL,
+                effective_at TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(processing_key, attempt_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_provider_uncertainty_effective
+            ON sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+                effective_at,
+                transition_run_id
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sv1_feedback_versions_admission_cursor
+            ON sheet_vitrina_v1_wb_feedback_versions(
+                created_at,
+                feedback_id,
+                content_version
+            );
+            """
+        )
+
     def settings(self) -> AutoanswersSettings:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton = 1").fetchone()
@@ -1862,6 +1947,278 @@ class AutoanswersRepository:
             ),
         }
 
+    @staticmethod
+    def _active_automatic_sweep(
+        conn: sqlite3.Connection,
+        *,
+        policy_epoch: int,
+    ) -> sqlite3.Row | None:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+            WHERE policy_epoch=? AND target_mode<>?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (int(policy_epoch), MODE_MANUAL),
+        ).fetchone()
+        if row is not None and str(row["state"]) == STATE_TERMINAL_ERROR:
+            return None
+        return row
+
+    def refresh_rolling_admissions(
+        self,
+        *,
+        actor_id: str,
+        batch_size: int = 250,
+    ) -> dict[str, Any] | None:
+        """Append current unanswered content versions to the active automatic run.
+
+        The initial owner-confirmed reconciliation scope remains immutable.
+        This cursor scans only version rows created after the run started and
+        advances across every scanned row, so restart/replay is bounded and
+        idempotent even when rows are answered or superseded before admission.
+        """
+
+        settings = self.settings()
+        if not settings.effective_enabled or settings.mode == MODE_MANUAL:
+            return None
+        limit = min(1000, max(1, int(batch_size)))
+        now = self._now()
+        with self.transaction() as conn:
+            sweep = self._active_automatic_sweep(
+                conn,
+                policy_epoch=settings.policy_epoch,
+            )
+            if sweep is None:
+                return None
+            run_id = str(sweep["transition_run_id"] or sweep["sweep_id"])
+            state = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_autoanswers_rolling_state
+                WHERE sweep_id=?
+                """,
+                (sweep["sweep_id"],),
+            ).fetchone()
+            if state is None:
+                cursor_created_at = str(sweep["created_at"])
+                cursor_feedback_id = ""
+                cursor_content_version = 0
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_wb_autoanswers_rolling_state(
+                        sweep_id,cursor_created_at,cursor_feedback_id,
+                        cursor_content_version,last_refresh_at,last_batch_count,
+                        refresh_count,created_at,updated_at
+                    ) VALUES(?,?,?,?,NULL,0,0,?,?)
+                    """,
+                    (
+                        sweep["sweep_id"],
+                        cursor_created_at,
+                        cursor_feedback_id,
+                        cursor_content_version,
+                        iso_utc(now),
+                        iso_utc(now),
+                    ),
+                )
+            else:
+                cursor_created_at = str(state["cursor_created_at"])
+                cursor_feedback_id = str(state["cursor_feedback_id"])
+                cursor_content_version = int(state["cursor_content_version"])
+            rows = conn.execute(
+                """
+                SELECT
+                    v.feedback_id,
+                    v.content_version,
+                    v.content_version_hash,
+                    v.created_at AS version_created_at,
+                    f.content_version AS current_content_version,
+                    f.content_version_hash AS current_content_hash,
+                    f.content_classification,
+                    f.rating,
+                    f.answer_text,
+                    f.source_stream,
+                    f.last_sync_run_id,
+                    f.created_at_wb,
+                    f.first_seen_at
+                FROM sheet_vitrina_v1_wb_feedback_versions v
+                JOIN sheet_vitrina_v1_wb_feedbacks f
+                  ON f.feedback_id=v.feedback_id
+                WHERE (
+                    v.created_at>? OR
+                    (
+                        v.created_at=? AND (
+                            v.feedback_id>? OR
+                            (v.feedback_id=? AND v.content_version>?)
+                        )
+                    )
+                )
+                ORDER BY v.created_at,v.feedback_id,v.content_version
+                LIMIT ?
+                """,
+                (
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_feedback_id,
+                    cursor_feedback_id,
+                    cursor_content_version,
+                    limit,
+                ),
+            ).fetchall()
+            admitted = 0
+            admitted_by_class: dict[str, int] = {}
+            admitted_by_rating: dict[str, int] = {}
+            scope_from = str(sweep["scope_from"] or BACKFILL_FROM_DATE)
+            scope_to = str(sweep["scope_to"] or "")
+            for row in rows:
+                current_exact = (
+                    int(row["content_version"]) == int(row["current_content_version"])
+                    and str(row["content_version_hash"]) == str(row["current_content_hash"])
+                )
+                review_date = str(row["created_at_wb"] or row["first_seen_at"] or "")[:10]
+                in_date_scope = bool(review_date and review_date >= scope_from)
+                if scope_to:
+                    in_date_scope = in_date_scope and review_date <= scope_to
+                initial_exact = conn.execute(
+                    """
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope
+                    WHERE sweep_id=? AND feedback_id=?
+                      AND content_version_at_preview=?
+                      AND content_version_hash_at_preview=?
+                    """,
+                    (
+                        sweep["sweep_id"],
+                        row["feedback_id"],
+                        row["content_version"],
+                        row["content_version_hash"],
+                    ),
+                ).fetchone()
+                if (
+                    current_exact
+                    and in_date_scope
+                    and not str(row["answer_text"] or "")
+                    and initial_exact is None
+                ):
+                    classification = str(
+                        row["content_classification"]
+                        or CONTENT_CLASS_INDETERMINATE
+                    )
+                    evidence = {
+                        "content_version_hash": str(row["content_version_hash"]),
+                        "content_classification": classification,
+                        "rating": row["rating"],
+                        "source_stream": str(row["source_stream"] or ""),
+                        "source_sync_run_id": row["last_sync_run_id"],
+                        "version_created_at": str(row["version_created_at"]),
+                        "cursor_contract": "feedback_version_created_at_v1",
+                    }
+                    inserted = int(
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+                                admission_id,sweep_id,transition_run_id,feedback_id,
+                                content_version,content_version_hash,content_classification,
+                                rating,source_stream,source_sync_run_id,admission_source,
+                                version_created_at,admitted_at,evidence_json
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                uuid4().hex,
+                                sweep["sweep_id"],
+                                run_id,
+                                row["feedback_id"],
+                                row["content_version"],
+                                row["content_version_hash"],
+                                classification,
+                                row["rating"],
+                                str(row["source_stream"] or "unknown"),
+                                row["last_sync_run_id"],
+                                "rolling_scheduler",
+                                row["version_created_at"],
+                                iso_utc(now),
+                                canonical_json(evidence),
+                            ),
+                        ).rowcount
+                        or 0
+                    )
+                    if inserted:
+                        admitted += 1
+                        admitted_by_class[classification] = (
+                            admitted_by_class.get(classification, 0) + 1
+                        )
+                        rating_key = str(row["rating"] or "unknown")
+                        admitted_by_rating[rating_key] = (
+                            admitted_by_rating.get(rating_key, 0) + 1
+                        )
+                        conn.execute(
+                            """
+                            UPDATE sheet_vitrina_v1_wb_feedbacks
+                            SET auto_eligible_epoch=?
+                            WHERE feedback_id=?
+                            """,
+                            (settings.enable_epoch, row["feedback_id"]),
+                        )
+                        self._audit(
+                            conn,
+                            aggregate_type="rolling_admission",
+                            aggregate_id=f"{run_id}:{row['feedback_id']}:{row['content_version']}",
+                            event_type="feedback_version_admitted",
+                            actor_type="scheduler",
+                            actor_id=_clean_text(actor_id),
+                            details=evidence,
+                            at=now,
+                        )
+            if rows:
+                last = rows[-1]
+                cursor_created_at = str(last["version_created_at"])
+                cursor_feedback_id = str(last["feedback_id"])
+                cursor_content_version = int(last["content_version"])
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_rolling_state
+                SET cursor_created_at=?,cursor_feedback_id=?,cursor_content_version=?,
+                    last_refresh_at=?,last_batch_count=?,refresh_count=refresh_count+1,
+                    updated_at=?
+                WHERE sweep_id=?
+                """,
+                (
+                    cursor_created_at,
+                    cursor_feedback_id,
+                    cursor_content_version,
+                    iso_utc(now),
+                    admitted,
+                    iso_utc(now),
+                    sweep["sweep_id"],
+                ),
+            )
+            if admitted:
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                    SET state='queued',completed_at=NULL,pause_reason=NULL,updated_at=?
+                    WHERE sweep_id=? AND state='succeeded'
+                    """,
+                    (iso_utc(now), sweep["sweep_id"]),
+                )
+            return {
+                "sweep_id": str(sweep["sweep_id"]),
+                "transition_run_id": run_id,
+                "scanned": len(rows),
+                "admitted": admitted,
+                "admitted_by_class": admitted_by_class,
+                "admitted_by_rating": admitted_by_rating,
+                "last_refresh_at": iso_utc(now),
+                "cursor": {
+                    "created_at": cursor_created_at,
+                    "feedback_id": cursor_feedback_id,
+                    "content_version": cursor_content_version,
+                },
+                "has_more": len(rows) == limit,
+            }
+
     def sync_cursor(self, stream_key: str) -> dict[str, Any] | None:
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -2041,10 +2398,19 @@ class AutoanswersRepository:
             progress_policy_epoch = int(sweep["policy_epoch"]) if sweep is not None else settings.policy_epoch
             if scope_exact:
                 scope_clause = (
-                    "EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs "
-                    "WHERE rs.sweep_id=? AND rs.feedback_id=f.feedback_id)"
+                    "(EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs "
+                    "WHERE rs.sweep_id=? AND rs.feedback_id=f.feedback_id "
+                    "AND rs.content_version_at_preview=f.content_version "
+                    "AND rs.content_version_hash_at_preview=f.content_version_hash) "
+                    "OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra "
+                    "WHERE ra.transition_run_id=? AND ra.feedback_id=f.feedback_id "
+                    "AND ra.content_version=f.content_version "
+                    "AND ra.content_version_hash=f.content_version_hash))"
                 )
-                scope_params: list[Any] = [str(sweep["sweep_id"])]
+                scope_params: list[Any] = [
+                    str(sweep["sweep_id"]),
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                ]
             else:
                 scope_clause = "substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?"
                 scope_params = [scope_from]
@@ -2053,14 +2419,30 @@ class AutoanswersRepository:
                     scope_params.append(scope_to)
             if scope_exact:
                 grouped_scope_join = (
-                    "JOIN sheet_vitrina_v1_wb_autoanswers_reconciliation_scope prs "
-                    "ON prs.sweep_id=? AND prs.feedback_id=f.feedback_id"
+                    "JOIN ("
+                    "SELECT rs.feedback_id,"
+                    "rs.content_version_at_preview AS content_version,"
+                    "rs.content_version_hash_at_preview AS content_version_hash,"
+                    "rs.content_classification_at_preview AS content_classification "
+                    "FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs "
+                    "WHERE rs.sweep_id=? "
+                    "UNION "
+                    "SELECT ra.feedback_id,ra.content_version,"
+                    "ra.content_version_hash,ra.content_classification "
+                    "FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra "
+                    "WHERE ra.transition_run_id=?"
+                    ") prs ON prs.feedback_id=f.feedback_id "
+                    "AND prs.content_version=f.content_version "
+                    "AND prs.content_version_hash=f.content_version_hash"
                 )
                 grouped_scope_clause = "1=1"
-                grouped_join_params: list[Any] = [str(sweep["sweep_id"])]
+                grouped_join_params: list[Any] = [
+                    str(sweep["sweep_id"]),
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                ]
                 grouped_where_params: list[Any] = []
-                grouped_classification = "prs.content_classification_at_preview"
-                grouped_job_version = "prs.content_version_at_preview"
+                grouped_classification = "prs.content_classification"
+                grouped_job_version = "prs.content_version"
             else:
                 grouped_scope_join = ""
                 grouped_scope_clause = scope_clause
@@ -2128,13 +2510,18 @@ class AutoanswersRepository:
                      WHERE transition_run_id=?) AS reserved,
                     (SELECT COALESCE(SUM(CAST(upper_bound_usd AS REAL)),0)
                      FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                     WHERE transition_run_id=?)
+                    +
+                    (SELECT COALESCE(SUM(CAST(upper_bound_usd AS REAL)),0)
+                     FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
                      WHERE transition_run_id=?) AS uncertainty
                 """,
                 (
-                    str(sweep["transition_run_id"]) if sweep is not None else "",
-                    str(sweep["transition_run_id"]) if sweep is not None else "",
-                    str(sweep["transition_run_id"]) if sweep is not None else "",
-                    str(sweep["transition_run_id"]) if sweep is not None else "",
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep is not None else "",
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep is not None else "",
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep is not None else "",
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep is not None else "",
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep is not None else "",
                 ),
             ).fetchone()
             prepared_sql = f"""
@@ -2222,21 +2609,104 @@ class AutoanswersRepository:
                     *grouped_where_params,
                 ],
             ).fetchone()
+            rolling_rows = conn.execute(
+                """
+                SELECT content_classification,rating,COUNT(*) AS count
+                FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions
+                WHERE transition_run_id=?
+                GROUP BY content_classification,rating
+                ORDER BY content_classification,rating
+                """,
+                (
+                    str(sweep["transition_run_id"] or sweep["sweep_id"])
+                    if sweep is not None
+                    else "",
+                ),
+            ).fetchall()
+            rolling_state = conn.execute(
+                """
+                SELECT last_refresh_at,last_batch_count,refresh_count
+                FROM sheet_vitrina_v1_wb_autoanswers_rolling_state
+                WHERE sweep_id=?
+                """,
+                (str(sweep["sweep_id"]) if sweep is not None else "",),
+            ).fetchone()
+            current_run_total = int(
+                conn.execute(
+                    """
+                    WITH active_members AS (
+                        SELECT
+                            rs.feedback_id,
+                            rs.content_version_at_preview AS content_version,
+                            rs.content_version_hash_at_preview AS content_version_hash
+                        FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                        WHERE rs.sweep_id=?
+                        UNION
+                        SELECT
+                            ra.feedback_id,
+                            ra.content_version,
+                            ra.content_version_hash
+                        FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                        WHERE ra.transition_run_id=?
+                    )
+                    SELECT COUNT(*)
+                    FROM active_members m
+                    JOIN sheet_vitrina_v1_wb_feedbacks f
+                      ON f.feedback_id=m.feedback_id
+                     AND f.content_version=m.content_version
+                     AND f.content_version_hash=m.content_version_hash
+                    """,
+                    (
+                        str(sweep["sweep_id"]) if sweep is not None else "",
+                        (
+                            str(sweep["transition_run_id"] or sweep["sweep_id"])
+                            if sweep is not None
+                            else ""
+                        ),
+                    ),
+                ).fetchone()[0]
+            )
             outside_current_run = int(
                 conn.execute(
                     """
                     SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks f
                     WHERE COALESCE(f.answer_text,'')=''
-                      AND NOT EXISTS(
-                        SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
-                        WHERE rs.sweep_id=? AND rs.feedback_id=f.feedback_id
-                          AND rs.content_version_at_preview=f.content_version
+                      AND NOT (
+                        EXISTS(
+                            SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                            WHERE rs.sweep_id=? AND rs.feedback_id=f.feedback_id
+                              AND rs.content_version_at_preview=f.content_version
+                              AND rs.content_version_hash_at_preview=f.content_version_hash
+                        )
+                        OR EXISTS(
+                            SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                            WHERE ra.transition_run_id=? AND ra.feedback_id=f.feedback_id
+                              AND ra.content_version=f.content_version
+                              AND ra.content_version_hash=f.content_version_hash
+                        )
                       )
                     """,
-                    (str(sweep["sweep_id"]) if sweep is not None else "",),
+                    (
+                        str(sweep["sweep_id"]) if sweep is not None else "",
+                        (
+                            str(sweep["transition_run_id"] or sweep["sweep_id"])
+                            if sweep is not None
+                            else ""
+                        ),
+                    ),
                 ).fetchone()[0]
             )
             automatic_content_pending = self._automatic_content_pending_count(
+                conn,
+                transition_run_id=(
+                    str(sweep["transition_run_id"] or sweep["sweep_id"])
+                    if sweep is not None
+                    else None
+                ),
+                policy_epoch=progress_policy_epoch,
+                target_mode=(str(sweep["target_mode"]) if sweep is not None else settings.mode),
+            )
+            current_priority_bucket = self._automatic_priority_bucket(
                 conn,
                 transition_run_id=(
                     str(sweep["transition_run_id"] or sweep["sweep_id"])
@@ -2313,6 +2783,31 @@ class AutoanswersRepository:
             if content_speed > 0
             else None
         )
+        admitted_by_class: dict[str, int] = {}
+        admitted_by_rating: dict[str, dict[str, int]] = {}
+        admitted_total = 0
+        for rolling_row in rolling_rows:
+            classification = str(
+                rolling_row["content_classification"]
+                or CONTENT_CLASS_INDETERMINATE
+            )
+            count = int(rolling_row["count"] or 0)
+            rating_key = str(rolling_row["rating"] or "unknown")
+            admitted_total += count
+            admitted_by_class[classification] = (
+                admitted_by_class.get(classification, 0) + count
+            )
+            admitted_by_rating.setdefault(classification, {})[rating_key] = count
+        priority_label = (
+            f"content_bearing_{current_priority_bucket}_star"
+            if current_priority_bucket is not None
+            and 1 <= current_priority_bucket <= 5
+            else "indeterminate"
+            if current_priority_bucket == AUTOMATIC_PRIORITY_INDETERMINATE
+            else "rating_only"
+            if current_priority_bucket == AUTOMATIC_PRIORITY_RATING_ONLY
+            else None
+        )
         if settings.mode == MODE_MANUAL:
             current_operation = "paused_manual"
         elif grouped_counters["content_readback_pending"] > 0:
@@ -2379,6 +2874,30 @@ class AutoanswersRepository:
             "content_bearing_needs_review": grouped_counters["content_needs_review"],
             "rating_only_remaining": max(0, rating_total - rating_prepared),
             "outside_current_run": outside_current_run,
+            "rolling_admission": {
+                "initial_membership": membership_count,
+                "admitted_since_start": admitted_total,
+                "admitted_by_class": admitted_by_class,
+                "admitted_by_rating": admitted_by_rating,
+                "current_total": current_run_total,
+                "last_refresh_at": (
+                    rolling_state["last_refresh_at"]
+                    if rolling_state is not None
+                    else None
+                ),
+                "last_batch_count": (
+                    int(rolling_state["last_batch_count"] or 0)
+                    if rolling_state is not None
+                    else 0
+                ),
+                "refresh_count": (
+                    int(rolling_state["refresh_count"] or 0)
+                    if rolling_state is not None
+                    else 0
+                ),
+                "current_priority_bucket": priority_label,
+                "current_priority_rank": current_priority_bucket,
+            },
             "external_answer": grouped_counters["external_answer"],
             "content_bearing_external_answer": grouped_counters["content_external_answer"],
             "content_bearing_stale_or_regeneration": grouped_counters["content_stale_or_regeneration"],
@@ -2388,7 +2907,11 @@ class AutoanswersRepository:
             "policy_epoch": settings.policy_epoch,
             "scope": {"from": scope_from, "to": scope_to},
             "scope_membership_exact": scope_exact,
-            "transition_run_id": str(sweep["transition_run_id"]) if sweep is not None else None,
+            "transition_run_id": (
+                str(sweep["transition_run_id"] or sweep["sweep_id"])
+                if sweep is not None
+                else None
+            ),
             "run_actual_usd": float(run_spend["actual"] or 0),
             "run_active_reserved_usd": float(run_spend["reserved"] or 0),
             "run_uncertainty_hold_usd": float(run_spend["uncertainty"] or 0),
@@ -3026,6 +3549,12 @@ class AutoanswersRepository:
                     FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
                     WHERE h.processing_key=r.processing_key
                   )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts u
+                    WHERE u.processing_key=r.processing_key
+                      AND u.attempt_number=j.attempts
+                  )
             ORDER BY r.provider_call_started_at,r.processing_key
             """
         ).fetchall()
@@ -3381,6 +3910,18 @@ class AutoanswersRepository:
                     """
                 ).fetchall()
             ]
+            attempt_holds = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT uncertainty_id,processing_key,attempt_number,
+                           transition_run_id,upper_bound_usd,effective_at,
+                           error_code,evidence_json,created_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                    ORDER BY effective_at,uncertainty_id
+                    """
+                ).fetchall()
+            ]
             unresolved = self._budget_uncertainty_candidates(conn)
             runtime = conn.execute(
                 "SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
@@ -3389,6 +3930,9 @@ class AutoanswersRepository:
             "contract": "wb_autoanswers_budget_reconciliation_v1",
             "holds": holds,
             "hold_count": len(holds),
+            "provider_attempt_holds": attempt_holds,
+            "provider_attempt_hold_count": len(attempt_holds),
+            "total_hold_count": len(holds) + len(attempt_holds),
             "unresolved_count": len(unresolved),
             "stop_reason": str(runtime["stop_reason"] or "") if runtime else "",
             "confirmed": not unresolved
@@ -3453,6 +3997,13 @@ class AutoanswersRepository:
             ).fetchone()
             uncertainty = conn.execute(
                 """
+                WITH uncertainty_rows AS (
+                    SELECT upper_bound_usd,effective_at,created_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                    UNION ALL
+                    SELECT upper_bound_usd,effective_at,created_at
+                    FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                )
                 SELECT
                     COALESCE(SUM(CASE WHEN substr(effective_at,1,10)=? THEN upper_bound_usd ELSE 0 END),0) AS daily_hold,
                     COALESCE(SUM(CASE WHEN substr(effective_at,1,7)=? THEN upper_bound_usd ELSE 0 END),0) AS monthly_hold,
@@ -3460,7 +4011,7 @@ class AutoanswersRepository:
                     COALESCE(SUM(upper_bound_usd),0) AS all_hold,
                     COUNT(*) AS hold_count,
                     MAX(created_at) AS last_hold_at
-                FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                FROM uncertainty_rows
                 """,
                 (day, month, hour_start),
             ).fetchone()
@@ -3670,11 +4221,18 @@ class AutoanswersRepository:
         ).fetchone()
         uncertainty = conn.execute(
             """
+            WITH uncertainty_rows AS (
+                SELECT upper_bound_usd,effective_at
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                UNION ALL
+                SELECT upper_bound_usd,effective_at
+                FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+            )
             SELECT
                 COALESCE(SUM(CASE WHEN substr(effective_at,1,10)=? THEN upper_bound_usd ELSE 0 END),0) AS daily_total,
                 COALESCE(SUM(CASE WHEN substr(effective_at,1,7)=? THEN upper_bound_usd ELSE 0 END),0) AS monthly_total,
                 COALESCE(SUM(CASE WHEN effective_at>=? THEN upper_bound_usd ELSE 0 END),0) AS hourly_total
-            FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+            FROM uncertainty_rows
             """,
             (day, month, hour_start),
         ).fetchone()
@@ -3725,11 +4283,16 @@ class AutoanswersRepository:
             uncertain_run = _money(
                 conn.execute(
                     """
-                    SELECT COALESCE(SUM(upper_bound_usd),0)
-                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
-                    WHERE transition_run_id=?
+                    SELECT
+                        (SELECT COALESCE(SUM(upper_bound_usd),0)
+                         FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                         WHERE transition_run_id=?)
+                        +
+                        (SELECT COALESCE(SUM(upper_bound_usd),0)
+                         FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                         WHERE transition_run_id=?)
                     """,
-                    (transition_run_id,),
+                    (transition_run_id, transition_run_id),
                 ).fetchone()[0]
             )
             if sweep["run_max_usd"] is not None and _money(run["actual"]) + _money(failed_run["actual"]) + _money(run["reserved"]) + uncertain_run + reservation > _money(sweep["run_max_usd"]):
@@ -3779,20 +4342,34 @@ class AutoanswersRepository:
         return int(
             conn.execute(
                 f"""
+                WITH active_members AS (
+                    SELECT
+                        rs.feedback_id,
+                        rs.content_version_at_preview AS content_version,
+                        rs.content_version_hash_at_preview AS content_version_hash
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                    WHERE rs.sweep_id=?
+                    UNION
+                    SELECT
+                        ra.feedback_id,
+                        ra.content_version,
+                        ra.content_version_hash
+                    FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                    WHERE ra.transition_run_id=?
+                )
                 SELECT COUNT(*)
-                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                FROM active_members m
                 JOIN sheet_vitrina_v1_wb_feedbacks f
-                  ON f.feedback_id=rs.feedback_id
-                 AND f.content_version=rs.content_version_at_preview
-                 AND f.content_version_hash=rs.content_version_hash_at_preview
+                  ON f.feedback_id=m.feedback_id
+                 AND f.content_version=m.content_version
+                 AND f.content_version_hash=m.content_version_hash
                 LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
                   ON j.feedback_id=f.feedback_id
                  AND j.content_version=f.content_version
                  AND j.bundle_version=?
                 LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
                   ON p.processing_key=j.processing_key
-                WHERE rs.sweep_id=?
-                  AND rs.content_classification_at_preview=?
+                WHERE f.content_classification=?
                   AND COALESCE(f.answer_text,'')=''
                   AND (
                     j.processing_key IS NULL
@@ -3808,13 +4385,98 @@ class AutoanswersRepository:
                   )
                 """,
                 (
-                    PROMPT_BUNDLE_VERSION,
                     run_id,
+                    run_id,
+                    PROMPT_BUNDLE_VERSION,
                     CONTENT_CLASS_CONTENT_BEARING,
                     int(policy_epoch),
                 ),
             ).fetchone()[0]
         )
+
+    @staticmethod
+    def _automatic_priority_bucket(
+        conn: sqlite3.Connection,
+        *,
+        transition_run_id: str | None,
+        policy_epoch: int,
+        target_mode: str,
+    ) -> int | None:
+        """Return the literal next automatic bucket across every pipeline stage."""
+
+        run_id = _clean_text(transition_run_id)
+        if not run_id:
+            return None
+        generated_clause = " OR j.state='generated'" if target_mode != MODE_DRAFT_ONLY else ""
+        row = conn.execute(
+            f"""
+            WITH active_members AS (
+                SELECT
+                    rs.feedback_id,
+                    rs.content_version_at_preview AS content_version,
+                    rs.content_version_hash_at_preview AS content_version_hash
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                WHERE rs.sweep_id=?
+                UNION
+                SELECT
+                    ra.feedback_id,
+                    ra.content_version,
+                    ra.content_version_hash
+                FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                WHERE ra.transition_run_id=?
+            )
+            SELECT MIN(
+                CASE f.content_classification
+                    WHEN ? THEN
+                        CASE WHEN f.rating BETWEEN 1 AND 5
+                             THEN f.rating ELSE ? END
+                    WHEN ? THEN ?
+                    ELSE ?
+                END
+            ) AS priority_bucket
+            FROM active_members m
+            JOIN sheet_vitrina_v1_wb_feedbacks f
+              ON f.feedback_id=m.feedback_id
+             AND f.content_version=m.content_version
+             AND f.content_version_hash=m.content_version_hash
+            LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+              ON j.feedback_id=f.feedback_id
+             AND j.content_version=f.content_version
+             AND j.bundle_version=?
+            LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
+              ON p.processing_key=j.processing_key
+            WHERE COALESCE(f.answer_text,'')=''
+              AND (
+                j.processing_key IS NULL
+                OR COALESCE(j.regeneration_required,0)=1
+                OR (
+                    COALESCE(j.policy_epoch,-1)<>?
+                    AND j.state NOT IN ('needs_review','terminal_error','skipped','published')
+                )
+                OR j.state IN (
+                    'queued','processing','retryable_error','approved',
+                    'publishing','publish_pending_readback'
+                )
+                {generated_clause}
+                OR p.state IN ('approved','publishing','publish_pending_readback')
+                OR (p.state='retryable_error' AND p.retry_stage='readback')
+              )
+            """,
+            (
+                run_id,
+                run_id,
+                CONTENT_CLASS_CONTENT_BEARING,
+                AUTOMATIC_PRIORITY_INDETERMINATE,
+                CONTENT_CLASS_INDETERMINATE,
+                AUTOMATIC_PRIORITY_INDETERMINATE,
+                AUTOMATIC_PRIORITY_RATING_ONLY,
+                PROMPT_BUNDLE_VERSION,
+                int(policy_epoch),
+            ),
+        ).fetchone()
+        if row is None or row["priority_bucket"] is None:
+            return None
+        return int(row["priority_bucket"])
 
     def claim_processing_job(self, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict[str, Any] | None:
         settings = self.assert_effective_on(operation="AI processing")
@@ -3918,17 +4580,19 @@ class AutoanswersRepository:
                 ),
             )
             sweep = conn.execute(
-                "SELECT transition_run_id,target_mode FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE policy_epoch=? ORDER BY created_at DESC LIMIT 1",
+                "SELECT sweep_id,transition_run_id,target_mode FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE policy_epoch=? ORDER BY created_at DESC LIMIT 1",
                 (settings.policy_epoch,),
             ).fetchone()
-            content_pending = self._automatic_content_pending_count(
+            active_run_id = (
+                str(sweep["transition_run_id"] or sweep["sweep_id"])
+                if sweep is not None
+                else ""
+            )
+            priority_bucket = self._automatic_priority_bucket(
                 conn,
-                transition_run_id=(sweep["transition_run_id"] if sweep is not None else None),
+                transition_run_id=active_run_id or None,
                 policy_epoch=settings.policy_epoch,
                 target_mode=(str(sweep["target_mode"]) if sweep is not None else settings.mode),
-            )
-            active_run_id = (
-                str(sweep["transition_run_id"] or "") if sweep is not None else ""
             )
             row = conn.execute(
                 f"""
@@ -3943,7 +4607,18 @@ class AutoanswersRepository:
                   AND j.policy_epoch=?
                   AND (? <> ? OR j.trigger_source='manual_generate')
                   AND (j.trigger_source='manual_generate' OR ?='' OR j.transition_run_id=?)
-                  AND (?=0 OR j.trigger_source='manual_generate' OR f.content_classification=?)
+                  AND (
+                    j.trigger_source='manual_generate'
+                    OR ?=''
+                    OR (
+                        CASE f.content_classification
+                          WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
+                                           THEN f.rating ELSE ? END
+                          WHEN ? THEN ?
+                          ELSE ?
+                        END
+                    )=?
+                  )
                 ORDER BY {_automatic_priority_order_sql(
                     "f",
                     manual_predicate="j.trigger_source='manual_generate'",
@@ -3962,8 +4637,13 @@ class AutoanswersRepository:
                     MODE_MANUAL,
                     active_run_id,
                     active_run_id,
-                    content_pending,
+                    active_run_id,
                     CONTENT_CLASS_CONTENT_BEARING,
+                    AUTOMATIC_PRIORITY_INDETERMINATE,
+                    CONTENT_CLASS_INDETERMINATE,
+                    AUTOMATIC_PRIORITY_INDETERMINATE,
+                    AUTOMATIC_PRIORITY_RATING_ONLY,
+                    priority_bucket,
                 ),
             ).fetchone()
             if row is None:
@@ -4158,6 +4838,197 @@ class AutoanswersRepository:
                 at=now,
                 previous_state=str(row["state"]),
                 next_state=STATE_RETRYABLE_ERROR,
+            )
+
+    def record_processing_boundary_failure(
+        self,
+        processing_key_value: str,
+        *,
+        error_code: str,
+        worker_id: str,
+        diagnostics: Mapping[str, Any] | None = None,
+        max_attempts: int = 2,
+    ) -> dict[str, Any]:
+        """Conservatively account an opaque provider boundary before retry."""
+
+        code = _clean_text(error_code)
+        if code not in {"node_timeout", "node_invalid_json", "node_process_exit_1"}:
+            raise ValueError("unsupported opaque boundary failure")
+        now = self._now()
+        with self.transaction() as conn:
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (_clean_text(processing_key_value),),
+            ).fetchone()
+            reservation = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                WHERE processing_key=?
+                """,
+                (_clean_text(processing_key_value),),
+            ).fetchone()
+            settings = conn.execute(
+                """
+                SELECT max_reservation_per_review_usd
+                FROM sheet_vitrina_v1_wb_autoanswers_settings
+                WHERE singleton=1
+                """
+            ).fetchone()
+            if job is None:
+                raise AutoanswersRuntimeError("processing job not found", code="job_not_found")
+            if str(job["state"]) != STATE_PROCESSING:
+                raise AutoanswersRuntimeError(
+                    "processing job is not active",
+                    code="job_not_processing",
+                )
+            if (
+                reservation is None
+                or str(reservation["status"]) != "reserved"
+                or not reservation["provider_call_started_at"]
+            ):
+                raise AutoanswersRuntimeError(
+                    "opaque boundary is missing reservation evidence",
+                    code="reservation_missing",
+                )
+            if settings is None:
+                raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
+            attempt = int(job["attempts"] or 0)
+            safe_diagnostics = {
+                key: value
+                for key, value in dict(diagnostics or {}).items()
+                if key
+                in {
+                    "returncode",
+                    "stderr_bytes",
+                    "stderr_sha256",
+                    "stdout_bytes",
+                    "stdout_sha256",
+                    "raw_output_persisted",
+                }
+            }
+            upper_bound = str(_money(settings["max_reservation_per_review_usd"]))
+            evidence = {
+                "error_code": code,
+                "attempt_number": attempt,
+                "provider_call_started_at": reservation["provider_call_started_at"],
+                "reservation_upper_bound_usd": upper_bound,
+                "amount_semantics": "conservative_cap_hold_not_actual_cost",
+                "diagnostics": safe_diagnostics,
+            }
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+                    uncertainty_id,processing_key,attempt_number,transition_run_id,
+                    upper_bound_usd,effective_at,error_code,evidence_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "provider-attempt:"
+                    + sha256_text(f"{processing_key_value}:{attempt}:{code}"),
+                    processing_key_value,
+                    attempt,
+                    reservation["transition_run_id"],
+                    upper_bound,
+                    reservation["provider_call_started_at"],
+                    code,
+                    canonical_json(evidence),
+                    iso_utc(now),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                SET reserved_usd=0,status='released',expires_at=NULL,
+                    released_reason='provider_boundary_uncertain_attempt',
+                    updated_at=?
+                WHERE processing_key=?
+                """,
+                (iso_utc(now), processing_key_value),
+            )
+            retry = attempt < max(1, int(max_attempts))
+            next_state = STATE_RETRYABLE_ERROR if retry else STATE_NEEDS_REVIEW
+            next_code = code if retry else f"{code}_repeated_needs_review"
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state=?,retry_stage=?,available_at=?,lease_owner=NULL,
+                    lease_until=NULL,last_error_code=?,completed_at=?,updated_at=?
+                WHERE processing_key=?
+                """,
+                (
+                    next_state,
+                    "processing" if retry else None,
+                    iso_utc(now + timedelta(seconds=60 * max(1, attempt)))
+                    if retry
+                    else iso_utc(now),
+                    next_code,
+                    None if retry else iso_utc(now),
+                    iso_utc(now),
+                    processing_key_value,
+                ),
+            )
+            runtime = conn.execute(
+                """
+                SELECT stop_reason,stop_details_json
+                FROM sheet_vitrina_v1_wb_autoanswers_runtime_state
+                WHERE singleton=1
+                """
+            ).fetchone()
+            current_stop = str(runtime["stop_reason"] or "") if runtime else ""
+            try:
+                current_details = (
+                    json.loads(str(runtime["stop_details_json"] or "{}"))
+                    if runtime
+                    else {}
+                )
+            except json.JSONDecodeError:
+                current_details = {}
+            stop_details = {
+                "code": next_code,
+                "processing_key": processing_key_value,
+                "isolated_needs_review": not retry,
+            }
+            if retry and current_stop in {"", "retry_backoff"}:
+                self._set_stop_reason(
+                    conn,
+                    "retry_backoff",
+                    details=stop_details,
+                    at=now,
+                )
+            elif (
+                not retry
+                and current_stop == "retry_backoff"
+                and str(current_details.get("processing_key") or "")
+                == processing_key_value
+            ):
+                self._set_stop_reason(
+                    conn,
+                    None,
+                    details=stop_details,
+                    at=now,
+                )
+            self._audit(
+                conn,
+                aggregate_type="processing_job",
+                aggregate_id=processing_key_value,
+                event_type=(
+                    "opaque_boundary_retry_scheduled"
+                    if retry
+                    else "opaque_boundary_isolated_needs_review"
+                ),
+                actor_type="worker",
+                actor_id=_clean_text(worker_id),
+                details=evidence,
+                at=now,
+                previous_state=STATE_PROCESSING,
+                next_state=next_state,
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                    (processing_key_value,),
+                ).fetchone()
             )
 
     def settle_budget(self, processing_key_value: str, *, actual_cost_usd: Any) -> None:
@@ -4625,17 +5496,82 @@ class AutoanswersRepository:
                     next_state=next_state,
                 )
             if next_state == STATE_APPROVED:
-                self._create_publication_job(
-                    conn,
-                    job=job,
-                    reply=reply,
-                    reply_sha=reply_sha,
-                    request_source="automatic",
-                    requested_by=None,
-                    mode_at_enqueue=settings.mode,
-                    manual_edit_revision=None,
-                    at=now,
+                sweep = conn.execute(
+                    """
+                    SELECT sweep_id,transition_run_id,target_mode
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                    WHERE policy_epoch=?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (settings.policy_epoch,),
+                ).fetchone()
+                active_run_id = (
+                    str(sweep["transition_run_id"] or sweep["sweep_id"])
+                    if sweep is not None
+                    else ""
                 )
+                priority_bucket = self._automatic_priority_bucket(
+                    conn,
+                    transition_run_id=active_run_id or None,
+                    policy_epoch=settings.policy_epoch,
+                    target_mode=(
+                        str(sweep["target_mode"])
+                        if sweep is not None
+                        else settings.mode
+                    ),
+                )
+                feedback_bucket = (
+                    int(feedback["rating"])
+                    if feedback is not None
+                    and str(feedback["content_classification"])
+                    == CONTENT_CLASS_CONTENT_BEARING
+                    and feedback["rating"] is not None
+                    and 1 <= int(feedback["rating"]) <= 5
+                    else AUTOMATIC_PRIORITY_INDETERMINATE
+                    if feedback is not None
+                    and str(feedback["content_classification"])
+                    in {
+                        CONTENT_CLASS_CONTENT_BEARING,
+                        CONTENT_CLASS_INDETERMINATE,
+                    }
+                    else AUTOMATIC_PRIORITY_RATING_ONLY
+                )
+                enqueue_now = (
+                    not active_run_id
+                    or str(job["transition_run_id"] or "") != active_run_id
+                    or priority_bucket is None
+                    or feedback_bucket == priority_bucket
+                )
+                if enqueue_now:
+                    self._create_publication_job(
+                        conn,
+                        job=job,
+                        reply=reply,
+                        reply_sha=reply_sha,
+                        request_source="automatic",
+                        requested_by=None,
+                        mode_at_enqueue=settings.mode,
+                        manual_edit_revision=None,
+                        at=now,
+                    )
+                else:
+                    self._audit(
+                        conn,
+                        aggregate_type="processing_job",
+                        aggregate_id=processing_key_value,
+                        event_type="publication_enqueue_deferred_by_priority",
+                        actor_type="policy",
+                        actor_id=settings.policy_version,
+                        details={
+                            "current_priority_bucket": priority_bucket,
+                            "feedback_priority_bucket": feedback_bucket,
+                            "transition_run_id": active_run_id,
+                        },
+                        at=now,
+                        previous_state=STATE_APPROVED,
+                        next_state=STATE_APPROVED,
+                    )
             stored = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
                 (processing_key_value,),
@@ -5038,18 +5974,77 @@ class AutoanswersRepository:
                 if not settings_row or not bool(settings_row["master_enabled"]) or _force_off_from_env(self.env):
                     return None
                 sweep = conn.execute(
-                    "SELECT transition_run_id,target_mode FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE policy_epoch=? ORDER BY created_at DESC LIMIT 1",
+                    "SELECT sweep_id,transition_run_id,target_mode FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE policy_epoch=? ORDER BY created_at DESC LIMIT 1",
                     (int(settings_row["policy_epoch"]),),
                 ).fetchone()
-                content_pending = self._automatic_content_pending_count(
+                active_run_id = (
+                    str(sweep["transition_run_id"] or sweep["sweep_id"])
+                    if sweep is not None
+                    else ""
+                )
+                priority_bucket = self._automatic_priority_bucket(
                     conn,
-                    transition_run_id=(sweep["transition_run_id"] if sweep is not None else None),
+                    transition_run_id=active_run_id or None,
                     policy_epoch=int(settings_row["policy_epoch"]),
                     target_mode=(str(sweep["target_mode"]) if sweep is not None else str(settings_row["mode"])),
                 )
-                active_run_id = (
-                    str(sweep["transition_run_id"] or "") if sweep is not None else ""
-                )
+                if active_run_id and priority_bucket is not None:
+                    ready = conn.execute(
+                        """
+                        SELECT j.*
+                        FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                        JOIN sheet_vitrina_v1_wb_feedbacks f
+                          ON f.feedback_id=j.feedback_id
+                         AND f.content_version=j.content_version
+                         AND f.content_version_hash=j.content_version_hash
+                        WHERE j.state=?
+                          AND j.policy_epoch=?
+                          AND j.transition_run_id=?
+                          AND j.final_reply IS NOT NULL
+                          AND j.final_reply_sha256 IS NOT NULL
+                          AND NOT EXISTS(
+                            SELECT 1
+                            FROM sheet_vitrina_v1_wb_publication_jobs p
+                            WHERE p.processing_key=j.processing_key
+                          )
+                          AND (
+                            CASE f.content_classification
+                              WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
+                                               THEN f.rating ELSE ? END
+                              WHEN ? THEN ?
+                              ELSE ?
+                            END
+                          )=?
+                        ORDER BY
+                          COALESCE(f.created_at_wb,f.first_seen_at) DESC,
+                          f.feedback_id DESC,
+                          f.content_version DESC
+                        LIMIT 1
+                        """,
+                        (
+                            STATE_APPROVED,
+                            int(settings_row["policy_epoch"]),
+                            active_run_id,
+                            CONTENT_CLASS_CONTENT_BEARING,
+                            AUTOMATIC_PRIORITY_INDETERMINATE,
+                            CONTENT_CLASS_INDETERMINATE,
+                            AUTOMATIC_PRIORITY_INDETERMINATE,
+                            AUTOMATIC_PRIORITY_RATING_ONLY,
+                            priority_bucket,
+                        ),
+                    ).fetchone()
+                    if ready is not None:
+                        self._create_publication_job(
+                            conn,
+                            job=ready,
+                            reply=str(ready["final_reply"]),
+                            reply_sha=str(ready["final_reply_sha256"]),
+                            request_source="automatic",
+                            requested_by=None,
+                            mode_at_enqueue=str(settings_row["mode"]),
+                            manual_edit_revision=None,
+                            at=now,
+                        )
                 row = conn.execute(
                     f"""
                     SELECT p.* FROM sheet_vitrina_v1_wb_publication_jobs p
@@ -5062,8 +6057,16 @@ class AutoanswersRepository:
                       AND p.policy_epoch=?
                       AND (p.request_source='manual' OR ?='' OR p.transition_run_id=?)
                       AND (
-                        p.request_source='manual' OR ?=0
-                        OR f.content_classification=?
+                        p.request_source='manual'
+                        OR ?=''
+                        OR (
+                            CASE f.content_classification
+                              WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
+                                               THEN f.rating ELSE ? END
+                              WHEN ? THEN ?
+                              ELSE ?
+                            END
+                        )=?
                       )
                     ORDER BY {_automatic_priority_order_sql(
                         "f",
@@ -5079,8 +6082,13 @@ class AutoanswersRepository:
                         int(settings_row["policy_epoch"]),
                         active_run_id,
                         active_run_id,
-                        content_pending,
+                        active_run_id,
                         CONTENT_CLASS_CONTENT_BEARING,
+                        AUTOMATIC_PRIORITY_INDETERMINATE,
+                        CONTENT_CLASS_INDETERMINATE,
+                        AUTOMATIC_PRIORITY_INDETERMINATE,
+                        AUTOMATIC_PRIORITY_RATING_ONLY,
+                        priority_bucket,
                     ),
                 ).fetchone()
                 action = "write"
@@ -6461,7 +7469,7 @@ class AutoanswersRepository:
                 """,
                 (_clean_text(worker_id), iso_utc(lease_until), iso_utc(now), sweep["sweep_id"]),
             )
-            content_pending = self._automatic_content_pending_count(
+            priority_bucket = self._automatic_priority_bucket(
                 conn,
                 transition_run_id=str(sweep["transition_run_id"] or sweep["sweep_id"]),
                 policy_epoch=settings.policy_epoch,
@@ -6475,15 +7483,30 @@ class AutoanswersRepository:
                     JOIN sheet_vitrina_v1_wb_feedbacks f
                       ON f.feedback_id=j.feedback_id AND f.content_version=j.content_version
                     WHERE j.policy_epoch=? AND j.state IN (?,?,?)
-                      AND (?=0 OR f.content_classification=?)
+                      AND (
+                        j.state=?
+                        OR (
+                          CASE f.content_classification
+                            WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
+                                             THEN f.rating ELSE ? END
+                            WHEN ? THEN ?
+                            ELSE ?
+                          END
+                        )=?
+                      )
                     """,
                     (
                         settings.policy_epoch,
                         STATE_QUEUED,
                         STATE_PROCESSING,
                         STATE_RETRYABLE_ERROR,
-                        content_pending,
+                        STATE_PROCESSING,
                         CONTENT_CLASS_CONTENT_BEARING,
+                        AUTOMATIC_PRIORITY_INDETERMINATE,
+                        CONTENT_CLASS_INDETERMINATE,
+                        AUTOMATIC_PRIORITY_INDETERMINATE,
+                        AUTOMATIC_PRIORITY_RATING_ONLY,
+                        priority_bucket,
                     ),
                 ).fetchone()[0]
             )
@@ -6513,11 +7536,19 @@ class AutoanswersRepository:
             uncertainty_run_usage = _money(
                 conn.execute(
                     """
-                    SELECT COALESCE(SUM(upper_bound_usd),0)
-                    FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
-                    WHERE transition_run_id=?
+                    SELECT
+                        (SELECT COALESCE(SUM(upper_bound_usd),0)
+                         FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+                         WHERE transition_run_id=?)
+                        +
+                        (SELECT COALESCE(SUM(upper_bound_usd),0)
+                         FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+                         WHERE transition_run_id=?)
                     """,
-                    (str(sweep["transition_run_id"] or sweep["sweep_id"]),),
+                    (
+                        str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                        str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                    ),
                 ).fetchone()[0]
             )
             if sweep["run_max_usd"] is not None and _money(run_usage["actual"]) + _money(failed_run_usage["actual"]) + _money(run_usage["reserved"]) + uncertainty_run_usage + _money(settings.max_reservation_per_review_usd) > _money(sweep["run_max_usd"]):
@@ -6533,10 +7564,14 @@ class AutoanswersRepository:
                 ).fetchone()
             )
             membership_clause = (
-                "AND EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs "
+                "AND (EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs "
                 "WHERE rs.sweep_id=? AND rs.feedback_id=f.feedback_id "
                 "AND rs.content_version_at_preview=f.content_version "
-                "AND rs.content_version_hash_at_preview=f.content_version_hash)"
+                "AND rs.content_version_hash_at_preview=f.content_version_hash) "
+                "OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra "
+                "WHERE ra.transition_run_id=? AND ra.feedback_id=f.feedback_id "
+                "AND ra.content_version=f.content_version "
+                "AND ra.content_version_hash=f.content_version_hash))"
                 if has_exact_scope
                 else ""
             )
@@ -6545,8 +7580,16 @@ class AutoanswersRepository:
                 PROMPT_BUNDLE_VERSION,
                 sweep["scope_from"],
                 settings.policy_epoch,
-                content_pending,
+                STATE_NEEDS_REVIEW,
+                STATE_TERMINAL_ERROR,
+                STATE_SKIPPED,
+                STATE_PUBLISHED,
                 CONTENT_CLASS_CONTENT_BEARING,
+                AUTOMATIC_PRIORITY_INDETERMINATE,
+                CONTENT_CLASS_INDETERMINATE,
+                AUTOMATIC_PRIORITY_INDETERMINATE,
+                AUTOMATIC_PRIORITY_RATING_ONLY,
+                priority_bucket,
                 int(queue_blocked),
                 int(paid_blocked),
                 CONTENT_CLASS_RATING_ONLY,
@@ -6555,7 +7598,12 @@ class AutoanswersRepository:
                 STATE_TERMINAL_ERROR,
             ]
             if has_exact_scope:
-                params.append(sweep["sweep_id"])
+                params.extend(
+                    [
+                        sweep["sweep_id"],
+                        str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                    ]
+                )
             if sweep["scope_to"]:
                 params.append(sweep["scope_to"])
             params.append(min(25, max(1, min(int(batch_size), capacity if not queue_blocked else 25))))
@@ -6569,7 +7617,17 @@ class AutoanswersRepository:
                 WHERE COALESCE(f.answer_text,'')=''
                   AND substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?
                   AND COALESCE(j.policy_epoch,-1)<>?
-                  AND (?=0 OR f.content_classification=?)
+                  AND (
+                    j.state IN (?,?,?,?)
+                    OR (
+                      CASE f.content_classification
+                        WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
+                                         THEN f.rating ELSE ? END
+                        WHEN ? THEN ?
+                        ELSE ?
+                      END
+                    )=?
+                  )
                   AND (?=0 OR j.final_reply IS NOT NULL)
                   AND (?=0 OR j.final_reply IS NOT NULL
                        OR f.content_classification IN (?,?)
@@ -6600,7 +7658,7 @@ class AutoanswersRepository:
             progress = json.loads(str(current["progress_json"] or "{}"))
             for name, count in outcomes.items():
                 progress[name] = int(progress.get(name) or 0) + count
-            remaining_automatic_content = self._automatic_content_pending_count(
+            remaining_priority_bucket = self._automatic_priority_bucket(
                 conn,
                 transition_run_id=str(sweep["transition_run_id"] or sweep["sweep_id"]),
                 policy_epoch=settings.policy_epoch,
@@ -6610,13 +7668,14 @@ class AutoanswersRepository:
                 "queued"
                 if candidates
                 or queue_blocked
-                or (paid_blocked and remaining_automatic_content > 0)
+                or remaining_priority_bucket is not None
                 else "succeeded"
             )
             cursor = {
                 "last_feedback_id": str(candidates[-1]["feedback_id"]) if candidates else None,
                 "materialized_total": sum(int(value) for value in progress.values()),
                 "queue_depth": outstanding,
+                "priority_bucket": remaining_priority_bucket,
             }
             conn.execute(
                 """
@@ -7186,6 +8245,8 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_feedback_versions(
     PRIMARY KEY(feedback_id, content_version),
     UNIQUE(feedback_id, content_version_hash)
 );
+CREATE INDEX IF NOT EXISTS idx_sv1_feedback_versions_admission_cursor
+ON sheet_vitrina_v1_wb_feedback_versions(created_at,feedback_id,content_version);
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_feedback_media(
     feedback_id TEXT NOT NULL,
@@ -7492,6 +8553,21 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_ho
 CREATE INDEX IF NOT EXISTS idx_sv1_budget_uncertainty_effective
 ON sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds(effective_at, transition_run_id);
 
+CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+    uncertainty_id TEXT PRIMARY KEY,
+    processing_key TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswer_jobs(processing_key),
+    attempt_number INTEGER NOT NULL,
+    transition_run_id TEXT,
+    upper_bound_usd TEXT NOT NULL,
+    effective_at TEXT NOT NULL,
+    error_code TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(processing_key, attempt_number)
+);
+CREATE INDEX IF NOT EXISTS idx_sv1_provider_uncertainty_effective
+ON sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(effective_at, transition_run_id);
+
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(
     sweep_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
     feedback_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_feedbacks(feedback_id),
@@ -7503,6 +8579,44 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(
 );
 CREATE INDEX IF NOT EXISTS idx_sv1_reconciliation_scope_feedback
 ON sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(feedback_id,sweep_id);
+
+CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+    admission_id TEXT PRIMARY KEY,
+    sweep_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+    transition_run_id TEXT NOT NULL,
+    feedback_id TEXT NOT NULL,
+    content_version INTEGER NOT NULL,
+    content_version_hash TEXT NOT NULL,
+    content_classification TEXT NOT NULL,
+    rating INTEGER,
+    source_stream TEXT NOT NULL,
+    source_sync_run_id TEXT,
+    admission_source TEXT NOT NULL,
+    version_created_at TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    UNIQUE(sweep_id,feedback_id,content_version),
+    FOREIGN KEY(feedback_id,content_version)
+      REFERENCES sheet_vitrina_v1_wb_feedback_versions(feedback_id,content_version)
+);
+CREATE INDEX IF NOT EXISTS idx_sv1_rolling_admissions_run_priority
+ON sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+    transition_run_id,content_classification,rating,admitted_at,feedback_id
+);
+CREATE INDEX IF NOT EXISTS idx_sv1_rolling_admissions_feedback
+ON sheet_vitrina_v1_wb_autoanswers_rolling_admissions(feedback_id,content_version,sweep_id);
+
+CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_rolling_state(
+    sweep_id TEXT PRIMARY KEY REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+    cursor_created_at TEXT NOT NULL,
+    cursor_feedback_id TEXT NOT NULL,
+    cursor_content_version INTEGER NOT NULL,
+    last_refresh_at TEXT,
+    last_batch_count INTEGER NOT NULL DEFAULT 0,
+    refresh_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_runtime_state(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),

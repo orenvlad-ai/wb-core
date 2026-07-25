@@ -357,6 +357,20 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 page.wait_for_function(
                     "document.querySelectorAll('[data-autoanswers-open]').length === 1"
                 )
+                normal_pause = page.evaluate(
+                    """() => processOperationalPresentation({
+                      desired: true,
+                      actual: false,
+                      lifecycle_state: "error",
+                      drift_status: "blocked",
+                      stop_reason: "hourly_budget_reached",
+                      last_error: "worker oneshot exited"
+                    })"""
+                )
+                self.assertEqual(
+                    normal_pause,
+                    {"label": "Работает · штатная пауза", "tone": "warning"},
+                )
                 backlog = page.locator("[data-autoanswers-backlog]")
                 self.assertEqual(backlog.count(), 1)
                 self.assertTrue(backlog.is_disabled())
@@ -370,7 +384,10 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 self.assertIn(box_metrics["overflowY"], {"auto", "scroll"})
                 self.assertNotEqual(box_metrics["background"], "rgb(248, 250, 252)")
                 self.assertNotEqual(box_metrics["color"], "rgb(0, 0, 0)")
-                self.assertEqual(page.locator("[data-autoanswers-queue-metrics] .autoanswers-queue-metric").count(), 21)
+                queue_metrics = page.locator("[data-autoanswers-queue-metrics]")
+                self.assertEqual(queue_metrics.locator(".autoanswers-queue-metric").count(), 27)
+                self.assertIn("Начальный состав", queue_metrics.inner_text())
+                self.assertIn("Добавлено после старта", queue_metrics.inner_text())
                 self.assertEqual(page.locator("[data-autoanswers-progress-bars] .autoanswers-progress-row").count(), 2)
                 self.assertEqual(page.locator("[data-autoanswers-content-progress-bars] .autoanswers-progress-row").count(), 2)
                 self.assertEqual(page.locator("[data-autoanswers-progress-card]").count(), 2)

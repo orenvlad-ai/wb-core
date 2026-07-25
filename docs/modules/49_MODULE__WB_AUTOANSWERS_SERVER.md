@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "The current runtime adds one end-to-end content rating priority, publication-bound reconciliation hardening and bounded GET-only lifecycle refresh while preserving the schema-v6 lifecycle, budget and mode/run/cap contracts."
+update_note: "The current runtime adds schema-v7 rolling run admission, literal cross-stage priority, bounded opaque-boundary retries and content-bearing five-star recovery while preserving the owner-confirmed initial snapshot, frozen bundle and existing run cap."
 ---
 
 # WB Autoanswers Server v1
@@ -60,7 +60,7 @@ Frozen identity:
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
 | Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
 | Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
-| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py` |
+| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
 | Backend/UI | `registry_upload_http_entrypoint.py`, `sheet_vitrina_v1_web_vitrina.html` |
 
@@ -73,11 +73,27 @@ All schema changes are additive in the existing runtime SQLite database. The can
 - content-class/date indexes used by preview, reconciliation, processing and publication ordering;
 - conservative v2-result quarantine when old `rating_only_template` evidence no longer satisfies the v3 classification.
 
-Schema v6 retains the v5 classification and immutable membership model and adds
+Schema v6 retains the v5 classification and immutable initial membership model and adds
 append-only `budget_uncertainty_holds`. A hold is a conservative cap reservation,
 not asserted actual spend. It is created only from an exact dry-run fingerprint
 when local evidence proves that a provider call started but no usage/cost
-readback exists. Schema v4 fields retained by v6 include:
+readback exists.
+
+Schema v7 adds:
+
+- append-only `rolling_admissions`, keyed idempotently by transition run,
+  feedback and exact content version/hash;
+- one bounded admission cursor per sweep over the indexed immutable
+  feedback-version log;
+- admission source, source sync run, version time, classification/rating and
+  canonical evidence for every admitted version;
+- append-only per-attempt provider uncertainty evidence for bounded opaque
+  Node exits;
+- indexes used by admission and the literal cross-stage priority barrier.
+
+The schema-v7 migration does not rewrite the initial membership, content
+versions, frozen bundle identity, policy epoch, transition run or cap. Schema
+v4 fields retained by v7 include:
 
 - `policy_epoch` to settings, processing jobs and publication jobs;
 - media preview metadata and media processing version;
@@ -124,22 +140,50 @@ not compare store-wide AI/publication queue totals, because the independently
 scheduled worker can legitimately advance those shared queues during the same
 GET window; that concurrent progress is not attributed to the readonly sync.
 
-Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot. Reviews observed after preview remain outside that run and require a new preview. Apply creates a new `policy_epoch`, transition run and resumable lazy sweep. Replaying the same consumed preview is an exact no-op; a fresh owner-confirmed capped preview creates a new run even when the selected automatic mode is unchanged.
+Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot; that initial snapshot remains the owner-confirmed audit proof.
+
+While the resulting automatic run remains active, each ordinary bounded
+scheduler tick scans the indexed feedback-version cursor and append-only admits
+new current unanswered versions. It never recalculates or reorders the initial
+snapshot. A repeated tick is a no-op, restart resumes from the durable
+watermark, and a changed content version receives its own hash-bound admission
+only while it is current and unanswered. Admission does not create a provider
+call, WB write or publication aggregate; normal reconciliation materializes
+the exact admitted version under existing idempotency keys. The admission
+shares the remaining owner-confirmed run cap and every global/hourly/daily/
+monthly/review limit. It never enlarges or renews a cap.
+
+Apply creates a new `policy_epoch`, transition run and resumable live sweep.
+The sweep remains active while any admitted automatic action is pending, so a
+later admission can re-enter materialization without a new preview. Replaying
+the same consumed preview is an exact no-op; a fresh owner-confirmed capped
+preview creates a new run even when the selected automatic mode is unchanged.
 
 Every automatic stage uses one strict order. `content_bearing` is split into
 rating buckets `1`, `2`, `3`, `4`, `5` in that order. Within each bucket the
 deterministic tie-break is `created_at_wb DESC`, falling back to
-`first_seen_at DESC`, then `feedback_id DESC`. Only after every scoped content
-bucket has no claimable or pending automatic step may non-content work proceed;
-the existing deterministic non-content order remains `indeterminate` review
-evidence followed by the final `rating_only` block, newest first with the same
-fallback/tie-break. A content job that becomes claimable again preempts queued
-rating-only work on the next claim. This single order governs snapshot
-ordinals, reconciliation, lazy materialization, processing/retry/expired-lease
-claims, ready-result reuse, publication enqueue and publication claims.
-Explicit manual work retains its separate owner-triggered semantics.
+`first_seen_at DESC`, then `feedback_id DESC`. Only after every currently
+admitted content bucket has no claimable or pending automatic step may
+non-content work proceed; the existing deterministic non-content order remains
+`indeterminate` review evidence followed by the final `rating_only` block,
+newest first with the same fallback/tie-break. A newly admitted higher-priority
+version preempts every not-yet-started lower bucket at the next safe claim.
+This single order governs initial ordinals, rolling reconciliation, lazy
+materialization, processing/retry/expired-lease claims, ready-result reuse,
+publication enqueue and publication claims. Explicit manual work retains its
+separate owner-triggered semantics.
 
-`rating_only` cannot materialize, claim or begin a new WB write while a scoped `content_bearing` member still has an automatic next step, including regeneration, retry/backoff, budget wait, publication or readback. Budget/run caps do not open the empty-review lane. `needs_review`, terminal/hard-gate outcomes, external answers and policy-ineligible publication do not hold the barrier forever. Old rating-only jobs remain immutable evidence but are excluded from current content capacity accounting and cannot be claimed ahead of content. A write already started is the sole safety exception: mandatory GET readback remains first and never creates a second POST.
+`rating_only` cannot materialize, claim or begin a new WB write while an
+admitted `content_bearing` member still has an automatic next step, including
+regeneration, retry/backoff, budget wait, publication or readback. The same
+barrier prevents a prepared 5★ publication while any admitted automatic 1★
+action remains unfinished. Budget/run caps do not open a lower-priority lane.
+`needs_review`, terminal/hard-gate outcomes, external answers and
+policy-ineligible publication do not hold the barrier forever. Old rating-only
+jobs remain immutable evidence but are excluded from current content capacity
+accounting and cannot be claimed ahead of content. An in-flight provider call
+or WB write is not interrupted. A write already started retains mandatory GET
+readback priority and never creates a second POST.
 
 Current valid drafts are reused, in-flight jobs are not duplicated, stale results are quarantined, existing WB answers skip permanently, and published answers are never recreated. Downgrades immediately invalidate old-epoch pre-write claims without making preserved work terminal.
 
@@ -156,6 +200,19 @@ affected counts and readback. Re-applying an already consumed
 exact fingerprint returns a confirmed idempotent no-op only when every
 fingerprint-bound hold and audit row still exists and no provider-cost
 uncertainty remains. A different or stale fingerprint still fails closed.
+
+An opaque Node child exit after the provider boundary does not guess usage and
+does not discard the review. The runtime releases the active reservation,
+appends one maximum-reservation uncertainty hold for that exact attempt and
+stores only return code, byte counts and SHA-256 diagnostics; raw child output
+is not persisted. Attempt one becomes `retryable_error` with bounded backoff.
+A second opaque failure appends its own hold and becomes
+`needs_review/*_repeated_needs_review`. The contained result is returned to the
+worker coordinator, so an isolated, durably recorded failure does not make the
+whole oneshot exit. Existing quota, budget and other stronger pause reasons are
+never cleared by this path. Valid partial usage follows the existing failed-cost
+event path instead. Both legacy and per-attempt holds count against the same
+global and transition-run caps.
 
 A completed frozen `skipped` result is terminal for the immutable
 content/bundle identity. Policy-epoch reconciliation adopts the new epoch/run
@@ -174,6 +231,25 @@ are all read back. It has its own dry-run/fingerprint/apply/readback contract,
 changes one runtime-state row plus one audit event, and preserves provider,
 cost and WB evidence.
 
+Policy v3 makes tags, photo and video authoritative content-bearing evidence
+even when text/pros/cons are blank. The frozen v1.4.2 prefilter and all frozen
+hashes remain untouched. The versioned server boundary marks such an exact
+version as content-bearing, requires the existing media hard gate first, and
+adapts only real WB tag/media facts into the frozen input so the frozen
+classifier/writer/validator path can run. The adapter and source fields are
+stored in result audit. It does not route the row to the rating-only template
+and does not synthesize a publication outside the frozen guards.
+
+`wb_autoanswers_rolling_recovery_v1` repairs already affected unpublished
+content-bearing `empty_five_star` rows and every exact eligible legacy
+`node_process_exit_1` row in the selected transition run. Dry-run/readback are
+query-only. Apply requires the
+verified schema-v7 pre-change backup, exact run/count/fingerprint coverage,
+`BEGIN IMMEDIATE`, current version/hash, no publication/WB write, no cost event
+and no revision conflict. It archives the prior job projection, requeues the
+same processing identity under the unchanged frozen bundle, preserves every
+legacy hold/cost/audit row and appends recovery audit. Replay is an exact no-op.
+
 Policy reconciliation never sends an immutable publication aggregate back
 through regeneration. Existing `needs_review`/terminal evidence is adopted
 before regeneration checks; any other unpublished publication-bound
@@ -187,7 +263,7 @@ and zero unresolved provider-cost boundaries. The release appends one audit
 event and is idempotent. It does not clear `reservation_missing`,
 `budget_state_unknown`, quota or other provider/safety latches.
 
-The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. Queue progress is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`.
+The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. It also shows immutable initial membership, admitted-since-start totals by content class and rating, current exact total, last admission refresh/batch, current literal priority bucket and pause/error reason. Queue progress uses the full current admitted set and is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`. Ordinary budget/rate/backoff pauses render as the yellow `Работает · штатная пауза`, even if the one-shot service's last exit presentation is error; genuine lifecycle drift and fatal reasons remain red.
 
 Policy v3 classifies a current version as `content_bearing` when trimmed text, pros, cons, any non-empty tag, photo or video exists. Canonical media rows and `has_photo`/`has_video` are conservative positive evidence. Only a review with none of those surfaces and a rating 1–5 is `rating_only`; malformed or contradictory data is `indeterminate` and fails closed to review. True `rating_only` continues to use the unchanged owner-approved v2 template contract, costs `$0` and never invokes Node/OpenAI. The frozen v1.4.2 prefilter is not modified.
 
@@ -209,7 +285,7 @@ Exact publication evidence is committed before transport. Every HTTP success/err
 
 ## UI and API
 
-Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v3`; local list/filter/detail/settings expose the canonical classification, exact all/content progress counters and server-owned lifecycle. Settings POST requires `expected_policy_epoch`; automated apply additionally requires its preview. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
+Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v4`; local list/filter/detail/settings expose the canonical classification, rolling membership/current-priority evidence, exact all/content progress counters and server-owned lifecycle. Settings POST requires `expected_policy_epoch`; automated apply additionally requires its preview. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
 
 The first `Отзывы → Отзывы` screen reads SQLite immediately, defaults to 50 rows and uses server pagination/filters, including `Без ответа Wildberries`, server-side `Ответ системы` states and `content_bearing`/`rating_only`/`indeterminate` classification. Table system replies remain in a fixed-height dark internal scroller with a copy-only button. Missing replies have a compact neutral state. The obsolete independent `Исторический backlog` control is hidden and disabled; its legacy backend routes fail closed so it cannot bypass the capped preview-bound transition action.
 
@@ -255,11 +331,11 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 ## Deploy, verification and rollback
 
-Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing feature mode, `policy_epoch`, transition run, immutable membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries.
+Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. For an unapplied schema version it temporarily uses process-local force-off, creates a coherent current-version backup with `PRAGMA integrity_check=ok`, then applies DDL atomically. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries.
 
-Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v6 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v7 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
-After that current v6 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v6 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
+After that current v7 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v7 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
 
 Required local checks:
 
@@ -276,15 +352,23 @@ PYTHONPATH=. python3 -m unittest \
   apps.wb_autoanswers_readonly_test \
   apps.wb_autoanswers_release_safety_test \
   apps.wb_autoanswers_incident_regression_test \
-  apps.wb_autoanswers_ui_browser_test
+  apps.wb_autoanswers_ui_browser_test \
+  apps.wb_autoanswers_rolling_recovery_test
+PYTHONPATH=. python3 apps/business_data_maintenance_status_smoke.py
 python3 -m compileall -q apps packages
 ```
 
 Production acceptance preserves the already confirmed feature intent and exact
-transition run/cap. After deploy it reconciles any `budget_state_unknown`,
-resumes through the dedicated lifecycle, proves both component readbacks and a
-fresh scheduler tick, then observes ordinary queue movement without synthetic
-OpenAI/WB writes. Authenticated UI Flow covers Settings monitoring/ownership and
+transition run/cap. After deploy it runs exact query-only recovery planning,
+applies only fingerprint-bound candidates after verified backup proof, and
+reads back the recovery invariants. It reconciles any
+`budget_state_unknown`, resumes through the dedicated lifecycle, proves both
+component readbacks and a fresh scheduler tick, then observes ordinary queue
+movement without synthetic OpenAI/WB writes. It must show a feedback version
+first observed after the initial run start being automatically admitted,
+selected at the next safe claim ahead of lower/rating-only work, published
+through the normal policy path and confirmed by exact WB readback.
+Authenticated UI Flow covers Settings monitoring/ownership and
 the actual indicator in `Отзывы → Отзывы`, including a live `auto_all` mode
 that requires master/effective ON, Full selector, lifecycle
 `running/actual/matched`, both desired/actual/matched components and a fresh
@@ -294,7 +378,7 @@ still requires compact/narrow/dark render and zero 5xx/page/console errors. Any
 publication proof comes only from normal policy-allowed flow and mandatory WB
 readback.
 
-Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v6 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
+Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Code can roll back while additive tables remain inert. Restore the verified pre-v7 database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 
 No migration or acceptance step creates a replacement transition preview/run
 when the current run is valid. A new preview is an explicit future owner action.
