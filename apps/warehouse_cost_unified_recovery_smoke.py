@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+import threading
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +89,7 @@ def main() -> None:
         else:
             raise AssertionError("resume accepted drifted WB evidence")
     _assert_cny_ledger_payment_anchors()
+    _assert_audit_waits_for_sqlite_writer()
     print("warehouse_cost_unified_recovery_smoke: OK")
 
 
@@ -295,6 +298,68 @@ def _assert_cny_ledger_payment_anchors() -> None:
             raise AssertionError(
                 "CNY payment revision must stale the bank confirmation preview"
             )
+
+
+def _assert_audit_waits_for_sqlite_writer() -> None:
+    with TemporaryDirectory(prefix="warehouse-cost-audit-lock-") as temp:
+        runtime = RegistryUploadDbBackedRuntime(
+            runtime_dir=Path(temp) / "runtime"
+        )
+        plan = _plan()
+        _ensure_audit_schema(runtime)
+        _start_audit(runtime, plan)
+        writer_started = threading.Event()
+
+        def hold_unrelated_write() -> None:
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                writer_started.set()
+                time.sleep(0.15)
+                conn.commit()
+
+        writer = threading.Thread(target=hold_unrelated_write)
+        writer.start()
+        assert writer_started.wait(timeout=2)
+        elapsed_started = time.monotonic()
+        wait_ms = _checkpoint_audit(
+            runtime,
+            plan,
+            {"bank": {"idempotent": True}},
+        )
+        elapsed_ms = (time.monotonic() - elapsed_started) * 1000
+        writer.join(timeout=2)
+        assert not writer.is_alive()
+        assert wait_ms >= 100, wait_ms
+        assert elapsed_ms >= 100, elapsed_ms
+        assert (
+            _load_audit_record(runtime, FINGERPRINT) or {}
+        ).get("steps") == {"bank": {"idempotent": True}}
+        from apps import warehouse_cost_unified_recovery as recovery
+
+        blocker = sqlite3.connect(runtime.db_path)
+        blocker.execute("BEGIN IMMEDIATE")
+        prior_wait_ms = recovery.AUDIT_SQLITE_LOCK_WAIT_MS
+        recovery.AUDIT_SQLITE_LOCK_WAIT_MS = 1
+        try:
+            try:
+                _checkpoint_audit(
+                    runtime,
+                    plan,
+                    {"bank": {"idempotent": True}, "box": {}},
+                )
+            except RuntimeError as exc:
+                assert str(exc) == (
+                    "unified_recovery_sqlite_write_wait_expired"
+                )
+                assert "database is locked" not in str(exc)
+            else:
+                raise AssertionError(
+                    "audit checkpoint ignored bounded SQLite writer wait"
+                )
+        finally:
+            recovery.AUDIT_SQLITE_LOCK_WAIT_MS = prior_wait_ms
+            blocker.rollback()
+            blocker.close()
 
 
 def _payment_row(operation_number: str, amount: str) -> dict:
