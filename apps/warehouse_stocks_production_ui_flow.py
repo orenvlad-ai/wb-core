@@ -803,8 +803,15 @@ def _run_warehouse_ui_flow(
         supplier_detail_response = page.goto(supplier_detail_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(supplier_detail_response is not None and supplier_detail_response.status == 200, "supplier fee detail page status")
         page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
-        page.wait_for_function(
-            "document.querySelector('[data-bank-fee-total]').textContent.trim() !== '-'",
+        # The shipment shell renders a temporary 0,00 total before the
+        # financial-documents request completes.  Waiting only for a value
+        # different from "-" races that initial paint and can reject a
+        # correct production readback.  Pin the completed async state first.
+        expect(page.locator("#financialDocumentsMessage")).to_have_text(
+            "",
+            timeout=60_000,
+        )
+        page.locator("[data-financial-document-row]").first.wait_for(
             timeout=60_000,
         )
         parent_fee_text = page.locator("[data-bank-fee-total]").inner_text().strip()
