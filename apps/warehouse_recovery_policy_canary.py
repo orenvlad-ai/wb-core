@@ -71,6 +71,7 @@ def run(
         raise ValueError("exact canary plan fingerprint is required")
 
     registry.ensure_schema()
+    prior_canary_recovery = registry.release_failed_canary_pre_mutations()
     operation_count_before = _operation_count(runtime.db_path)
     noop = registry.plan_noop(
         mutation_kind="supplier_cost_queue_replay",
@@ -205,6 +206,7 @@ def run(
         **plan,
         "status": "complete",
         "would_change": False,
+        "prior_canary_recovery": prior_canary_recovery,
         "noop": noop,
         "bounded_replay": bounded,
         "wide_domain_publication": wide,
