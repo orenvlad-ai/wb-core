@@ -62,6 +62,12 @@ evidence; retention removes only lifecycle-authorized exact artifacts. Expired
 `retained` evidence advances to `released`; expired `rolled_back` evidence
 keeps its terminal audit state while its files and undo rows are released.
 Failed and quarantined evidence is never removed by ordinary retention.
+Files already present in the legacy `backups/` tree before the first durable
+policy operation are reported separately as the pre-policy baseline. They do
+not make a later canary look as though it created an orphan, but they remain
+visible in the API/UI; a new file or any baseline file touched after the
+activation timestamp is unclassified and fails closed. This classification is
+read-only and never adopts, deletes or rewrites a legacy backup.
 
 ## Routed production contours
 
@@ -115,7 +121,9 @@ The canonical production sequence is:
 The canary's only temporary row is in the recovery-owned canary table and is
 removed by the exact T1 rollback. T2 performs no business mutation. Success
 requires identical warehouse-domain digests and zero unclassified raw,
-sidecar, temp or orphan evidence. Before a new deployed-SHA attempt, the canary
+sidecar, temp or orphan evidence created after the durable policy activation
+boundary. The independently visible pre-policy baseline is not attributed to
+the canary. Before a new deployed-SHA attempt, the canary
 releases only older canary-scoped failures proven to have stopped before
 `mutation_running`; their deterministic owned temp/checkpoint paths and
 reservations are released, while any failed business mutation remains

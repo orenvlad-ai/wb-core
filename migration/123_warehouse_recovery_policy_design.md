@@ -92,6 +92,15 @@ deployed-SHA attempt releases only older canary-scoped failures whose durable
 transition history proves that business mutation never began; ordinary failed
 or quarantined operations remain fail-closed.
 
+The scanner uses the first durable recovery operation as the activation
+boundary for the pre-existing `backups/` tree. Known recovery-family files
+whose filesystem identity predates that boundary are exposed as a separate
+read-only pre-policy baseline, not attributed to a later canary. Any new file
+or baseline identity touched after activation remains unclassified and blocks
+acceptance. The classifier never adopts, removes or rewrites those legacy
+files, so acceptance proves zero policy-era leak without silently hiding the
+pre-existing inventory.
+
 ## Current call-site matrix
 
 `Current bytes` are lower bounds at the measured production size. A coherent

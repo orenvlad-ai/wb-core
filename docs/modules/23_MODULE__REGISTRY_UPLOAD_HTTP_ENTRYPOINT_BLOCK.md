@@ -951,5 +951,9 @@ readback for `warehouse_recovery_policy_v1`. It exposes only server-owned
 registry metadata: tier/scope, planned/actual/read bytes, lifecycle/heartbeat,
 next action, capacity reservations/watermarks, writer/timer state,
 orphan/quarantine evidence, artifacts and rollback expiry. The warehouse update
-tab renders the same payload and keeps failures visible. No browser control can
-select a tier, migration identifier, cleanup target or rollback action.
+tab renders the same payload and keeps failures visible. Orphan readback
+separates active policy-era findings from the visible read-only pre-policy
+backup baseline fixed by the first durable recovery operation; a new or
+subsequently touched unregistered recovery-family file remains actionable.
+No browser control can select a tier, migration identifier, cleanup target or
+rollback action.

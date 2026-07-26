@@ -1776,15 +1776,42 @@ class WarehouseRecoveryRegistry:
     def scan_orphans(self) -> dict[str, Any]:
         """Classify complete artifact families without deleting anything."""
 
-        registered = {
-            str(artifact.get("path") or ""): artifact
-            for operation in self.list_operations(limit=1000)
-            for artifact in operation.get("artifacts", [])
-            if artifact.get("path") and artifact.get("state") != "released"
-        }
+        policy_activation_at = ""
+        policy_activation_epoch = 0.0
+        registered: dict[str, dict[str, Any]] = {}
+        if self.db_path.is_file():
+            with _connect_readonly(self.db_path) as conn:
+                if _table_exists(conn, "sheet_vitrina_v1_recovery_operations"):
+                    row = conn.execute(
+                        """
+                        SELECT MIN(created_at)
+                        FROM sheet_vitrina_v1_recovery_operations
+                        """
+                    ).fetchone()
+                    policy_activation_at = str(row[0] if row else "")
+                if _table_exists(conn, "sheet_vitrina_v1_recovery_artifacts"):
+                    registered = {
+                        str(item["path"]): dict(item)
+                        for item in conn.execute(
+                            """
+                            SELECT *
+                            FROM sheet_vitrina_v1_recovery_artifacts
+                            WHERE state<>'released'
+                            """
+                        )
+                        if item["path"]
+                    }
+        if policy_activation_at:
+            try:
+                policy_activation_epoch = datetime.fromisoformat(
+                    policy_activation_at.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                policy_activation_epoch = 0.0
         files: list[dict[str, Any]] = []
         unclassified: list[str] = []
         foreign_non_target: list[str] = []
+        pre_policy_legacy: list[str] = []
         corrupt_registered: list[dict[str, Any]] = []
         roots = [self.recovery_root, self.runtime_dir / "backups"]
         legacy_managed: set[str] = set()
@@ -1817,14 +1844,50 @@ class WarehouseRecoveryRegistry:
                 if path.is_symlink() or not path.is_file():
                     continue
                 kind = _artifact_kind(path)
+                resolved_path = str(path.resolve())
+                path_stat = path.stat()
+                is_registered = (
+                    str(path) in registered or resolved_path in registered
+                )
+                is_pre_policy_legacy = (
+                    kind != "foreign"
+                    and root == backup_root
+                    and policy_activation_epoch > 0
+                    and path_stat.st_mtime <= policy_activation_epoch
+                )
+                is_legacy_manifest = (
+                    resolved_path in legacy_managed
+                    and (
+                        policy_activation_epoch <= 0
+                        or is_pre_policy_legacy
+                    )
+                )
+                is_managed = (
+                    is_registered
+                    or is_legacy_manifest
+                    or is_pre_policy_legacy
+                )
                 record = {
                     "path": str(path),
                     "kind": kind,
-                    "registered": str(path) in registered
-                    or str(path.resolve()) in legacy_managed,
-                    "size_bytes": path.stat().st_size,
+                    "registered": is_registered,
+                    "managed": is_managed,
+                    "classification": (
+                        "registered"
+                        if is_registered
+                        else "legacy_manifest"
+                        if is_legacy_manifest
+                        else "pre_policy_legacy"
+                        if is_pre_policy_legacy
+                        else "foreign_non_target"
+                        if kind == "foreign"
+                        else "unclassified"
+                    ),
+                    "size_bytes": path_stat.st_size,
                 }
-                registered_artifact = registered.get(str(path))
+                registered_artifact = registered.get(
+                    str(path), registered.get(resolved_path)
+                )
                 if registered_artifact is not None:
                     expected_size = int(
                         registered_artifact.get("size_bytes") or 0
@@ -1856,10 +1919,9 @@ class WarehouseRecoveryRegistry:
                 files.append(record)
                 if kind == "foreign":
                     foreign_non_target.append(str(path))
-                elif (
-                    str(path) not in registered
-                    and str(path.resolve()) not in legacy_managed
-                ):
+                elif is_pre_policy_legacy:
+                    pre_policy_legacy.append(str(path))
+                elif not is_managed:
                     unclassified.append(str(path))
         registry_without_bytes = sorted(
             path
@@ -1926,6 +1988,9 @@ class WarehouseRecoveryRegistry:
             "status": status,
             "read_only": True,
             "files": files,
+            "policy_activation_at": policy_activation_at,
+            "pre_policy_legacy_paths": sorted(set(pre_policy_legacy)),
+            "pre_policy_legacy_count": len(set(pre_policy_legacy)),
             "unclassified_paths": sorted(set(unclassified)),
             "foreign_non_target_paths": sorted(set(foreign_non_target)),
             "registry_without_bytes": registry_without_bytes,
@@ -2043,6 +2108,13 @@ class WarehouseRecoveryRegistry:
             "orphan_scanner": {
                 "status": orphan["status"],
                 "orphan_count": orphan["orphan_count"],
+                "policy_activation_at": orphan["policy_activation_at"],
+                "pre_policy_legacy_count": orphan[
+                    "pre_policy_legacy_count"
+                ],
+                "pre_policy_legacy_paths": orphan[
+                    "pre_policy_legacy_paths"
+                ][:20],
                 "unclassified_paths": orphan["unclassified_paths"][:20],
                 "registry_without_bytes": orphan["registry_without_bytes"][:20],
                 "stuck_operations": orphan["stuck_operations"][:20],

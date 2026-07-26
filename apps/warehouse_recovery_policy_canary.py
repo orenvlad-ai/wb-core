@@ -188,7 +188,7 @@ def run(
         item["path"]
         for item in orphan["files"]
         if item["kind"] in {"raw", "wal", "shm", "journal", "temp"}
-        and not item["registered"]
+        and not item["managed"]
     ]
     if orphan["status"] != "clean" or raw_leaks:
         raise RuntimeError(
@@ -197,6 +197,10 @@ def run(
                 {
                     "orphan_count": orphan["orphan_count"],
                     "raw_leaks": raw_leaks,
+                    "policy_activation_at": orphan["policy_activation_at"],
+                    "pre_policy_legacy_count": orphan[
+                        "pre_policy_legacy_count"
+                    ],
                     "unclassified_paths": orphan["unclassified_paths"],
                 },
                 sort_keys=True,
@@ -217,6 +221,10 @@ def run(
             "status": orphan["status"],
             "orphan_count": orphan["orphan_count"],
             "raw_leaks": raw_leaks,
+            "policy_activation_at": orphan["policy_activation_at"],
+            "pre_policy_legacy_count": orphan[
+                "pre_policy_legacy_count"
+            ],
         },
     }
 

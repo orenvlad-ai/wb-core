@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -315,6 +316,10 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
 
     def test_production_canary_is_business_safe_and_terminal(self) -> None:
         deployed_sha = "a" * 40
+        legacy_backup = self.runtime_dir / "backups" / "legacy.sqlite3"
+        legacy_backup.parent.mkdir(parents=True)
+        legacy_backup.write_bytes(b"pre-policy-backup")
+        os.utime(legacy_backup, (1, 1))
         before = self.registry.domain_content_digest()
         result = run_canary(
             runtime_dir=self.runtime_dir,
@@ -331,6 +336,10 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
             "retained",
         )
         self.assertEqual(result["orphan_scanner"]["status"], "clean")
+        self.assertEqual(
+            result["orphan_scanner"]["pre_policy_legacy_count"],
+            1,
+        )
         self.assertEqual(before["digest"], after["digest"])
 
     def test_t2_filtered_checkpoint_excludes_finance_raw(self) -> None:
@@ -893,6 +902,68 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
         report = self.registry.scan_orphans()
         self.assertIn(str(foreign.resolve()), report["foreign_non_target_paths"])
         self.assertNotIn(str(foreign.resolve()), report["unclassified_paths"])
+
+    def test_orphan_scanner_separates_pre_policy_backup_baseline(self) -> None:
+        activation = datetime(2026, 7, 26, 18, 43, 50, tzinfo=timezone.utc)
+        backups = self.runtime_dir / "backups"
+        backups.mkdir()
+        legacy = backups / "legacy-pre-policy.sqlite3"
+        legacy.write_bytes(b"legacy")
+        before_activation = (activation - timedelta(seconds=1)).timestamp()
+        os.utime(legacy, (before_activation, before_activation))
+        policy = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            clock=lambda: activation,
+        )
+        policy.prepare_t1(
+            mutation_kind="supplier_cost_queue_replay",
+            closure_kind="shipment",
+            plan_fingerprint="sha256:activation-boundary",
+            scope={"shipment_id": "baseline"},
+            before_images=[
+                {
+                    "table": "bounded_rows",
+                    "key": {"row_id": "target"},
+                    "before": {
+                        "row_id": "target",
+                        "value": "before",
+                        "untouched": "stable",
+                    },
+                    "after": {
+                        "row_id": "target",
+                        "value": "after",
+                        "untouched": "stable",
+                    },
+                }
+            ],
+        )
+        report = policy.scan_orphans()
+        self.assertEqual(report["status"], "clean")
+        self.assertEqual(
+            report["pre_policy_legacy_paths"],
+            [str(legacy.resolve())],
+        )
+        self.assertEqual(
+            report["policy_activation_at"],
+            "2026-07-26T18:43:50.000000Z",
+        )
+
+        new_or_touched = backups / "post-policy.sqlite3-wal"
+        new_or_touched.write_bytes(b"new")
+        after_activation = (activation + timedelta(seconds=1)).timestamp()
+        os.utime(new_or_touched, (after_activation, after_activation))
+        report = policy.scan_orphans()
+        self.assertEqual(report["status"], "attention_required")
+        self.assertIn(
+            str(new_or_touched.resolve()),
+            report["unclassified_paths"],
+        )
+
+        os.utime(legacy, (after_activation, after_activation))
+        report = policy.scan_orphans()
+        self.assertIn(str(legacy.resolve()), report["unclassified_paths"])
 
     def test_scanner_detects_registered_corruption(self) -> None:
         operation = self.registry.prepare_t2(
