@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -166,7 +166,9 @@ class RegistryUploadDbBackedRuntime:
             descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(descriptor)
             destination_created = True
-            with sqlite3.connect(self.db_path) as source_conn, sqlite3.connect(target) as target_conn:
+            with closing(sqlite3.connect(self.db_path)) as source_conn, closing(
+                sqlite3.connect(target)
+            ) as target_conn:
                 source_conn.backup(target_conn)
                 integrity_rows = target_conn.execute("PRAGMA integrity_check").fetchall()
                 integrity_check = [str(row[0]) for row in integrity_rows]
@@ -193,7 +195,12 @@ class RegistryUploadDbBackedRuntime:
         """Conservatively bound a coherent backup, including committed WAL pages."""
 
         main_size = self.db_path.stat().st_size
-        with sqlite3.connect(f"file:{self.db_path.resolve()}?mode=ro", uri=True) as conn:
+        with closing(
+            sqlite3.connect(
+                f"file:{self.db_path.resolve()}?mode=ro",
+                uri=True,
+            )
+        ) as conn:
             page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
             page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         wal_path = Path(str(self.db_path) + "-wal")

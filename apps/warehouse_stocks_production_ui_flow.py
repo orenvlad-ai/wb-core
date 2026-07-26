@@ -28,6 +28,7 @@ WAREHOUSES = (
 WAREHOUSE_UI_PATH = "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
 WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
+WAREHOUSE_RECOVERY_POLICY_PROFILE = "warehouse_recovery_policy_20260726"
 
 
 def _period_vitrina_url(base_url: str, *, date_to: str) -> str:
@@ -108,6 +109,7 @@ def _run_warehouse_ui_flow(
         "",
         WAREHOUSE_CHAIN_RECOVERY_PROFILE,
         WAREHOUSE_COST_TRANSPARENCY_PROFILE,
+        WAREHOUSE_RECOVERY_POLICY_PROFILE,
     }:
         raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
     documents = [
@@ -176,6 +178,7 @@ def _run_warehouse_ui_flow(
     warehouse_detail_by_key: dict[str, dict[str, Any]] = {}
     warehouse_action_theme: dict[str, Any] = {}
     incident_policy_evidence: dict[str, Any] = {}
+    recovery_policy_evidence: dict[str, Any] = {}
     business_acceptance: dict[str, Any] = {}
     settings_evidence: dict[str, Any] = {}
     supplier_evidence: dict[str, Any] = {}
@@ -285,6 +288,91 @@ def _run_warehouse_ui_flow(
             not warehouse_sync_post_requests,
             "opening update tab must not start a warehouse mutation",
         )
+        recovery_payload = _protected_json_get(
+            context,
+            normalized_base_url + "/v1/sheet-vitrina-v1/warehouses/recovery",
+            label="Warehouse recovery policy API",
+        )
+        page.wait_for_function(
+            """() => {
+                const node = document.querySelector("[data-warehouse-recovery-status]");
+                return node && !["Загрузка…", "Status недоступен"].includes(node.textContent.trim());
+            }""",
+            timeout=60_000,
+        )
+        recovery_operations = list(recovery_payload.get("operations") or [])
+        recovery_orphans = dict(recovery_payload.get("orphan_scanner") or {})
+        recovery_capacity = dict(recovery_payload.get("capacity") or {})
+        _assert(
+            recovery_payload.get("contract_name") == "warehouse_recovery_policy_v1",
+            "recovery API exposes the authoritative contract",
+        )
+        _assert(
+            {
+                "free_bytes",
+                "reserved_bytes",
+                "operational_reserve_bytes",
+                "available_after_reservations_bytes",
+                "degraded",
+                "hard_stop",
+            }.issubset(recovery_capacity),
+            "recovery API exposes capacity reservations and watermarks",
+        )
+        _assert(
+            isinstance(recovery_payload.get("writer"), dict)
+            and isinstance(recovery_payload.get("timer"), dict)
+            and isinstance(recovery_payload.get("tiers"), list),
+            "recovery API exposes writer, timer and deterministic tier table",
+        )
+        if normalized_acceptance_profile == WAREHOUSE_RECOVERY_POLICY_PROFILE:
+            terminal_by_tier = {
+                str(item.get("tier") or ""): str(item.get("lifecycle") or "")
+                for item in recovery_operations
+                if bool((item.get("scope") or {}).get("canary"))
+            }
+            _assert(
+                terminal_by_tier.get("T1") == "rolled_back"
+                and terminal_by_tier.get("T2") == "retained",
+                "production bounded and wide canaries are terminal",
+            )
+            _assert(
+                recovery_payload.get("status") == "ready"
+                and recovery_orphans.get("status") == "clean"
+                and int(recovery_orphans.get("orphan_count") or 0) == 0,
+                "production recovery status has no orphan or quarantine leak",
+            )
+        recovery_status_text = page.locator(
+            "[data-warehouse-recovery-status]"
+        ).inner_text().strip()
+        recovery_table_text = page.locator(
+            "[data-warehouse-recovery-operations]"
+        ).inner_text().strip()
+        _assert(
+            recovery_status_text in {"Policy ready", "Требуется внимание"}
+            and bool(recovery_table_text),
+            "recovery lifecycle renders visibly",
+        )
+        recovery_screenshot = evidence_dir / "warehouse_recovery_policy.png"
+        page.screenshot(path=str(recovery_screenshot), full_page=False)
+        screenshots.append(str(recovery_screenshot))
+        recovery_policy_evidence = {
+            "contract_name": recovery_payload.get("contract_name"),
+            "status": recovery_payload.get("status"),
+            "visible_status": recovery_status_text,
+            "operation_count": len(recovery_operations),
+            "tiers": sorted(
+                {str(item.get("tier") or "") for item in recovery_operations}
+            ),
+            "lifecycles": sorted(
+                {str(item.get("lifecycle") or "") for item in recovery_operations}
+            ),
+            "capacity": recovery_capacity,
+            "writer": recovery_payload.get("writer"),
+            "timer": recovery_payload.get("timer"),
+            "orphan_scanner": recovery_orphans,
+            "screenshot": str(recovery_screenshot),
+            "business_post_requests": list(protected_business_post_requests),
+        }
         warehouse_action_theme = _warehouse_action_theme_evidence(page)
 
         for warehouse_key, warehouse_name in WAREHOUSES:
@@ -660,6 +748,7 @@ def _run_warehouse_ui_flow(
                 "dependent_consumers": {"status": "not_in_local_structure_scope"},
                 "hourly_sync": dict(expected_readback.get("sync") or {}),
                 "warehouse_action_theme": warehouse_action_theme,
+                "recovery_policy": recovery_policy_evidence,
                 "historical_wb_cost_projection": dict(expected_readback.get("historical_wb_cost_projection") or {}),
                 "legacy_ff_transition": True,
                 "legacy_ff_reconciliation": {
@@ -1349,6 +1438,7 @@ def _run_warehouse_ui_flow(
         "official_wb_snapshot": wb_snapshot,
         "warehouse_action_theme": warehouse_action_theme,
         "incident_policy": incident_policy_evidence,
+        "recovery_policy": recovery_policy_evidence,
         "business_acceptance": business_acceptance,
         "acceptance_profile": normalized_acceptance_profile or None,
         "historical_wb_cost_projection": dict(expected_readback.get("historical_wb_cost_projection") or {}),

@@ -125,6 +125,12 @@ def apply_plan(
     *,
     backup_root: Path,
 ) -> dict[str, Any]:
+    raise ValueError(
+        "legacy supplier payment mutation is disabled; use the current "
+        "bounded supplier document/queue recovery contour"
+    )
+
+    # Historical implementation retained below as migration evidence only.
     if not plan.get("would_change"):
         return {
             **dict(plan),

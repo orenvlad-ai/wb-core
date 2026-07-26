@@ -1,5 +1,12 @@
 # wb-core
 
+Warehouse/cost recovery is governed by the centralized T0/T1/T2/T3 policy in
+[`docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md`](docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md):
+bounded writes use exact undo journals, wide publications use a Finance-raw-free
+domain checkpoint, and full-store backup is restricted to allowlisted
+schema/store migrations. The protected warehouse update UI exposes lifecycle,
+bytes, capacity, writer/timer, orphan/quarantine and rollback status.
+
 `wb-core` — target-core репозиторий для controlled sidecar migration проекта «Динамики и корреляции» на WB.
 
 Legacy-репозитории остаются рабочими, но считаются maintenance-only:

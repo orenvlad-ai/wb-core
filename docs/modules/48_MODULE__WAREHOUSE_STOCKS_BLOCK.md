@@ -278,3 +278,26 @@ The supplier exact-cost cell follows its canonical proof independently of the op
 Warehouse writers use the shared bounded SQLite recovery contract, while the functional sync alone preserves its documented 120-second process-local wait. It does not widen web or feature-worker budgets. A failed commit leaves the immutable last-good functional version active.
 
 A confirmed supplier bank-fee group changes only its exact shipment source revision. The existing targeted queue derives the shipment's exact matched SKU set and actually dependent warehouse stages/projections from canonical provenance. It never invokes Finance raw/history loading or a global/full-history rebuild. Publication still requires the existing immutable functional version, source/calculation fingerprints, conservation and certification gates; unrelated shipment/SKU/version digests remain invariant.
+
+## Unified recovery policy (authoritative override)
+
+Module 51 and migration 123 supersede every earlier recovery-volume statement
+in this document. In particular:
+
+- a true no-op is T0 and creates zero registry rows, files, reservations or
+  recovery reads;
+- targeted factual, cost, certification, archival, settings and economics
+  publication is T1 with exact before/after images and targeted rollback;
+- hourly/manual publication, emergency rebuild/rollback and opening
+  publication are T2 domain checkpoints that exclude Finance raw;
+- the initial `warehouse_functional_cutover_v1` remains T3 because it is an
+  explicitly allowlisted schema cutover; runtime business commands cannot
+  select T3.
+
+`warehouse-functional-backup` is therefore a T2 domain-checkpoint command, not
+a monolithic SQLite copy. Calculation-parameter saves no longer create or
+archive a daily full-store restore point. Supplier certification, emergency
+correction and functional economics no longer retain separate full backups.
+Capacity, CAS lifecycle, retention, artifact identity, orphan/quarantine and
+rollback status are read through the central registry and rendered on
+`Обновление и пересчёт`.

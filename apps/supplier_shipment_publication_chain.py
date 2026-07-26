@@ -283,6 +283,12 @@ def _save_job(
 
 
 def apply_chain(args: argparse.Namespace) -> dict[str, Any]:
+    raise ValueError(
+        "legacy supplier/publication chain apply is disabled; use the "
+        "recovery-policy targeted factual correction and economics contours"
+    )
+
+    # The previous full-backup chain remains below as migration evidence only.
     plan = build_chain_report(args)
     required = {
         "chain": (args.chain_fingerprint, plan["chain_fingerprint"]),

@@ -6,11 +6,10 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -31,6 +30,10 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    RecoveryState,
+    WarehouseRecoveryRegistry,
 )
 
 
@@ -82,7 +85,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not source_db.exists():
         raise ValueError("runtime SQLite database does not exist")
     source_inode = source_db.stat().st_ino
-    integrity_before = _integrity_check(source_db)
+    integrity_before = "not_applicable_domain_checkpoint"
     source_digest = _tables_digest(source_db, SOURCE_TABLES)
     protected_digest = _tables_digest(source_db, PROTECTED_TABLES)
     legacy_digest = _legacy_digest(source_db)
@@ -91,7 +94,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="canonical-cost-candidate-") as temp_dir:
         candidate_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir) / "runtime")
         candidate_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-        _sqlite_backup(source_db, candidate_runtime.db_path)
+        WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=source_db,
+        ).write_disposable_domain_checkpoint(
+            candidate_runtime.db_path,
+            purpose="canonical_cost_backfill_candidate",
+        )
         engine = CanonicalCostEngine(runtime=candidate_runtime)
         operation_date_audit: dict[str, Any] | None = None
         try:
@@ -262,49 +271,82 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if not str(args.backup_dir or "").strip():
             raise ValueError("apply requires an explicit --backup-dir")
         if not payload["would_change"]:
+            payload["recovery_policy"] = WarehouseRecoveryRegistry(
+                runtime_dir=runtime.runtime_dir,
+                db_path=source_db,
+            ).plan_noop(
+                mutation_kind="canonical_cost_wide_publication",
+                closure_kind="warehouse_domain",
+                plan_fingerprint=fingerprint,
+                scope={"date_from": date_from, "date_to": date_to},
+            )
             payload["post_run"] = {"changed": 0, "idempotent": True}
             return payload
-        backup_path = Path(args.backup_dir) / (
-            f"{source_db.stem}.canonical-cost-backup-"
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=source_db,
         )
-        backup = _sqlite_backup(source_db, backup_path)
+        recovery = recovery_registry.prepare_t2(
+            mutation_kind="canonical_cost_wide_publication",
+            plan_fingerprint=fingerprint,
+            scope={"date_from": date_from, "date_to": date_to},
+            source_digest=source_digest,
+            non_target_digest=protected_digest,
+            source_watermarks={
+                "date_from": date_from,
+                "date_to": date_to,
+                "legacy_pre_cutover_digest": legacy_digest,
+                "target_before_digest": target_before,
+            },
+            schema_revision="canonical_cost_engine_backfill_v1",
+        )
+        if recovery["lifecycle"] == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                recovery["operation_id"],
+                expected_source_digest=source_digest,
+            )
         materialized = _read_canonical_tables(candidate_runtime.db_path)
-        with closing(sqlite3.connect(source_db, timeout=60)) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                if source_digest != _tables_digest_conn(conn, SOURCE_TABLES):
-                    raise ValueError("optimistic authoritative-source digest drift")
-                if protected_digest != _tables_digest_conn(conn, PROTECTED_TABLES):
-                    raise ValueError("optimistic protected-table digest drift")
-                if legacy_digest != _legacy_digest_conn(conn):
-                    raise ValueError("optimistic pre-cutover digest drift")
-                if target_before != _canonical_digest_conn(
-                    conn, date_from=date_from, date_to=date_to
-                ):
-                    raise ValueError("optimistic target digest drift")
-                ensure_canonical_cost_schema(conn)
-                _replace_canonical_tables(conn, materialized)
-                if first_target != _canonical_digest_conn(
-                    conn, date_from=date_from, date_to=date_to
-                ):
-                    raise ValueError("candidate target digest mismatch in transaction")
-                if source_digest != _tables_digest_conn(conn, SOURCE_TABLES):
-                    raise ValueError("authoritative source changed in transaction")
-                if protected_digest != _tables_digest_conn(conn, PROTECTED_TABLES):
-                    raise ValueError("protected target changed in transaction")
-                if legacy_digest != _legacy_digest_conn(conn):
-                    raise ValueError("pre-cutover rows changed in transaction")
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        try:
+            with closing(sqlite3.connect(source_db, timeout=60)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if source_digest != _tables_digest_conn(conn, SOURCE_TABLES):
+                        raise ValueError("optimistic authoritative-source digest drift")
+                    if protected_digest != _tables_digest_conn(conn, PROTECTED_TABLES):
+                        raise ValueError("optimistic protected-table digest drift")
+                    if legacy_digest != _legacy_digest_conn(conn):
+                        raise ValueError("optimistic pre-cutover digest drift")
+                    if target_before != _canonical_digest_conn(
+                        conn, date_from=date_from, date_to=date_to
+                    ):
+                        raise ValueError("optimistic target digest drift")
+                    ensure_canonical_cost_schema(conn)
+                    _replace_canonical_tables(conn, materialized)
+                    if first_target != _canonical_digest_conn(
+                        conn, date_from=date_from, date_to=date_to
+                    ):
+                        raise ValueError("candidate target digest mismatch in transaction")
+                    if source_digest != _tables_digest_conn(conn, SOURCE_TABLES):
+                        raise ValueError("authoritative source changed in transaction")
+                    if protected_digest != _tables_digest_conn(conn, PROTECTED_TABLES):
+                        raise ValueError("protected target changed in transaction")
+                    if legacy_digest != _legacy_digest_conn(conn):
+                        raise ValueError("pre-cutover rows changed in transaction")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                recovery["operation_id"],
+                error=str(exc),
+                next_action="resume_or_rollback_canonical_cost_backfill",
+            )
+            raise
         try:
             if source_db.stat().st_ino != source_inode:
                 raise ValueError("live SQLite inode changed; in-place apply contract violated")
-            if _integrity_check(source_db) != "ok":
-                raise ValueError("post-apply integrity check failed")
             post = CanonicalCostEngine(runtime=runtime).rebuild(
                 date_from=date_from, date_to=date_to
             )
@@ -324,17 +366,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             post_continuity = _layer_cost_continuity(source_db)
             if post_continuity["status"] != "ok":
                 raise ValueError("post-apply layer-level cost continuity mismatch")
-        except Exception:
-            _restore_backup_in_place(backup_path, source_db)
-            if source_db.stat().st_ino != source_inode:
-                raise ValueError(
-                    "post-apply rollback could not restore the original SQLite inode"
-                )
-            if _integrity_check(source_db) != "ok":
-                raise ValueError("post-apply rollback integrity check failed")
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                recovery["operation_id"],
+                error=str(exc),
+                next_action="rollback_canonical_cost_domain_checkpoint",
+            )
+            recovery_registry.rollback_t2(
+                recovery["operation_id"],
+                reason="canonical cost post-apply readback failed",
+            )
             raise
+        recovery = recovery_registry.retain(
+            recovery["operation_id"],
+            after_digest=str(first_target),
+            non_target_digest=protected_digest,
+        )
         payload["applied"] = True
-        payload["backup"] = backup
+        payload["backup"] = recovery
+        payload["recovery_policy"] = recovery
         payload["post_run"] = {
             "changed": 0,
             "idempotent": True,
@@ -674,46 +724,6 @@ def _replace_canonical_tables(
         conn.executemany(
             f'INSERT INTO "{table}"({column_sql}) VALUES({placeholders})', rows
         )
-
-
-def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(source)) as source_conn, closing(sqlite3.connect(destination)) as dest_conn:
-        source_conn.backup(dest_conn)
-        dest_conn.commit()
-    if _integrity_check(destination) != "ok":
-        destination.unlink(missing_ok=True)
-        raise ValueError("coherent SQLite backup integrity_check failed")
-    destination.chmod(0o600)
-    if destination.stat().st_mode & 0o077:
-        raise ValueError("backup mode must be 0600")
-    return {
-        "filename": destination.name,
-        "sha256": _file_hash(destination),
-        "size_bytes": destination.stat().st_size,
-        "mode": "0600",
-        "integrity_check": "ok",
-    }
-
-
-def _restore_backup_in_place(backup: Path, destination: Path) -> None:
-    """Restore through SQLite's online backup API without replacing the live inode."""
-    with closing(sqlite3.connect(backup)) as source_conn, closing(
-        sqlite3.connect(destination, timeout=60)
-    ) as destination_conn:
-        # sqlite3_backup owns the destination transaction internally and takes
-        # the required write lock; wrapping it in BEGIN makes SQLite reject the
-        # destination as already in use.
-        source_conn.backup(destination_conn)
-        destination_conn.commit()
-
-
-def _integrity_check(db_path: Path) -> str:
-    with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)) as conn:
-        value = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    if value.lower() != "ok":
-        raise ValueError(f"SQLite integrity_check failed: {value}")
-    return "ok"
 
 
 def _canonical_digest(db_path: Path, *, date_from: str, date_to: str) -> str:

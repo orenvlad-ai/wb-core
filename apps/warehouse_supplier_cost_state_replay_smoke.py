@@ -8,7 +8,6 @@ import sqlite3
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +24,9 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _watermark,
     ensure_warehouse_functional_schema,
     load_supplier_line_cost_breakdown,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
 )
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     WarehouseSupplierCostStateReplayError,
@@ -179,37 +181,23 @@ def main() -> int:
             )
             conn.commit()
         plan = build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
-        original_backup = runtime.backup_database
-        invalid_backup_paths: list[Path] = []
-
-        def invalid_backup(destination: Path) -> dict[str, object]:
-            evidence = original_backup(destination)
-            invalid_backup_paths.append(Path(str(evidence["path"])))
-            return {**evidence, "integrity_check": "failed-smoke"}
-
-        runtime.backup_database = invalid_backup  # type: ignore[method-assign]
-        try:
-            apply_supplier_cost_state_replay_plan(
+        with mock.patch.object(
+            runtime,
+            "backup_database",
+            side_effect=AssertionError("bounded replay reached full backup"),
+        ) as full_backup:
+            result = apply_supplier_cost_state_replay_plan(
                 runtime,
                 plan,
                 confirm_fingerprint=plan["plan_fingerprint"],
                 backup_dir=root / "backups",
             )
-        except WarehouseSupplierCostStateReplayError as exc:
-            _assert("integrity_check" in str(exc), "invalid backup fails closed")
-        else:
-            raise AssertionError("invalid backup unexpectedly reached apply")
-        finally:
-            runtime.backup_database = original_backup  # type: ignore[method-assign]
+            full_backup.assert_not_called()
         _assert(
-            invalid_backup_paths and not invalid_backup_paths[0].exists(),
-            "failed-integrity backup is removed",
-        )
-        result = apply_supplier_cost_state_replay_plan(
-            runtime,
-            plan,
-            confirm_fingerprint=plan["plan_fingerprint"],
-            backup_dir=root / "backups",
+            result["recovery_policy"]["tier"] == "T1"
+            and result["recovery_policy"]["lifecycle"] == "retained"
+            and result["backup"]["copy_bytes"] == 0,
+            "bounded replay uses the retained exact undo journal",
         )
         _assert(result["database_written"] is True, "first apply writes derived correction")
         _assert(result["primary_source_digest_before"] == result["primary_source_digest_after"], "primary source digest is conserved")
@@ -225,28 +213,18 @@ def main() -> int:
         _assert(exact_repeat["idempotent"] is True, "exact repeated apply is a no-op")
         _assert(exact_repeat["database_written"] is False, "no-op creates no second backup/write")
 
-        with mock.patch(
-            "packages.application.warehouse_supplier_cost_state_replay.shutil.disk_usage",
-            return_value=SimpleNamespace(free=0),
-        ), mock.patch.object(runtime, "backup_database") as no_space_backup:
-            try:
-                rollback_supplier_cost_state_replay(
-                    runtime,
-                    replay_plan_fingerprint=plan["plan_fingerprint"],
-                    reason="must fail before backup",
-                    backup_dir=root / "backups",
-                )
-            except WarehouseSupplierCostStateReplayError as exc:
-                _assert("free space" in str(exc), "rollback disk preflight fails closed")
-            else:
-                raise AssertionError("rollback ignored insufficient backup headroom")
-            no_space_backup.assert_not_called()
-        rollback = rollback_supplier_cost_state_replay(
+        with mock.patch.object(
             runtime,
-            replay_plan_fingerprint=plan["plan_fingerprint"],
-            reason="smoke rollback proof",
-            backup_dir=root / "backups",
-        )
+            "backup_database",
+            side_effect=AssertionError("bounded rollback reached full backup"),
+        ) as full_backup:
+            rollback = rollback_supplier_cost_state_replay(
+                runtime,
+                replay_plan_fingerprint=plan["plan_fingerprint"],
+                reason="smoke rollback proof",
+                backup_dir=root / "backups",
+            )
+            full_backup.assert_not_called()
         _assert(rollback["database_written"] is True, "rollback appends a tombstone")
         repeated_rollback = rollback_supplier_cost_state_replay(
             runtime,
@@ -353,12 +331,10 @@ def main() -> int:
             runtime,
             shipment_ids=["26GN390"],
         )
-        original_backup = runtime.backup_database
-        failed_backup_path: list[Path] = []
+        original_begin_mutation = WarehouseRecoveryRegistry.begin_mutation
 
-        def backup_then_drift(destination: Path) -> dict[str, object]:
-            evidence = original_backup(destination)
-            failed_backup_path.append(Path(str(evidence["path"])))
+        def begin_then_drift(self, operation_id: str, **kwargs):
+            evidence = original_begin_mutation(self, operation_id, **kwargs)
             with sqlite3.connect(runtime.db_path) as conn:
                 conn.execute(
                     """UPDATE sheet_vitrina_v1_cny_ledger_operations
@@ -368,24 +344,25 @@ def main() -> int:
                 conn.commit()
             return evidence
 
-        runtime.backup_database = backup_then_drift  # type: ignore[method-assign]
-        try:
-            apply_supplier_cost_state_replay_plan(
-                runtime,
-                conflict_plan,
-                confirm_fingerprint=conflict_plan["plan_fingerprint"],
-                backup_dir=root / "backups",
-            )
-        except WarehouseSupplierCostStateReplayError as exc:
-            _assert(
-                "legacy_target_source_revision_after_version" in str(exc),
-                "optimistic source conflict fails closed against immutable proof",
-            )
-        else:
-            raise AssertionError("optimistic source conflict unexpectedly committed")
-        finally:
-            runtime.backup_database = original_backup  # type: ignore[method-assign]
-        _assert(failed_backup_path and not failed_backup_path[0].exists(), "failed apply backup is removed")
+        with mock.patch.object(
+            WarehouseRecoveryRegistry,
+            "begin_mutation",
+            new=begin_then_drift,
+        ):
+            try:
+                apply_supplier_cost_state_replay_plan(
+                    runtime,
+                    conflict_plan,
+                    confirm_fingerprint=conflict_plan["plan_fingerprint"],
+                    backup_dir=root / "backups",
+                )
+            except WarehouseSupplierCostStateReplayError as exc:
+                _assert(
+                    "legacy_target_source_revision_after_version" in str(exc),
+                    "optimistic source conflict fails closed against immutable proof",
+                )
+            else:
+                raise AssertionError("optimistic source conflict unexpectedly committed")
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations

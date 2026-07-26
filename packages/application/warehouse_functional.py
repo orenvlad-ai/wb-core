@@ -48,6 +48,12 @@ from packages.application.warehouse_stocks import (
     _normalized_wb_record,
     _validated_wb_goods,
 )
+from packages.application.warehouse_recovery_policy import (
+    BeforeImageQuery,
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+    capture_before_images,
+)
 
 
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
@@ -225,7 +231,7 @@ def enqueue_warehouse_targeted_recalculation(
     affected_nm_ids: Iterable[int],
     requested_at: str | None = None,
 ) -> dict[str, Any]:
-    """Coalesce one source revision for the next bounded atomic publication."""
+    """Coalesce one source revision under a bounded recovery operation."""
 
     stable_id = str(stable_source_id or "").strip()
     revision = str(source_revision or "").strip()
@@ -238,7 +244,225 @@ def enqueue_warehouse_targeted_recalculation(
         "whrq",
         {"stable_source_id": stable_id, "source_revision": revision},
     )
+    if stable_id.startswith(
+        ("supplier_shipment:", "cny_document:", "supplier_costs:")
+    ):
+        mutation_kind = "supplier_document_confirmation"
+        closure_kind = "document"
+    elif stable_id.startswith("wb_supply:"):
+        mutation_kind = "wb_supplies_refresh"
+        closure_kind = "shipment"
+    else:
+        mutation_kind = "targeted_warehouse_publication"
+        closure_kind = "sku_date"
+    plan_fingerprint = _fingerprint(
+        {
+            "mutation_kind": mutation_kind,
+            "stable_source_id": stable_id,
+            "source_revision": revision,
+            "effective_date": business_date,
+            "affected_nm_ids": nm_ids,
+        }
+    )
     runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+    with _connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        conn.commit()
+    registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    before_images, read_bytes = capture_before_images(
+        runtime.db_path,
+        [
+            BeforeImageQuery(
+                table="sheet_vitrina_v1_warehouse_targeted_recalc_queue",
+                query=(
+                    "SELECT * FROM "
+                    "sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                    "WHERE stable_source_id=? OR queue_id=? ORDER BY queue_id"
+                ),
+                parameters=(stable_id, queue_id),
+                key_columns=("queue_id",),
+            )
+        ],
+    )
+    noop_row = _targeted_enqueue_noop_row(
+        before_images=before_images,
+        source_revision=revision,
+        effective_date=business_date,
+        affected_nm_ids=nm_ids,
+    )
+    if noop_row is not None:
+        recovery = registry.plan_noop(
+            mutation_kind=mutation_kind,
+            closure_kind=closure_kind,
+            plan_fingerprint=plan_fingerprint,
+            scope={
+                "stable_source_id": stable_id,
+                "source_revision": revision,
+                "effective_date": business_date,
+                "affected_nm_ids": nm_ids,
+                "queue_id": str(noop_row["queue_id"]),
+            },
+        )
+        return {**noop_row, "recovery_policy": recovery}
+    if not any(
+        str((image.get("key") or {}).get("queue_id") or "") == queue_id
+        for image in before_images
+    ):
+        before_images.append(
+            {
+                "table": "sheet_vitrina_v1_warehouse_targeted_recalc_queue",
+                "key": {"queue_id": queue_id},
+                "before": None,
+                "after": {
+                    "queue_id": queue_id,
+                    "stable_source_id": stable_id,
+                    "source_revision": revision,
+                    "effective_date": business_date,
+                    "affected_nm_ids_json": _json(nm_ids),
+                    "status": "queued",
+                },
+            }
+        )
+    recovery = registry.prepare_t1(
+        mutation_kind=mutation_kind,
+        closure_kind=closure_kind,
+        plan_fingerprint=plan_fingerprint,
+        scope={
+            "stable_source_id": stable_id,
+            "source_revision": revision,
+            "effective_date": business_date,
+            "affected_nm_ids": nm_ids,
+            "queue_id": queue_id,
+        },
+        before_images=before_images,
+        expected_after_images=[
+            {
+                "table": "sheet_vitrina_v1_warehouse_targeted_recalc_queue",
+                "key": {"queue_id": queue_id},
+                "stable_source_id": stable_id,
+                "source_revision": revision,
+                "effective_date": business_date,
+                "affected_nm_ids": nm_ids,
+            }
+        ],
+        source_digest=revision,
+        read_bytes=read_bytes,
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=revision,
+        )
+    try:
+        result = _enqueue_warehouse_targeted_recalculation_unprotected(
+            runtime=runtime,
+            stable_source_id=stable_id,
+            source_revision=revision,
+            effective_date=business_date,
+            affected_nm_ids=nm_ids,
+            requested_at=now,
+        )
+    except Exception as exc:
+        registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error=str(exc),
+            next_action="resume_or_rollback_targeted_recalculation_enqueue",
+        )
+        raise
+    recovery = registry.retain(
+        str(recovery["operation_id"]),
+        after_digest=_fingerprint({"queue": dict(result)}),
+    )
+    return {**result, "recovery_policy": recovery}
+
+
+def _targeted_enqueue_noop_row(
+    *,
+    before_images: Iterable[Mapping[str, Any]],
+    source_revision: str,
+    effective_date: str,
+    affected_nm_ids: Iterable[int],
+) -> dict[str, Any] | None:
+    """Return the unchanged queue row when enqueue semantics are already met."""
+
+    rows = [
+        dict(image["before"])
+        for image in before_images
+        if isinstance(image.get("before"), Mapping)
+    ]
+    queued = sorted(
+        (row for row in rows if str(row.get("status") or "") == "queued"),
+        key=lambda row: (
+            str(row.get("requested_at") or ""),
+            str(row.get("queue_id") or ""),
+        ),
+    )
+    requested_nm_ids = {int(item) for item in affected_nm_ids if int(item) > 0}
+    if queued:
+        selected = queued[0]
+        current_nm_ids = {
+            int(item)
+            for item in _loads(selected.get("affected_nm_ids_json"), [])
+            if int(item) > 0
+        }
+        if (
+            str(selected.get("source_revision") or "") == str(source_revision)
+            and str(selected.get("effective_date") or "") <= str(effective_date)
+            and requested_nm_ids <= current_nm_ids
+        ):
+            return selected
+        return None
+    exact = sorted(
+        (
+            row
+            for row in rows
+            if str(row.get("source_revision") or "") == str(source_revision)
+        ),
+        key=lambda row: (
+            str(row.get("requested_at") or ""),
+            str(row.get("queue_id") or ""),
+        ),
+    )
+    if not exact:
+        return None
+    selected = exact[0]
+    current_nm_ids = {
+        int(item)
+        for item in _loads(selected.get("affected_nm_ids_json"), [])
+        if int(item) > 0
+    }
+    if (
+        str(selected.get("status") or "") == "complete"
+        and str(selected.get("effective_date") or "") <= str(effective_date)
+        and requested_nm_ids == current_nm_ids
+    ):
+        return selected
+    return None
+
+
+def _enqueue_warehouse_targeted_recalculation_unprotected(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    stable_source_id: str,
+    source_revision: str,
+    effective_date: str,
+    affected_nm_ids: Iterable[int],
+    requested_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist the exact queue mutation after the public T1 guard is durable."""
+
+    stable_id = str(stable_source_id)
+    revision = str(source_revision)
+    business_date = str(effective_date)
+    nm_ids = sorted({int(item) for item in affected_nm_ids if int(item) > 0})
+    now = requested_at or _now()
+    queue_id = _stable_id(
+        "whrq",
+        {"stable_source_id": stable_id, "source_revision": revision},
+    )
     with _connect(runtime.db_path) as conn:
         ensure_warehouse_functional_schema(conn)
         queued = conn.execute(
@@ -3620,27 +3844,121 @@ class WarehouseFunctionalBlock:
                     connection=correction_conn,
                     recovery_end_date=recovery_end_date,
                 )
-        backup = None
-        if kind in {"functional_cutover", "emergency_rebuild"}:
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
+        )
+        recovery: dict[str, Any] | None = None
+        if kind == "functional_cutover":
             if backup_dir is None or not Path(backup_dir).is_absolute():
                 raise WarehouseFunctionalError(
                     f"absolute backup_dir is required for {kind.replace('_', ' ')}"
                 )
             Path(backup_dir).mkdir(parents=True, exist_ok=True)
             timestamp = self.timestamp_factory().replace(":", "").replace("-", "")
-            if kind == "functional_cutover":
-                prefix = FUNCTIONAL_CUTOVER_ID
-                destination = Path(backup_dir) / f"{prefix}-{timestamp}.sqlite3"
-            else:
-                prefix = f"warehouse-functional-emergency-{fingerprint.removeprefix('sha256:')[:16]}"
-                destination = Path(backup_dir) / f"{prefix}.sqlite3"
-            if kind == "emergency_rebuild" and destination.exists():
-                destination = Path(backup_dir) / f"{prefix}-{timestamp}.sqlite3"
-            backup = self.runtime.backup_database(destination)
-            destination.chmod(0o600)
-            if str(backup.get("integrity_check") or "").lower() != "ok":
-                _discard_uncommitted_backup(backup)
-                raise WarehouseFunctionalError(f"pre-{kind} backup integrity_check is not ok")
+            destination = (
+                Path(backup_dir) / f"{FUNCTIONAL_CUTOVER_ID}-{timestamp}.sqlite3"
+            )
+            recovery = recovery_registry.prepare_t3(
+                runtime=self.runtime,
+                mutation_kind="schema_migration",
+                migration_id=FUNCTIONAL_CUTOVER_ID,
+                plan_fingerprint=fingerprint,
+                scope={
+                    "cutover_id": FUNCTIONAL_CUTOVER_ID,
+                    "effective_date": planned_effective_date,
+                },
+                destination=destination,
+                source_digest=current_digest,
+            )
+        elif kind in {"emergency_rebuild", "hourly_wb_sync"}:
+            recovery = recovery_registry.prepare_t2(
+                mutation_kind=(
+                    "emergency_warehouse_rebuild"
+                    if kind == "emergency_rebuild"
+                    else "hourly_warehouse_sync"
+                ),
+                plan_fingerprint=fingerprint,
+                scope={
+                    "effective_date": planned_effective_date,
+                    "base_active_version_id": str(
+                        normalized.get("base_active_version_id") or ""
+                    ),
+                },
+                source_digest=current_digest,
+                non_target_digest=str(
+                    (normalized.get("invariants") or {}).get(
+                        "non_target_digest"
+                    )
+                    or ""
+                ),
+                source_watermarks={
+                    "local_source_digest": current_digest,
+                    "wb_supply_source_digest": str(
+                        normalized.get("wb_supply_source_digest") or ""
+                    ),
+                    "base_active_version_id": str(
+                        normalized.get("base_active_version_id") or ""
+                    ),
+                    "effective_date": planned_effective_date,
+                },
+                schema_revision=CONTRACT_VERSION,
+            )
+        elif kind == "targeted_recovery":
+            target_scope = dict(normalized.get("target_scope") or {})
+            target_nm_ids = sorted(
+                {
+                    int(value)
+                    for value in target_scope.get("affected_nm_ids") or []
+                }
+            )
+            target_queries = [
+                BeforeImageQuery(
+                    table="sheet_vitrina_v1_warehouse_functional_active",
+                    query=(
+                        "SELECT * FROM "
+                        "sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                    ),
+                    key_columns=("slot",),
+                )
+            ]
+            if target_nm_ids:
+                placeholders = ",".join("?" for _ in target_nm_ids)
+                target_queries.append(
+                    BeforeImageQuery(
+                        table="sheet_vitrina_v1_warehouse_functional_balances",
+                        query=(
+                            "SELECT balance.* FROM "
+                            "sheet_vitrina_v1_warehouse_functional_active active "
+                            "JOIN sheet_vitrina_v1_warehouse_functional_balances balance "
+                            "ON balance.version_id=active.version_id "
+                            f"WHERE active.slot=1 AND balance.nm_id IN ({placeholders}) "
+                            "ORDER BY balance.version_id,balance.warehouse_key,balance.nm_id"
+                        ),
+                        parameters=tuple(target_nm_ids),
+                        key_columns=("version_id", "warehouse_key", "nm_id"),
+                    )
+                )
+            recovery = recovery_registry.prepare_t1_from_queries(
+                mutation_kind="targeted_warehouse_publication",
+                closure_kind="sku_date",
+                plan_fingerprint=fingerprint,
+                scope=target_scope,
+                queries=target_queries,
+                source_digest=current_digest,
+                non_target_digest=str(
+                    (normalized.get("invariants") or {}).get(
+                        "non_target_digest"
+                    )
+                    or ""
+                ),
+            )
+        if recovery is not None and recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=current_digest,
+            )
+        backup = recovery
         now = self.timestamp_factory()
         publication_effective_at = now if kind == "functional_cutover" else str(normalized["captured_at"])
         version_id = "whfv_" + fingerprint.removeprefix("sha256:")[:24]
@@ -4008,9 +4326,32 @@ class WarehouseFunctionalBlock:
                 conn.commit()
             except Exception:
                 conn.rollback()
-                _discard_uncommitted_backup(backup)
+                if recovery is not None:
+                    recovery_registry.fail_recoverable(
+                        str(recovery["operation_id"]),
+                        error=f"{kind} transaction failed",
+                        next_action=f"resume_or_rollback_{kind}",
+                    )
                 raise
-        return {**self.readback(), "idempotent": False, "backup": backup}
+        readback = self.readback()
+        if recovery is not None:
+            recovery = recovery_registry.retain(
+                str(recovery["operation_id"]),
+                after_digest=str(
+                    (readback.get("active_version") or {}).get(
+                        "plan_fingerprint"
+                    )
+                    or fingerprint
+                ),
+                non_target_digest=str(
+                    (normalized.get("invariants") or {}).get(
+                        "non_target_digest"
+                    )
+                    or ""
+                ),
+            )
+            backup = recovery
+        return {**readback, "idempotent": False, "backup": backup, "recovery_policy": recovery}
 
     def rollback_functional_cutover(
         self,
@@ -4052,17 +4393,42 @@ class WarehouseFunctionalBlock:
             raise WarehouseFunctionalError(
                 "active archival estimate must be rolled back before functional cutover rollback"
             )
-        destination_dir = Path(backup_dir)
-        if not destination_dir.is_absolute():
-            raise WarehouseFunctionalError("absolute backup_dir is required for rollback")
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        destination = destination_dir / (
-            f"{FUNCTIONAL_CUTOVER_ID}-rollback-{self.timestamp_factory().replace(':', '').replace('-', '')}.sqlite3"
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
         )
-        backup = self.runtime.backup_database(destination)
-        destination.chmod(0o600)
-        if str(backup.get("integrity_check") or "").lower() != "ok":
-            raise WarehouseFunctionalError("pre-rollback backup integrity_check is not ok")
+        rollback_fingerprint = "sha256:" + hashlib.sha256(
+            (
+                f"functional-cutover-rollback:{confirm_fingerprint}:"
+                f"{cutover['cutover_at']}"
+            ).encode("utf-8")
+        ).hexdigest()
+        recovery = recovery_registry.prepare_t2(
+            mutation_kind="emergency_warehouse_rebuild",
+            plan_fingerprint=rollback_fingerprint,
+            scope={
+                "action": "functional_cutover_rollback",
+                "cutover_id": FUNCTIONAL_CUTOVER_ID,
+            },
+            source_digest=str(confirm_fingerprint),
+            non_target_digest="",
+            source_watermarks={
+                "cutover_fingerprint": str(confirm_fingerprint),
+                "cutover_at": str(cutover["cutover_at"]),
+                "active_version_id": str(
+                    (self.readback().get("active_version") or {}).get(
+                        "version_id"
+                    )
+                    or ""
+                ),
+            },
+            schema_revision=CONTRACT_VERSION,
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=str(confirm_fingerprint),
+            )
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -4145,13 +4511,24 @@ class WarehouseFunctionalBlock:
                 conn.commit()
             except Exception:
                 conn.rollback()
+                recovery_registry.fail_recoverable(
+                    str(recovery["operation_id"]),
+                    error="functional cutover rollback transaction failed",
+                    next_action="resume_or_restore_domain_checkpoint",
+                )
                 raise
+        recovery = recovery_registry.retain(
+            str(recovery["operation_id"]),
+            after_digest="sha256:"
+            + hashlib.sha256(b"functional-cutover-rolled-back").hexdigest(),
+        )
         return {
             "status": "rolled_back",
             "idempotent": False,
             "cutover_id": FUNCTIONAL_CUTOVER_ID,
             "plan_fingerprint": confirm_fingerprint,
-            "backup": backup,
+            "backup": recovery,
+            "recovery_policy": recovery,
             "primary_sources_changed": False,
         }
 

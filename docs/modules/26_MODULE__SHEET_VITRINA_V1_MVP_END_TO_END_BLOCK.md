@@ -375,7 +375,11 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - dry-run compares server-side ready snapshots against accepted temporal slots for bounded windows and reports insert/skip/diff actions;
   - apply inserts only missing `fin_report_daily` / `ads_compact` accepted slots from daily SKU values already present in server-side ready snapshots;
   - existing accepted snapshots are not overwritten, blank ready values are not fabricated as zero, and the path is not a recurring Google Sheets/GAS source.
-- Legacy one-off `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py` остаётся migration evidence для прежнего двухрядного repair и не является active post-functional writer.
+- Legacy one-off `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py`
+  остаётся read-only migration evidence для прежнего двухрядного repair и не
+  является active post-functional writer. Его `--apply` fail-closed отключён
+  до любого backup/write; активная публикация идёт только через единый T1
+  recovery-policy contour ниже.
 - Active bounded publication с `2026-07-01` выполняет только `packages/application/warehouse_functional_economics_backfill.py` через repo-owned команды `warehouse-functional-economics-dry-run/apply`:
   - она читает frozen/canonical daily WB WAC и effective versioned calculation parameters, затем публикует ровно восемь public cost/coverage/Proxy 3 SKU+TOTAL metric families;
   - Proxy margin делится на expected buyout revenue, TOTAL строится как ratio aggregate profits к aggregate expected revenue, а missing operand/zero denominator остаётся blank;

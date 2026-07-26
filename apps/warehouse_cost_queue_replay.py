@@ -35,6 +35,11 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    BeforeImageQuery,
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 
 
 CONTRACT_NAME = "warehouse_cost_queue_replay_v1"
@@ -257,11 +262,21 @@ def apply_plan(
     if not fingerprint or fingerprint != _fingerprint(material):
         raise ValueError("queue replay exact reviewed fingerprint is invalid")
     if not normalized.get("would_change"):
+        recovery = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=runtime.db_path,
+        ).plan_noop(
+            mutation_kind="supplier_cost_queue_replay",
+            closure_kind="shipment",
+            plan_fingerprint=fingerprint,
+            scope=dict(normalized.get("scope") or {}),
+        )
         return {
             **normalized,
             "mode": "apply",
             "applied": False,
             "idempotent": True,
+            "recovery_policy": recovery,
         }
     free_bytes = shutil.disk_usage(runtime.runtime_dir).free
     required_free_bytes = int(
@@ -285,11 +300,43 @@ def apply_plan(
     )
     _start_audit(runtime, normalized)
     started = time.monotonic()
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    recovery_operation: dict[str, Any] | None = None
+    non_target_recovery_digest = _fingerprint(
+        {
+            "queue": normalized.get("non_target_queue_digest"),
+            "warehouse": normalized.get("non_target_warehouse_digest"),
+        }
+    )
     try:
         with warehouse_functional_write_lock(
             runtime.runtime_dir,
             timeout_seconds=300,
         ) as lock_info:
+            recovery_operation = recovery_registry.prepare_t1_from_queries(
+                mutation_kind="supplier_cost_queue_replay",
+                closure_kind="shipment",
+                plan_fingerprint=fingerprint,
+                scope=dict(normalized.get("scope") or {}),
+                queries=_recovery_before_image_queries(normalized),
+                source_digest=str(
+                    normalized.get("source_identity_digest") or ""
+                ),
+                non_target_digest=non_target_recovery_digest,
+            )
+            if (
+                recovery_operation.get("lifecycle")
+                == RecoveryState.VERIFIED.value
+            ):
+                recovery_operation = recovery_registry.begin_mutation(
+                    str(recovery_operation["operation_id"]),
+                    expected_source_digest=str(
+                        normalized.get("source_identity_digest") or ""
+                    ),
+                )
             if "functional" not in steps:
                 recovered_functional = (
                     _recover_functional_checkpoint(
@@ -483,8 +530,21 @@ def apply_plan(
                 },
             }
             _save_audit(runtime, report)
+            recovery_operation = recovery_registry.retain(
+                str(recovery_operation["operation_id"]),
+                after_digest=_fingerprint(after),
+                non_target_digest=non_target_recovery_digest,
+                timer_state="unchanged",
+            )
+            report["recovery_policy"] = recovery_operation
     except Exception as exc:
         _mark_audit_failed(runtime, normalized, steps, exc)
+        if recovery_operation is not None:
+            recovery_registry.fail_recoverable(
+                str(recovery_operation["operation_id"]),
+                error=str(exc),
+                next_action="resume_exact_supplier_cost_queue_replay",
+            )
         raise
     return {
         **report,
@@ -492,6 +552,114 @@ def apply_plan(
         "applied": True,
         "idempotent": False,
     }
+
+
+def _recovery_before_image_queries(
+    plan: Mapping[str, Any],
+) -> list[BeforeImageQuery]:
+    scope = dict(plan.get("scope") or {})
+    queue_ids = sorted(
+        {
+            str(item["queue"]["queue_id"])
+            for item in plan.get("targets") or []
+            if str((item.get("queue") or {}).get("queue_id") or "")
+        }
+    )
+    nm_ids = sorted(
+        {int(value) for value in scope.get("all_target_nm_ids") or []}
+    )
+    shipment_ids = sorted(
+        {str(value) for value in scope.get("shipment_ids") or [] if str(value)}
+    )
+    earliest_date = str(scope.get("earliest_business_date") or "")[:10]
+    queries = [
+        BeforeImageQuery(
+            table="sheet_vitrina_v1_warehouse_functional_active",
+            query=(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_active "
+                "WHERE slot=1"
+            ),
+            key_columns=("slot",),
+        )
+    ]
+    if queue_ids:
+        placeholders = ",".join("?" for _ in queue_ids)
+        queries.append(
+            BeforeImageQuery(
+                table="sheet_vitrina_v1_warehouse_targeted_recalc_queue",
+                query=(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                    f"WHERE queue_id IN ({placeholders}) ORDER BY queue_id"
+                ),
+                parameters=tuple(queue_ids),
+                key_columns=("queue_id",),
+            )
+        )
+    if nm_ids:
+        placeholders = ",".join("?" for _ in nm_ids)
+        queries.extend(
+            [
+                BeforeImageQuery(
+                    table="sheet_vitrina_v1_warehouse_functional_balances",
+                    query=(
+                        "SELECT balance.* "
+                        "FROM sheet_vitrina_v1_warehouse_functional_active active "
+                        "JOIN sheet_vitrina_v1_warehouse_functional_balances balance "
+                        "ON balance.version_id=active.version_id "
+                        f"WHERE active.slot=1 AND balance.nm_id IN ({placeholders}) "
+                        "ORDER BY balance.version_id,balance.warehouse_key,balance.nm_id"
+                    ),
+                    parameters=tuple(nm_ids),
+                    key_columns=("version_id", "warehouse_key", "nm_id"),
+                ),
+                BeforeImageQuery(
+                    table="sheet_vitrina_v1_warehouse_functional_document_lines",
+                    query=(
+                        "SELECT line.* "
+                        "FROM sheet_vitrina_v1_warehouse_functional_active active "
+                        "JOIN sheet_vitrina_v1_warehouse_functional_document_lines line "
+                        "ON line.version_id=active.version_id "
+                        f"WHERE active.slot=1 AND line.nm_id IN ({placeholders}) "
+                        "ORDER BY line.line_id"
+                    ),
+                    parameters=tuple(nm_ids),
+                    key_columns=("line_id",),
+                ),
+            ]
+        )
+    if shipment_ids:
+        placeholders = ",".join("?" for _ in shipment_ids)
+        queries.append(
+            BeforeImageQuery(
+                table="sheet_vitrina_v1_warehouse_supplier_cost_states",
+                query=(
+                    "SELECT state.* "
+                    "FROM sheet_vitrina_v1_warehouse_functional_active active "
+                    "JOIN sheet_vitrina_v1_warehouse_supplier_cost_states state "
+                    "ON state.version_id=active.version_id "
+                    f"WHERE active.slot=1 AND state.shipment_id IN ({placeholders}) "
+                    "ORDER BY state.version_id,state.shipment_id"
+                ),
+                parameters=tuple(shipment_ids),
+                key_columns=("version_id", "shipment_id"),
+            )
+        )
+    if earliest_date:
+        queries.append(
+            BeforeImageQuery(
+                table="sheet_vitrina_v1_ready_snapshots",
+                query=(
+                    "SELECT snapshot.* FROM sheet_vitrina_v1_ready_snapshots snapshot "
+                    "WHERE EXISTS("
+                    "SELECT 1 FROM json_each(snapshot.plan_json,'$.date_columns') day "
+                    "WHERE CAST(day.value AS TEXT)>=?"
+                    ") ORDER BY snapshot.bundle_version,snapshot.as_of_date"
+                ),
+                parameters=(earliest_date,),
+                key_columns=("bundle_version", "as_of_date"),
+            )
+        )
+    return queries
 
 
 def _target_invoice_plan(

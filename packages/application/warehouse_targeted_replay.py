@@ -34,6 +34,10 @@ from packages.application.warehouse_functional import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 
 
 TARGETED_PUBLICATION_TABLE = (
@@ -668,7 +672,21 @@ class WarehouseTargetedSupplierReplay:
                 "exact reviewed targeted plan fingerprint is required"
             )
         if not bool(plan.get("would_change")):
-            return {**dict(plan), "applied": False, "idempotent": True}
+            recovery = WarehouseRecoveryRegistry(
+                runtime_dir=self.runtime.runtime_dir,
+                db_path=self.runtime.db_path,
+            ).plan_noop(
+                mutation_kind="supplier_factual_date_correction",
+                closure_kind="shipment",
+                plan_fingerprint=approved,
+                scope=dict(plan.get("scope") or {}),
+            )
+            return {
+                **dict(plan),
+                "applied": False,
+                "idempotent": True,
+                "recovery_policy": recovery,
+            }
         free_bytes = shutil.disk_usage(self.runtime.runtime_dir).free
         required_bytes = max(
             4 * 1024 * 1024,
@@ -691,526 +709,609 @@ class WarehouseTargetedSupplierReplay:
                 "source_revision": plan["source_revision"],
             }
         )[:24]
-        with _connect(self.runtime.db_path) as conn:
-            ensure_warehouse_targeted_replay_schema(conn)
-            existing = conn.execute(
-                f"SELECT * FROM {TARGETED_PUBLICATION_TABLE} WHERE plan_fingerprint=?",
-                (fingerprint,),
+        with _connect_readonly(self.runtime.db_path) as recovery_source:
+            active_before_row = recovery_source.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_warehouse_functional_active
+                WHERE slot=1
+                """
             ).fetchone()
-            if existing is not None and str(existing["status"]) == "complete":
-                return {
-                    **dict(plan),
-                    "applied": False,
-                    "idempotent": True,
-                    "version_id": str(existing["version_id"]),
-                    "publication_id": str(existing["publication_id"]),
-                }
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                self._inject("after_begin")
-                current_header, current_revision, _, _ = _header_and_revision(
-                    conn, shipment_id
-                )
-                if current_revision != str(plan["source_revision"]):
-                    raise WarehouseTargetedReplayError(
-                        "stale targeted preview: source revision changed"
-                    )
-                active = conn.execute(
-                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+        if active_before_row is None:
+            raise WarehouseTargetedReplayError(
+                "active functional pointer disappeared before recovery preparation"
+            )
+        active_before = dict(active_before_row)
+        header_after = {
+            **dict(plan["after_header"]),
+            "updated_at": now,
+        }
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
+        )
+        recovery = recovery_registry.prepare_t1(
+            mutation_kind="supplier_factual_date_correction",
+            closure_kind="shipment",
+            plan_fingerprint=fingerprint,
+            scope=dict(plan.get("scope") or {}),
+            before_images=[
+                {
+                    "table": "sheet_vitrina_v1_supplier_shipments",
+                    "key": {"shipment_id": shipment_id},
+                    "before": dict(plan["before_header"]),
+                    "after": header_after,
+                },
+                {
+                    "table": "sheet_vitrina_v1_warehouse_functional_active",
+                    "key": {"slot": 1},
+                    "before": active_before,
+                    "after": {
+                        **active_before,
+                        "version_id": version_id,
+                        "updated_at": now,
+                    },
+                },
+            ],
+            expected_after_images=[
+                header_after,
+                {
+                    **active_before,
+                    "version_id": version_id,
+                    "updated_at": now,
+                },
+                *list(plan["target_rows_after"]),
+            ],
+            source_digest=str(plan["source_revision"]),
+            non_target_digest=str(plan["non_target_digest"]),
+            read_bytes=int(
+                (plan.get("performance") or {}).get("read_bytes_upper_bound") or 0
+            ),
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=str(plan["source_revision"]),
+            )
+        try:
+            with _connect(self.runtime.db_path) as conn:
+                ensure_warehouse_targeted_replay_schema(conn)
+                existing = conn.execute(
+                    f"SELECT * FROM {TARGETED_PUBLICATION_TABLE} "
+                    "WHERE plan_fingerprint=?",
+                    (fingerprint,),
                 ).fetchone()
-                if active is None or str(active["version_id"]) != base_version_id:
-                    raise WarehouseTargetedReplayError(
-                        "stale targeted preview: active functional version changed"
+                if existing is not None and str(existing["status"]) == "complete":
+                    retained = recovery_registry.retain(
+                        str(recovery["operation_id"]),
+                        after_digest=str(plan["target_after_digest"]),
+                        non_target_digest=str(plan["non_target_digest"]),
                     )
-                current_rows = _active_target_rows(
-                    conn,
-                    version_id=base_version_id,
-                    nm_ids=plan["affected_nm_ids"],
-                )
-                if _fingerprint(current_rows) != str(plan["target_before_digest"]):
-                    raise WarehouseTargetedReplayError(
-                        "stale targeted preview: target rows changed"
+                    return {
+                        **dict(plan),
+                        "applied": False,
+                        "idempotent": True,
+                        "version_id": str(existing["version_id"]),
+                        "publication_id": str(existing["publication_id"]),
+                        "recovery_policy": retained,
+                    }
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._inject("after_begin")
+                    current_header, current_revision, _, _ = _header_and_revision(
+                        conn, shipment_id
                     )
-                non_target_before = _non_target_digest(
-                    conn,
-                    version_id=base_version_id,
-                    affected_nm_ids=plan["affected_nm_ids"],
-                )
-                if non_target_before != str(plan["non_target_digest"]):
-                    raise WarehouseTargetedReplayError(
-                        "stale targeted preview: non-target active rows changed"
+                    if current_revision != str(plan["source_revision"]):
+                        raise WarehouseTargetedReplayError(
+                            "stale targeted preview: source revision changed"
+                        )
+                    active = conn.execute(
+                        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                    ).fetchone()
+                    if active is None or str(active["version_id"]) != base_version_id:
+                        raise WarehouseTargetedReplayError(
+                            "stale targeted preview: active functional version changed"
+                        )
+                    current_rows = _active_target_rows(
+                        conn,
+                        version_id=base_version_id,
+                        nm_ids=plan["affected_nm_ids"],
                     )
-                conn.execute(
-                    f"""
-                    UPDATE {QUEUE_TABLE}
-                    SET status='complete',finished_at=?,error='superseded by newer coalesced revision'
-                    WHERE stable_source_id=? AND status='queued'
-                    """,
-                    (now, f"supplier_shipment:{shipment_id}"),
-                )
-                conn.execute(
-                    f"""
-                    INSERT INTO {QUEUE_TABLE}(
-                        queue_id,stable_source_id,source_revision,effective_date,
-                        affected_nm_ids_json,status,requested_at,started_at,finished_at,error
-                    ) VALUES(?,?,?,?,?,'running',?,?,NULL,NULL)
-                    ON CONFLICT(stable_source_id,source_revision) DO UPDATE SET
-                        status='running',started_at=excluded.started_at,
-                        finished_at=NULL,error=NULL
-                    """,
-                    (
-                        queue_id,
-                        f"supplier_shipment:{shipment_id}",
-                        str(plan["source_revision"]),
-                        str(plan["earliest_business_date"]),
-                        _json(plan["affected_nm_ids"]),
-                        now,
-                        now,
-                    ),
-                )
-                updated = conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_supplier_shipments
-                    SET actual_shipment_date=?,order_status=?,updated_at=?
-                    WHERE shipment_id=? AND COALESCE(actual_shipment_date,'')=?
-                    """,
-                    (
-                        str(plan["new_actual_shipment_date"]) or None,
-                        str(plan["new_order_status"]),
-                        now,
-                        shipment_id,
-                        str(plan["old_actual_shipment_date"]),
-                    ),
-                )
-                if int(updated.rowcount or 0) != 1:
-                    raise WarehouseTargetedReplayError(
-                        "target header changed before atomic apply"
+                    if _fingerprint(current_rows) != str(plan["target_before_digest"]):
+                        raise WarehouseTargetedReplayError(
+                            "stale targeted preview: target rows changed"
+                        )
+                    non_target_before = _non_target_digest(
+                        conn,
+                        version_id=base_version_id,
+                        affected_nm_ids=plan["affected_nm_ids"],
                     )
-                base_version = conn.execute(
-                    """
-                    SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions
-                    WHERE version_id=?
-                    """,
-                    (base_version_id,),
-                ).fetchone()
-                if base_version is None:
-                    raise WarehouseTargetedReplayError(
-                        "base functional version disappeared"
+                    if non_target_before != str(plan["non_target_digest"]):
+                        raise WarehouseTargetedReplayError(
+                            "stale targeted preview: non-target active rows changed"
+                        )
+                    conn.execute(
+                        f"""
+                        UPDATE {QUEUE_TABLE}
+                        SET status='complete',finished_at=?,error='superseded by newer coalesced revision'
+                        WHERE stable_source_id=? AND status='queued'
+                        """,
+                        (now, f"supplier_shipment:{shipment_id}"),
                     )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
-                        version_id,cutover_id,version_kind,effective_at,status,
-                        plan_fingerprint,local_source_digest,source_watermarks_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        version_id,
-                        FUNCTIONAL_CUTOVER_ID,
-                        "targeted_supplier_replay",
-                        now,
-                        "good",
-                        fingerprint,
-                        str(plan["source_revision"]),
-                        _json(
-                            {
-                                "base_version_id": base_version_id,
-                                "stable_source_id": f"supplier_shipment:{shipment_id}",
-                                "source_revision": plan["source_revision"],
-                                "earliest_business_date": plan["earliest_business_date"],
-                            }
+                    conn.execute(
+                        f"""
+                        INSERT INTO {QUEUE_TABLE}(
+                            queue_id,stable_source_id,source_revision,effective_date,
+                            affected_nm_ids_json,status,requested_at,started_at,finished_at,error
+                        ) VALUES(?,?,?,?,?,'running',?,?,NULL,NULL)
+                        ON CONFLICT(stable_source_id,source_revision) DO UPDATE SET
+                            status='running',started_at=excluded.started_at,
+                            finished_at=NULL,error=NULL
+                        """,
+                        (
+                            queue_id,
+                            f"supplier_shipment:{shipment_id}",
+                            str(plan["source_revision"]),
+                            str(plan["earliest_business_date"]),
+                            _json(plan["affected_nm_ids"]),
+                            now,
+                            now,
                         ),
-                        now,
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
-                        version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
-                        cost_covered_quantity,quality,certified,wb_quantity,
-                        wb_in_way_to_client,wb_in_way_from_client,provenance_json
                     )
-                    SELECT ?,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
-                           cost_covered_quantity,quality,certified,wb_quantity,
-                           wb_in_way_to_client,wb_in_way_from_client,provenance_json
-                    FROM sheet_vitrina_v1_warehouse_functional_balances
-                    WHERE version_id=?
-                    """,
-                    (version_id, base_version_id),
-                )
-                affected = sorted({int(value) for value in plan["affected_nm_ids"]})
-                placeholders = ",".join("?" for _ in affected)
-                conn.execute(
-                    f"""
-                    DELETE FROM sheet_vitrina_v1_warehouse_functional_balances
-                    WHERE version_id=? AND warehouse_key IN (?,?)
-                      AND nm_id IN ({placeholders})
-                    """,
-                    (version_id, STAGE_PRODUCTION, STAGE_CHINA_TO_FF, *affected),
-                )
-                for item in plan["target_rows_after"]:
+                    updated = conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_supplier_shipments
+                        SET actual_shipment_date=?,order_status=?,updated_at=?
+                        WHERE shipment_id=? AND COALESCE(actual_shipment_date,'')=?
+                        """,
+                        (
+                            str(plan["new_actual_shipment_date"]) or None,
+                            str(plan["new_order_status"]),
+                            now,
+                            shipment_id,
+                            str(plan["old_actual_shipment_date"]),
+                        ),
+                    )
+                    if int(updated.rowcount or 0) != 1:
+                        raise WarehouseTargetedReplayError(
+                            "target header changed before atomic apply"
+                        )
+                    base_version = conn.execute(
+                        """
+                        SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions
+                        WHERE version_id=?
+                        """,
+                        (base_version_id,),
+                    ).fetchone()
+                    if base_version is None:
+                        raise WarehouseTargetedReplayError(
+                            "base functional version disappeared"
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                            version_id,cutover_id,version_kind,effective_at,status,
+                            plan_fingerprint,local_source_digest,source_watermarks_json,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            version_id,
+                            FUNCTIONAL_CUTOVER_ID,
+                            "targeted_supplier_replay",
+                            now,
+                            "good",
+                            fingerprint,
+                            str(plan["source_revision"]),
+                            _json(
+                                {
+                                    "base_version_id": base_version_id,
+                                    "stable_source_id": f"supplier_shipment:{shipment_id}",
+                                    "source_revision": plan["source_revision"],
+                                    "earliest_business_date": plan["earliest_business_date"],
+                                }
+                            ),
+                            now,
+                        ),
+                    )
                     conn.execute(
                         """
                         INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
                             version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
                             cost_covered_quantity,quality,certified,wb_quantity,
                             wb_in_way_to_client,wb_in_way_from_client,provenance_json
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        )
+                        SELECT ?,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                               cost_covered_quantity,quality,certified,wb_quantity,
+                               wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                        FROM sheet_vitrina_v1_warehouse_functional_balances
+                        WHERE version_id=?
                         """,
-                        (
-                            version_id,
-                            item["warehouse_key"],
-                            int(item["nm_id"]),
-                            item["quantity"],
-                            item.get("wac_rub"),
-                            item["capital_rub"],
-                            item["cost_covered_quantity"],
-                            item["quality"],
-                            int(bool(item["certified"])),
-                            item.get("wb_quantity") or "0",
-                            item.get("wb_in_way_to_client") or "0",
-                            item.get("wb_in_way_from_client") or "0",
-                            _json(item.get("provenance") or {}),
-                        ),
+                        (version_id, base_version_id),
                     )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_warehouse_functional_ff_reservations(
-                        version_id,supply_id,nm_id,quantity
-                    )
-                    SELECT ?,supply_id,nm_id,quantity
-                    FROM sheet_vitrina_v1_warehouse_functional_ff_reservations
-                    WHERE version_id=?
-                    """,
-                    (version_id, base_version_id),
-                )
-                snapshot = conn.execute(
-                    """
-                    SELECT * FROM sheet_vitrina_v1_warehouse_wb_snapshots
-                    WHERE version_id=?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (base_version_id,),
-                ).fetchone()
-                if snapshot is not None:
+                    affected = sorted({int(value) for value in plan["affected_nm_ids"]})
+                    placeholders = ",".join("?" for _ in affected)
                     conn.execute(
-                        """
-                        INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
-                            snapshot_id,version_id,fetched_at,snapshot_date,
-                            requested_nm_ids_json,pagination_complete,page_count,
-                            page_offsets_json,raw_row_count,raw_rows_digest,
-                            raw_rows_json,items_json,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        f"""
+                        DELETE FROM sheet_vitrina_v1_warehouse_functional_balances
+                        WHERE version_id=? AND warehouse_key IN (?,?)
+                          AND nm_id IN ({placeholders})
                         """,
-                        (
-                            "wbsnap_target_"
-                            + fingerprint.removeprefix("sha256:")[:20],
-                            version_id,
-                            snapshot["fetched_at"],
-                            snapshot["snapshot_date"],
-                            snapshot["requested_nm_ids_json"],
-                            snapshot["pagination_complete"],
-                            snapshot["page_count"],
-                            snapshot["page_offsets_json"],
-                            snapshot["raw_row_count"],
-                            snapshot["raw_rows_digest"],
-                            snapshot["raw_rows_json"],
-                            snapshot["items_json"],
-                            now,
-                        ),
+                        (version_id, STAGE_PRODUCTION, STAGE_CHINA_TO_FF, *affected),
                     )
-                for unmatched in conn.execute(
-                    """
-                    SELECT * FROM sheet_vitrina_v1_warehouse_unmatched_doprinato
-                    WHERE version_id=? ORDER BY unmatched_id
-                    """,
-                    (base_version_id,),
-                ).fetchall():
-                    conn.execute(
-                        """
-                        INSERT INTO sheet_vitrina_v1_warehouse_unmatched_doprinato(
-                            unmatched_id,version_id,source_id,business_date,nm_id,
-                            quantity,matched_quantity,reason,provenance_json,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            "unmatched_target_"
-                            + _hash(
-                                {
-                                    "version_id": version_id,
-                                    "base_id": unmatched["unmatched_id"],
-                                }
-                            )[:20],
-                            version_id,
-                            unmatched["source_id"],
-                            unmatched["business_date"],
-                            unmatched["nm_id"],
-                            unmatched["quantity"],
-                            unmatched["matched_quantity"],
-                            unmatched["reason"],
-                            unmatched["provenance_json"],
-                            now,
-                        ),
-                    )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
-                        version_id,shipment_id,source_fingerprint,calculation_fingerprint,
-                        expenses_complete,calculation_available,created_at
-                    )
-                    SELECT ?,shipment_id,source_fingerprint,calculation_fingerprint,
-                           expenses_complete,calculation_available,?
-                    FROM sheet_vitrina_v1_warehouse_supplier_cost_states
-                    WHERE version_id=?
-                    """,
-                    (version_id, now, base_version_id),
-                )
-                conn.execute(
-                    """
-                    DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_states
-                    WHERE version_id=? AND shipment_id=?
-                    """,
-                    (version_id, shipment_id),
-                )
-                cost_state = dict(plan["supplier_cost_state"])
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
-                        version_id,shipment_id,source_fingerprint,calculation_fingerprint,
-                        expenses_complete,calculation_available,created_at
-                    ) VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (
-                        version_id,
-                        shipment_id,
-                        str(cost_state.get("source_fingerprint") or ""),
-                        str(cost_state.get("calculation_fingerprint") or ""),
-                        int(bool(cost_state.get("expenses_complete"))),
-                        int(bool(cost_state.get("calculation_available"))),
-                        now,
-                    ),
-                )
-                for stage in sorted(
-                    {
-                        str(item["warehouse_key"])
-                        for item in conn.execute(
-                            """
-                            SELECT DISTINCT warehouse_key
-                            FROM sheet_vitrina_v1_warehouse_functional_balances
-                            WHERE version_id=?
-                            """,
-                            (version_id,),
-                        ).fetchall()
-                    }
-                ):
-                    document_id = (
-                        "whdoc_target_"
-                        + _hash({"version_id": version_id, "stage": stage})[:20]
-                    )
-                    stage_rows = conn.execute(
-                        """
-                        SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
-                        WHERE version_id=? AND warehouse_key=?
-                        ORDER BY nm_id
-                        """,
-                        (version_id, stage),
-                    ).fetchall()
-                    quantity = sum(
-                        (_decimal(item["quantity"]) for item in stage_rows),
-                        ZERO,
-                    )
-                    capital = sum(
-                        (_decimal(item["capital_rub"]) for item in stage_rows),
-                        ZERO,
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO sheet_vitrina_v1_warehouse_functional_documents(
-                            document_id,version_id,warehouse_key,document_type,
-                            occurred_at,source_id,source_fingerprint,quantity,
-                            capital_rub,provenance_json,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            document_id,
-                            version_id,
-                            stage,
-                            "targeted_supplier_replay",
-                            now,
-                            publication_id,
-                            _fingerprint(
-                                [
-                                    {
-                                        "nm_id": int(item["nm_id"]),
-                                        "quantity": item["quantity"],
-                                        "capital_rub": item["capital_rub"],
-                                        "provenance_json": item["provenance_json"],
-                                    }
-                                    for item in stage_rows
-                                ]
-                            ),
-                            _text(quantity),
-                            _text(capital),
-                            _json(
-                                {
-                                    "base_version_id": base_version_id,
-                                    "stable_source_id": (
-                                        f"supplier_shipment:{shipment_id}"
-                                    ),
-                                    "targeted_replay": True,
-                                }
-                            ),
-                            now,
-                        ),
-                    )
-                    for item in stage_rows:
+                    for item in plan["target_rows_after"]:
                         conn.execute(
                             """
-                            INSERT INTO sheet_vitrina_v1_warehouse_functional_document_lines(
-                                line_id,document_id,version_id,nm_id,quantity,
-                                wac_rub,capital_rub,provenance_json,created_at
-                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                            INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                                version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                                cost_covered_quantity,quality,certified,wb_quantity,
+                                wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
-                                "whdocline_target_"
-                                + _hash(
-                                    {
-                                        "document_id": document_id,
-                                        "nm_id": int(item["nm_id"]),
-                                    }
-                                )[:20],
-                                document_id,
                                 version_id,
+                                item["warehouse_key"],
                                 int(item["nm_id"]),
                                 item["quantity"],
-                                item["wac_rub"],
+                                item.get("wac_rub"),
                                 item["capital_rub"],
-                                item["provenance_json"],
+                                item["cost_covered_quantity"],
+                                item["quality"],
+                                int(bool(item["certified"])),
+                                item.get("wb_quantity") or "0",
+                                item.get("wb_in_way_to_client") or "0",
+                                item.get("wb_in_way_from_client") or "0",
+                                _json(item.get("provenance") or {}),
+                            ),
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_functional_ff_reservations(
+                            version_id,supply_id,nm_id,quantity
+                        )
+                        SELECT ?,supply_id,nm_id,quantity
+                        FROM sheet_vitrina_v1_warehouse_functional_ff_reservations
+                        WHERE version_id=?
+                        """,
+                        (version_id, base_version_id),
+                    )
+                    snapshot = conn.execute(
+                        """
+                        SELECT * FROM sheet_vitrina_v1_warehouse_wb_snapshots
+                        WHERE version_id=?
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (base_version_id,),
+                    ).fetchone()
+                    if snapshot is not None:
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                                snapshot_id,version_id,fetched_at,snapshot_date,
+                                requested_nm_ids_json,pagination_complete,page_count,
+                                page_offsets_json,raw_row_count,raw_rows_digest,
+                                raw_rows_json,items_json,created_at
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                "wbsnap_target_"
+                                + fingerprint.removeprefix("sha256:")[:20],
+                                version_id,
+                                snapshot["fetched_at"],
+                                snapshot["snapshot_date"],
+                                snapshot["requested_nm_ids_json"],
+                                snapshot["pagination_complete"],
+                                snapshot["page_count"],
+                                snapshot["page_offsets_json"],
+                                snapshot["raw_row_count"],
+                                snapshot["raw_rows_digest"],
+                                snapshot["raw_rows_json"],
+                                snapshot["items_json"],
                                 now,
                             ),
                         )
-                after_digest = _fingerprint(
-                    _active_target_rows(
+                    for unmatched in conn.execute(
+                        """
+                        SELECT * FROM sheet_vitrina_v1_warehouse_unmatched_doprinato
+                        WHERE version_id=? ORDER BY unmatched_id
+                        """,
+                        (base_version_id,),
+                    ).fetchall():
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_warehouse_unmatched_doprinato(
+                                unmatched_id,version_id,source_id,business_date,nm_id,
+                                quantity,matched_quantity,reason,provenance_json,created_at
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                "unmatched_target_"
+                                + _hash(
+                                    {
+                                        "version_id": version_id,
+                                        "base_id": unmatched["unmatched_id"],
+                                    }
+                                )[:20],
+                                version_id,
+                                unmatched["source_id"],
+                                unmatched["business_date"],
+                                unmatched["nm_id"],
+                                unmatched["quantity"],
+                                unmatched["matched_quantity"],
+                                unmatched["reason"],
+                                unmatched["provenance_json"],
+                                now,
+                            ),
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
+                            version_id,shipment_id,source_fingerprint,calculation_fingerprint,
+                            expenses_complete,calculation_available,created_at
+                        )
+                        SELECT ?,shipment_id,source_fingerprint,calculation_fingerprint,
+                               expenses_complete,calculation_available,?
+                        FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+                        WHERE version_id=?
+                        """,
+                        (version_id, now, base_version_id),
+                    )
+                    conn.execute(
+                        """
+                        DELETE FROM sheet_vitrina_v1_warehouse_supplier_cost_states
+                        WHERE version_id=? AND shipment_id=?
+                        """,
+                        (version_id, shipment_id),
+                    )
+                    cost_state = dict(plan["supplier_cost_state"])
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_states(
+                            version_id,shipment_id,source_fingerprint,calculation_fingerprint,
+                            expenses_complete,calculation_available,created_at
+                        ) VALUES(?,?,?,?,?,?,?)
+                        """,
+                        (
+                            version_id,
+                            shipment_id,
+                            str(cost_state.get("source_fingerprint") or ""),
+                            str(cost_state.get("calculation_fingerprint") or ""),
+                            int(bool(cost_state.get("expenses_complete"))),
+                            int(bool(cost_state.get("calculation_available"))),
+                            now,
+                        ),
+                    )
+                    for stage in sorted(
+                        {
+                            str(item["warehouse_key"])
+                            for item in conn.execute(
+                                """
+                                SELECT DISTINCT warehouse_key
+                                FROM sheet_vitrina_v1_warehouse_functional_balances
+                                WHERE version_id=?
+                                """,
+                                (version_id,),
+                            ).fetchall()
+                        }
+                    ):
+                        document_id = (
+                            "whdoc_target_"
+                            + _hash({"version_id": version_id, "stage": stage})[:20]
+                        )
+                        stage_rows = conn.execute(
+                            """
+                            SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
+                            WHERE version_id=? AND warehouse_key=?
+                            ORDER BY nm_id
+                            """,
+                            (version_id, stage),
+                        ).fetchall()
+                        quantity = sum(
+                            (_decimal(item["quantity"]) for item in stage_rows),
+                            ZERO,
+                        )
+                        capital = sum(
+                            (_decimal(item["capital_rub"]) for item in stage_rows),
+                            ZERO,
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_warehouse_functional_documents(
+                                document_id,version_id,warehouse_key,document_type,
+                                occurred_at,source_id,source_fingerprint,quantity,
+                                capital_rub,provenance_json,created_at
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                document_id,
+                                version_id,
+                                stage,
+                                "targeted_supplier_replay",
+                                now,
+                                publication_id,
+                                _fingerprint(
+                                    [
+                                        {
+                                            "nm_id": int(item["nm_id"]),
+                                            "quantity": item["quantity"],
+                                            "capital_rub": item["capital_rub"],
+                                            "provenance_json": item["provenance_json"],
+                                        }
+                                        for item in stage_rows
+                                    ]
+                                ),
+                                _text(quantity),
+                                _text(capital),
+                                _json(
+                                    {
+                                        "base_version_id": base_version_id,
+                                        "stable_source_id": (
+                                            f"supplier_shipment:{shipment_id}"
+                                        ),
+                                        "targeted_replay": True,
+                                    }
+                                ),
+                                now,
+                            ),
+                        )
+                        for item in stage_rows:
+                            conn.execute(
+                                """
+                                INSERT INTO sheet_vitrina_v1_warehouse_functional_document_lines(
+                                    line_id,document_id,version_id,nm_id,quantity,
+                                    wac_rub,capital_rub,provenance_json,created_at
+                                ) VALUES(?,?,?,?,?,?,?,?,?)
+                                """,
+                                (
+                                    "whdocline_target_"
+                                    + _hash(
+                                        {
+                                            "document_id": document_id,
+                                            "nm_id": int(item["nm_id"]),
+                                        }
+                                    )[:20],
+                                    document_id,
+                                    version_id,
+                                    int(item["nm_id"]),
+                                    item["quantity"],
+                                    item["wac_rub"],
+                                    item["capital_rub"],
+                                    item["provenance_json"],
+                                    now,
+                                ),
+                            )
+                    after_digest = _fingerprint(
+                        _active_target_rows(
+                            conn,
+                            version_id=version_id,
+                            nm_ids=plan["affected_nm_ids"],
+                        )
+                    )
+                    if after_digest != str(plan["target_after_digest"]):
+                        raise WarehouseTargetedReplayError(
+                            "published target rows differ from reviewed plan"
+                        )
+                    non_target_after = _non_target_digest(
                         conn,
                         version_id=version_id,
-                        nm_ids=plan["affected_nm_ids"],
+                        affected_nm_ids=plan["affected_nm_ids"],
                     )
-                )
-                if after_digest != str(plan["target_after_digest"]):
-                    raise WarehouseTargetedReplayError(
-                        "published target rows differ from reviewed plan"
+                    if non_target_after != non_target_before:
+                        raise WarehouseTargetedReplayError(
+                            "targeted publication changed non-target balances"
+                        )
+                    undo = {
+                        "shipment_id": shipment_id,
+                        "before_header": plan["before_header"],
+                        "after_header": plan["after_header"],
+                        "base_version_id": base_version_id,
+                        "published_version_id": version_id,
+                        "target_rows_before": plan["target_rows_before"],
+                        "target_rows_after": plan["target_rows_after"],
+                    }
+                    undo_digest = _fingerprint(undo)
+                    conn.execute(
+                        f"""
+                        INSERT INTO {TARGETED_UNDO_TABLE}(
+                            undo_id,publication_id,shipment_id,before_header_json,
+                            after_header_json,base_version_id,published_version_id,
+                            target_rows_before_json,target_rows_after_json,
+                            manifest_digest,status,created_at,rolled_back_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,'ready',?,NULL)
+                        """,
+                        (
+                            "whtu_" + undo_digest.removeprefix("sha256:")[:24],
+                            publication_id,
+                            shipment_id,
+                            _json(plan["before_header"]),
+                            _json(plan["after_header"]),
+                            base_version_id,
+                            version_id,
+                            _json(plan["target_rows_before"]),
+                            _json(plan["target_rows_after"]),
+                            undo_digest,
+                            now,
+                        ),
                     )
-                non_target_after = _non_target_digest(
-                    conn,
-                    version_id=version_id,
-                    affected_nm_ids=plan["affected_nm_ids"],
-                )
-                if non_target_after != non_target_before:
-                    raise WarehouseTargetedReplayError(
-                        "targeted publication changed non-target balances"
+                    diagnostics = {
+                        **dict(plan["performance"]),
+                        "lock_wait_ms": int(lock_wait_ms),
+                        "capacity": {
+                            "required_bytes": required_bytes,
+                            "free_bytes": free_bytes,
+                        },
+                        "queue_id": queue_id,
+                        "rollback_manifest_digest": undo_digest,
+                    }
+                    conn.execute(
+                        f"""
+                        INSERT INTO {TARGETED_PUBLICATION_TABLE}(
+                            publication_id,stable_source_id,source_revision,
+                            earliest_business_date,affected_nm_ids_json,
+                            base_version_id,version_id,plan_fingerprint,
+                            target_before_digest,target_after_digest,
+                            non_target_before_digest,non_target_after_digest,status,
+                            blocker_summary_json,diagnostics_json,created_at,completed_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            publication_id,
+                            f"supplier_shipment:{shipment_id}",
+                            str(plan["source_revision"]),
+                            str(plan["earliest_business_date"]),
+                            _json(plan["affected_nm_ids"]),
+                            base_version_id,
+                            version_id,
+                            fingerprint,
+                            str(plan["target_before_digest"]),
+                            after_digest,
+                            non_target_before,
+                            non_target_after,
+                            "complete",
+                            _json(plan.get("blocker_summary") or []),
+                            _json(diagnostics),
+                            now,
+                            now,
+                        ),
                     )
-                undo = {
-                    "shipment_id": shipment_id,
-                    "before_header": plan["before_header"],
-                    "after_header": plan["after_header"],
-                    "base_version_id": base_version_id,
-                    "published_version_id": version_id,
-                    "target_rows_before": plan["target_rows_before"],
-                    "target_rows_after": plan["target_rows_after"],
-                }
-                undo_digest = _fingerprint(undo)
-                conn.execute(
-                    f"""
-                    INSERT INTO {TARGETED_UNDO_TABLE}(
-                        undo_id,publication_id,shipment_id,before_header_json,
-                        after_header_json,base_version_id,published_version_id,
-                        target_rows_before_json,target_rows_after_json,
-                        manifest_digest,status,created_at,rolled_back_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,'ready',?,NULL)
-                    """,
-                    (
-                        "whtu_" + undo_digest.removeprefix("sha256:")[:24],
-                        publication_id,
-                        shipment_id,
-                        _json(plan["before_header"]),
-                        _json(plan["after_header"]),
-                        base_version_id,
-                        version_id,
-                        _json(plan["target_rows_before"]),
-                        _json(plan["target_rows_after"]),
-                        undo_digest,
-                        now,
-                    ),
-                )
-                diagnostics = {
-                    **dict(plan["performance"]),
-                    "lock_wait_ms": int(lock_wait_ms),
-                    "capacity": {
-                        "required_bytes": required_bytes,
-                        "free_bytes": free_bytes,
-                    },
-                    "queue_id": queue_id,
-                    "rollback_manifest_digest": undo_digest,
-                }
-                conn.execute(
-                    f"""
-                    INSERT INTO {TARGETED_PUBLICATION_TABLE}(
-                        publication_id,stable_source_id,source_revision,
-                        earliest_business_date,affected_nm_ids_json,
-                        base_version_id,version_id,plan_fingerprint,
-                        target_before_digest,target_after_digest,
-                        non_target_before_digest,non_target_after_digest,status,
-                        blocker_summary_json,diagnostics_json,created_at,completed_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        publication_id,
-                        f"supplier_shipment:{shipment_id}",
-                        str(plan["source_revision"]),
-                        str(plan["earliest_business_date"]),
-                        _json(plan["affected_nm_ids"]),
-                        base_version_id,
-                        version_id,
-                        fingerprint,
-                        str(plan["target_before_digest"]),
-                        after_digest,
-                        non_target_before,
-                        non_target_after,
-                        "complete",
-                        _json(plan.get("blocker_summary") or []),
-                        _json(diagnostics),
-                        now,
-                        now,
-                    ),
-                )
-                self._inject("before_switch")
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_warehouse_functional_active
-                    SET version_id=?,updated_at=? WHERE slot=1
-                    """,
-                    (version_id, now),
-                )
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_warehouse_wb_sync_status
-                    SET active_version_id=?,updated_at=? WHERE slot=1
-                    """,
-                    (version_id, now),
-                )
-                conn.execute(
-                    f"""
-                    UPDATE {QUEUE_TABLE}
-                    SET status='complete',finished_at=?,error=NULL
-                    WHERE queue_id=? AND status='running'
-                    """,
-                    (now, queue_id),
-                )
-                self._inject("before_commit")
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                    self._inject("before_switch")
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_warehouse_functional_active
+                        SET version_id=?,updated_at=? WHERE slot=1
+                        """,
+                        (version_id, now),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_warehouse_wb_sync_status
+                        SET active_version_id=?,updated_at=? WHERE slot=1
+                        """,
+                        (version_id, now),
+                    )
+                    conn.execute(
+                        f"""
+                        UPDATE {QUEUE_TABLE}
+                        SET status='complete',finished_at=?,error=NULL
+                        WHERE queue_id=? AND status='running'
+                        """,
+                        (now, queue_id),
+                    )
+                    self._inject("before_commit")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_rollback_targeted_supplier_replay",
+            )
+            raise
+        recovery = recovery_registry.retain(
+            str(recovery["operation_id"]),
+            after_digest=str(plan["target_after_digest"]),
+            non_target_digest=str(plan["non_target_digest"]),
+        )
         return {
             **dict(plan),
             "applied": True,
@@ -1228,6 +1329,7 @@ class WarehouseTargetedSupplierReplay:
                 "target_digest": str(plan["target_after_digest"]),
                 "non_target_digest": str(plan["non_target_digest"]),
             },
+            "recovery_policy": recovery,
         }
 
     def rollback(self, *, manifest_digest: str) -> dict[str, Any]:

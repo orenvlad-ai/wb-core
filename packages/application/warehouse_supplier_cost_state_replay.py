@@ -12,13 +12,17 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import sqlite3
 from typing import Any, Iterable, Mapping
 
 from packages.business_time import current_business_date_iso
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+    recovery_operation_id,
+)
 from packages.application.warehouse_functional import (
     _supplier_cost_allocations,
     _supplier_cost_version_states,
@@ -29,9 +33,6 @@ from packages.application.warehouse_functional import (
 
 CONTRACT_NAME = "sheet_vitrina_v1_warehouse_supplier_cost_state_replay"
 CONTRACT_VERSION = "v1"
-MIN_BACKUP_HEADROOM_BYTES = 64 * 1024 * 1024
-
-
 class WarehouseSupplierCostStateReplayError(RuntimeError):
     pass
 
@@ -420,24 +421,118 @@ def apply_supplier_cost_state_replay_plan(
             "active version or canonical supplier sources drifted after dry-run"
         )
     if not normalized.get("corrections"):
+        recovery = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=runtime.db_path,
+        ).plan_noop(
+            mutation_kind="supplier_certification_replay",
+            closure_kind="shipment",
+            plan_fingerprint=fingerprint,
+            scope={
+                "shipment_ids": normalized.get("target_shipment_ids") or [],
+                "version_id": normalized.get("active_version_id"),
+            },
+        )
         return {
             **fresh,
             "status": "applied",
             "idempotent": True,
             "database_written": False,
             "primary_source_digest_after": fresh["primary_source_digest"],
+            "recovery_policy": recovery,
         }
 
-    backup_root = Path(backup_dir)
-    if not backup_root.is_absolute():
-        raise WarehouseSupplierCostStateReplayError("absolute backup_dir is required")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backup, free_before, database_size = _create_verified_backup(
-        runtime,
-        root=backup_root,
-        prefix="supplier-cost-state-replay",
-        fingerprint=fingerprint,
+    operation_id = recovery_operation_id(
+        "supplier_certification_replay", fingerprint
     )
+    now = _now()
+    replay_after = {
+        "replay_id": normalized["replay_id"],
+        "version_id": normalized["active_version_id"],
+        "sequence_no": int(normalized["replay_sequence_no"]),
+        "supersedes_version_plan_fingerprint": normalized[
+            "supersedes_version_plan_fingerprint"
+        ],
+        "replay_plan_fingerprint": fingerprint,
+        "source_manifest_digest": normalized["source_manifest_digest"],
+        "target_shipment_ids_json": _json(normalized["target_shipment_ids"]),
+        "state_fingerprints_json": _json(normalized["target_state_fingerprints"]),
+        "provenance_json": _json(normalized["provenance"]),
+        "backup_json": _json(
+            {
+                "kind": "warehouse_recovery_policy",
+                "operation_id": operation_id,
+                "tier": "T1",
+            }
+        ),
+        "created_at": now,
+    }
+    correction_afters = [
+        {
+            "correction_id": correction["correction_id"],
+            "replay_id": correction["replay_id"],
+            "version_id": correction["version_id"],
+            "shipment_id": correction["shipment_id"],
+            "source_fingerprint": correction["source_fingerprint"],
+            "calculation_fingerprint": correction["calculation_fingerprint"],
+            "expenses_complete": int(bool(correction["expenses_complete"])),
+            "calculation_available": int(bool(correction["calculation_available"])),
+            "supersedes_state_fingerprint": correction[
+                "supersedes_state_fingerprint"
+            ],
+            "state_fingerprint": correction["state_fingerprint"],
+            "created_at": now,
+        }
+        for correction in normalized["corrections"]
+    ]
+    before_images = [
+        {
+            "table": "sheet_vitrina_v1_warehouse_supplier_cost_state_replays",
+            "key": {"replay_id": replay_after["replay_id"]},
+            "before": None,
+            "after": replay_after,
+        },
+        *[
+            {
+                "table": "sheet_vitrina_v1_warehouse_supplier_cost_state_corrections",
+                "key": {"correction_id": row["correction_id"]},
+                "before": None,
+                "after": row,
+            }
+            for row in correction_afters
+        ],
+    ]
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    recovery = recovery_registry.prepare_t1(
+        mutation_kind="supplier_certification_replay",
+        closure_kind="shipment",
+        plan_fingerprint=fingerprint,
+        scope={
+            "shipment_ids": normalized["target_shipment_ids"],
+            "version_id": normalized["active_version_id"],
+        },
+        before_images=before_images,
+        expected_after_images=[replay_after, *correction_afters],
+        source_digest=str(normalized["primary_source_digest"]),
+        non_target_digest=str(normalized["non_target_derived_digest"]),
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = recovery_registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=str(normalized["primary_source_digest"]),
+        )
+    backup = {
+        "kind": "warehouse_recovery_policy",
+        "operation_id": str(recovery["operation_id"]),
+        "tier": "T1",
+        "integrity_check": "not_applicable_target_scoped",
+        "copy_bytes": 0,
+    }
+    free_before = int(recovery_registry.capacity_status().get("free_bytes") or 0)
+    database_size = int(runtime.db_path.stat().st_size)
     committed = False
     try:
         with _connect(runtime.db_path) as conn:
@@ -454,7 +549,6 @@ def apply_supplier_cost_state_replay_plan(
                     raise WarehouseSupplierCostStateReplayError(
                         "active version or canonical supplier sources drifted before atomic replay"
                     )
-                now = _now()
                 conn.execute(
                     """INSERT INTO sheet_vitrina_v1_warehouse_supplier_cost_state_replays(
                            replay_id,version_id,sequence_no,supersedes_version_plan_fingerprint,
@@ -471,7 +565,7 @@ def apply_supplier_cost_state_replay_plan(
                         _json(normalized["target_shipment_ids"]),
                         _json(normalized["target_state_fingerprints"]),
                         _json(normalized["provenance"]),
-                        _json(backup),
+                        replay_after["backup_json"],
                         now,
                     ),
                 )
@@ -528,9 +622,13 @@ def apply_supplier_cost_state_replay_plan(
             except Exception:
                 conn.rollback()
                 raise
-    except Exception:
+    except Exception as exc:
         if not committed:
-            _discard_uncommitted_backup(backup)
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_rollback_supplier_certification_replay",
+            )
         raise
     readback = build_supplier_cost_state_replay_plan(
         runtime,
@@ -538,9 +636,19 @@ def apply_supplier_cost_state_replay_plan(
         business_date=operation_business_date,
     )
     if readback.get("corrections"):
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error="supplier certification replay is not idempotent",
+            next_action="rollback_supplier_certification_replay",
+        )
         raise WarehouseSupplierCostStateReplayError(
             "supplier certification replay is not idempotent"
         )
+    recovery = recovery_registry.retain(
+        str(recovery["operation_id"]),
+        after_digest=str(readback["primary_source_digest"]),
+        non_target_digest=str(normalized["non_target_derived_digest"]),
+    )
     return {
         **readback,
         "status": "applied",
@@ -553,6 +661,7 @@ def apply_supplier_cost_state_replay_plan(
         "database_size_bytes": database_size,
         "primary_source_digest_before": normalized["primary_source_digest"],
         "primary_source_digest_after": readback["primary_source_digest"],
+        "recovery_policy": recovery,
     }
 
 
@@ -635,16 +744,6 @@ def rollback_supplier_cost_state_replay(
             conn,
             version_id=str(replay["version_id"]),
         )
-    backup_root = Path(backup_dir)
-    if not backup_root.is_absolute():
-        raise WarehouseSupplierCostStateReplayError("absolute backup_dir is required")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backup, free_before, database_size = _create_verified_backup(
-        runtime,
-        root=backup_root,
-        prefix="supplier-cost-state-rollback",
-        fingerprint=selected,
-    )
     rollback_fingerprint = "sha256:" + _hash(
         {
             "replay_plan_fingerprint": selected,
@@ -653,6 +752,64 @@ def rollback_supplier_cost_state_replay(
         }
     )
     rollback_id = "whscrb_" + rollback_fingerprint.removeprefix("sha256:")[:24]
+    rollback_now = _now()
+    operation_id = recovery_operation_id(
+        "supplier_certification_replay", rollback_fingerprint
+    )
+    rollback_after = {
+        "rollback_id": rollback_id,
+        "replay_id": replay["replay_id"],
+        "replay_plan_fingerprint": selected,
+        "rollback_fingerprint": rollback_fingerprint,
+        "reason": rollback_reason,
+        "primary_source_digest": primary_before,
+        "backup_json": _json(
+            {
+                "kind": "warehouse_recovery_policy",
+                "operation_id": operation_id,
+                "tier": "T1",
+            }
+        ),
+        "created_at": rollback_now,
+    }
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    recovery = recovery_registry.prepare_t1(
+        mutation_kind="supplier_certification_replay",
+        closure_kind="shipment",
+        plan_fingerprint=rollback_fingerprint,
+        scope={
+            "action": "rollback",
+            "replay_id": str(replay["replay_id"]),
+        },
+        before_images=[
+            {
+                "table": "sheet_vitrina_v1_warehouse_supplier_cost_state_replay_rollbacks",
+                "key": {"rollback_id": rollback_id},
+                "before": None,
+                "after": rollback_after,
+            }
+        ],
+        expected_after_images=[rollback_after],
+        source_digest=primary_before,
+        non_target_digest=non_target_before,
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = recovery_registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=primary_before,
+        )
+    backup = {
+        "kind": "warehouse_recovery_policy",
+        "operation_id": str(recovery["operation_id"]),
+        "tier": "T1",
+        "integrity_check": "not_applicable_target_scoped",
+        "copy_bytes": 0,
+    }
+    free_before = int(recovery_registry.capacity_status().get("free_bytes") or 0)
+    database_size = int(runtime.db_path.stat().st_size)
     committed = False
     try:
         with _connect(runtime.db_path) as conn:
@@ -689,8 +846,8 @@ def rollback_supplier_cost_state_replay(
                         rollback_fingerprint,
                         rollback_reason,
                         primary_before,
-                        _json(backup),
-                        _now(),
+                        rollback_after["backup_json"],
+                        rollback_now,
                     ),
                 )
                 if _supplier_source_digest(conn) != primary_before:
@@ -702,10 +859,19 @@ def rollback_supplier_cost_state_replay(
             except Exception:
                 conn.rollback()
                 raise
-    except Exception:
+    except Exception as exc:
         if not committed:
-            _discard_uncommitted_backup(backup)
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_supplier_certification_rollback",
+            )
         raise
+    recovery = recovery_registry.retain(
+        str(recovery["operation_id"]),
+        after_digest=rollback_fingerprint,
+        non_target_digest=non_target_before,
+    )
     return {
         "status": "rolled_back",
         "idempotent": False,
@@ -717,6 +883,7 @@ def rollback_supplier_cost_state_replay(
         "database_size_bytes": database_size,
         "primary_source_digest_before": primary_before,
         "primary_source_digest_after": _supplier_source_digest_from_runtime(runtime),
+        "recovery_policy": recovery,
     }
 
 
@@ -1369,60 +1536,6 @@ def _replay_audit_digest(conn: sqlite3.Connection, *, version_id: str) -> str:
 def _supplier_source_digest_from_runtime(runtime: RegistryUploadDbBackedRuntime) -> str:
     with _connect(runtime.db_path) as conn:
         return _supplier_source_digest(conn)
-
-
-def _available_backup_destination(
-    root: Path,
-    *,
-    prefix: str,
-    fingerprint: str,
-) -> Path:
-    digest = str(fingerprint or "").removeprefix("sha256:")
-    for length in (16, 24, 64):
-        candidate = root / f"{prefix}-{digest[:length]}.sqlite3"
-        if not candidate.exists():
-            return candidate
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return root / f"{prefix}-{digest[:24]}-{timestamp}.sqlite3"
-
-
-def _create_verified_backup(
-    runtime: RegistryUploadDbBackedRuntime,
-    *,
-    root: Path,
-    prefix: str,
-    fingerprint: str,
-) -> tuple[dict[str, Any], int, int]:
-    database_size = runtime.db_path.stat().st_size
-    free_before = shutil.disk_usage(root).free
-    if free_before < database_size + MIN_BACKUP_HEADROOM_BYTES:
-        raise WarehouseSupplierCostStateReplayError(
-            "insufficient free space for coherent supplier certification replay backup"
-        )
-    destination = _available_backup_destination(
-        root,
-        prefix=prefix,
-        fingerprint=fingerprint,
-    )
-    backup = runtime.backup_database(destination)
-    destination.chmod(0o600)
-    if str(backup.get("integrity_check") or "").lower() != "ok":
-        _discard_uncommitted_backup(backup)
-        raise WarehouseSupplierCostStateReplayError(
-            "supplier certification replay backup integrity_check failed"
-        )
-    return backup, free_before, database_size
-
-
-def _discard_uncommitted_backup(backup: Mapping[str, Any] | None) -> None:
-    path_value = str((backup or {}).get("path") or "")
-    if not path_value:
-        return
-    path = Path(path_value)
-    if not path.is_absolute():
-        return
-    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-        candidate.unlink(missing_ok=True)
 
 
 def _rows(

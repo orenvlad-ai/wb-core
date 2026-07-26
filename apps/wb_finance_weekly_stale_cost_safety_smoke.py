@@ -233,12 +233,10 @@ def main() -> None:
             f"CLI apply mismatch: {cli_apply}",
         )
         _assert(
-            cli_apply["backup"]["integrity_check"] == "ok",
-            f"CLI backup mismatch: {cli_apply}",
-        )
-        _assert(
-            Path(cli_apply["backup"]["path"]).stat().st_mode & 0o777 == 0o600,
-            f"CLI backup permissions mismatch: {cli_apply}",
+            cli_apply["recovery_policy"]["tier"] == "T1"
+            and cli_apply["recovery_policy"]["lifecycle"] == "retained"
+            and cli_apply["backup"]["copy_bytes"] == 0,
+            f"CLI bounded recovery mismatch: {cli_apply}",
         )
         cli_repeat = json.loads(
             subprocess.run(

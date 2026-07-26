@@ -266,3 +266,14 @@ The FF ledger remains the physical source of truth. Legacy operations before cut
 ## Confirmed supplier acceptance boundary
 
 Changing a supplier shipment actual FF-acceptance date is a server-confirmed mutation, not a browser-side Save. Its preview is read-only. A valid one-use confirmation creates at most one receipt with source key `supplier_shipment_acceptance:<shipment_id>`, at most one current supplier FF cost layer, then reconciles WB reservations and eligible `FF → WB` movements. Repeating the consumed token or the same acceptance source is idempotent. A stale shipment/dependency revision fails closed before receipt, layer or movement creation.
+
+## Unified recovery-policy boundary
+
+Manual FF documents and the reviewed targeted WB-supply reconciliation now
+derive stable operation identities and use central T1 journal/lifecycle state.
+An exact repeat is T0. The policy records the exact document/shipment/SKU
+closure and never requests a coherent store backup; the legacy
+`--backup-dir` argument is compatibility-only. The former
+`ff_reservations_transit_cost_recovery` apply entrypoint remains disabled.
+Earlier coherent-backup wording for bounded FF recovery is superseded by
+module 51.

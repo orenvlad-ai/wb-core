@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
-import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 
@@ -130,6 +129,43 @@ def main() -> int:
             == dry["dependency_closure_digest"],
             "unrelated activity must preserve the bounded dependency closure",
         )
+        disabled_before = _evidence(runtime)
+        disabled_backup_root = root / "disabled-legacy-backups"
+        try:
+            block.apply(
+                shipment_id=SHIPMENT_ID,
+                new_actual_shipment_date="2026-06-25",
+                actor="smoke",
+                fingerprint=dry["fingerprint"],
+                backup_dir=disabled_backup_root,
+                expected_invoice_no="26GN390",
+                expected_invoice_document_id=DOCUMENT_ID,
+                historical_status_change=historical_change,
+            )
+        except ValueError as exc:
+            _assert(
+                "legacy chained factual-date mutation is disabled" in str(exc),
+                "legacy historical correction must fail closed",
+            )
+        else:
+            raise AssertionError("legacy historical correction unexpectedly applied")
+        _assert(
+            _evidence(runtime) == disabled_before,
+            "disabled legacy correction must preserve every live row",
+        )
+        _assert(
+            not disabled_backup_root.exists(),
+            "disabled legacy correction must create zero backup artifacts",
+        )
+        print(
+            "supplier_shipment_factual_date_correction_smoke: "
+            "dry-run evidence retained, legacy chained apply disabled"
+        )
+        return 0
+
+        # Historical monolithic apply scenarios remain below as migration
+        # evidence and are intentionally unreachable after the fail-closed
+        # assertion above.
         with _connect(runtime.db_path) as conn:
             conn.execute(
                 "UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_amount_total=COALESCE(invoice_amount_total,0)+1 WHERE shipment_id=?",

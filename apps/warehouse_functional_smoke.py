@@ -90,6 +90,9 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     build_functional_economics_backfill_plan,
     rollback_target_scoped_functional_economics,
 )
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
+)
 from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
 from apps.warehouse_functional_runner import _verify_cutover_external_recheck  # noqa: E402
 
@@ -3282,12 +3285,19 @@ def _test_guarded_publication() -> None:
         )
         emergency_backup = emergency_applied.get("backup") or {}
         _assert(
-            emergency_backup.get("integrity_check") == "ok",
-            "emergency apply creates a coherent backup before derived mutation",
+            emergency_backup.get("tier") == "T2"
+            and emergency_backup.get("lifecycle") == "retained",
+            "emergency apply retains a warehouse-domain checkpoint",
+        )
+        emergency_checkpoint = next(
+            artifact
+            for artifact in emergency_backup.get("artifacts") or []
+            if artifact.get("artifact_kind") == "domain_checkpoint"
         )
         _assert(
-            Path(str(emergency_backup["path"])).stat().st_mode & 0o777 == 0o600,
-            "emergency backup remains owner-only",
+            Path(str(emergency_checkpoint["path"])).stat().st_mode & 0o777
+            == 0o600,
+            "emergency domain checkpoint remains owner-only",
         )
         with sqlite3.connect(runtime.db_path) as conn:
             frozen_after = conn.execute(
@@ -3414,7 +3424,16 @@ def _test_guarded_publication() -> None:
         _assert(block.readback()["status"] == "not_initialized", "derived state removed")
         with sqlite3.connect(runtime.db_path) as conn:
             _assert(conn.execute("SELECT COUNT(*) FROM immutable_warehouse_opening_v1").fetchone()[0] == 1, "old opening audit preserved")
-        backup_path = Path(str(applied["backup"]["path"]))
+        _assert(
+            applied["backup"]["tier"] == "T3",
+            "functional schema cutover is the allowlisted full-backup tier",
+        )
+        backup_artifact = next(
+            artifact
+            for artifact in applied["backup"].get("artifacts") or []
+            if artifact.get("artifact_kind") == "raw"
+        )
+        backup_path = Path(str(backup_artifact["path"]))
         _assert(backup_path.stat().st_mode & 0o777 == 0o600, "backup mode 0600")
         _assert(
             backup_path.name.startswith(f"{FUNCTIONAL_CUTOVER_ID}-")
@@ -4145,10 +4164,19 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         )
         conn.commit()
     dry_run = build_functional_economics_backfill_plan(runtime)
-    original_backup_database = runtime.backup_database
+    original_begin_mutation = WarehouseRecoveryRegistry.begin_mutation
 
-    def backup_then_publish_new_daily_cost(destination: Path) -> dict[str, object]:
-        backup_result = original_backup_database(destination)
+    def journal_then_publish_new_daily_cost(
+        registry: WarehouseRecoveryRegistry,
+        operation_id: str,
+        *,
+        expected_source_digest: str,
+    ) -> dict[str, object]:
+        recovery = original_begin_mutation(
+            registry,
+            operation_id,
+            expected_source_digest=expected_source_digest,
+        )
         with sqlite3.connect(runtime.db_path) as drift_conn:
             drift_conn.execute(
                 """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
@@ -4157,25 +4185,29 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                 (FUNCTIONAL_CUTOVER_ID,),
             )
             drift_conn.commit()
-        return backup_result
+        return recovery
 
-    runtime.backup_database = backup_then_publish_new_daily_cost  # type: ignore[method-assign]
     try:
-        apply_functional_economics_backfill_plan(
-            runtime,
-            dry_run,
-            confirm_fingerprint=dry_run["plan_fingerprint"],
-            backup_dir=root / "economics-backups",
-        )
+        with patch.object(
+            WarehouseRecoveryRegistry,
+            "begin_mutation",
+            autospec=True,
+            side_effect=journal_then_publish_new_daily_cost,
+        ):
+            apply_functional_economics_backfill_plan(
+                runtime,
+                dry_run,
+                confirm_fingerprint=dry_run["plan_fingerprint"],
+                backup_dir=root / "economics-backups",
+            )
     except Exception as exc:
         _assert(
             "warehouse/cost/settings inputs drifted" in str(exc),
-            "hourly warehouse publication during backup is rejected under the write lock",
+            "publication during recovery journaling is rejected under the write lock",
         )
     else:
         raise AssertionError("concurrent warehouse source drift must block economics backfill")
     finally:
-        runtime.backup_database = original_backup_database  # type: ignore[method-assign]
         with sqlite3.connect(runtime.db_path) as restore_conn:
             restore_conn.execute(
                 """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost

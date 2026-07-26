@@ -17,6 +17,10 @@ from packages.application.sqlite_contention import connect_sqlite
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.stocks_block import StocksBlock, transform_legacy_payload
 from packages.application.supplier_shipment_status import resolve_supplier_shipment_status
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 from packages.business_time import business_date_iso
 from packages.contracts.cny_ledger import (
     CNY_DOCUMENT_STATUS_POSTED,
@@ -359,6 +363,15 @@ class WarehouseStocksBlock:
                     "warehouse opening cutover already exists with a different fingerprint"
                 )
             existing["idempotent"] = True
+            existing["recovery_policy"] = WarehouseRecoveryRegistry(
+                runtime_dir=self.runtime.runtime_dir,
+                db_path=self.runtime.db_path,
+            ).plan_noop(
+                mutation_kind="warehouse_opening_publication",
+                closure_kind="warehouse_domain",
+                plan_fingerprint=fingerprint,
+                scope={"cutover_id": OPENING_CUTOVER_ID},
+            )
             return existing
 
         current_local = self._read_local_source_snapshot(
@@ -369,11 +382,28 @@ class WarehouseStocksBlock:
                 "local source snapshot changed after dry-run; build a fresh plan"
             )
 
-        backup = self._backup_before_mutation(backup_dir, purpose="preapply")
-        with _connect(self.runtime.db_path) as conn:
-            _ensure_warehouse_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
+        )
+        recovery = recovery_registry.prepare_t2(
+            mutation_kind="warehouse_opening_publication",
+            plan_fingerprint=fingerprint,
+            scope={"action": "opening_apply", "cutover_id": OPENING_CUTOVER_ID},
+            source_digest=str(normalized_plan["local_source_digest"]),
+            non_target_digest="",
+            source_watermarks=dict(normalized_plan.get("source_watermarks") or {}),
+            schema_revision=CONTRACT_VERSION,
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=str(normalized_plan["local_source_digest"]),
+            )
+        try:
+            with _connect(self.runtime.db_path) as conn:
+                _ensure_warehouse_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
                 locked_local = self._read_local_source_snapshot(
                     cutover_at=str(normalized_plan.get("cutover_at") or ""),
                     connection=conn,
@@ -397,7 +427,12 @@ class WarehouseStocksBlock:
                         "posted",
                         _json_dumps(normalized_plan.get("source_watermarks") or {}),
                         fingerprint,
-                        _json_dumps({"backup": _public_backup_evidence(backup), "mode": "opening_apply"}),
+                        _json_dumps(
+                            {
+                                "recovery_policy": _public_backup_evidence(recovery),
+                                "mode": "opening_apply",
+                            }
+                        ),
                         self.timestamp_factory(),
                         self.timestamp_factory(),
                     ),
@@ -408,12 +443,21 @@ class WarehouseStocksBlock:
                         raise RuntimeError("injected warehouse opening apply failure")
                 _verify_applied_cutover(conn, normalized_plan)
                 conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_rollback_warehouse_opening",
+            )
+            raise
         result = self.readback()
+        recovery = recovery_registry.retain(
+            str(recovery["operation_id"]),
+            after_digest=fingerprint,
+        )
         result["idempotent"] = False
-        result["backup"] = _public_backup_evidence(backup)
+        result["backup"] = _public_backup_evidence(recovery)
+        result["recovery_policy"] = recovery
         return result
 
     def rollback_opening_cutover(
@@ -428,11 +472,31 @@ class WarehouseStocksBlock:
         fingerprint = str((existing.get("cutover") or {}).get("plan_fingerprint") or "")
         if fingerprint != str(confirm_fingerprint or "").strip():
             raise WarehouseOpeningSnapshotError("exact applied fingerprint is required for rollback")
-        backup = self._backup_before_mutation(backup_dir, purpose="prerollback")
-        with _connect(self.runtime.db_path) as conn:
-            _ensure_warehouse_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+        rollback_fingerprint = "sha256:" + hashlib.sha256(
+            f"warehouse-opening-rollback:{fingerprint}".encode("utf-8")
+        ).hexdigest()
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
+        )
+        recovery = recovery_registry.prepare_t2(
+            mutation_kind="warehouse_opening_publication",
+            plan_fingerprint=rollback_fingerprint,
+            scope={"action": "opening_rollback", "cutover_id": OPENING_CUTOVER_ID},
+            source_digest=fingerprint,
+            non_target_digest="",
+            source_watermarks={"opening_plan_fingerprint": fingerprint},
+            schema_revision=CONTRACT_VERSION,
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=fingerprint,
+            )
+        try:
+            with _connect(self.runtime.db_path) as conn:
+                _ensure_warehouse_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "DELETE FROM sheet_vitrina_v1_warehouse_cutovers WHERE cutover_id = ?",
                     (OPENING_CUTOVER_ID,),
@@ -444,16 +508,25 @@ class WarehouseStocksBlock:
                 if int(remaining["count"] or 0) != 0:
                     raise WarehouseOpeningSnapshotError("warehouse rollback left document rows")
                 conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_restore_warehouse_opening_checkpoint",
+            )
+            raise
+        recovery = recovery_registry.retain(
+            str(recovery["operation_id"]),
+            after_digest=rollback_fingerprint,
+        )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "rolled_back",
             "cutover_id": OPENING_CUTOVER_ID,
             "plan_fingerprint": fingerprint,
-            "backup": _public_backup_evidence(backup),
+            "backup": _public_backup_evidence(recovery),
+            "recovery_policy": recovery,
         }
 
     def readback(self) -> dict[str, Any]:
@@ -1081,18 +1154,6 @@ class WarehouseStocksBlock:
             key = str(document["warehouse_key"])
             document["source_watermark"] = warehouse_watermarks["warehouse_sources"][key]
         return documents, warehouse_watermarks
-
-    def _backup_before_mutation(self, backup_dir: Path, *, purpose: str) -> dict[str, Any]:
-        target_dir = Path(backup_dir)
-        if not target_dir.is_absolute():
-            raise WarehouseOpeningSnapshotError("backup_dir must be absolute")
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stamp = self.timestamp_factory().replace(":", "").replace("-", "").replace("+", "_")
-        destination = target_dir / f"{OPENING_CUTOVER_ID}-{purpose}-{stamp}.sqlite3"
-        backup = self.runtime.backup_database(destination)
-        destination.chmod(0o600)
-        return backup
-
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     conn = connect_sqlite(db_path)
@@ -1868,6 +1929,17 @@ def _query_dicts(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = (
 
 
 def _public_backup_evidence(backup: Mapping[str, Any]) -> dict[str, Any]:
+    if backup.get("tier"):
+        return {
+            "kind": "warehouse_recovery_policy",
+            "operation_id": str(backup.get("operation_id") or ""),
+            "tier": str(backup.get("tier") or ""),
+            "lifecycle": str(backup.get("lifecycle") or ""),
+            "planned_bytes": int(backup.get("planned_bytes") or 0),
+            "actual_bytes": int(backup.get("actual_bytes") or 0),
+            "read_bytes": int(backup.get("read_bytes") or 0),
+            "full_database_copy": str(backup.get("tier") or "") == "T3",
+        }
     return {
         "filename": Path(str(backup.get("path") or "")).name,
         "size_bytes": int(backup.get("size_bytes") or 0),

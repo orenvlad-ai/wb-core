@@ -1,10 +1,13 @@
 # Migration 123 — Warehouse/cost recovery policy design
 
-Status: design only for the global policy; the tactical archive lifecycle and
-exact supplier-cost queue replay described in the first section are implemented
-by the production-cleanup change that introduced this document. The global
-policy, operator surface and call-site migrations are intentionally deferred to
-a separate `NEW_TASK`.
+Status: authoritative implementation contract. The global policy, operator
+surface, call-site migrations and production canary are implemented by the
+independent Stage 2 `NEW_TASK`. Release truth is the GitHub Release Train:
+production acceptance is terminal only at `release:production` after the exact
+deployed-SHA canary and UI acceptance described below.
+The production measurements in the evidence baseline and the `Current
+copied/read bytes` column remain the pre-policy baseline, not the desired
+runtime behavior.
 
 ## Evidence baseline
 
@@ -48,6 +51,43 @@ The tactical contracts now available are:
 
 These tactical paths prevent recurrence for the cleanup and two selected
 commissions. They do not constitute the global policy below.
+
+## Implementation truth
+
+The policy implementation lives in
+`packages/application/warehouse_recovery_policy.py`. It is the only warehouse
+recovery component allowed to call `RegistryUploadDbBackedRuntime.backup_database`,
+and that single call is reachable only from allowlisted T3 schema/store
+migrations. Current bounded and wide warehouse/cost writers select their tier
+through this module; legacy invoice-specific apply entrypoints fail closed.
+
+Durable state is stored in the runtime SQLite recovery registry. T1 before
+images, including reversible SQLite BLOBs, and undo rows remain inside that
+registry. T2 artifacts live below
+`state/warehouse-recovery/domain-checkpoints/` as private SQLite checkpoints
+plus manifests; their table filter rejects `wb_finance_weekly_raw_rows` and
+their schema/capacity inventory includes table, explicit/implicit index and
+trigger closure.
+Capacity reservations, artifact identity, CAS lifecycle, rollback expiry,
+writer/timer state and orphan/quarantine status share the same registry.
+
+Operator readback is
+`GET /v1/sheet-vitrina-v1/warehouses/recovery`; the warehouse update tab renders
+tier, scope, planned/actual/read bytes, lifecycle, next action, rollback,
+capacity, writer/timer and orphan/quarantine state. The business-safe rollout
+runner is `apps/warehouse_recovery_policy_canary.py`, exposed on the canonical
+hosted runner as:
+
+- `warehouse-recovery-canary-dry-run --deployed-sha <40-hex>`;
+- `warehouse-recovery-canary-apply --deployed-sha <40-hex> --fingerprint <sha256>`;
+- `warehouse-ui-flow --acceptance-profile warehouse_recovery_policy_20260726`.
+
+The hosted wrapper verifies `.wb-core-runtime-sha` before either canary mode.
+Apply creates no T0 row or bytes, proves one exact T1 marker replay and rollback,
+creates one T2 domain checkpoint without a business-row mutation, compares the
+warehouse-domain digest before/after and requires a clean orphan scan. The UI
+profile requires the canary T1/T2 operations to be terminal and the recovery
+surface to be visibly ready with zero orphan/quarantine leak.
 
 ## Current call-site matrix
 

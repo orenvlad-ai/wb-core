@@ -22,6 +22,11 @@ from packages.application.wb_finance_weekly import WbFinanceApiClient, block_fro
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    BeforeImageQuery,
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 
 
 def _load_env(path: Path) -> None:
@@ -104,23 +109,64 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--apply requires an explicit --backup-dir")
             if args.confirm_fingerprint != str(plan["fingerprint"]):
                 parser.error("--confirm-fingerprint does not match current dry-run")
-            backup = (
-                _create_sqlite_backup(
-                    block.db_path,
-                    Path(args.backup_dir),
-                    fingerprint=args.confirm_fingerprint,
-                )
-                if int(plan["stale_week_count"]) > 0
-                else None
+            registry = WarehouseRecoveryRegistry(
+                runtime_dir=Path(args.runtime_dir),
+                db_path=block.db_path,
             )
+            if int(plan["stale_week_count"]) > 0:
+                recovery = _prepare_bounded_finance_recovery(
+                    registry,
+                    block.db_path,
+                    plan,
+                )
+                if recovery["lifecycle"] == RecoveryState.VERIFIED.value:
+                    recovery = registry.begin_mutation(
+                        recovery["operation_id"],
+                        expected_source_digest=str(plan["target_before_digest"]),
+                    )
+            else:
+                recovery = registry.plan_noop(
+                    mutation_kind="canonical_cost_bounded_publication",
+                    closure_kind="sku_date",
+                    plan_fingerprint=str(plan["fingerprint"]),
+                    scope={
+                        "date_from": plan["date_from"],
+                        "date_to": plan["date_to"],
+                        "weeks": [],
+                    },
+                )
             apply_kwargs = {
                 "expected_fingerprint": args.confirm_fingerprint,
                 "date_to": date_to,
             }
             if date_from is not None:
                 apply_kwargs["date_from"] = date_from
-            result = block.apply_stale_cost_weeks(**apply_kwargs)
-            result["backup"] = backup
+            try:
+                result = block.apply_stale_cost_weeks(**apply_kwargs)
+            except Exception as exc:
+                if recovery["tier"] != "T0":
+                    registry.fail_recoverable(
+                        recovery["operation_id"],
+                        error=str(exc),
+                        next_action="resume_or_rollback_stale_finance_cost",
+                    )
+                raise
+            if recovery["tier"] != "T0":
+                recovery = registry.retain(
+                    recovery["operation_id"],
+                    after_digest=str(result["fingerprint"]),
+                    non_target_digest=str(result["non_target_digest_after"]),
+                )
+            result["backup"] = (
+                None
+                if recovery["tier"] == "T0"
+                else {
+                    "kind": "target_scoped_before_image",
+                    "operation_id": recovery["operation_id"],
+                    "copy_bytes": 0,
+                }
+            )
+            result["recovery_policy"] = recovery
     elif args.command == "canonical-cost-backfill":
         date_from = date.fromisoformat(args.date_from) if args.date_from else None
         date_to = date.fromisoformat(args.date_to) if args.date_to else None
@@ -149,27 +195,90 @@ def main(argv: list[str] | None = None) -> int:
                 already_applied = block.canonical_finance_fingerprint_applied(
                     fingerprint=args.confirm_fingerprint
                 )
+                plan_date_from = str(plan.get("date_from") or args.date_from or "")
+                plan_date_to = str(plan.get("date_to") or args.date_to or "")
                 if args.confirm_fingerprint != str(plan["fingerprint"]) and not already_applied:
                     parser.error("--confirm-fingerprint does not match the current canonical dry-run")
                 if not bool(plan.get("apply_allowed")) and not already_applied:
                     parser.error("canonical dry-run contains blockers; apply is forbidden")
-                backup = (
-                    None
-                    if already_applied
-                    else _create_sqlite_backup(
-                        block.db_path,
-                        Path(args.backup_dir),
-                        fingerprint=args.confirm_fingerprint,
-                        prefix="wb-finance-canonical-cost-v2",
+                registry = WarehouseRecoveryRegistry(
+                    runtime_dir=Path(args.runtime_dir),
+                    db_path=block.db_path,
+                )
+                if already_applied:
+                    recovery = registry.plan_noop(
+                        mutation_kind="canonical_cost_wide_publication",
+                        closure_kind="warehouse_domain",
+                        plan_fingerprint=args.confirm_fingerprint,
+                        scope={
+                            "date_from": plan_date_from,
+                            "date_to": plan_date_to,
+                            "consumer": "wb_finance_weekly",
+                        },
                     )
+                else:
+                    source_digest = _json_digest(plan.get("source_manifests") or {})
+                    recovery = registry.prepare_t2(
+                        mutation_kind="canonical_cost_wide_publication",
+                        plan_fingerprint=args.confirm_fingerprint,
+                        scope={
+                            "date_from": plan_date_from,
+                            "date_to": plan_date_to,
+                            "consumer": "wb_finance_weekly",
+                        },
+                        source_digest=source_digest,
+                        non_target_digest=str(
+                            plan.get("non_target_digest") or ""
+                        ),
+                        source_watermarks={
+                            "week_count": int(plan.get("week_count") or 0),
+                            "finance_row_count": int(
+                                plan.get("finance_row_count") or 0
+                            ),
+                            "target_before_digest": str(
+                                plan.get("target_before_digest") or ""
+                            ),
+                        },
+                        schema_revision=str(plan.get("schema_version") or "finance-v1"),
+                    )
+                    if recovery["lifecycle"] == RecoveryState.VERIFIED.value:
+                        recovery = registry.begin_mutation(
+                            recovery["operation_id"],
+                            expected_source_digest=source_digest,
+                        )
+                try:
+                    result = block.apply_canonical_finance_backfill(
+                        expected_fingerprint=args.confirm_fingerprint,
+                        approval_reference=args.approval_reference,
+                        date_from=date_from,
+                        date_to=date_to,
+                    )
+                except Exception as exc:
+                    if recovery["tier"] != "T0":
+                        registry.fail_recoverable(
+                            recovery["operation_id"],
+                            error=str(exc),
+                            next_action="resume_or_rollback_canonical_finance",
+                        )
+                    raise
+                if recovery["tier"] != "T0":
+                    recovery = registry.retain(
+                        recovery["operation_id"],
+                        after_digest=str(
+                            result.get("post_apply_fingerprint")
+                            or result.get("fingerprint")
+                            or args.confirm_fingerprint
+                        ),
+                        non_target_digest=str(
+                            plan.get("non_target_digest") or ""
+                        ),
+                    )
+                result["backup"] = (
+                    None
+                    if recovery["tier"] == "T0"
+                    else recovery
                 )
-                result = block.apply_canonical_finance_backfill(
-                    expected_fingerprint=args.confirm_fingerprint,
-                    approval_reference=args.approval_reference,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-                result["backup"] = backup
+                result["recovery_policy"] = recovery
     elif args.command == "business-approved-backfill":
         parser.error(
             "business-approved-backfill is permanently revoked; use canonical-cost-backfill and a new human approval"
@@ -248,6 +357,92 @@ def _create_sqlite_backup(
         "sha256": f"sha256:{sha256.hexdigest()}",
         "integrity_check": integrity,
     }
+
+
+def _prepare_bounded_finance_recovery(
+    registry: WarehouseRecoveryRegistry,
+    db_path: Path,
+    plan: dict[str, object],
+) -> dict[str, object]:
+    weeks = [
+        (str(item["week_start"]), str(item["week_end"]))
+        for item in plan.get("weeks", [])
+        if isinstance(item, dict)
+    ]
+    if not weeks:
+        raise ValueError("bounded Finance recovery requires target weeks")
+    predicates = " OR ".join("(week_start=? AND week_end=?)" for _ in weeks)
+    parameters: tuple[object, ...] = (
+        str(plan["seller_id"]),
+        *(value for week in weeks for value in week),
+    )
+    queries: list[BeforeImageQuery] = []
+    with sqlite3.connect(
+        f"file:{db_path.resolve()}?mode=ro",
+        uri=True,
+    ) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        for table in (
+            "wb_finance_weekly_aggregates",
+            "wb_finance_weekly_cost_coverage",
+            "wb_finance_weekly_reconciliation",
+            "wb_finance_weekly_sku_aggregates",
+            "wb_finance_weekly_sync",
+        ):
+            primary_key = tuple(
+                str(row[1])
+                for row in sorted(
+                    conn.execute(f'PRAGMA table_info("{table}")').fetchall(),
+                    key=lambda row: int(row[5]) if int(row[5]) > 0 else 10_000,
+                )
+                if int(row[5]) > 0
+            )
+            if not primary_key:
+                raise ValueError(f"Finance recovery table has no primary key: {table}")
+            queries.append(
+                BeforeImageQuery(
+                    table=table,
+                    query=(
+                        f'SELECT * FROM "{table}" '
+                        f"WHERE seller_id=? AND ({predicates}) "
+                        f"ORDER BY {','.join(primary_key)}"
+                    ),
+                    parameters=parameters,
+                    key_columns=primary_key,
+                )
+            )
+    return registry.prepare_t1_from_queries(
+        mutation_kind="canonical_cost_bounded_publication",
+        closure_kind="sku_date",
+        plan_fingerprint=str(plan["fingerprint"]),
+        scope={
+            "date_from": plan["date_from"],
+            "date_to": plan["date_to"],
+            "weeks": [
+                {"week_start": start, "week_end": end}
+                for start, end in weeks
+            ],
+        },
+        queries=queries,
+        expected_after_images=[
+            item.get("expected") or {}
+            for item in plan.get("weeks", [])
+            if isinstance(item, dict)
+        ],
+        source_digest=str(plan["target_before_digest"]),
+        non_target_digest=str(plan["non_target_digest"]),
+    )
+
+
+def _json_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 if __name__ == "__main__":

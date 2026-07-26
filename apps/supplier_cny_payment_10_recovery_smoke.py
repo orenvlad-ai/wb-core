@@ -6,7 +6,6 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,40 +86,23 @@ def main() -> int:
         plan = build_plan(runtime.db_path)
         _assert(plan["would_change"], "dry-run detects the old shipment binding")
         _assert(plan["expected_affected_rows"] == 1, "exact affected row count")
-        with patch.object(
-            Path,
-            "read_bytes",
-            side_effect=MemoryError("whole-file reads are forbidden"),
-        ):
-            result = apply_plan(
+        before = runtime.db_path.read_bytes()
+        try:
+            apply_plan(
                 runtime,
                 plan,
                 backup_root=runtime.runtime_dir / "backups",
             )
-        _assert(result["applied"], "approved relink is applied")
-        _assert(Path(result["backup"]["path"]).is_file(), "coherent backup exists")
-        readback = result["post_apply"]["readback"]
+        except ValueError as exc:
+            _assert("disabled" in str(exc).lower(), "legacy apply is explicitly disabled")
+        else:
+            raise AssertionError("legacy apply entrypoint must fail closed")
+        _assert(runtime.db_path.read_bytes() == before, "disabled apply changes no data")
         _assert(
-            readback["source_order_id"] == TARGET_SHIPMENT_ID
-            and readback["operation_shipment_id"] == TARGET_SHIPMENT_ID
-            and readback["capital_shipment_id"] == TARGET_SHIPMENT_ID,
-            "document, ledger and capital move as one chain",
+            not list((runtime.runtime_dir / "backups").glob("*")),
+            "disabled apply creates no recovery artifact",
         )
-        _assert(
-            readback["same_sha_document_count"] == 1
-            and readback["operation_count"] == 1
-            and readback["capital_layer_count"] == 1,
-            "no duplicate document or derived chain is created",
-        )
-        second = build_plan(runtime.db_path)
-        _assert(not second["would_change"], "second dry-run is a no-op")
-        second_result = apply_plan(
-            runtime,
-            second,
-            backup_root=runtime.runtime_dir / "backups",
-        )
-        _assert(not second_result["applied"], "second apply is idempotent")
-    print("supplier_cny_payment_10_recovery_smoke: ok")
+    print("supplier_cny_payment_10_recovery_smoke: diagnostic-only apply disabled")
     return 0
 
 

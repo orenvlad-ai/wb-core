@@ -55,6 +55,13 @@ from packages.application.warehouse_functional import (
     FUNCTIONAL_CUTOVER_ID,
     _warehouse_balance_status_presentation,
 )
+from packages.application.warehouse_recovery_policy import (
+    BeforeImageQuery,
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+    capture_before_images,
+    recovery_operation_id,
+)
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_functional_economics_backfill"
@@ -336,7 +343,7 @@ def apply_functional_economics_backfill_plan(
     confirm_fingerprint: str,
     backup_dir: Any,
     verified_backup: Mapping[str, Any] | None = None,
-    target_scoped_undo: bool = False,
+    target_scoped_undo: bool = True,
 ) -> dict[str, Any]:
     normalized = json.loads(json.dumps(dict(plan), ensure_ascii=False))
     fingerprint = str(normalized.get("plan_fingerprint") or "")
@@ -360,6 +367,15 @@ def apply_functional_economics_backfill_plan(
         if target_scope
         else None
     )
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    operation_id = recovery_operation_id(
+        "functional_economics_targeted_publication",
+        fingerprint,
+    )
+    existing_recovery = recovery_registry.get_operation(operation_id)
     fresh = build_functional_economics_backfill_plan(
         runtime,
         business_date=operation_business_date,
@@ -367,61 +383,146 @@ def apply_functional_economics_backfill_plan(
         earliest_business_date=target_earliest_date,
     )
     if str(fresh["plan_fingerprint"]) != fingerprint:
+        if (
+            existing_recovery is not None
+            and existing_recovery.get("lifecycle")
+            in {
+                RecoveryState.MUTATION_RUNNING.value,
+                RecoveryState.FAILED_RECOVERABLE.value,
+                RecoveryState.RETAINED.value,
+            }
+            and not fresh.get("updates")
+        ):
+            if existing_recovery.get("lifecycle") != RecoveryState.RETAINED.value:
+                existing_recovery = recovery_registry.retain(
+                    operation_id,
+                    after_digest=str(normalized.get("plan_fingerprint") or ""),
+                    non_target_digest=str(
+                        normalized.get("non_target_digest") or ""
+                    ),
+                )
+            return {
+                **fresh,
+                "status": "applied",
+                "idempotent": True,
+                "database_written": False,
+                "backup": {
+                    "kind": "target_scoped_before_image",
+                    "integrity_check": "ok",
+                    "full_database_copy": False,
+                    "copy_bytes": 0,
+                    "recovery_operation_id": operation_id,
+                },
+                "recovery_policy": existing_recovery,
+            }
         raise FunctionalEconomicsBackfillError(
             "functional cost/settings or ready snapshots drifted after dry-run"
         )
-    backup = (
-        _validate_verified_backup(
-            verified_backup,
-            expected_business_date=operation_business_date,
-        )
-        if verified_backup is not None
-        else (
-            {
-                "kind": "target_scoped_before_image",
-                "integrity_check": "ok",
-                "full_database_copy": False,
-                "copy_bytes": 0,
-            }
-            if target_scoped_undo
-            else None
-        )
-    )
     if not normalized.get("updates"):
-        return {**fresh, "status": "applied", "idempotent": True, "database_written": False}
-    if backup is None:
-        backup_root = Path(backup_dir)
-        if not backup_root.is_absolute():
-            raise FunctionalEconomicsBackfillError("absolute backup_dir is required")
-        backup_root.mkdir(parents=True, exist_ok=True)
-        destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:16]}.sqlite3"
-        if destination.exists():
-            destination = backup_root / f"functional-economics-{fingerprint.removeprefix('sha256:')[:24]}.sqlite3"
-        backup = runtime.backup_database(destination)
-        destination.chmod(0o600)
-    if str(backup.get("integrity_check") or "") != "ok":
-        raise FunctionalEconomicsBackfillError("functional economics backup integrity_check failed")
+        recovery = recovery_registry.plan_noop(
+            mutation_kind="functional_economics_targeted_publication",
+            closure_kind="sku_date",
+            plan_fingerprint=fingerprint,
+            scope=target_scope
+            or {
+                "affected_nm_ids": "all",
+                "earliest_business_date": normalized.get("date_from"),
+            },
+        )
+        return {
+            **fresh,
+            "status": "applied",
+            "idempotent": True,
+            "database_written": False,
+            "recovery_policy": recovery,
+        }
+    update_predicates: list[str] = []
+    update_parameters: list[Any] = []
+    after_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in normalized["updates"]:
+        key = (str(item["bundle_version"]), str(item["as_of_date"]))
+        update_predicates.append("(bundle_version=? AND as_of_date=?)")
+        update_parameters.extend(key)
+        after_by_key[key] = {
+            "bundle_version": key[0],
+            "as_of_date": key[1],
+            "plan_json": str(item["after_plan_json"]),
+        }
+    policy_images, policy_read_bytes = capture_before_images(
+        runtime.db_path,
+        [
+            BeforeImageQuery(
+                table="sheet_vitrina_v1_ready_snapshots",
+                query=(
+                    "SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE "
+                    + " OR ".join(update_predicates)
+                    + " ORDER BY bundle_version,as_of_date"
+                ),
+                parameters=tuple(update_parameters),
+                key_columns=("bundle_version", "as_of_date"),
+            )
+        ],
+    )
+    for image in policy_images:
+        before = dict(image["before"])
+        key = (str(before["bundle_version"]), str(before["as_of_date"]))
+        after = dict(before)
+        after["plan_json"] = after_by_key[key]["plan_json"]
+        image["after"] = after
+    recovery = recovery_registry.prepare_t1(
+        mutation_kind="functional_economics_targeted_publication",
+        closure_kind="sku_date",
+        plan_fingerprint=fingerprint,
+        scope=target_scope
+        or {
+            "affected_nm_ids": "all",
+            "earliest_business_date": normalized.get("date_from"),
+        },
+        before_images=policy_images,
+        source_digest=str(normalized.get("source_fingerprint") or ""),
+        non_target_digest=str(normalized.get("non_target_digest") or ""),
+        read_bytes=policy_read_bytes,
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = recovery_registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=str(
+                normalized.get("source_fingerprint") or ""
+            ),
+        )
+    backup = {
+        "kind": "target_scoped_before_image",
+        "integrity_check": "ok",
+        "full_database_copy": False,
+        "copy_bytes": 0,
+        "recovery_operation_id": str(recovery["operation_id"]),
+        "actual_undo_bytes": int(recovery.get("actual_bytes") or 0),
+    }
     if current_business_date_iso() != operation_business_date:
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error="business date changed before bounded economics mutation",
+            next_action="replan_functional_economics",
+        )
         raise FunctionalEconomicsBackfillError(
             "functional economics apply crossed the canonical business-date boundary during backup"
         )
-    if target_scoped_undo:
-        with _connect(runtime.db_path) as schema_conn:
-            schema_conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS
-                sheet_vitrina_v1_functional_economics_undo_manifests(
-                    manifest_digest TEXT PRIMARY KEY,
-                    plan_fingerprint TEXT NOT NULL UNIQUE,
-                    before_images_json TEXT NOT NULL,
-                    after_images_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    rolled_back_at TEXT
-                )
-                """
+    with _connect(runtime.db_path) as schema_conn:
+        schema_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS
+            sheet_vitrina_v1_functional_economics_undo_manifests(
+                manifest_digest TEXT PRIMARY KEY,
+                plan_fingerprint TEXT NOT NULL UNIQUE,
+                before_images_json TEXT NOT NULL,
+                after_images_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                rolled_back_at TEXT
             )
-            schema_conn.commit()
+            """
+        )
+        schema_conn.commit()
     before_images: list[dict[str, Any]] = []
     after_images: list[dict[str, Any]] = []
     with _connect(runtime.db_path) as conn:
@@ -496,39 +597,39 @@ def apply_functional_economics_backfill_plan(
                     raise FunctionalEconomicsBackfillError(
                         "functional economics in-transaction readback failed"
                     )
-            if target_scoped_undo:
-                manifest_material = {
-                    "plan_fingerprint": fingerprint,
-                    "before_images": before_images,
-                    "after_images": after_images,
-                }
-                manifest_digest = "sha256:" + _hash(manifest_material)
-                conn.execute(
-                    """
-                    INSERT INTO
-                    sheet_vitrina_v1_functional_economics_undo_manifests(
-                        manifest_digest,plan_fingerprint,before_images_json,
-                        after_images_json,status,created_at,rolled_back_at
-                    ) VALUES(?,?,?,?,'ready',?,NULL)
-                    """,
-                    (
-                        manifest_digest,
-                        fingerprint,
-                        json.dumps(
-                            before_images,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                        json.dumps(
-                            after_images,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                        operation_business_date,
+            manifest_material = {
+                "plan_fingerprint": fingerprint,
+                "before_images": before_images,
+                "after_images": after_images,
+            }
+            manifest_digest = "sha256:" + _hash(manifest_material)
+            conn.execute(
+                """
+                INSERT INTO
+                sheet_vitrina_v1_functional_economics_undo_manifests(
+                    manifest_digest,plan_fingerprint,before_images_json,
+                    after_images_json,status,created_at,rolled_back_at
+                ) VALUES(?,?,?,?,'ready',?,NULL)
+                ON CONFLICT(plan_fingerprint) DO NOTHING
+                """,
+                (
+                    manifest_digest,
+                    fingerprint,
+                    json.dumps(
+                        before_images,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
                     ),
-                )
+                    json.dumps(
+                        after_images,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    operation_business_date,
+                ),
+            )
             if current_business_date_iso() != operation_business_date:
                 raise FunctionalEconomicsBackfillError(
                     "functional economics apply crossed the canonical business-date boundary before commit"
@@ -536,16 +637,39 @@ def apply_functional_economics_backfill_plan(
             conn.commit()
         except Exception:
             conn.rollback()
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error="functional economics transaction failed",
+                next_action="resume_targeted_economics_publication",
+            )
             raise
-    readback = build_functional_economics_backfill_plan(
-        runtime,
-        business_date=operation_business_date,
-        affected_nm_ids=target_nm_ids,
-        earliest_business_date=target_earliest_date,
-        _enforce_business_date_boundary=False,
-    )
+    try:
+        readback = build_functional_economics_backfill_plan(
+            runtime,
+            business_date=operation_business_date,
+            affected_nm_ids=target_nm_ids,
+            earliest_business_date=target_earliest_date,
+            _enforce_business_date_boundary=False,
+        )
+    except Exception as exc:
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error=str(exc),
+            next_action="retry_targeted_economics_readback",
+        )
+        raise
     if readback.get("updates"):
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error="functional economics readback is not a no-op",
+            next_action="retry_or_rollback_targeted_economics",
+        )
         raise FunctionalEconomicsBackfillError("functional economics backfill is not idempotent")
+    recovery = recovery_registry.retain(
+        str(recovery["operation_id"]),
+        after_digest=str(readback.get("plan_fingerprint") or ""),
+        non_target_digest=str(normalized.get("non_target_digest") or ""),
+    )
     return {
         **readback,
         "status": "applied",
@@ -553,10 +677,9 @@ def apply_functional_economics_backfill_plan(
         "database_written": True,
         "applied_snapshot_count": len(normalized["updates"]),
         "backup": backup,
+        "recovery_policy": recovery,
         "applied_plan_fingerprint": fingerprint,
-        "rollback_manifest_digest": (
-            manifest_digest if target_scoped_undo else ""
-        ),
+        "rollback_manifest_digest": manifest_digest,
     }
 
 

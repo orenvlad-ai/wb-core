@@ -27,8 +27,6 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 )
 from packages.application.sheet_vitrina_v1_proxy_margin_3_historical_backfill import (  # noqa: E402
     ReadySnapshotInput,
-    build_backfill_preflight,
-    non_target_plan_digest,
     transform_ready_snapshot,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import (  # noqa: E402
@@ -206,89 +204,31 @@ def main() -> None:
                 runtime_dir=runtime_dir,
                 all_available=True,
                 apply=True,
-                expected_fingerprint="0" * 64,
-            )
-        except BackfillExecutionError as exc:
-            _assert("fingerprint mismatch" in str(exc), "fingerprint mismatch must block apply")
-        else:
-            raise AssertionError("fingerprint mismatch unexpectedly applied")
-        _assert(_snapshot_identity_rows(db_path) == original_identity, "mismatch must preserve snapshot identity")
-
-        try:
-            run_backfill(
-                runtime_dir=runtime_dir,
-                all_available=True,
-                apply=True,
                 expected_fingerprint=fingerprint,
-                _test_fail_after_updates=1,
             )
         except BackfillExecutionError as exc:
-            _assert("injected transaction failure" in str(exc), "rollback smoke must use injected failure")
+            _assert(
+                "mutation entrypoint is disabled" in str(exc),
+                "legacy apply must fail closed before backup or mutation",
+            )
         else:
-            raise AssertionError("injected apply unexpectedly committed")
-        rollback_dry_run = run_backfill(
-            runtime_dir=runtime_dir,
-            all_available=True,
-            apply=False,
-            expected_fingerprint=None,
+            raise AssertionError("disabled legacy apply unexpectedly ran")
+        _assert(
+            _snapshot_identity_rows(db_path) == original_identity,
+            "disabled apply must preserve snapshot identity",
         )
         _assert(
-            rollback_dry_run["expected_fingerprint"] == fingerprint,
-            "transaction rollback must restore original fingerprint",
+            _file_sha256(db_path) == original_db_hash,
+            "disabled apply must preserve DB bytes",
         )
-
-        applied = run_backfill(
-            runtime_dir=runtime_dir,
-            all_available=True,
-            apply=True,
-            expected_fingerprint=fingerprint,
+        backup_root = runtime_dir / "backups"
+        _assert(
+            not backup_root.exists(),
+            "disabled legacy apply must create zero recovery artifacts",
         )
-        _assert(applied["database_written"], "first apply must write changed snapshots")
-        _assert(Path(applied["backup_path"]).is_file(), "apply must create a SQLite backup")
-        _assert(applied["post_apply"] == {
-            "changed_snapshots": 0,
-            "changed_rows": 0,
-            "changed_cells": 0,
-            "conflicts": 0,
-            "non_target_preserved": True,
-        }, f"post-apply precommit idempotency mismatch: {applied['post_apply']}")
-        _assert(_snapshot_identity_rows(db_path) == original_identity, "apply must preserve snapshot identity fields")
-
-        second_dry_run = run_backfill(
-            runtime_dir=runtime_dir,
-            all_available=True,
-            apply=False,
-            expected_fingerprint=None,
-        )
-        _assert(second_dry_run["changed_snapshots"] == 0, "second dry-run changed_snapshots must be zero")
-        _assert(second_dry_run["changed_rows"] == 0, "second dry-run changed_rows must be zero")
-        _assert(second_dry_run["changed_cells"] == 0, "second dry-run changed_cells must be zero")
-        _assert(second_dry_run["conflicts"] == 0, "second dry-run conflicts must be zero")
-        db_hash_after_apply = _file_sha256(db_path)
-        second_apply = run_backfill(
-            runtime_dir=runtime_dir,
-            all_available=True,
-            apply=True,
-            expected_fingerprint=second_dry_run["expected_fingerprint"],
-        )
-        _assert(second_apply["idempotent_noop"], "second apply must be a true no-op")
-        _assert(not second_apply["database_written"], "second apply must not write SQLite")
-        _assert(second_apply["backup_path"] is None, "true no-op apply must not create a redundant backup")
-        _assert(_file_sha256(db_path) == db_hash_after_apply, "true no-op apply must preserve DB bytes")
-
-        _verify_full_period_web_contract(
-            runtime=runtime,
-            first_nm=first_nm,
-            second_nm=second_nm,
-            third_nm=third_nm,
-        )
-        _verify_order_and_timestamp_map(db_path, first_nm=first_nm)
 
         print("proxy_margin_3_backfill_dry_run: ok ->", dry_run["changed_snapshots"], "snapshots")
-        print("proxy_margin_3_backfill_fingerprint_guard: ok ->", fingerprint[:12])
-        print("proxy_margin_3_backfill_backup_atomic_apply: ok ->", applied["applied_snapshots"], "snapshots")
-        print("proxy_margin_3_backfill_idempotency: ok -> zero changes on second run")
-        print("proxy_margin_3_backfill_full_period_web_contract: ok -> 2026-06-28..2026-07-03")
+        print("proxy_margin_3_backfill_legacy_apply_disabled: ok ->", fingerprint[:12])
 
 
 def _pure_conflict_and_non_finite_guards(db_path: Path) -> None:

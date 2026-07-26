@@ -808,6 +808,41 @@ def main() -> None:
     )
     if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    recovery_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "warehouse-ui-flow",
+            "--evidence-dir",
+            "/tmp/wb-core-warehouse-recovery-ui-smoke",
+            "--acceptance-profile",
+            "warehouse_recovery_policy_20260726",
+        ]
+    )
+    if (
+        recovery_ui_flow_args.acceptance_profile
+        != "warehouse_recovery_policy_20260726"
+    ):
+        raise AssertionError("hosted runner must expose recovery-policy UI acceptance")
+    recovery_canary_dry_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-recovery-canary-dry-run", "--deployed-sha", "a" * 40]
+    )
+    recovery_canary_apply_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "warehouse-recovery-canary-apply",
+            "--deployed-sha",
+            "a" * 40,
+            "--fingerprint",
+            "sha256:" + "b" * 64,
+        ]
+    )
+    if (
+        recovery_canary_dry_args.handler
+        is not hosted_runtime.run_warehouse_recovery_canary_command
+        or recovery_canary_dry_args.recovery_canary_apply
+        or recovery_canary_apply_args.handler
+        is not hosted_runtime.run_warehouse_recovery_canary_command
+        or not recovery_canary_apply_args.recovery_canary_apply
+    ):
+        raise AssertionError("hosted runner must expose exact dry/apply recovery canary")
     finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]
     )
