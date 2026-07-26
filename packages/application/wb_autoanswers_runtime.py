@@ -65,7 +65,7 @@ from packages.contracts.wb_autoanswers import (
 from packages.application.sqlite_contention import connect_sqlite
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 AUTOANSWERS_STORE_SCHEMA_VERSION = 1
 AUTOANSWERS_DB_FILENAME = "wb_autoanswers_runtime.sqlite3"
 LEGACY_RUNTIME_DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -95,9 +95,31 @@ DEFAULT_ESTIMATED_REVIEW_COST_USD = Decimal("0.03")
 DEFAULT_POLICY_VERSION = "owner-policy-2026-07-21-v3"
 RATING_ONLY_TEMPLATE_POLICY_VERSION = "owner-policy-2026-07-21-v2"
 DEFAULT_LEASE_SECONDS = 300
+RECONCILIATION_STALL_THRESHOLD_SECONDS = 15 * 60
+RECONCILIATION_ACTION_OUTCOMES = frozenset(
+    {
+        "generation_queued",
+        "regeneration_queued",
+        "publication_queued",
+        "inflight_adopted",
+    }
+)
+RECONCILIATION_PRESERVED_OUTCOMES = frozenset(
+    {
+        "classification_review_required",
+        "external_answer_skipped",
+        "publication_bound_regeneration_preserved",
+        "published_preserved",
+        "readback_preserved",
+        "review_required",
+        "review_required_preserved",
+        "skipped_preserved",
+        "terminal_error_preserved",
+    }
+)
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v7"
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v8"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -1264,7 +1286,6 @@ class AutoanswersRepository:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         conn = connect_sqlite(
             self.db_path,
-            timeout_ms=30_000,
             isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
@@ -1311,7 +1332,7 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v7(conn)
+            self._migrate_schema_v8(conn)
             applied_at = iso_utc(self._now())
             conn.executemany(
                 """
@@ -2077,6 +2098,35 @@ class AutoanswersRepository:
             """
         )
 
+    @staticmethod
+    def _migrate_schema_v8(conn: sqlite3.Connection) -> None:
+        """Add monotonic per-member policy-reconciliation acknowledgements."""
+
+        AutoanswersRepository._migrate_schema_v7(conn)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
+                sweep_id TEXT NOT NULL
+                    REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+                feedback_id TEXT NOT NULL,
+                content_version INTEGER NOT NULL,
+                content_version_hash TEXT NOT NULL,
+                policy_epoch INTEGER NOT NULL,
+                transition_run_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                outcome_class TEXT NOT NULL
+                    CHECK(outcome_class IN ('action','preserved','unchanged')),
+                candidate_fingerprint TEXT NOT NULL,
+                acknowledged_at TEXT NOT NULL,
+                PRIMARY KEY(sweep_id,feedback_id,content_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_reconciliation_ack_sweep_outcome
+            ON sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
+                sweep_id,outcome_class,outcome,acknowledged_at
+            );
+            """
+        )
+
     def settings(self) -> AutoanswersSettings:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton = 1").fetchone()
@@ -2351,13 +2401,22 @@ class AutoanswersRepository:
                 # the stronger fail-closed reason.
                 current_reason = str(current["stop_reason"] or "") if current is not None else ""
                 if current_reason not in {"budget_state_unknown", "openai_quota_exhausted"}:
+                    details = {
+                        "code": code,
+                        "stage": _clean_text(errors[0].get("stage")),
+                    }
+                    for name in (
+                        "wait_ms",
+                        "retry_count",
+                        "contention_phase",
+                    ):
+                        value = errors[0].get(name)
+                        if value is not None:
+                            details[name] = value
                     self._set_stop_reason(
                         conn,
                         reason,
-                        details={
-                            "code": code,
-                            "stage": _clean_text(errors[0].get("stage")),
-                        },
+                        details=details,
                         at=now,
                     )
             elif current is not None and str(current["stop_reason"] or "") == "worker_error":
@@ -2409,11 +2468,24 @@ class AutoanswersRepository:
                                   AND (COALESCE(j.regeneration_required,0)=1
                                        OR COALESCE(j.media_uncertain,0)=1)
                                   AND p.write_started_at IS NULL
+                                  AND NOT EXISTS(
+                                      SELECT 1
+                                      FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements a
+                                      WHERE a.sweep_id=?
+                                        AND a.feedback_id=f.feedback_id
+                                        AND a.content_version=f.content_version
+                                        AND a.content_version_hash=f.content_version_hash
+                                        AND a.outcome IN (
+                                            'review_required_preserved',
+                                            'publication_bound_regeneration_preserved'
+                                        )
+                                  )
                                 """,
                                 (
                                     PROMPT_BUNDLE_VERSION,
                                     sweep["sweep_id"],
                                     int(settings["policy_epoch"]),
+                                    sweep["sweep_id"],
                                 ),
                             ).fetchone()[0]
                         )
@@ -3284,6 +3356,16 @@ class AutoanswersRepository:
             runtime = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
             ).fetchone()
+            runtime_details = (
+                json.loads(str(runtime["stop_details_json"] or "{}"))
+                if runtime is not None
+                else {}
+            )
+            sweep_cursor = (
+                json.loads(str(sweep["cursor_json"] or "{}"))
+                if sweep is not None
+                else {}
+            )
             last_sync = conn.execute(
                 "SELECT MAX(last_success_at) FROM sheet_vitrina_v1_wb_sync_state"
             ).fetchone()[0]
@@ -3508,6 +3590,78 @@ class AutoanswersRepository:
                 policy_epoch=progress_policy_epoch,
                 target_mode=(str(sweep["target_mode"]) if sweep is not None else settings.mode),
             )
+            claimable = conn.execute(
+                """
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                        WHERE j.policy_epoch=?
+                          AND j.state IN ('queued','processing','retryable_error')
+                          AND (
+                            j.state<>'retryable_error'
+                            OR j.available_at<=?
+                          )
+                    ) AS ai,
+                    (
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_wb_publication_jobs p
+                        WHERE p.policy_epoch=?
+                          AND (
+                            (p.write_started_at IS NULL
+                             AND p.state IN ('approved','publishing')
+                             AND p.available_at<=?)
+                            OR p.state='publish_pending_readback'
+                            OR (
+                                p.state='retryable_error'
+                                AND p.retry_stage='readback'
+                                AND p.available_at<=?
+                            )
+                          )
+                    ) AS publication,
+                    (
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                        WHERE j.transition_run_id=?
+                          AND j.completed_at>=?
+                          AND j.processing_kind=?
+                    ) AS ai_completed_last_hour,
+                    (
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_wb_publication_jobs p
+                        WHERE p.transition_run_id=?
+                          AND p.state='published'
+                          AND p.updated_at>=?
+                    ) AS publications_confirmed_last_hour,
+                    (
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements a
+                        WHERE a.sweep_id=? AND a.acknowledged_at>=?
+                    ) AS reconciliation_acknowledged_last_hour
+                """,
+                (
+                    progress_policy_epoch,
+                    iso_utc(now),
+                    progress_policy_epoch,
+                    iso_utc(now),
+                    iso_utc(now),
+                    (
+                        str(sweep["transition_run_id"] or sweep["sweep_id"])
+                        if sweep is not None
+                        else ""
+                    ),
+                    hour_start,
+                    PROCESSING_KIND_FROZEN_AI,
+                    (
+                        str(sweep["transition_run_id"] or sweep["sweep_id"])
+                        if sweep is not None
+                        else ""
+                    ),
+                    hour_start,
+                    str(sweep["sweep_id"]) if sweep is not None else "",
+                    hour_start,
+                ),
+            ).fetchone()
         counters = {key: int(row[key] or 0) for key in row.keys()}
         if sweep is not None and not scope_exact:
             # Schema-v3 sweeps stored an immutable hash/count but not members.
@@ -3559,6 +3713,12 @@ class AutoanswersRepository:
             last_tick = parse_timestamp(runtime["last_scheduler_tick_at"] if runtime is not None else None)
             if last_tick is None or last_tick < now - timedelta(minutes=3):
                 stop_reason = "worker_unavailable"
+            elif int(sweep_cursor.get("reconciliation_remaining") or 0) > 0:
+                stop_reason = "reconciliation_in_progress"
+            elif current_priority_bucket is not None and int(claimable["ai"] or 0) + int(
+                claimable["publication"] or 0
+            ) == 0:
+                stop_reason = "priority_wait"
         all_total = grouped_counters["all_total"]
         content_total = grouped_counters["content_total"]
         rating_total = grouped_counters["rating_total"]
@@ -3613,6 +3773,124 @@ class AutoanswersRepository:
         else:
             current_operation = "complete"
         pause_reason = stop_reason or "no_eligible_jobs"
+        budget_snapshot = self.budget_status()
+        budget_free = (
+            budget_snapshot["budget_state"] != "unknown"
+            and _money(budget_snapshot["available_hourly_usd"])
+            >= _money(settings.max_reservation_per_review_usd)
+            and _money(budget_snapshot["available_daily_usd"])
+            >= _money(settings.max_reservation_per_review_usd)
+            and _money(budget_snapshot["available_monthly_usd"])
+            >= _money(settings.max_reservation_per_review_usd)
+        )
+        last_output_at = max(
+            (
+                value
+                for value in (
+                    parse_timestamp(
+                        runtime["last_successful_ai_call_at"]
+                        if runtime is not None
+                        else None
+                    ),
+                    parse_timestamp(
+                        runtime["last_confirmed_publication_at"]
+                        if runtime is not None
+                        else None
+                    ),
+                    parse_timestamp(sweep["created_at"] if sweep is not None else None),
+                )
+                if value is not None
+            ),
+            default=None,
+        )
+        output_idle_seconds = (
+            max(0, int((now - last_output_at).total_seconds()))
+            if last_output_at is not None
+            else None
+        )
+        bucket_since = parse_timestamp(sweep_cursor.get("priority_bucket_since"))
+        bucket_age_seconds = (
+            max(0, int((now - bucket_since).total_seconds()))
+            if bucket_since is not None and current_priority_bucket is not None
+            else None
+        )
+        claimable_total = int(claimable["ai"] or 0) + int(
+            claimable["publication"] or 0
+        )
+        expected_pause = stop_reason in {
+            "hourly_budget_reached",
+            "daily_budget_reached",
+            "monthly_budget_reached",
+            "run_budget_reached",
+            "run_review_limit_reached",
+            "run_cap_missing",
+            "paid_reviews_hourly_limit",
+            "concurrency_limit",
+            "openai_quota_exhausted",
+            "budget_state_unknown",
+            "rate_limited",
+            "retry_backoff",
+            "worker_unavailable",
+        }
+        stall_alerts: list[dict[str, Any]] = []
+        if (
+            settings.effective_enabled
+            and settings.mode != MODE_MANUAL
+            and budget_free
+            and not expected_pause
+            and current_priority_bucket is not None
+            and claimable_total == 0
+            and output_idle_seconds is not None
+            and output_idle_seconds >= RECONCILIATION_STALL_THRESHOLD_SECONDS
+        ):
+            stall_alerts.append(
+                {
+                    "code": "automatic_pipeline_stalled",
+                    "severity": "error",
+                    "idle_seconds": output_idle_seconds,
+                    "priority_bucket": priority_label,
+                }
+            )
+            stop_reason = "automatic_pipeline_stalled"
+            pause_reason = stop_reason
+        if int(sweep_cursor.get("repeated_candidate_batches") or 0) >= 2:
+            stall_alerts.append(
+                {
+                    "code": "reconciliation_candidate_repeat",
+                    "severity": "error",
+                    "repeat_count": int(
+                        sweep_cursor.get("repeated_candidate_batches") or 0
+                    ),
+                    "candidate_batch_fingerprint": sweep_cursor.get(
+                        "candidate_batch_fingerprint"
+                    ),
+                }
+            )
+        if (
+            bucket_age_seconds is not None
+            and bucket_age_seconds >= RECONCILIATION_STALL_THRESHOLD_SECONDS
+            and not expected_pause
+            and claimable_total == 0
+        ):
+            stall_alerts.append(
+                {
+                    "code": "priority_bucket_stalled",
+                    "severity": "warning",
+                    "bucket_age_seconds": bucket_age_seconds,
+                    "priority_bucket": priority_label,
+                }
+            )
+        if str(runtime_details.get("code") or "") == "sqlite_contention_exhausted":
+            stall_alerts.append(
+                {
+                    "code": "sqlite_contention_exhausted",
+                    "severity": "error",
+                    "stage": runtime_details.get("stage"),
+                    "wait_ms": runtime_details.get("wait_ms"),
+                    "retry_count": runtime_details.get("retry_count"),
+                    "contention_phase": runtime_details.get("contention_phase"),
+                }
+            )
         all_status = "paused_manual" if settings.mode == MODE_MANUAL else current_operation
         content_status = "paused_manual" if settings.mode == MODE_MANUAL else current_operation
         return {
@@ -3690,6 +3968,60 @@ class AutoanswersRepository:
                 "current_priority_bucket": priority_label,
                 "current_priority_rank": current_priority_bucket,
             },
+            "reconciliation": {
+                "state": str(sweep["state"]) if sweep is not None else None,
+                "unique_acknowledged": int(
+                    sweep_cursor.get("acknowledged_total") or 0
+                ),
+                "already_current": int(
+                    (json.loads(str(sweep["progress_json"] or "{}")) if sweep is not None else {}).get(
+                        "already_current"
+                    )
+                    or 0
+                ),
+                "total": int(sweep_cursor.get("membership_total") or current_run_total),
+                "remaining": int(
+                    sweep_cursor.get("reconciliation_remaining") or 0
+                ),
+                "action_total": int(sweep_cursor.get("action_total") or 0),
+                "preserved_total": int(
+                    sweep_cursor.get("preserved_total") or 0
+                ),
+                "unchanged_total": int(
+                    sweep_cursor.get("unchanged_total") or 0
+                ),
+                "rate_per_minute": float(
+                    sweep_cursor.get("rate_per_minute") or 0
+                ),
+                "eta_minutes": sweep_cursor.get("eta_minutes"),
+                "last_progress_at": sweep_cursor.get("last_progress_at"),
+                "candidate_batch_fingerprint": sweep_cursor.get(
+                    "candidate_batch_fingerprint"
+                ),
+                "repeated_candidate_batches": int(
+                    sweep_cursor.get("repeated_candidate_batches") or 0
+                ),
+                "priority_bucket_since": sweep_cursor.get(
+                    "priority_bucket_since"
+                ),
+                "bucket_age_seconds": bucket_age_seconds,
+            },
+            "business_throughput": {
+                "new_ai_completions_last_hour": int(
+                    claimable["ai_completed_last_hour"] or 0
+                ),
+                "confirmed_wb_publications_last_hour": int(
+                    claimable["publications_confirmed_last_hour"] or 0
+                ),
+                "reconciliation_acknowledged_last_hour": int(
+                    claimable["reconciliation_acknowledged_last_hour"] or 0
+                ),
+            },
+            "claimable_ai_jobs": int(claimable["ai"] or 0),
+            "claimable_publication_jobs": int(claimable["publication"] or 0),
+            "output_idle_seconds": output_idle_seconds,
+            "stall_alerts": stall_alerts,
+            "stop_details": runtime_details,
             "external_answer": grouped_counters["external_answer"],
             "content_bearing_external_answer": grouped_counters["content_external_answer"],
             "content_bearing_stale_or_regeneration": grouped_counters["content_stale_or_regeneration"],
@@ -5166,8 +5498,13 @@ class AutoanswersRepository:
                   AND (
                     j.processing_key IS NULL
                     OR (
-                      COALESCE(j.regeneration_required,0)=1
+                      (
+                        COALESCE(j.regeneration_required,0)=1
+                        OR COALESCE(j.media_uncertain,0)=1
+                      )
                       AND COALESCE(j.policy_epoch,-1)<>?
+                      AND j.state NOT IN ('terminal_error','skipped','published')
+                      AND p.publication_key IS NULL
                     )
                     OR (
                       COALESCE(j.policy_epoch,-1)<>?
@@ -5245,8 +5582,13 @@ class AutoanswersRepository:
               AND (
                 j.processing_key IS NULL
                 OR (
-                  COALESCE(j.regeneration_required,0)=1
+                  (
+                    COALESCE(j.regeneration_required,0)=1
+                    OR COALESCE(j.media_uncertain,0)=1
+                  )
                   AND COALESCE(j.policy_epoch,-1)<>?
+                  AND j.state NOT IN ('terminal_error','skipped','published')
+                  AND p.publication_key IS NULL
                 )
                 OR (
                     COALESCE(j.policy_epoch,-1)<>?
@@ -5447,9 +5789,34 @@ class AutoanswersRepository:
                 ),
             ).fetchone()
             if row is None:
+                active_cursor_row = conn.execute(
+                    """
+                    SELECT cursor_json
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                    WHERE policy_epoch=?
+                      AND state IN ('queued','processing','retryable_error')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (settings.policy_epoch,),
+                ).fetchone()
+                reconciliation_cursor = (
+                    json.loads(str(active_cursor_row["cursor_json"] or "{}"))
+                    if active_cursor_row is not None
+                    else {}
+                )
+                no_job_reason = (
+                    "manual_pause"
+                    if settings.mode == MODE_MANUAL
+                    else "reconciliation_in_progress"
+                    if int(reconciliation_cursor.get("reconciliation_remaining") or 0) > 0
+                    else "priority_wait"
+                    if priority_bucket is not None
+                    else "no_eligible_jobs"
+                )
                 self._set_stop_reason(
                     conn,
-                    "manual_pause" if settings.mode == MODE_MANUAL else "no_eligible_jobs",
+                    no_job_reason,
                     at=now,
                 )
                 return None
@@ -7776,7 +8143,7 @@ class AutoanswersRepository:
         result = dict(row)
         result["totals"] = json.loads(str(result.pop("totals_json")))
         result["progress"] = json.loads(str(result.pop("progress_json")))
-        result.pop("cursor_json", None)
+        result["cursor"] = json.loads(str(result.pop("cursor_json") or "{}"))
         return result
 
     def reconciliation_status(self, sweep_id: str | None = None) -> dict[str, Any] | None:
@@ -7794,10 +8161,71 @@ class AutoanswersRepository:
             return None
         return self._reconciliation_row(row)
 
+    @staticmethod
+    def _reconciliation_outcome_class(outcome: str) -> str:
+        if outcome in RECONCILIATION_ACTION_OUTCOMES:
+            return "action"
+        if outcome in RECONCILIATION_PRESERVED_OUTCOMES:
+            return "preserved"
+        return "unchanged"
+
+    @classmethod
+    def _acknowledge_reconciliation_member(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        sweep_id: str,
+        feedback_id: str,
+        content_version: int,
+        content_version_hash: str,
+        policy_epoch: int,
+        transition_run_id: str,
+        outcome: str,
+        at: datetime,
+    ) -> bool:
+        fingerprint = "sha256:" + hashlib.sha256(
+            canonical_json(
+                {
+                    "sweep_id": sweep_id,
+                    "feedback_id": feedback_id,
+                    "content_version": int(content_version),
+                    "content_version_hash": content_version_hash,
+                    "policy_epoch": int(policy_epoch),
+                    "transition_run_id": transition_run_id,
+                    "outcome": outcome,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
+                sweep_id,feedback_id,content_version,content_version_hash,
+                policy_epoch,transition_run_id,outcome,outcome_class,
+                candidate_fingerprint,acknowledged_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                sweep_id,
+                feedback_id,
+                int(content_version),
+                content_version_hash,
+                int(policy_epoch),
+                transition_run_id,
+                outcome,
+                cls._reconciliation_outcome_class(outcome),
+                fingerprint,
+                iso_utc(at),
+            ),
+        )
+        return int(cursor.rowcount or 0) == 1
+
     def _reconcile_feedback_for_policy(
         self,
         *,
+        sweep_id: str,
         feedback_id: str,
+        content_version: int,
+        content_version_hash: str,
         enable_epoch: int,
         policy_epoch: int,
         target_mode: str,
@@ -7808,12 +8236,44 @@ class AutoanswersRepository:
         regeneration_key: str | None = None
         outcome = "unchanged"
         with self.transaction() as conn:
+            def acknowledge(name: str, row: Mapping[str, Any] | None = None) -> str:
+                self._acknowledge_reconciliation_member(
+                    conn,
+                    sweep_id=_clean_text(sweep_id),
+                    feedback_id=(
+                        str(row["feedback_id"]) if row is not None else _clean_text(feedback_id)
+                    ),
+                    content_version=(
+                        int(row["content_version"]) if row is not None else int(content_version)
+                    ),
+                    content_version_hash=(
+                        str(row["content_version_hash"])
+                        if row is not None
+                        else _clean_text(content_version_hash)
+                    ),
+                    policy_epoch=policy_epoch,
+                    transition_run_id=transition_run_id,
+                    outcome=name,
+                    at=now,
+                )
+                return name
+
             feedback = conn.execute(
-                "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
-                (_clean_text(feedback_id),),
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id=?
+                  AND content_version=?
+                  AND content_version_hash=?
+                """,
+                (
+                    _clean_text(feedback_id),
+                    int(content_version),
+                    _clean_text(content_version_hash),
+                ),
             ).fetchone()
             if feedback is None:
-                return "missing"
+                return acknowledge("missing")
             job = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs
@@ -7839,7 +8299,7 @@ class AutoanswersRepository:
                         """,
                         (STATE_SKIPPED, policy_epoch, DEFAULT_POLICY_VERSION, iso_utc(now), job["processing_key"]),
                     )
-                return "external_answer_skipped"
+                return acknowledge("external_answer_skipped", feedback)
             classification = str(
                 feedback["content_classification"] or CONTENT_CLASS_INDETERMINATE
             )
@@ -7878,14 +8338,14 @@ class AutoanswersRepository:
                     )
                     outcome = "classification_review_required"
                 elif str(job["state"]) == STATE_PUBLISHED:
-                    return "published_preserved"
+                    return acknowledge("published_preserved", feedback)
                 else:
                     publication = conn.execute(
                         "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?",
                         (job["processing_key"],),
                     ).fetchone()
                     if publication is not None and publication["write_started_at"]:
-                        return "readback_preserved"
+                        return acknowledge("readback_preserved", feedback)
                     conn.execute(
                         """
                         UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
@@ -7950,17 +8410,13 @@ class AutoanswersRepository:
                 )
                 outcome = "generation_queued"
             elif int(job["policy_epoch"] or 0) == policy_epoch:
-                return "already_reconciled"
+                return acknowledge("already_reconciled", feedback)
             elif str(job["state"]) == STATE_PUBLISHED:
-                return "published_preserved"
+                return acknowledge("published_preserved", feedback)
             elif publication is not None and publication["write_started_at"]:
                 # A possible write is reconciled only by readback; policy
                 # transitions must never manufacture a second POST.
-                conn.execute(
-                    "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET enable_epoch=?, policy_epoch=?, updated_at=? WHERE processing_key=?",
-                    (enable_epoch, policy_epoch, iso_utc(now), job["processing_key"]),
-                )
-                return "readback_preserved"
+                return acknowledge("readback_preserved", feedback)
             elif str(job["state"]) == STATE_SKIPPED:
                 # A frozen prefilter result is already a terminal, zero-cost
                 # evaluation for this immutable content/bundle identity.
@@ -7968,22 +8424,6 @@ class AutoanswersRepository:
                 # again: its settled reservation is immutable evidence and a
                 # second claim would otherwise reach the provider boundary
                 # without an active reservation.
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
-                    SET enable_epoch=?, policy_epoch=?, policy_version=?,
-                        transition_run_id=?, updated_at=?
-                    WHERE processing_key=?
-                    """,
-                    (
-                        enable_epoch,
-                        policy_epoch,
-                        DEFAULT_POLICY_VERSION,
-                        transition_run_id,
-                        iso_utc(now),
-                        job["processing_key"],
-                    ),
-                )
                 outcome = "skipped_preserved"
             elif (
                 str(job["state"]) == STATE_TERMINAL_ERROR
@@ -8001,36 +8441,6 @@ class AutoanswersRepository:
                 # Human-only and terminal outcomes remain visible but are not
                 # automatic work.  Adopting the new run identity must not turn
                 # them back into paid generation or hold the rating-only gate.
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
-                    SET enable_epoch=?, policy_epoch=?, policy_version=?,
-                        transition_run_id=?, updated_at=?
-                    WHERE processing_key=?
-                    """,
-                    (
-                        enable_epoch,
-                        policy_epoch,
-                        DEFAULT_POLICY_VERSION,
-                        transition_run_id,
-                        iso_utc(now),
-                        job["processing_key"],
-                    ),
-                )
-                if publication is not None:
-                    conn.execute(
-                        """
-                        UPDATE sheet_vitrina_v1_wb_publication_jobs
-                        SET policy_epoch=?, transition_run_id=?, updated_at=?
-                        WHERE publication_key=?
-                        """,
-                        (
-                            policy_epoch,
-                            transition_run_id,
-                            iso_utc(now),
-                            publication["publication_key"],
-                        ),
-                    )
                 outcome = (
                     "review_required_preserved"
                     if str(job["state"]) == STATE_NEEDS_REVIEW
@@ -8043,42 +8453,9 @@ class AutoanswersRepository:
                 else:
                     # Publication aggregates are immutable evidence for an
                     # exact reply.  They cannot be replaced by regeneration,
-                    # so retain the row for explicit review instead of
+                    # so preserve both rows unchanged for explicit review instead of
                     # repeatedly calling request_regeneration(), which must
                     # continue to reject publication-bound jobs.
-                    conn.execute(
-                        """
-                        UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
-                        SET state=?, enable_epoch=?, policy_epoch=?,
-                            policy_version=?, transition_run_id=?,
-                            last_error_code='publication_bound_regeneration_requires_review',
-                            updated_at=? WHERE processing_key=?
-                        """,
-                        (
-                            STATE_NEEDS_REVIEW,
-                            enable_epoch,
-                            policy_epoch,
-                            DEFAULT_POLICY_VERSION,
-                            transition_run_id,
-                            iso_utc(now),
-                            job["processing_key"],
-                        ),
-                    )
-                    conn.execute(
-                        """
-                        UPDATE sheet_vitrina_v1_wb_publication_jobs
-                        SET state=?, policy_epoch=?, transition_run_id=?,
-                            last_error_code='publication_bound_regeneration_requires_review',
-                            updated_at=? WHERE publication_key=?
-                        """,
-                        (
-                            STATE_NEEDS_REVIEW,
-                            policy_epoch,
-                            transition_run_id,
-                            iso_utc(now),
-                            publication["publication_key"],
-                        ),
-                    )
                     outcome = "publication_bound_regeneration_preserved"
             else:
                 ready = (
@@ -8210,6 +8587,8 @@ class AutoanswersRepository:
                 details={"policy_epoch": policy_epoch, "mode": target_mode, "outcome": outcome, "transition_run_id": transition_run_id},
                 at=now,
             )
+            if regeneration_key is None:
+                acknowledge(outcome, feedback)
         if regeneration_key:
             self.request_regeneration(
                 regeneration_key,
@@ -8217,6 +8596,18 @@ class AutoanswersRepository:
                 trigger_source="policy_reconciliation",
                 transition_run_id=transition_run_id,
             )
+            with self.transaction() as conn:
+                self._acknowledge_reconciliation_member(
+                    conn,
+                    sweep_id=_clean_text(sweep_id),
+                    feedback_id=_clean_text(feedback_id),
+                    content_version=int(content_version),
+                    content_version_hash=_clean_text(content_version_hash),
+                    policy_epoch=policy_epoch,
+                    transition_run_id=transition_run_id,
+                    outcome=outcome,
+                    at=now,
+                )
         return outcome
 
     def reconcile_policy_sweep_once(
@@ -8379,11 +8770,12 @@ class AutoanswersRepository:
             params: list[Any] = [
                 PROMPT_BUNDLE_VERSION,
                 sweep["scope_from"],
-                settings.policy_epoch,
+                sweep["sweep_id"],
                 STATE_NEEDS_REVIEW,
                 STATE_TERMINAL_ERROR,
                 STATE_SKIPPED,
                 STATE_PUBLISHED,
+                settings.policy_epoch,
                 CONTENT_CLASS_CONTENT_BEARING,
                 AUTOMATIC_PRIORITY_INDETERMINATE,
                 CONTENT_CLASS_INDETERMINATE,
@@ -8406,19 +8798,33 @@ class AutoanswersRepository:
                 )
             if sweep["scope_to"]:
                 params.append(sweep["scope_to"])
+            params.append(settings.policy_epoch)
             params.append(min(25, max(1, min(int(batch_size), capacity if not queue_blocked else 25))))
             candidates = conn.execute(
                 f"""
-                SELECT f.feedback_id
+                SELECT
+                    f.feedback_id,
+                    f.content_version,
+                    f.content_version_hash,
+                    j.state AS job_state,
+                    j.policy_epoch AS job_policy_epoch
                 FROM sheet_vitrina_v1_wb_feedbacks f
                 LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
                   ON j.feedback_id=f.feedback_id AND j.content_version=f.content_version
                  AND j.bundle_version=?
-                WHERE COALESCE(f.answer_text,'')=''
-                  AND substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?
-                  AND COALESCE(j.policy_epoch,-1)<>?
+                WHERE substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?
+                  AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements a
+                    WHERE a.sweep_id=?
+                      AND a.feedback_id=f.feedback_id
+                      AND a.content_version=f.content_version
+                      AND a.content_version_hash=f.content_version_hash
+                  )
                   AND (
-                    j.state IN (?,?,?,?)
+                    COALESCE(f.answer_text,'')<>''
+                    OR j.state IN (?,?,?,?)
+                    OR COALESCE(j.policy_epoch,-1)=?
                     OR (
                       CASE f.content_classification
                         WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
@@ -8428,21 +8834,63 @@ class AutoanswersRepository:
                       END
                     )=?
                   )
-                  AND (?=0 OR j.final_reply IS NOT NULL)
-                  AND (?=0 OR j.final_reply IS NOT NULL
+                  AND (?=0 OR COALESCE(f.answer_text,'')<>''
+                       OR j.final_reply IS NOT NULL)
+                  AND (?=0 OR COALESCE(f.answer_text,'')<>''
+                       OR j.final_reply IS NOT NULL
                        OR f.content_classification IN (?,?)
                        OR j.state IN (?,?))
                   {membership_clause}
                   {scope_clause}
-                ORDER BY {_automatic_priority_order_sql("f")}
+                ORDER BY
+                  CASE
+                    WHEN COALESCE(f.answer_text,'')<>'' THEN 1
+                    WHEN COALESCE(j.policy_epoch,-1)=? THEN 2
+                    WHEN j.state='needs_review'
+                         AND (
+                           COALESCE(j.regeneration_required,0)=1
+                           OR COALESCE(j.media_uncertain,0)=1
+                         )
+                         AND NOT EXISTS(
+                           SELECT 1
+                           FROM sheet_vitrina_v1_wb_publication_jobs action_p
+                           WHERE action_p.processing_key=j.processing_key
+                         )
+                      THEN 0
+                    WHEN j.state IN ('needs_review','terminal_error','skipped','published') THEN 1
+                    ELSE 0
+                  END,
+                  {_automatic_priority_order_sql("f")}
                 LIMIT ?
                 """,
                 params,
             ).fetchall()
+        candidate_batch_fingerprint = (
+            "sha256:"
+            + hashlib.sha256(
+                canonical_json(
+                    [
+                        {
+                            "feedback_id": str(candidate["feedback_id"]),
+                            "content_version": int(candidate["content_version"]),
+                            "content_version_hash": str(candidate["content_version_hash"]),
+                            "job_state": candidate["job_state"],
+                            "job_policy_epoch": candidate["job_policy_epoch"],
+                        }
+                        for candidate in candidates
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()
+            if candidates
+            else None
+        )
         outcomes: dict[str, int] = {}
         for candidate in candidates:
             name = self._reconcile_feedback_for_policy(
+                sweep_id=str(sweep["sweep_id"]),
                 feedback_id=str(candidate["feedback_id"]),
+                content_version=int(candidate["content_version"]),
+                content_version_hash=str(candidate["content_version_hash"]),
                 enable_epoch=settings.enable_epoch,
                 policy_epoch=settings.policy_epoch,
                 target_mode=settings.mode,
@@ -8455,27 +8903,197 @@ class AutoanswersRepository:
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE sweep_id=?",
                 (sweep["sweep_id"],),
             ).fetchone()
-            progress = json.loads(str(current["progress_json"] or "{}"))
-            for name, count in outcomes.items():
-                progress[name] = int(progress.get(name) or 0) + count
+            previous_cursor = json.loads(str(current["cursor_json"] or "{}"))
+            outcome_rows = conn.execute(
+                """
+                SELECT outcome,COUNT(*) AS count
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=?
+                GROUP BY outcome
+                ORDER BY outcome
+                """,
+                (sweep["sweep_id"],),
+            ).fetchall()
+            progress = {
+                str(row["outcome"]): int(row["count"] or 0)
+                for row in outcome_rows
+            }
+            acknowledgement_stats = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS acknowledged,
+                    SUM(CASE WHEN outcome_class='action' THEN 1 ELSE 0 END) AS actions,
+                    SUM(CASE WHEN outcome_class='preserved' THEN 1 ELSE 0 END) AS preserved,
+                    SUM(CASE WHEN outcome_class='unchanged' THEN 1 ELSE 0 END) AS unchanged,
+                    MIN(acknowledged_at) AS first_acknowledged_at,
+                    MAX(acknowledged_at) AS last_acknowledged_at
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=?
+                """,
+                (sweep["sweep_id"],),
+            ).fetchone()
+            membership_stats = conn.execute(
+                """
+                WITH active_members AS (
+                    SELECT
+                        rs.feedback_id,
+                        rs.content_version_at_preview AS content_version,
+                        rs.content_version_hash_at_preview AS content_version_hash
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                    WHERE rs.sweep_id=?
+                    UNION
+                    SELECT
+                        ra.feedback_id,
+                        ra.content_version,
+                        ra.content_version_hash
+                    FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                    WHERE ra.transition_run_id=?
+                )
+                SELECT
+                    COUNT(*) AS membership_total,
+                    SUM(
+                        CASE WHEN EXISTS(
+                            SELECT 1
+                            FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements a
+                            WHERE a.sweep_id=?
+                              AND a.feedback_id=m.feedback_id
+                              AND a.content_version=m.content_version
+                              AND a.content_version_hash=m.content_version_hash
+                        )
+                        THEN 1 ELSE 0 END
+                    ) AS reconciled_total,
+                    SUM(
+                        CASE WHEN
+                            NOT EXISTS(
+                                SELECT 1
+                                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements a
+                                WHERE a.sweep_id=?
+                                  AND a.feedback_id=m.feedback_id
+                                  AND a.content_version=m.content_version
+                                  AND a.content_version_hash=m.content_version_hash
+                            )
+                            AND EXISTS(
+                                SELECT 1
+                                FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                                WHERE j.feedback_id=m.feedback_id
+                                  AND j.content_version=m.content_version
+                                  AND j.content_version_hash=m.content_version_hash
+                                  AND j.bundle_version=?
+                                  AND j.policy_epoch=?
+                            )
+                        THEN 1 ELSE 0 END
+                    ) AS already_current
+                FROM active_members m
+                JOIN sheet_vitrina_v1_wb_feedbacks f
+                  ON f.feedback_id=m.feedback_id
+                 AND f.content_version=m.content_version
+                 AND f.content_version_hash=m.content_version_hash
+                """,
+                (
+                    sweep["sweep_id"],
+                    str(sweep["transition_run_id"] or sweep["sweep_id"]),
+                    sweep["sweep_id"],
+                    sweep["sweep_id"],
+                    PROMPT_BUNDLE_VERSION,
+                    settings.policy_epoch,
+                ),
+            ).fetchone()
+            already_current = int(membership_stats["already_current"] or 0)
+            if already_current:
+                progress["already_current"] = already_current
+            acknowledged = int(acknowledgement_stats["acknowledged"] or 0)
+            previous_acknowledged = int(
+                previous_cursor.get("acknowledged_total") or 0
+            )
+            new_acknowledgements = max(0, acknowledged - previous_acknowledged)
+            repeated_batches = (
+                int(previous_cursor.get("repeated_candidate_batches") or 0) + 1
+                if candidate_batch_fingerprint
+                and candidate_batch_fingerprint
+                == previous_cursor.get("candidate_batch_fingerprint")
+                and new_acknowledgements == 0
+                else 0
+            )
             remaining_priority_bucket = self._automatic_priority_bucket(
                 conn,
                 transition_run_id=str(sweep["transition_run_id"] or sweep["sweep_id"]),
                 policy_epoch=settings.policy_epoch,
                 target_mode=settings.mode,
             )
+            membership_total = int(membership_stats["membership_total"] or 0)
+            reconciled_total = min(
+                membership_total,
+                int(membership_stats["reconciled_total"] or 0),
+            )
+            reconciliation_remaining = max(0, membership_total - reconciled_total)
             state = (
                 "queued"
-                if candidates
+                if reconciliation_remaining > 0
                 or queue_blocked
                 or remaining_priority_bucket is not None
                 else "succeeded"
             )
+            previous_observed_at = parse_timestamp(
+                previous_cursor.get("observed_at")
+            )
+            elapsed_minutes = (
+                max(
+                    1.0 / 60.0,
+                    (now - previous_observed_at).total_seconds() / 60.0,
+                )
+                if previous_observed_at is not None
+                else None
+            )
+            rate_per_minute = (
+                round(new_acknowledgements / elapsed_minutes, 3)
+                if elapsed_minutes and new_acknowledgements > 0
+                else 0.0
+            )
+            eta_minutes = (
+                round(reconciliation_remaining / rate_per_minute, 1)
+                if rate_per_minute > 0 and reconciliation_remaining > 0
+                else 0.0
+                if reconciliation_remaining == 0
+                else None
+            )
+            previous_bucket = previous_cursor.get("priority_bucket")
+            bucket_since = (
+                previous_cursor.get("priority_bucket_since")
+                if previous_bucket == remaining_priority_bucket
+                else iso_utc(now)
+                if remaining_priority_bucket is not None
+                else None
+            )
+            last_progress_at = (
+                iso_utc(now)
+                if new_acknowledgements > 0
+                else previous_cursor.get("last_progress_at")
+            )
+            action_count = int(acknowledgement_stats["actions"] or 0)
+            previous_action_count = int(previous_cursor.get("action_total") or 0)
             cursor = {
                 "last_feedback_id": str(candidates[-1]["feedback_id"]) if candidates else None,
-                "materialized_total": sum(int(value) for value in progress.values()),
+                "materialized_total": reconciled_total,
+                "acknowledged_total": acknowledged,
+                "action_total": action_count,
+                "preserved_total": int(acknowledgement_stats["preserved"] or 0),
+                "unchanged_total": int(acknowledgement_stats["unchanged"] or 0),
+                "membership_total": membership_total,
+                "reconciliation_remaining": reconciliation_remaining,
+                "last_progress_at": last_progress_at,
+                "last_action_at": (
+                    iso_utc(now)
+                    if action_count > previous_action_count
+                    else previous_cursor.get("last_action_at")
+                ),
+                "candidate_batch_fingerprint": candidate_batch_fingerprint,
+                "repeated_candidate_batches": repeated_batches,
+                "rate_per_minute": rate_per_minute,
+                "eta_minutes": eta_minutes,
                 "queue_depth": outstanding,
                 "priority_bucket": remaining_priority_bucket,
+                "priority_bucket_since": bucket_since,
+                "observed_at": iso_utc(now),
             }
             conn.execute(
                 """
@@ -9416,6 +10034,24 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_rolling_state(
     refresh_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
+    sweep_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(sweep_id),
+    feedback_id TEXT NOT NULL,
+    content_version INTEGER NOT NULL,
+    content_version_hash TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL,
+    transition_run_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    outcome_class TEXT NOT NULL CHECK(outcome_class IN ('action','preserved','unchanged')),
+    candidate_fingerprint TEXT NOT NULL,
+    acknowledged_at TEXT NOT NULL,
+    PRIMARY KEY(sweep_id,feedback_id,content_version)
+);
+CREATE INDEX IF NOT EXISTS idx_sv1_reconciliation_ack_sweep_outcome
+ON sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
+    sweep_id,outcome_class,outcome,acknowledged_at
 );
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_runtime_state(
