@@ -444,13 +444,6 @@ def _rematerialize_snapshot(
         for item in projection_evidence.values()
     ):
         return snapshot, projection_evidence
-    metadata["incident_rematerialization"] = {
-        "contract_name": CONTRACT_NAME,
-        "contract_version": CONTRACT_VERSION,
-        "generated_at": generated_at,
-        "target_dates": list(target_dates),
-        "projection_evidence": projection_evidence,
-    }
     replacement_sheet = replace(
         sheet,
         rows=rows,
@@ -461,7 +454,23 @@ def _rematerialize_snapshot(
         replacement_sheet if item.sheet_name == DATA_SHEET_NAME else item
         for item in snapshot.sheets
     ]
-    return replace(snapshot, sheets=sheets, metadata=metadata), projection_evidence
+    candidate = replace(snapshot, sheets=sheets, metadata=metadata)
+    if _incident_target_manifest(
+        candidate,
+        target_dates=target_dates,
+    ) == _incident_target_manifest(
+        snapshot,
+        target_dates=target_dates,
+    ):
+        return snapshot, projection_evidence
+    metadata["incident_rematerialization"] = {
+        "contract_name": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "generated_at": generated_at,
+        "target_dates": list(target_dates),
+        "projection_evidence": projection_evidence,
+    }
+    return replace(candidate, metadata=metadata), projection_evidence
 
 
 def plan_vitrina_incident_rematerialization(
