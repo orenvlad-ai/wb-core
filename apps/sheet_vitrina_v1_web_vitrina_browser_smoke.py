@@ -388,6 +388,22 @@ def run_browser_checks(
                     )
                 if unavailable_cell.locator('span[aria-label="Исторические данные отсутствуют"]').count() != 1:
                     raise AssertionError("unavailable presentation must keep one accessible shared explanation")
+                unconfirmed_cell = page.locator(
+                    'td.cell-server-unconfirmed[data-metric-key="our_wb_unit_cost_rub"]'
+                    '[data-cell-date="2026-04-20"]'
+                )
+                if unconfirmed_cell.count() != 1:
+                    raise AssertionError("unconfirmed capital fixture cell must render once")
+                unconfirmed_style = unconfirmed_cell.evaluate(
+                    """node => {
+                      const style = getComputedStyle(node);
+                      return {background: style.backgroundColor, color: style.color, shadow: style.boxShadow};
+                    }"""
+                )
+                if unconfirmed_style["background"] in {"rgb(255, 247, 194)", "rgb(255, 239, 154)"}:
+                    raise AssertionError(f"unconfirmed cell must not use a bright yellow fill: {unconfirmed_style}")
+                if "inset" not in unconfirmed_style["shadow"]:
+                    raise AssertionError(f"unconfirmed cell must retain a restrained edge marker: {unconfirmed_style}")
             auto_schedule_block = _check_auto_schedule_block(page)
             activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)
@@ -4565,6 +4581,14 @@ def _build_plan(
         ],
         metadata={
             "server_cell_presentation": {
+                f"SKU:{first_nm_id}|our_wb_unit_cost_rub": {
+                    as_of_date: {
+                        "state": "unconfirmed",
+                        "tone": "yellow",
+                        "reason": "Тест: предварительная себестоимость.",
+                        "source": "WebCore",
+                    }
+                },
                 f"SKU:{first_nm_id}|{UNAVAILABLE_STALE_VALUE_METRIC_KEY}": {
                     as_of_date: {
                         "state": "unavailable",

@@ -41,6 +41,7 @@ from packages.application.sheet_vitrina_v1_web_vitrina import (
     _merge_period_server_cell_presentation,
     _merge_period_warehouse_history_coverage,
 )
+from packages.application.wb_incident_policy import save_policy_revision
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -109,6 +110,67 @@ def main() -> None:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
         if [slot.slot_key for slot in payload.meta.temporal_slots] != ["yesterday_closed", "today_current"]:
             raise AssertionError(f"meta temporal slots mismatch, got {payload.meta}")
+        if payload.meta.incident_policy_badge != {
+            "active": False,
+            "label": "Политика инцидентов не активна",
+            "detail": "",
+            "warehouse_names": [],
+            "revision": 0,
+            "effective_from": "",
+        }:
+            raise AssertionError(
+                f"Vitrina policy badge must come from the read-only contract, got {payload.meta}"
+            )
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 0,
+                "active": True,
+                "excluded_wb_warehouse_ids": [101],
+                "reason": "Vitrina badge fixture",
+                "effective_from": "2026-04-20",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="contract-smoke",
+            warehouse_options=[
+                {"warehouse_id": 101, "warehouse_name": "Fixture warehouse"},
+            ],
+            timestamp="2026-04-20T09:10:00Z",
+        )
+        active_badge_payload = SheetVitrinaV1WebVitrinaBlock(
+            runtime=runtime,
+            now_factory=lambda: NOW,
+        ).build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+        )
+        if (
+            active_badge_payload.meta.incident_policy_badge.get("active") is not True
+            or active_badge_payload.meta.incident_policy_badge.get("revision") != 1
+            or "Fixture warehouse"
+            not in active_badge_payload.meta.incident_policy_badge.get("detail", "")
+        ):
+            raise AssertionError(
+                "Vitrina-only read contract must expose the effective policy badge"
+            )
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 1,
+                "active": False,
+                "excluded_wb_warehouse_ids": [101],
+                "reason": "Vitrina badge fixture resolved",
+                "effective_from": "2026-04-20",
+                "effective_to": "",
+                "status": "resolved",
+            },
+            actor="contract-smoke",
+            warehouse_options=[
+                {"warehouse_id": 101, "warehouse_name": "Fixture warehouse"},
+            ],
+            timestamp="2026-04-20T09:11:00Z",
+        )
 
         if payload.status_summary.refresh_status != "warning":
             raise AssertionError(f"status_summary.refresh_status mismatch, got {payload.status_summary}")

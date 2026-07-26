@@ -1907,6 +1907,10 @@
       display: none;
     }
 
+    [data-vitrina-incident-policy-badge][hidden] {
+      display: none;
+    }
+
     .table-summary-line {
       display: inline-flex;
       align-items: center;
@@ -3391,13 +3395,34 @@
     }
 
     .vitrina-table td.cell-server-unconfirmed {
-      background: #fff7c2;
-      color: #8a4b08;
-      box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.24);
+      background: inherit;
+      color: #d6a44a;
+      font-weight: 700;
+      box-shadow:
+        inset 3px 0 0 rgba(217, 145, 28, 0.72),
+        inset 0 0 0 1px rgba(217, 145, 28, 0.18);
     }
 
     .vitrina-table tbody tr:hover td.cell-server-unconfirmed {
-      background: #ffef9a;
+      color: #efbd63;
+      box-shadow:
+        inset 3px 0 0 rgba(239, 173, 55, 0.88),
+        inset 0 0 0 1px rgba(239, 173, 55, 0.25);
+    }
+
+    .vitrina-table td.cell-incident-adjusted {
+      color: #8b7cf6;
+      font-weight: 750;
+      box-shadow:
+        inset 3px 0 0 rgba(99, 102, 241, 0.78),
+        inset 0 0 0 1px rgba(139, 92, 246, 0.2);
+    }
+
+    .vitrina-table tbody tr:hover td.cell-incident-adjusted {
+      color: #a99cfb;
+      box-shadow:
+        inset 3px 0 0 rgba(124, 108, 245, 0.94),
+        inset 0 0 0 1px rgba(139, 92, 246, 0.3);
     }
 
     .vitrina-table td.cell-history-unavailable {
@@ -3592,6 +3617,9 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    button.sku-separator-label { cursor: pointer; text-align: left; }
+    button.sku-separator-label:hover { color: #a99cfb; text-decoration: underline; text-underline-offset: 2px; }
+    button.sku-separator-label:focus-visible { outline: 2px solid #7c6cf5; outline-offset: 2px; border-radius: 3px; }
 
     .state-box {
       border: 1px dashed var(--border-strong);
@@ -4576,6 +4604,16 @@
     .sku-modal-state { margin: 0; border: 1px solid var(--border); border-radius: 7px; padding: 12px; background: var(--panel-subtle); }
     .sku-modal-state.success { border-color: rgba(34,197,94,.42); background: #14251b; color: var(--success-text); }
     .sku-modal-state.error { border-color: rgba(248,113,113,.42); background: #2a1719; color: var(--error-text); }
+    .sku-quick-grid { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; }
+    .sku-quick-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-subtle); }
+    .sku-quick-card h4 { margin: 0 0 8px; font-size: 14px; }
+    .sku-quick-card label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+    .sku-quick-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .sku-quick-history { overflow: auto; max-height: 260px; border: 1px solid var(--border); border-radius: 8px; }
+    .sku-quick-history table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 760px; }
+    .sku-quick-history th, .sku-quick-history td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    .sku-management-modal.operator-modal-card { width: min(960px, calc(100vw - 40px)); }
+    @media (max-width: 720px) { .sku-quick-grid { grid-template-columns: 1fr; } }
 
     .prices-preview-table {
       width: 100%;
@@ -4920,6 +4958,24 @@
     .warehouse-summary-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
     .warehouse-summary-value { display: block; font-size: 21px; font-weight: 750; }
     .warehouse-section-title { margin: 0 0 10px; font-size: 17px; }
+    .warehouse-incident-card { border-color: color-mix(in srgb, var(--accent-border) 66%, var(--border)); }
+    .warehouse-incident-head, .warehouse-incident-footer { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+    .warehouse-incident-grid { display: grid; grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, .7fr)); gap: 12px; margin-top: 16px; }
+    .warehouse-incident-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .warehouse-incident-grid input, .warehouse-incident-grid select, .warehouse-incident-grid textarea {
+      width: 100%; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-subtle); color: var(--text); padding: 8px; font: inherit;
+    }
+    .warehouse-incident-toggle { display: flex !important; align-items: center; align-self: end; grid-column: 1 / -1; }
+    .warehouse-incident-toggle input { width: auto; }
+    .warehouse-incident-options { margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .warehouse-incident-options legend { color: var(--muted); font-size: 12px; font-weight: 750; padding: 0 6px; }
+    .warehouse-incident-options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+    .warehouse-incident-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-subtle); font-size: 12px; }
+    .warehouse-incident-option small { display: block; margin-top: 3px; color: var(--muted); }
+    .warehouse-incident-footer { align-items: center; }
+    .warehouse-incident-footer p, .warehouse-incident-result { margin: 0; color: var(--muted); font-size: 12px; }
+    .warehouse-incident-result { margin-top: 10px; color: var(--success-text); }
+    .warehouse-incident-result[data-tone="error"] { color: var(--error-text); }
     .warehouse-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .warehouse-table { width: 100%; border-collapse: collapse; min-width: 900px; font-size: 13px; }
     .warehouse-table th, .warehouse-table td { border-bottom: 1px solid var(--border); padding: 9px 10px; text-align: left; vertical-align: top; }
@@ -4951,6 +5007,7 @@
     .warehouse-action.is-danger { color: var(--warning-text); border-color: var(--warning-text); }
     @media (max-width: 780px) {
       .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      .warehouse-incident-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -4983,6 +5040,7 @@
           <div class="table-heading-row">
             <div class="table-heading-left">
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
+              <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>Учитывается политика инцидентов</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
               <span class="seller-top-session tone-neutral" data-seller-top-session title="сессия" aria-label="сессия">
@@ -5207,6 +5265,48 @@
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Товарный капитал</span><span class="warehouse-summary-value">—</span></div>
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Средневзвешенная себестоимость</span><span class="warehouse-summary-value">—</span></div>
         </div>
+      </section>
+
+      <section class="warehouse-card warehouse-incident-card" data-wb-incident-policy-card hidden>
+        <div class="warehouse-incident-head">
+          <div>
+            <h2 class="warehouse-section-title">Инциденты на складах WB</h2>
+            <p class="warehouse-meta">Единая политика доступности для Расчёта поставок, SKU Management и витрины. Капитал и фактический складской контур не изменяются.</p>
+          </div>
+          <span class="status-pill tone-neutral" data-wb-incident-policy-badge>Политика не активна</span>
+        </div>
+        <div class="warehouse-incident-grid">
+          <label class="warehouse-incident-toggle">
+            <input type="checkbox" data-wb-incident-active>
+            <span>Учитывать политику инцидентов</span>
+          </label>
+          <label>Причина
+            <textarea rows="2" data-wb-incident-reason placeholder="Кратко опишите подтверждённый инцидент"></textarea>
+          </label>
+          <label>Действует с
+            <input type="date" data-wb-incident-effective-from>
+          </label>
+          <label>Действует до (опционально)
+            <input type="date" data-wb-incident-effective-to>
+          </label>
+          <label>Статус
+            <select data-wb-incident-status>
+              <option value="active">Активен</option>
+              <option value="monitoring">Наблюдение</option>
+              <option value="resolved">Завершён</option>
+              <option value="disabled">Выключен</option>
+            </select>
+          </label>
+        </div>
+        <fieldset class="warehouse-incident-options">
+          <legend>Склады WB</legend>
+          <div data-wb-incident-options><p class="warehouse-empty">Список складов загружается из полного current snapshot…</p></div>
+        </fieldset>
+        <div class="warehouse-incident-footer">
+          <p data-wb-incident-audit>Revision ещё не создана.</p>
+          <button class="button primary" type="button" data-wb-incident-apply>Применить</button>
+        </div>
+        <p class="warehouse-incident-result" data-wb-incident-result hidden></p>
       </section>
 
       <section class="warehouse-card" data-warehouse-unmatched-card hidden>
@@ -6142,6 +6242,17 @@
     const warehouseStockReportFrame = document.querySelector("[data-warehouse-stock-report-frame]");
     const warehouseUnmatchedCard = document.querySelector("[data-warehouse-unmatched-card]");
     const warehouseUnmatchedNode = document.querySelector("[data-warehouse-unmatched]");
+    const wbIncidentPolicyCard = document.querySelector("[data-wb-incident-policy-card]");
+    const wbIncidentPolicyBadge = document.querySelector("[data-wb-incident-policy-badge]");
+    const wbIncidentActive = document.querySelector("[data-wb-incident-active]");
+    const wbIncidentReason = document.querySelector("[data-wb-incident-reason]");
+    const wbIncidentEffectiveFrom = document.querySelector("[data-wb-incident-effective-from]");
+    const wbIncidentEffectiveTo = document.querySelector("[data-wb-incident-effective-to]");
+    const wbIncidentStatus = document.querySelector("[data-wb-incident-status]");
+    const wbIncidentOptions = document.querySelector("[data-wb-incident-options]");
+    const wbIncidentAudit = document.querySelector("[data-wb-incident-audit]");
+    const wbIncidentApply = document.querySelector("[data-wb-incident-apply]");
+    const wbIncidentResult = document.querySelector("[data-wb-incident-result]");
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -6199,6 +6310,7 @@
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
     const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
+    const vitrinaIncidentPolicyBadge = document.querySelector("[data-vitrina-incident-policy-badge]");
     const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
     const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
@@ -6638,7 +6750,11 @@
         payload: null,
         error: "",
         updateRunId: "",
-        updatePollTimer: null
+        updatePollTimer: null,
+        incidentPolicy: null,
+        incidentOptions: [],
+        incidentOptionsError: "",
+        incidentLoading: false
       },
       tableSnapshot: {
         displayedRequestKey: "",
@@ -6983,6 +7099,10 @@
         modalError: "",
         modalRequestToken: 0,
         pendingConfirmedUpdate: null,
+        quickSku: null,
+        quickHistoryRows: [],
+        quickOrigin: false,
+        modalOpener: null,
         draggingColumnId: "",
         commitRunning: false,
         historyRows: [],
@@ -7089,6 +7209,13 @@
     }
     if (tableBodyNode) {
       tableBodyNode.addEventListener("click", function(event) {
+        const skuButton = event.target.closest("[data-open-vitrina-sku]");
+        if (skuButton) {
+          event.preventDefault();
+          event.stopPropagation();
+          openVitrinaSkuModal(Number(skuButton.getAttribute("data-open-vitrina-sku")), skuButton);
+          return;
+        }
         const toggle = event.target.closest("[data-metric-anchor-toggle]");
         if (!toggle) {
           return;
@@ -7136,6 +7263,7 @@
       });
     }
     if (warehouseUpdateStartButton) warehouseUpdateStartButton.addEventListener("click", startWarehouseCurrentSync);
+    if (wbIncidentApply) wbIncidentApply.addEventListener("click", applyWbIncidentPolicy);
     window.addEventListener("message", handleOperatorEmbedMessage);
 
     if (researchPanelNode) {
@@ -7672,6 +7800,31 @@
         }
       }, true);
       document.addEventListener("keydown", function(event) {
+        if (skuManagementModalNode && !skuManagementModalNode.hidden) {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            closeSkuManagementModal();
+            return;
+          }
+          if (event.key === "Tab") {
+            const focusable = Array.from(skuManagementModalNode.querySelectorAll(
+              'button:not([disabled]):not([hidden]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+            )).filter(function(node) { return node.offsetParent !== null; });
+            if (focusable.length) {
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }
+            return;
+          }
+        }
         if (event.key === "Escape") {
           closeAllFloatingControls();
           if (state.feedbacks.server.limitsModalOpen) closeAutoanswersLimits();
@@ -7975,12 +8128,16 @@
       const updateSelected = key === "update";
       if (warehouseDetailView) warehouseDetailView.hidden = updateSelected;
       if (warehouseUpdateView) warehouseUpdateView.hidden = !updateSelected;
+      if (wbIncidentPolicyCard) wbIncidentPolicyCard.hidden = key !== "wb";
       if (updateSelected) {
         loadWarehouseCurrentSyncStatus();
         return key;
       }
       stopWarehouseCurrentSyncPolling();
       ensureWarehouseLoaded(key, options);
+      if (key === "wb") {
+        loadWbIncidentPolicy();
+      }
       return key;
     }
 
@@ -8025,6 +8182,138 @@
         if (sequence === state.warehouses.requestSequence) {
           state.warehouses.loading = false;
         }
+      }
+    }
+
+    async function loadWbIncidentPolicy() {
+      if (state.warehouses.incidentLoading) return;
+      state.warehouses.incidentLoading = true;
+      if (wbIncidentApply) wbIncidentApply.disabled = true;
+      if (wbIncidentResult) wbIncidentResult.hidden = true;
+      try {
+        const settingsPath = String(WEB_VITRINA_CONFIG.wb_incident_policy_settings_path || "");
+        const optionsPath = String(WEB_VITRINA_CONFIG.wb_incident_policy_options_path || "");
+        const responses = await Promise.all([
+          fetch(settingsPath, {headers: {Accept: "application/json"}}),
+          fetch(optionsPath, {headers: {Accept: "application/json"}})
+        ]);
+        const settings = await responses[0].json().catch(function() { return {}; });
+        const optionsPayload = await responses[1].json().catch(function() { return {}; });
+        if (!responses[0].ok) throw new Error(String(settings.error || "Не удалось загрузить политику складов WB"));
+        state.warehouses.incidentPolicy = settings;
+        state.warehouses.incidentOptions = responses[1].ok && Array.isArray(optionsPayload.options) ? optionsPayload.options : [];
+        state.warehouses.incidentOptionsError = responses[1].ok
+          ? ""
+          : String(optionsPayload.error || "Полный current snapshot складов сейчас недоступен; применение fail closed.");
+        renderWbIncidentPolicy();
+      } catch (error) {
+        if (wbIncidentOptions) wbIncidentOptions.innerHTML = '<p class="warehouse-empty">' + escapeHtml(String(error && error.message ? error.message : error)) + '</p>';
+        if (wbIncidentPolicyBadge) {
+          wbIncidentPolicyBadge.textContent = "Ошибка загрузки";
+          wbIncidentPolicyBadge.className = "status-pill tone-error";
+        }
+      } finally {
+        state.warehouses.incidentLoading = false;
+        if (wbIncidentApply) wbIncidentApply.disabled = false;
+      }
+    }
+
+    function renderWbIncidentPolicy() {
+      const policy = state.warehouses.incidentPolicy || {};
+      const selected = new Set((policy.excluded_wb_warehouse_ids || []).map(function(item) { return String(item); }));
+      const active = Boolean(policy.active);
+      if (wbIncidentActive) wbIncidentActive.checked = Boolean(
+        Object.prototype.hasOwnProperty.call(policy, "configured_active")
+          ? policy.configured_active
+          : active
+      );
+      if (wbIncidentReason) wbIncidentReason.value = String(policy.reason || "");
+      if (wbIncidentEffectiveFrom) wbIncidentEffectiveFrom.value = String(policy.effective_from || new Date().toISOString().slice(0, 10));
+      if (wbIncidentEffectiveTo) wbIncidentEffectiveTo.value = String(policy.effective_to || "");
+      if (wbIncidentStatus) wbIncidentStatus.value = String(policy.policy_status || policy.status || (active ? "active" : "disabled"));
+      if (wbIncidentPolicyBadge) {
+        const badge = policy.badge || {};
+        wbIncidentPolicyBadge.textContent = String(badge.label || (active ? "Учитывается политика инцидентов" : "Политика инцидентов не активна"));
+        wbIncidentPolicyBadge.className = "status-pill " + (active ? "tone-warning" : "tone-neutral");
+        wbIncidentPolicyBadge.title = String(badge.detail || "");
+      }
+      if (vitrinaIncidentPolicyBadge) {
+        renderVitrinaIncidentPolicyBadge(policy.badge || {});
+      }
+      if (wbIncidentAudit) {
+        const migration = policy.migration_pending
+          ? (policy.legacy_conflict ? " · legacy-настройки расходятся, политика не применяется" : " · ожидает явной миграции по кнопке «Применить»")
+          : "";
+        wbIncidentAudit.textContent = "Revision " + String(policy.revision || 0) +
+          " · actor: " + String(policy.actor || "—") +
+          " · обновлено: " + warehouseDate(policy.updated_at || policy.created_at) + migration;
+      }
+      if (wbIncidentOptions) {
+        wbIncidentOptions.innerHTML = state.warehouses.incidentOptionsError
+          ? '<p class="warehouse-empty">' + escapeHtml(state.warehouses.incidentOptionsError) + '</p>'
+          : state.warehouses.incidentOptions.length
+          ? '<div class="warehouse-incident-options-grid">' + state.warehouses.incidentOptions.map(function(option) {
+              const id = String(option.warehouse_id);
+              return '<label class="warehouse-incident-option"><input type="checkbox" data-wb-incident-warehouse-id="' + escapeHtml(id) + '"' +
+                (selected.has(id) ? " checked" : "") + '><span><strong>' + escapeHtml(option.warehouse_name || ("warehouseId " + id)) +
+                '</strong><small>ID ' + escapeHtml(id) + ' · физически ' + escapeHtml(warehouseNumber(option.stock_quantity)) +
+                ' шт' + (option.temporarily_missing ? " · временно отсутствует" : "") + '</small></span></label>';
+            }).join("") + "</div>"
+          : '<p class="warehouse-empty">В полном current snapshot нет доступных складов.</p>';
+      }
+    }
+
+    function renderVitrinaIncidentPolicyBadge(badge) {
+      if (!vitrinaIncidentPolicyBadge || !badge || typeof badge !== "object") return;
+      const active = Boolean(badge.active);
+      vitrinaIncidentPolicyBadge.hidden = !active;
+      vitrinaIncidentPolicyBadge.textContent = String(
+        badge.label || "Учитывается политика инцидентов"
+      );
+      vitrinaIncidentPolicyBadge.title = String(badge.detail || "");
+    }
+
+    async function applyWbIncidentPolicy() {
+      if (!wbIncidentApply || state.warehouses.incidentLoading) return;
+      const selected = Array.from(document.querySelectorAll("[data-wb-incident-warehouse-id]:checked")).map(function(node) {
+        return Number(node.getAttribute("data-wb-incident-warehouse-id"));
+      });
+      const payload = {
+        base_revision: Number((state.warehouses.incidentPolicy || {}).revision || 0),
+        active: Boolean(wbIncidentActive && wbIncidentActive.checked),
+        excluded_wb_warehouse_ids: selected,
+        reason: String((wbIncidentReason && wbIncidentReason.value) || "").trim(),
+        effective_from: String((wbIncidentEffectiveFrom && wbIncidentEffectiveFrom.value) || ""),
+        effective_to: String((wbIncidentEffectiveTo && wbIncidentEffectiveTo.value) || ""),
+        status: String((wbIncidentStatus && wbIncidentStatus.value) || "disabled")
+      };
+      wbIncidentApply.disabled = true;
+      wbIncidentApply.textContent = "Применяем…";
+      if (wbIncidentResult) wbIncidentResult.hidden = true;
+      try {
+        const response = await fetch(String(WEB_VITRINA_CONFIG.wb_incident_policy_settings_path || ""), {
+          method: "POST",
+          headers: {"Content-Type": "application/json", Accept: "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(result.error || ("HTTP " + response.status)));
+        state.warehouses.incidentPolicy = result;
+        renderWbIncidentPolicy();
+        if (wbIncidentResult) {
+          wbIncidentResult.textContent = "Политика применена. Supply, SKU Management и следующий publish витрины используют revision " + String(result.revision || 0) + ".";
+          wbIncidentResult.setAttribute("data-tone", "success");
+          wbIncidentResult.hidden = false;
+        }
+      } catch (error) {
+        if (wbIncidentResult) {
+          wbIncidentResult.textContent = String(error && error.message ? error.message : error);
+          wbIncidentResult.setAttribute("data-tone", "error");
+          wbIncidentResult.hidden = false;
+        }
+      } finally {
+        wbIncidentApply.disabled = false;
+        wbIncidentApply.textContent = "Применить";
       }
     }
 
@@ -9064,7 +9353,12 @@
     }
 
     function defaultMetricDisplayStatus(metricKey) {
-      return new Set(["seller_price_change_rub", "advertising_bid_change_rub"]).has(String(metricKey || ""))
+      const normalized = String(metricKey || "");
+      return (
+        new Set(["seller_price_change_rub", "advertising_bid_change_rub"]).has(normalized)
+        || normalized.startsWith("wb_stock_")
+        || normalized.startsWith("total_wb_stock_")
+      )
         ? "collapsed"
         : "shown";
     }
@@ -11617,6 +11911,7 @@
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
       const meta = payload.meta || {};
+      renderVitrinaIncidentPolicyBadge(meta.incident_policy_badge);
       pageMetaNode.textContent = "";
       pageMetaNode.hidden = true;
       filterMetaNode.textContent =
@@ -11792,10 +12087,15 @@
 
     function buildSkuSeparatorRow(columnCount, nextRow) {
       const label = tableObjectLabelForRow(nextRow);
+      const nmId = skuClusterIdentity(nextRow);
+      const labelHtml = ALLOWED_UNIFIED_TABS.has(SKU_MANAGEMENT_UNIFIED_TAB) && /^\d+$/.test(nmId)
+        ? '<button class="sku-separator-label" type="button" data-open-vitrina-sku="' + escapeHtml(nmId) +
+          '" title="Открыть управление SKU: ' + escapeHtml(label) + '">' + escapeHtml(label) + '</button>'
+        : '<span class="sku-separator-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>';
       return [
         '<tr class="sku-separator-row" data-row-kind="separator" data-separator-next-label="' + escapeHtml(label) + '">',
         '<td colspan="' + columnCount + '">',
-        '<span class="sku-separator-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        labelHtml,
         "</td>",
         "</tr>"
       ].join("");
@@ -11935,6 +12235,8 @@
       }
       if (String(cell.presentation_state || "") === "unconfirmed") {
         classes.push("cell-server-unconfirmed");
+      } else if (String(cell.presentation_state || "") === "incident_adjusted") {
+        classes.push("cell-incident-adjusted");
       } else if (String(cell.presentation_state || "") === "unavailable") {
         classes.push("cell-history-unavailable");
       }
@@ -20428,10 +20730,11 @@
       if (skuManagementErrorNode) skuManagementErrorNode.textContent=state.skuManagement.error||"";
       if (skuManagementStatusNode) skuManagementStatusNode.textContent=state.skuManagement.loading?"Загрузка canonical SKU и evidence…":state.skuManagement.commitRunning?"Commit running / readback pending…":state.skuManagement.loaded?("SKU: "+state.skuManagement.rows.length+" · настройки и представление хранятся на сервере"):"Раздел не загружен.";
       if (skuManagementWarehouseExclusionSummaryNode) {
-        const names=((((state.skuManagement.meta||{}).warehouse_exclusion||{}).names)||[]);
-        skuManagementWarehouseExclusionSummaryNode.textContent=names.length
-          ? "В расчёте не участвуют склады: "+names.join(", ")
-          : "В расчёте учитываются все склады.";
+        const policy=((state.skuManagement.meta||{}).warehouse_exclusion||{});
+        const names=(policy.names||[]);
+        skuManagementWarehouseExclusionSummaryNode.textContent=policy.active&&names.length
+          ? "Учитывается политика инцидентов · Не участвуют: "+names.join(", ")
+          : "Политика инцидентов не активна · operational остаток равен факту.";
       }
       renderSkuManagementColumns();
       const columns=skuManagementOrderedColumns();
@@ -20577,6 +20880,96 @@
       await requestSkuManagementPreview("bid",{nm_id:nmId,advert_id:Number(parts[0]),placement:parts[1],requested_bid_rub:input&&input.value});
     }
 
+    async function openVitrinaSkuModal(nmId, opener) {
+      if (!ALLOWED_UNIFIED_TABS.has(SKU_MANAGEMENT_UNIFIED_TAB) || !Number.isFinite(nmId) || nmId <= 0) return;
+      const requestToken = ++state.skuManagement.modalRequestToken;
+      state.skuManagement.quickOrigin = true;
+      state.skuManagement.quickSku = null;
+      state.skuManagement.quickHistoryRows = [];
+      state.skuManagement.modalOpener = opener || document.activeElement;
+      state.skuManagement.modalError = "";
+      state.skuManagement.modalState = "quick_loading";
+      renderSkuManagementModal();
+      try {
+        const prefix = String(WEB_VITRINA_CONFIG.sku_management_sku_path || WEB_VITRINA_CONFIG.sku_management_path + "/sku").replace(/\/$/, "");
+        const response = await fetch(prefix + "/" + encodeURIComponent(String(nmId)), {headers: {Accept: "application/json"}});
+        const payload = await readJsonResponse(response, "non-json SKU detail response");
+        if (requestToken !== state.skuManagement.modalRequestToken) return;
+        if (!response.ok) throw new Error((payload && payload.error) || ("SKU detail route returned " + response.status));
+        const row = payload && payload.row;
+        if (!row || Number(row.nm_id) !== Number(nmId)) throw new Error("SKU detail returned a mismatching nmID");
+        state.skuManagement.quickSku = row;
+        state.skuManagement.quickHistoryRows = (((payload || {}).history || {}).rows || []);
+        const index = state.skuManagement.rows.findIndex(function(item) { return Number(item.nm_id) === Number(nmId); });
+        if (index >= 0) state.skuManagement.rows[index] = row;
+        else state.skuManagement.rows.push(row);
+        state.skuManagement.modalState = "quick_ready";
+        renderSkuManagementModal();
+        window.setTimeout(function() {
+          const focusTarget = skuManagementModalNode && skuManagementModalNode.querySelector("input, select, button");
+          if (focusTarget) focusTarget.focus();
+        }, 0);
+      } catch (error) {
+        if (requestToken !== state.skuManagement.modalRequestToken) return;
+        state.skuManagement.modalError = String(error && error.message ? error.message : error);
+        state.skuManagement.modalState = "controlled_error";
+        renderSkuManagementModal();
+      }
+    }
+
+    function skuQuickHistoryHtml(rows) {
+      const values = Array.isArray(rows) ? rows : [];
+      if (!values.length) return '<p class="panel-meta">Для этого nmID подтверждённых или ошибочных операций пока нет.</p>';
+      return '<div class="sku-quick-history"><table><thead><tr><th>Дата</th><th>Параметр</th><th>Изменение</th><th>Actor</th><th>Статус / readback</th><th>Warnings</th></tr></thead><tbody>' +
+        values.map(function(row) {
+          const nextValue = row.confirmed_value == null ? row.requested_value : row.confirmed_value;
+          return '<tr><td>' + escapeHtml(row.confirmed_at || row.requested_at || "—") + '</td><td>' + escapeHtml(row.parameter || "—") +
+            '</td><td>' + escapeHtml(row.old_value == null ? "—" : row.old_value) + ' → ' + escapeHtml(nextValue == null ? "—" : nextValue) +
+            '</td><td>' + escapeHtml(row.actor || "—") + '</td><td>' + escapeHtml((row.commit_status || "—") + " / " + (row.readback_status || "not_started")) +
+            '</td><td>' + escapeHtml((row.warnings || []).join(", ") || "—") + '</td></tr>';
+        }).join("") + "</tbody></table></div>";
+    }
+
+    function skuQuickReadyHtml(row) {
+      const options = Array.isArray(row.ad_options) ? row.ad_options : [];
+      const optionHtml = options.length
+        ? options.map(function(item) {
+            const token = String(item.advert_id) + "|" + String(item.placement || "");
+            return '<option value="' + escapeHtml(token) + '">' + escapeHtml((item.campaign_name || item.advert_id) + " · " + item.placement + " · " + (item.current_bid_rub == null ? "—" : item.current_bid_rub + " ₽")) + "</option>";
+          }).join("")
+        : '<option value="">Нет точной campaign/placement identity</option>';
+      const firstBid = options.length === 1 ? options[0].current_bid_rub : "";
+      return '<div class="sku-modal-state"><strong>' + escapeHtml(row.name || row.sku || "SKU") + '</strong><p>nmID ' + escapeHtml(row.nm_id) +
+        ' · изменения выполняются тем же защищённым SKU Management process; значения витрины исторически не переписываются.</p></div>' +
+        '<div class="sku-quick-grid"><section class="sku-quick-card"><h4>Цена продавца</h4><label>Целевая цена, ₽<input class="input" type="number" min="0.01" step="0.01" value="' +
+        escapeHtml(row.seller_price == null ? "" : row.seller_price) + '" data-quick-sku-price></label><div class="sku-quick-actions"><button class="button primary" type="button" data-quick-sku-price-preview>Проверить изменение цены</button></div></section>' +
+        '<section class="sku-quick-card"><h4>Рекламная ставка</h4><label>Кампания / размещение<select class="input" data-quick-sku-bid-option>' + optionHtml +
+        '</select></label><label>Целевая ставка, ₽<input class="input" type="number" min="0" step="0.01" value="' + escapeHtml(firstBid == null ? "" : firstBid) +
+        '" data-quick-sku-bid></label><div class="sku-quick-actions"><button class="button primary" type="button" data-quick-sku-bid-preview' +
+        (options.length ? "" : " disabled") + '>Проверить изменение ставки</button></div></section></div><h4>Последние изменения этого nmID</h4>' +
+        skuQuickHistoryHtml(state.skuManagement.quickHistoryRows);
+    }
+
+    function previewQuickSkuPrice() {
+      const row = state.skuManagement.quickSku;
+      const input = skuManagementModalNode && skuManagementModalNode.querySelector("[data-quick-sku-price]");
+      if (row) requestSkuManagementPreview("price", {nm_id: Number(row.nm_id), target_seller_price: input && input.value});
+    }
+
+    function previewQuickSkuBid() {
+      const row = state.skuManagement.quickSku;
+      const select = skuManagementModalNode && skuManagementModalNode.querySelector("[data-quick-sku-bid-option]");
+      const input = skuManagementModalNode && skuManagementModalNode.querySelector("[data-quick-sku-bid]");
+      const parts = String(select && select.value || "").split("|");
+      if (!row || !parts[0] || !parts[1]) {
+        state.skuManagement.modalError = "Выберите конкретные advert_id и placement.";
+        state.skuManagement.modalState = "controlled_error";
+        renderSkuManagementModal();
+        return;
+      }
+      requestSkuManagementPreview("bid", {nm_id: Number(row.nm_id), advert_id: Number(parts[0]), placement: parts[1], requested_bid_rub: input && input.value});
+    }
+
     async function requestSkuManagementPreview(kind,body){
       const requestToken=++state.skuManagement.modalRequestToken;state.skuManagement.error="";state.skuManagement.modalError="";state.skuManagement.preview=null;state.skuManagement.previewKind=kind;state.skuManagement.modalState="preview_loading";skuManagementModalNode.hidden=false;renderSkuManagementModal();renderSkuManagementFeedback();
       try{
@@ -20604,7 +20997,14 @@
     function renderSkuManagementModal(){
       if(!skuManagementModalNode)return;const modalState=String(state.skuManagement.modalState||"idle");const p=state.skuManagement.preview;
       skuManagementModalNode.setAttribute("data-sku-modal-state",modalState);skuManagementModalNode.hidden=modalState==="idle";
+      if(skuManagementModalConfirmButton)skuManagementModalConfirmButton.hidden=["quick_loading","quick_ready"].includes(modalState);
       if(skuManagementModalSecondaryButton)skuManagementModalSecondaryButton.hidden=["commit_running","readback_pending","success","controlled_error"].includes(modalState);
+      if(modalState==="quick_loading"){
+        skuManagementModalTitleNode.textContent="Загрузка SKU";skuManagementModalBodyNode.innerHTML='<p class="sku-modal-state">Загружаем точный SKU Management read model…</p>';skuManagementModalSecondaryButton.textContent="Отмена";return;
+      }
+      if(modalState==="quick_ready"&&state.skuManagement.quickSku){
+        skuManagementModalTitleNode.textContent="Управление SKU";skuManagementModalBodyNode.innerHTML=skuQuickReadyHtml(state.skuManagement.quickSku);skuManagementModalSecondaryButton.textContent="Закрыть";return;
+      }
       if(modalState==="preview_loading"){
         skuManagementModalTitleNode.textContent="Готовим preview";skuManagementModalBodyNode.innerHTML='<p class="sku-modal-state" data-sku-preview-loading>Готовим preview…</p>';skuManagementModalConfirmButton.textContent="Изменить";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
       }
@@ -20626,7 +21026,7 @@
       }
       if(modalState==="controlled_error"){
         skuManagementModalTitleNode.textContent="Изменение не подтверждено";skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state error"><strong>Controlled error</strong><p>'+escapeHtml(state.skuManagement.modalError||"WB readback не подтвердил изменение.")+'</p><p>Зелёный success не показан, локальное значение не изменено.</p></div>';
-        skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;
+        skuManagementModalConfirmButton.textContent=state.skuManagement.quickOrigin?"Вернуться к SKU":"Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;
       }
     }
 
@@ -20638,17 +21038,27 @@
 
     function closeSkuManagementModal(){
       if(state.skuManagement.commitRunning)return;
+      if(state.skuManagement.quickOrigin&&state.skuManagement.quickSku&&["preview_loading","preview_ready","controlled_error"].includes(state.skuManagement.modalState)){
+        state.skuManagement.modalRequestToken+=1;state.skuManagement.preview=null;state.skuManagement.modalError="";state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="quick_ready";renderSkuManagementModal();return;
+      }
       state.skuManagement.modalRequestToken+=1;
       if(state.skuManagement.modalState==="success"&&state.skuManagement.pendingConfirmedUpdate)applySkuManagementConfirmedUpdate(state.skuManagement.pendingConfirmedUpdate);
       if(state.skuManagement.modalState==="controlled_error"&&state.skuManagement.preview){
         const nmId=Number(state.skuManagement.preview.nm_id);if(state.skuManagement.previewKind==="price"){state.skuManagement.editingPriceNmId=null;patchSkuManagementRowCells(nmId,["seller_price"]);}else{state.skuManagement.editingBidNmId=null;patchSkuManagementRowCells(nmId,["current_bid"]);}
       }
-      state.skuManagement.preview=null;state.skuManagement.modalError="";state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="idle";skuManagementModalNode.hidden=true;renderSkuManagementFeedback();
+      const opener=state.skuManagement.modalOpener;
+      state.skuManagement.preview=null;state.skuManagement.modalError="";state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="idle";state.skuManagement.quickSku=null;state.skuManagement.quickHistoryRows=[];state.skuManagement.quickOrigin=false;state.skuManagement.modalOpener=null;skuManagementModalNode.hidden=true;renderSkuManagementFeedback();
+      if(opener&&typeof opener.focus==="function")opener.focus();
     }
 
-    function handleSkuManagementModalClick(event){if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode)closeSkuManagementModal();}
+    function handleSkuManagementModalClick(event){
+      if(event.target.closest("[data-quick-sku-price-preview]")){previewQuickSkuPrice();return;}
+      if(event.target.closest("[data-quick-sku-bid-preview]")){previewQuickSkuBid();return;}
+      if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode)closeSkuManagementModal();
+    }
 
     function handleSkuManagementModalPrimaryAction(){
+      if(state.skuManagement.modalState==="controlled_error"&&state.skuManagement.quickOrigin){state.skuManagement.modalError="";state.skuManagement.modalState="quick_ready";renderSkuManagementModal();return;}
       if(state.skuManagement.modalState==="success"||state.skuManagement.modalState==="controlled_error"){closeSkuManagementModal();return;}
       if(state.skuManagement.modalState==="preview_ready")commitSkuManagementPreview();
     }
@@ -20702,6 +21112,9 @@
     purgeObsoleteHistoryStorage();
     if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
       loadPageComposition();
+    }
+    if (ALLOWED_UNIFIED_TABS.has(WAREHOUSES_UNIFIED_TAB)) {
+      loadWbIncidentPolicy();
     }
   </script>
 </body>

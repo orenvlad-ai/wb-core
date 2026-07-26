@@ -20,6 +20,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_live_plan import STATUS_HEADER
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.stock_ff_onec_source import ONEC_FF_STOCK_QTY_METRIC_KEY
+from packages.application.wb_incident_policy import save_policy_revision
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
     DATASET_INBOUND_FF_TO_WB,
@@ -366,6 +367,23 @@ def main() -> None:
             raise AssertionError("coverage without inbound files must include only stock_total_mp + stock_ff")
         if sku_one.inbound_factory_to_ff != 0.0 or sku_one.inbound_ff_to_wb != 0.0:
             raise AssertionError("missing inbound files must be treated as zero, not as blocking input")
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 0,
+                "active": True,
+                "excluded_wb_warehouse_ids": [120762],
+                "reason": "factory smoke incident",
+                "effective_from": "2026-04-18",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="factory-smoke",
+            warehouse_options=[
+                {"warehouse_id": 120762, "warehouse_name": "Электросталь"},
+            ],
+            timestamp="2026-04-18T09:30:00Z",
+        )
         excluded_result = block.calculate(
             {
                 "prod_lead_time_days": 10,
@@ -377,7 +395,7 @@ def main() -> None:
                 "order_batch_qty": 50,
                 "report_date_override": "2026-04-18",
                 "sales_avg_period_days": 3,
-                "excluded_wb_warehouse_ids": [120762],
+                "excluded_wb_warehouse_ids": [999],
             }
         )
         excluded_sku = {item.nm_id: item for item in excluded_result.rows}[210183919]
@@ -393,6 +411,23 @@ def main() -> None:
             or exclusion.get("reconciliation_difference") != 0
         ):
             raise AssertionError(f"factory-order exclusion reconciliation changed: {exclusion}")
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 1,
+                "active": False,
+                "excluded_wb_warehouse_ids": [120762],
+                "reason": "factory smoke incident resolved",
+                "effective_from": "2026-04-18",
+                "effective_to": "",
+                "status": "resolved",
+            },
+            actor="factory-smoke",
+            warehouse_options=[
+                {"warehouse_id": 120762, "warehouse_name": "Электросталь"},
+            ],
+            timestamp="2026-04-18T09:31:00Z",
+        )
         if round(sku_two.target_qty, 2) != _expected_target_qty(
             210184534,
             report_date="2026-04-18",

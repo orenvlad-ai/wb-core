@@ -17,7 +17,13 @@ from packages.application.demand_estimation import estimate_availability_adjuste
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.stocks_block import (
     build_wb_warehouse_exclusion,
-    parse_excluded_wb_warehouse_ids,
+)
+from packages.application.wb_incident_policy import (
+    WbIncidentPolicyError,
+    build_incident_stock_projection,
+    get_latest_policy_state,
+    policy_badge,
+    save_policy_revision,
 )
 from packages.application.wb_prices_management import WbPricesManagementBlock, normalize_goods_payload
 from packages.business_time import current_business_date_iso
@@ -32,8 +38,6 @@ from packages.contracts.supplier_shipments import (
 
 SKU_MANAGEMENT_CONFIG_KEY = "sku_management"
 SKU_MANAGEMENT_CONFIG_SCHEMA_VERSION = 2
-WB_WAREHOUSE_EXCLUSION_CONFIG_KEY = "wb_warehouse_exclusions"
-WB_WAREHOUSE_EXCLUSION_CONFIG_SCHEMA_VERSION = 1
 PRICE_PARAMETER = "seller_price"
 BID_PARAMETER = "advertising_bid"
 
@@ -549,31 +553,24 @@ class SkuManagementBlock:
         return self.get_settings(user_key=user_key)
 
     def get_warehouse_exclusion_settings(self, *, user_key: str) -> dict[str, Any]:
-        record = self.runtime.load_sheet_vitrina_user_config(
-            user_key=user_key,
-            config_key=WB_WAREHOUSE_EXCLUSION_CONFIG_KEY,
-        )
-        config = dict(record.get("config") or {}) if record.get("status") == "ok" else {}
-        try:
-            excluded = parse_excluded_wb_warehouse_ids(
-                {
-                    "excluded_wb_warehouse_ids": config.get(
-                        "excluded_wb_warehouse_ids", []
-                    )
-                }
-            )
-        except ValueError as exc:
-            raise SkuManagementError(
-                "stored WB warehouse exclusion settings are invalid",
-                http_status=500,
-            ) from exc
+        del user_key  # policy ownership is seller/account-level, never per browser user
+        snapshot_date = current_business_date_iso(self.now_factory())
+        policy = get_latest_policy_state(self.runtime, snapshot_date=snapshot_date)
+        excluded = list(policy.get("warehouse_ids") or [])
         return {
+            **policy,
             "status": "ok",
-            "exists": record.get("status") == "ok",
-            "revision": int(record.get("revision") or 0),
-            "updated_at": str(record.get("updated_at") or ""),
-            "excluded_wb_warehouse_ids": list(excluded),
-            "canonical_store": "server_runtime_user_config",
+            "exists": bool(int(policy.get("revision") or 0) or policy.get("migration_pending")),
+            "revision": int(policy.get("revision") or 0),
+            "updated_at": str(policy.get("created_at") or ""),
+            "excluded_wb_warehouse_ids": excluded,
+            "effective_excluded_wb_warehouse_ids": list(
+                policy.get("effective_warehouse_ids")
+                if "effective_warehouse_ids" in policy
+                else (policy.get("warehouse_ids") or [])
+            ),
+            "canonical_store": "server_runtime_wb_incident_policy",
+            "badge": policy_badge(policy),
         }
 
     def save_warehouse_exclusion_settings(
@@ -582,40 +579,82 @@ class SkuManagementBlock:
         user_key: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        try:
-            excluded = parse_excluded_wb_warehouse_ids(
+        if self.stocks_block is None:
+            raise SkuManagementError("stocks contour is unavailable", http_status=503)
+        snapshot_date = current_business_date_iso(self.now_factory())
+        active = self._active_skus()
+        stock_result = self.stocks_block.execute(
+            StocksRequest(
+                snapshot_type="stocks",
+                snapshot_date=snapshot_date,
+                nm_ids=[int(item["nm_id"]) for item in active],
+            )
+        ).result
+        if getattr(stock_result, "kind", "") != "success":
+            raise SkuManagementError(
+                "Нельзя применить политику: официальный снимок WB неполный",
+                http_status=409,
+            )
+        options_contract = build_wb_warehouse_exclusion(
+            items=list(getattr(stock_result, "items", []) or []),
+            warehouse_rows=list(getattr(stock_result, "warehouse_rows", []) or []),
+            excluded_warehouse_ids=(),
+            snapshot_date=str(getattr(stock_result, "snapshot_date", "") or snapshot_date),
+            fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
+            pagination_complete=bool(getattr(stock_result, "pagination_complete", False)),
+            raw_rows_digest=str(getattr(stock_result, "raw_rows_digest", "") or ""),
+            require_complete=True,
+        )
+        normalized_payload = dict(payload)
+        if "active" not in normalized_payload and "effective_from" not in normalized_payload:
+            legacy_ids = list(normalized_payload.get("excluded_wb_warehouse_ids") or [])
+            normalized_payload.update(
                 {
-                    "excluded_wb_warehouse_ids": payload.get(
-                        "excluded_wb_warehouse_ids", []
-                    )
+                    "active": bool(legacy_ids),
+                    "reason": "Миграция совместимой настройки исключения складов",
+                    "effective_from": snapshot_date,
+                    "effective_to": "",
+                    "status": "active" if legacy_ids else "disabled",
                 }
             )
-        except ValueError as exc:
-            raise SkuManagementError(str(exc), http_status=422) from exc
-        saved = self.runtime.save_sheet_vitrina_user_config(
-            user_key=user_key,
-            config_key=WB_WAREHOUSE_EXCLUSION_CONFIG_KEY,
-            schema_version=WB_WAREHOUSE_EXCLUSION_CONFIG_SCHEMA_VERSION,
-            payload={"excluded_wb_warehouse_ids": list(excluded)},
-            updated_at=self.timestamp_factory(),
-            expected_revision=_optional_int(payload.get("base_revision")),
-        )
-        if saved.get("status") == "conflict":
-            raise SkuManagementError(
-                "WB warehouse exclusion settings revision conflict",
-                http_status=409,
-                payload=saved,
+        try:
+            save_policy_revision(
+                self.runtime,
+                payload=normalized_payload,
+                actor=user_key,
+                warehouse_options=list(options_contract.get("options") or []),
+                timestamp=self.timestamp_factory(),
             )
+        except WbIncidentPolicyError as exc:
+            status = 409 if "conflict" in str(exc).casefold() else 422
+            raise SkuManagementError(str(exc), http_status=status) from exc
         return self.get_warehouse_exclusion_settings(user_key=user_key)
 
-    def build_table(self, *, user_key: str) -> dict[str, Any]:
+    def build_table(
+        self,
+        *,
+        user_key: str,
+        only_nm_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
         settings_payload = self.get_settings(user_key=user_key)
         warehouse_settings = self.get_warehouse_exclusion_settings(user_key=user_key)
         excluded_warehouse_ids = tuple(
-            int(item) for item in warehouse_settings["excluded_wb_warehouse_ids"]
+            int(item)
+            for item in warehouse_settings.get("effective_excluded_wb_warehouse_ids") or []
+            if warehouse_settings.get("active")
         )
         settings = validate_forecast_settings(settings_payload["forecast"])
         active = self._active_skus()
+        if only_nm_ids is not None:
+            requested = {int(item) for item in only_nm_ids}
+            active = [item for item in active if int(item["nm_id"]) in requested]
+            missing = sorted(requested - {int(item["nm_id"]) for item in active})
+            if missing:
+                raise SkuManagementError(
+                    "SKU is not active in canonical config_v2",
+                    http_status=404,
+                    payload={"missing_nm_ids": missing},
+                )
         nm_ids = [int(item["nm_id"]) for item in active]
         cumulative_date = (
             date.fromisoformat(current_business_date_iso(self.now_factory())) - timedelta(days=2)
@@ -645,7 +684,6 @@ class SkuManagementBlock:
         evidence = self._collect_forecast_evidence(
             active=active,
             settings=settings,
-            excluded_warehouse_ids=excluded_warehouse_ids,
         )
         for item_evidence in evidence.values():
             item_evidence["warnings"].extend(source_warnings)
@@ -786,6 +824,21 @@ class SkuManagementBlock:
                     ),
                 },
             },
+        }
+
+    def build_sku_detail(self, nm_id: int, *, user_key: str) -> dict[str, Any]:
+        """Narrow per-SKU query over the same management service and contracts."""
+
+        if isinstance(nm_id, bool) or int(nm_id) <= 0:
+            raise SkuManagementError("nm_id must be positive", http_status=422)
+        table = self.build_table(user_key=user_key, only_nm_ids=[int(nm_id)])
+        history = self.history({"nm_id": int(nm_id), "limit": 50, "offset": 0})
+        return {
+            "contract_name": "sheet_vitrina_v1_sku_management_detail",
+            "generated_at": table["generated_at"],
+            "row": table["rows"][0],
+            "meta": table["meta"],
+            "history": history,
         }
 
     def preview_price(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
@@ -1104,7 +1157,6 @@ class SkuManagementBlock:
         *,
         active: Sequence[Mapping[str, Any]],
         settings: ForecastSettings,
-        excluded_warehouse_ids: tuple[int, ...] = (),
     ) -> dict[int, dict[str, Any]]:
         today = current_business_date_iso(self.now_factory())
         nm_ids = [int(item["nm_id"]) for item in active]
@@ -1136,12 +1188,12 @@ class SkuManagementBlock:
                 ).result
                 if getattr(stock_result, "kind", "") != "success":
                     raise ValueError("official WB stock snapshot is incomplete")
-                exclusion = build_wb_warehouse_exclusion(
+                exclusion = build_incident_stock_projection(
+                    self.runtime,
                     items=list(getattr(stock_result, "items", []) or []),
                     warehouse_rows=list(
                         getattr(stock_result, "warehouse_rows", []) or []
                     ),
-                    excluded_warehouse_ids=excluded_warehouse_ids,
                     snapshot_date=str(getattr(stock_result, "snapshot_date", "") or ""),
                     fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
                     pagination_complete=bool(
@@ -1150,7 +1202,6 @@ class SkuManagementBlock:
                     raw_rows_digest=str(
                         getattr(stock_result, "raw_rows_digest", "") or ""
                     ),
-                    require_complete=bool(excluded_warehouse_ids),
                 )
                 for item in getattr(stock_result, "items", []):
                     target = result.get(int(item.nm_id))

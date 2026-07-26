@@ -23,6 +23,7 @@ from packages.application.factory_order_sales_history import persist_sales_histo
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.wb_supply_overlay import build_warehouse_district_mapping
+from packages.application.wb_incident_policy import save_policy_revision
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock, _allocate_boxes
 from packages.application.wb_regional_supply_export import recommendation_identity, recommendation_prefix
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
@@ -263,6 +264,23 @@ def main() -> None:
             raise AssertionError("legacy scalar lead time must be exposed on district rows")
         if central_main_row.demand_diagnostics.get("lead_time_to_region_days") != 2:
             raise AssertionError("row diagnostics must expose the lead time used by the formula")
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 0,
+                "active": True,
+                "excluded_wb_warehouse_ids": [120762],
+                "reason": "regional smoke incident",
+                "effective_from": "2026-04-18",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="regional-smoke",
+            warehouse_options=[
+                {"warehouse_id": 120762, "warehouse_name": "Электросталь"},
+            ],
+            timestamp="2026-04-18T09:30:00Z",
+        )
         excluded_result = regional_block.calculate(
             {
                 "sales_avg_period_days": 14,
@@ -271,7 +289,7 @@ def main() -> None:
                 "safety_days": 1,
                 "order_batch_qty": 50,
                 "report_date_override": "2026-04-18",
-                "excluded_wb_warehouse_ids": [120762],
+                "excluded_wb_warehouse_ids": [999],
             }
         )
         excluded_districts = {
@@ -296,6 +314,23 @@ def main() -> None:
             or exclusion.get("reconciliation_difference") != 0
         ):
             raise AssertionError(f"regional exclusion reconciliation changed: {exclusion}")
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 1,
+                "active": False,
+                "excluded_wb_warehouse_ids": [120762],
+                "reason": "regional smoke incident resolved",
+                "effective_from": "2026-04-18",
+                "effective_to": "",
+                "status": "resolved",
+            },
+            actor="regional-smoke",
+            warehouse_options=[
+                {"warehouse_id": 120762, "warehouse_name": "Электросталь"},
+            ],
+            timestamp="2026-04-18T09:31:00Z",
+        )
 
         legacy_saved_payload = asdict(result)
         legacy_saved_payload["settings"].pop("lead_time_to_region_days_by_district", None)

@@ -49,6 +49,7 @@ from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridg
 from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
+from packages.application.wb_incident_policy import get_policy_state
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -2187,6 +2188,14 @@ class RegistryUploadHttpEntrypoint:
     def handle_sku_management_table_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.build_table(user_key=user_key)
 
+    def handle_sku_management_detail_request(
+        self,
+        nm_id: int,
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        return self.sku_management_block.build_sku_detail(nm_id, user_key=user_key)
+
     def handle_sku_management_settings_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.get_settings(user_key=user_key)
 
@@ -3096,7 +3105,11 @@ class RegistryUploadHttpEntrypoint:
             user_key=user_key
         )
         return self.factory_order_supply_block.build_wb_warehouse_exclusion_options(
-            excluded_warehouse_ids=tuple(settings["excluded_wb_warehouse_ids"])
+            excluded_warehouse_ids=tuple(
+                settings.get("effective_excluded_wb_warehouse_ids")
+                if settings.get("active")
+                else (settings.get("excluded_wb_warehouse_ids") or [])
+            )
         )
 
     def handle_wb_warehouse_exclusion_settings_request(
@@ -3213,11 +3226,18 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         result = dict(payload)
         if user_key:
-            settings = self.sku_management_block.get_warehouse_exclusion_settings(
-                user_key=user_key
+            now_factory = getattr(self, "now_factory", self.sku_management_block.now_factory)
+            snapshot_date = str(result.get("report_date_override") or "").strip() or current_business_date_iso(
+                now_factory()
+            )
+            settings = get_policy_state(
+                getattr(self, "runtime", self.sku_management_block.runtime),
+                snapshot_date=snapshot_date,
             )
             result["excluded_wb_warehouse_ids"] = list(
-                settings["excluded_wb_warehouse_ids"]
+                settings.get("warehouse_ids") or []
+                if settings.get("active")
+                else []
             )
         return result
 

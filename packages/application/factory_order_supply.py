@@ -28,6 +28,7 @@ from packages.application.stocks_block import (
     build_wb_warehouse_exclusion,
     parse_excluded_wb_warehouse_ids,
 )
+from packages.application.wb_incident_policy import build_incident_stock_projection
 from packages.application.stock_ff_onec_source import (
     ONEC_FF_STOCK_QTY_METRIC_KEY,
     build_onec_stock_ff_state,
@@ -452,10 +453,10 @@ class FactoryOrderSupplyBlock:
                 "authoritative stock_total coverage incomplete for requested nmIds: "
                 + ", ".join(str(item) for item in missing)
             )
-        wb_warehouse_exclusion = build_wb_warehouse_exclusion(
+        wb_warehouse_exclusion = build_incident_stock_projection(
+            self.runtime,
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=list(getattr(stock_response, "warehouse_rows", []) or []),
-            excluded_warehouse_ids=settings.excluded_wb_warehouse_ids,
             snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
             pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),

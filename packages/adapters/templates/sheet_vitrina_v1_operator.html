@@ -4344,15 +4344,16 @@
                 </details>
               </div>
               <details class="wb-supply-overlay-selector" id="wbWarehouseExclusionSelector">
-                <summary id="wbWarehouseExclusionSummary">Не учитывать при расчёте · Учитываются все склады</summary>
+                <summary id="wbWarehouseExclusionSummary">Политика инцидентов · не активна</summary>
                 <div class="wb-supply-overlay-head">
                   <div>
-                    <h3>Не учитывать при расчёте</h3>
+                    <h3>Политика инцидентов WB</h3>
+                    <p class="field-note">Read-only: управление находится в «Остатки → Склад WB».</p>
                     <p id="wbWarehouseExclusionEvidence" class="field-note">Читаем полный официальный снимок WB...</p>
                   </div>
                   <div class="district-selector-actions">
                     <button id="wbWarehouseExclusionRefreshButton" class="district-selector-button" type="button">Обновить</button>
-                    <button id="wbWarehouseExclusionClearButton" class="district-selector-button" type="button">Сброс</button>
+                    <button id="wbWarehouseExclusionClearButton" class="district-selector-button" type="button" hidden disabled>Сброс</button>
                   </div>
                 </div>
                 <div id="wbWarehouseExclusionOptions" class="wb-supply-overlay-options"></div>
@@ -5789,6 +5790,7 @@
       let wbWarehouseExclusionLoading = false;
       let wbWarehouseExclusionPayload = null;
       let wbWarehouseExclusionRevision = 0;
+      let wbWarehouseExclusionActive = false;
       let wbWarehouseExclusionSettingsLoaded = false;
       let excludedWbWarehouseIds = normalizeWbWarehouseIds(
         persistedOperatorUiState.excluded_wb_warehouse_ids
@@ -5940,15 +5942,6 @@
         writePersistedOperatorUiState({
           excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
         });
-        if (wbWarehouseExclusionSettingsLoaded) {
-          void saveWbWarehouseExclusionSettings().catch((error) => {
-            setWbWarehouseExclusionMessage(
-              "Не удалось сохранить единый список исключений: " +
-                (error instanceof Error ? error.message : String(error)),
-              "error"
-            );
-          });
-        }
       }
 
       async function loadWbWarehouseExclusionSettings() {
@@ -5966,9 +5959,12 @@
           throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
         }
         wbWarehouseExclusionRevision = Number(payload.revision || 0);
+        wbWarehouseExclusionActive = Boolean(payload.active);
         if (payload.exists) {
           excludedWbWarehouseIds = normalizeWbWarehouseIds(
-            payload.excluded_wb_warehouse_ids
+            wbWarehouseExclusionActive
+              ? payload.effective_excluded_wb_warehouse_ids
+              : payload.excluded_wb_warehouse_ids
           );
           writePersistedOperatorUiState({
             excluded_wb_warehouse_ids: excludedWbWarehouseIds.slice()
@@ -5976,11 +5972,7 @@
           wbWarehouseExclusionSettingsLoaded = true;
           return;
         }
-        if (legacyIds.length) {
-          excludedWbWarehouseIds = legacyIds;
-          await saveWbWarehouseExclusionSettings();
-          return;
-        }
+        if (legacyIds.length) excludedWbWarehouseIds = legacyIds;
         wbWarehouseExclusionSettingsLoaded = true;
       }
 
@@ -8913,7 +8905,7 @@
                   ].join(" · ");
               return [
                 "<label class=\"wb-supply-overlay-option" + (temporarilyMissing ? " is-warning" : "") + "\">",
-                "<input type=\"checkbox\" value=\"" + warehouseId + "\" data-wb-warehouse-exclusion-checkbox" +
+                "<input type=\"checkbox\" value=\"" + warehouseId + "\" data-wb-warehouse-exclusion-checkbox disabled" +
                   (selected.has(warehouseId) ? " checked" : "") + ">",
                 "<span>",
                 "<span class=\"wb-supply-overlay-main\">" + escapeHtml(main) + "</span>",
@@ -8924,9 +8916,9 @@
             }).join("")
           : "<p class=\"field-note\">В полном снимке нет складов с ненулевым контуром.</p>";
         if (wbWarehouseExclusionSummary) {
-          wbWarehouseExclusionSummary.textContent = excludedWbWarehouseIds.length
-            ? "Не учитывать при расчёте · Не учитываются: " + excludedWbWarehouseIds.length
-            : "Не учитывать при расчёте · Учитываются все склады";
+          wbWarehouseExclusionSummary.textContent = wbWarehouseExclusionActive && excludedWbWarehouseIds.length
+            ? "Учитывается политика инцидентов · Не участвуют: " + excludedWbWarehouseIds.length
+            : "Политика инцидентов · не активна";
         }
         if (wbWarehouseExclusionClearButton) {
           wbWarehouseExclusionClearButton.disabled = (
@@ -8969,7 +8961,7 @@
           wbWarehouseExclusionPayload = payload;
           renderWbWarehouseExclusionOptions(payload);
           setWbWarehouseExclusionMessage(
-            "Список подтверждён. Исключение меняет только текущий stockCount в обоих расчётах; WB snapshot и история не изменяются.",
+            "Read-only политика подтверждена. Управление: «Остатки → Склад WB». Сервер применяет её один раз к physical quantity; WB snapshot, inWay и капитал не изменяются.",
             "success"
           );
         } catch (error) {

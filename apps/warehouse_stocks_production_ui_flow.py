@@ -175,6 +175,7 @@ def _run_warehouse_ui_flow(
     warehouse_evidence: list[dict[str, Any]] = []
     warehouse_detail_by_key: dict[str, dict[str, Any]] = {}
     warehouse_action_theme: dict[str, Any] = {}
+    incident_policy_evidence: dict[str, Any] = {}
     business_acceptance: dict[str, Any] = {}
     settings_evidence: dict[str, Any] = {}
     supplier_evidence: dict[str, Any] = {}
@@ -214,6 +215,7 @@ def _run_warehouse_ui_flow(
             else None,
         )
         warehouse_sync_post_requests: list[str] = []
+        protected_business_post_requests: list[str] = []
         page.on(
             "request",
             lambda candidate: warehouse_sync_post_requests.append(candidate.url)
@@ -221,6 +223,22 @@ def _run_warehouse_ui_flow(
                 candidate.method == "POST"
                 and urlparse(candidate.url).path
                 == "/v1/sheet-vitrina-v1/warehouses/sync"
+            )
+            else None,
+        )
+        page.on(
+            "request",
+            lambda candidate: protected_business_post_requests.append(candidate.url)
+            if (
+                candidate.method == "POST"
+                and urlparse(candidate.url).path
+                in {
+                    "/v1/sheet-vitrina-v1/supply/wb-warehouse-exclusions/settings",
+                    "/v1/sheet-vitrina-v1/sku-management/price/preview",
+                    "/v1/sheet-vitrina-v1/sku-management/price/commit",
+                    "/v1/sheet-vitrina-v1/sku-management/bid/preview",
+                    "/v1/sheet-vitrina-v1/sku-management/bid/commit",
+                }
             )
             else None,
         )
@@ -401,6 +419,45 @@ def _run_warehouse_ui_flow(
                 ]
                 _assert([_visible_decimal(value) for value in summary_values[4:7]] == expected_contour, "Склад WB: contour components")
                 _assert(visible_quantity == Decimal(str(contour.get("total") or 0)), "Склад WB: contour total")
+                policy_card = page.locator("[data-wb-incident-policy-card]")
+                policy_card.wait_for(state="visible", timeout=60_000)
+                page.wait_for_function(
+                    """() => {
+                      const audit = document.querySelector("[data-wb-incident-audit]");
+                      const options = document.querySelector("[data-wb-incident-options]");
+                      return audit && options
+                        && !audit.textContent.includes("Revision ещё не создана")
+                        && !options.textContent.includes("загружается");
+                    }""",
+                    timeout=60_000,
+                )
+                policy_text = policy_card.inner_text()
+                _assert(
+                    "Инциденты на складах WB" in policy_text
+                    and "Капитал и фактический складской контур не изменяются" in policy_text,
+                    "Склад WB: incident policy contract is visible",
+                )
+                option_nodes = page.locator("[data-wb-incident-warehouse-id]")
+                if strict_business_acceptance:
+                    _assert(
+                        option_nodes.count() > 0,
+                        "Склад WB: complete current snapshot exposes incident-policy warehouse options",
+                    )
+                _assert(
+                    all(
+                        str(option_nodes.nth(index).get_attribute("data-wb-incident-warehouse-id") or "").isdigit()
+                        for index in range(option_nodes.count())
+                    ),
+                    "Склад WB: incident policy options use stable numeric warehouse IDs",
+                )
+                incident_policy_evidence = {
+                    "visible": True,
+                    "badge": page.locator("[data-wb-incident-policy-badge]").inner_text().strip(),
+                    "revision_audit": page.locator("[data-wb-incident-audit]").inner_text().strip(),
+                    "numeric_warehouse_option_count": option_nodes.count(),
+                    "active": page.locator("[data-wb-incident-active]").is_checked(),
+                    "apply_not_clicked": True,
+                }
             warehouse_surface_text = page.locator('[data-unified-tab-panel="warehouses"]').inner_text()
             for marker in ("Internal Server Error", "Traceback", "Остатки / Склады failed", "Данные склада не загружены."):
                 if marker in warehouse_surface_text:
@@ -1038,6 +1095,155 @@ def _run_warehouse_ui_flow(
             if page.locator(f'[data-metric-key="{metric_key}"]').count() == 0
         ]
         _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
+        incident_metric_keys = (
+            "wb_stock_fact_qty",
+            "wb_stock_incident_qty",
+            "wb_stock_effective_qty",
+            "total_wb_stock_fact_qty",
+            "total_wb_stock_incident_qty",
+            "total_wb_stock_effective_qty",
+        )
+        missing_incident_metrics = [
+            metric_key
+            for metric_key in incident_metric_keys
+            if page.locator(f'[data-metric-config-key="{metric_key}"]').count() == 0
+        ]
+        _assert(
+            not missing_incident_metrics,
+            f"stable fact/incident/effective metric family is configurable: {missing_incident_metrics}",
+        )
+        incident_metric_display = {
+            metric_key: page.locator(
+                f'[data-metric-config-key="{metric_key}"]'
+            ).first.get_attribute("data-metric-display-status")
+            for metric_key in incident_metric_keys
+        }
+        _assert(
+            all(value in {"shown", "collapsed", "hidden"} for value in incident_metric_display.values()),
+            "incident-aware metric family has stable visibility state",
+        )
+        unconfirmed_style = page.evaluate(
+            """() => {
+              const cells = Array.from(document.querySelectorAll("td.cell-server-unconfirmed"));
+              const styles = cells.map(cell => {
+                const style = getComputedStyle(cell);
+                return {
+                  backgroundColor: style.backgroundColor,
+                  color: style.color,
+                  boxShadow: style.boxShadow,
+                  title: cell.getAttribute("title") || ""
+                };
+              });
+              const ruleText = Array.from(document.styleSheets).flatMap(sheet => {
+                try { return Array.from(sheet.cssRules || []).map(rule => rule.cssText || ""); }
+                catch (_) { return []; }
+              }).filter(text => text.includes("cell-server-unconfirmed")).join("\\n");
+              return {count: cells.length, styles, ruleText};
+            }"""
+        )
+        _assert(
+            "background: inherit" in str(unconfirmed_style.get("ruleText") or "").lower(),
+            "unconfirmed cells inherit the dark table background instead of a light-yellow fill",
+        )
+        _assert(
+            all(
+                not str(item.get("backgroundColor") or "").startswith("rgb(254, 243")
+                and not str(item.get("backgroundColor") or "").startswith("rgb(255, 251")
+                for item in unconfirmed_style.get("styles") or []
+            ),
+            "rendered unconfirmed cells have no light-yellow fill",
+        )
+        incident_cell_evidence = page.evaluate(
+            """() => {
+              const cells = Array.from(document.querySelectorAll("td.cell-incident-adjusted"));
+              return {
+                count: cells.length,
+                tooltipsComplete: cells.every(cell => {
+                  const value = cell.getAttribute("title") || "";
+                  return value.includes("Факт:")
+                    && value.includes("На инцидентных складах:")
+                    && value.includes("Operational остаток:")
+                    && value.includes("Revision");
+                }),
+                styles: cells.slice(0, 10).map(cell => {
+                  const style = getComputedStyle(cell);
+                  return {color: style.color, boxShadow: style.boxShadow};
+                })
+              };
+            }"""
+        )
+        _assert(
+            not incident_cell_evidence["count"] or incident_cell_evidence["tooltipsComplete"],
+            "only incident-derived cells use the distinct marker with complete audit tooltip",
+        )
+        vitrina_policy_badge = page.locator("[data-vitrina-incident-policy-badge]")
+        policy_currently_active = str(incident_policy_evidence.get("badge") or "").startswith(
+            "Учитывается политика инцидентов"
+        )
+        if policy_currently_active:
+            _assert(
+                vitrina_policy_badge.is_visible()
+                and vitrina_policy_badge.inner_text().strip().startswith(
+                    "Учитывается политика инцидентов"
+                ),
+                "Vitrina shows the active incident-policy read-only badge",
+            )
+
+        sku_quick_popup_evidence: dict[str, Any] = {
+            "checked": False,
+            "business_post_requests": protected_business_post_requests,
+        }
+        consumer_screenshots = [
+            str(stock_report_screenshot),
+            str(sku_screenshot),
+        ]
+        if strict_business_acceptance:
+            sku_opener = page.locator("[data-open-vitrina-sku]").first
+            sku_opener.wait_for(state="visible", timeout=60_000)
+            popup_nm_id = sku_opener.get_attribute("data-open-vitrina-sku")
+            _assert(bool(popup_nm_id and popup_nm_id.isdigit()), "Vitrina SKU label exposes an exact nmID")
+            sku_opener.click()
+            sku_modal = page.locator('[data-sku-management-modal][data-sku-modal-state="quick_ready"]')
+            sku_modal.wait_for(state="visible", timeout=120_000)
+            _assert(
+                f"nmID {popup_nm_id}" in sku_modal.inner_text(),
+                "Vitrina SKU popup is bound to the clicked exact nmID",
+            )
+            _assert(
+                sku_modal.locator("[data-quick-sku-price]").count() == 1
+                and sku_modal.locator("[data-quick-sku-bid-option]").count() == 1
+                and sku_modal.locator(".sku-quick-history").count()
+                + sku_modal.get_by_text("операций пока нет").count()
+                >= 1,
+                "Vitrina SKU popup reuses price, exact campaign/placement and per-SKU history surfaces",
+            )
+            sku_popup_screenshot = evidence_dir / "vitrina_sku_quick_popup.png"
+            page.screenshot(path=str(sku_popup_screenshot), full_page=False)
+            screenshots.append(str(sku_popup_screenshot))
+            consumer_screenshots.append(str(sku_popup_screenshot))
+            page.keyboard.press("Escape")
+            _assert(sku_modal.is_hidden(), "Escape closes the SKU popup without side effects")
+            _assert(
+                page.evaluate(
+                    "expected => document.activeElement?.getAttribute('data-open-vitrina-sku') === expected",
+                    popup_nm_id,
+                ),
+                "SKU popup restores focus to its Vitrina opener",
+            )
+            sku_quick_popup_evidence = {
+                "checked": True,
+                "nm_id": popup_nm_id,
+                "price_form": True,
+                "exact_bid_selector": True,
+                "history_filtered_by_nm_id": True,
+                "closed_with_escape": True,
+                "business_post_requests": protected_business_post_requests,
+                "screenshot": str(sku_popup_screenshot),
+            }
+        _assert(
+            not protected_business_post_requests,
+            f"read-only production flow issued no policy/price/bid POST: {protected_business_post_requests}",
+        )
         if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE:
             historical_unavailable_cells = page.locator(
                 'td[data-metric-key^="own_capital_"][data-cell-date="2026-07-18"]'
@@ -1071,6 +1277,7 @@ def _run_warehouse_ui_flow(
         proxy_screenshot = evidence_dir / "proxy3_vitrina.png"
         page.screenshot(path=str(proxy_screenshot), full_page=False)
         screenshots.append(str(proxy_screenshot))
+        consumer_screenshots.append(str(proxy_screenshot))
         consumer_evidence = {
             "stock_report_navigation": True,
             "sku_management_visible": True,
@@ -1084,6 +1291,15 @@ def _run_warehouse_ui_flow(
             "closed_date_coverage": closed_date_coverage,
             "archived_metric_keys_absent": list(archived_metric_keys),
             "canonical_stage_metric_keys": canonical_stage_keys,
+            "incident_metric_display": incident_metric_display,
+            "incident_adjusted_cells": incident_cell_evidence,
+            "incident_policy_badge": {
+                "expected_active": policy_currently_active,
+                "visible": vitrina_policy_badge.is_visible(),
+                "label": vitrina_policy_badge.inner_text().strip(),
+            },
+            "unconfirmed_cell_style": unconfirmed_style,
+            "sku_quick_popup": sku_quick_popup_evidence,
             "warehouse_history_unavailable_reason_date": (
                 "2026-07-18"
                 if normalized_acceptance_profile == WAREHOUSE_COST_TRANSPARENCY_PROFILE
@@ -1095,7 +1311,7 @@ def _run_warehouse_ui_flow(
                 else None
             ),
             "period_url": period_vitrina_url,
-            "screenshots": [str(stock_report_screenshot), str(sku_screenshot), str(proxy_screenshot)],
+            "screenshots": consumer_screenshots,
         }
         final_url = page.url
         context.close()
@@ -1132,6 +1348,7 @@ def _run_warehouse_ui_flow(
         "recent_warehouse_versions": list(expected_readback.get("recent_versions") or []),
         "official_wb_snapshot": wb_snapshot,
         "warehouse_action_theme": warehouse_action_theme,
+        "incident_policy": incident_policy_evidence,
         "business_acceptance": business_acceptance,
         "acceptance_profile": normalized_acceptance_profile or None,
         "historical_wb_cost_projection": dict(expected_readback.get("historical_wb_cost_projection") or {}),

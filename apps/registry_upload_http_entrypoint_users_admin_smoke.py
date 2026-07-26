@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SKU_MANAGEMENT_SKU_PREFIX,
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_SHEET_DAILY_REPORT_PATH,
@@ -362,6 +363,17 @@ def main() -> None:
                 )
                 if forbidden_vitrina_code != 403 or forbidden_vitrina_payload.get("error") != "forbidden":
                     raise AssertionError("supply_operator must not access vitrina read API")
+                forbidden_sku_detail_code, forbidden_sku_detail_payload = _opener_json(
+                    supply,
+                    f"{base_url}{DEFAULT_SKU_MANAGEMENT_SKU_PREFIX}/210183919",
+                )
+                if (
+                    forbidden_sku_detail_code != 403
+                    or forbidden_sku_detail_payload.get("error") != "forbidden"
+                ):
+                    raise AssertionError(
+                        "narrow Vitrina SKU read must retain the sku_management permission"
+                    )
                 forbidden_reports_code, forbidden_reports_payload = _opener_json(supply, f"{base_url}{DEFAULT_SHEET_DAILY_REPORT_PATH}")
                 if forbidden_reports_code != 403 or forbidden_reports_payload.get("error") != "forbidden":
                     raise AssertionError("supply_operator must not access reports API")

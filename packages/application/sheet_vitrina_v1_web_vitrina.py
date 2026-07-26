@@ -17,6 +17,9 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
     active_refresh_summary as _active_refresh_summary,
 )
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    extend_metrics_with_incident_stock_metrics,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_METRIC_KEYS,
@@ -30,6 +33,7 @@ from packages.application.sheet_vitrina_v1_live_plan import (
 from packages.application.sheet_vitrina_v1_sku_actions import (
     extend_metrics_with_sku_action_metrics,
 )
+from packages.application.wb_incident_policy import get_policy_state, policy_badge
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
 )
@@ -216,9 +220,11 @@ class SheetVitrinaV1WebVitrinaBlock:
             for item in current_state.config_v2
         }
         effective_metrics = extend_metrics_with_sku_action_metrics(
-            extend_metrics_with_own_product_capital_metrics(
-                extend_metrics_with_our_wb_cost_metrics(
-                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            extend_metrics_with_incident_stock_metrics(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                    )
                 )
             )
         )
@@ -246,6 +252,10 @@ class SheetVitrinaV1WebVitrinaBlock:
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
+        current_incident_policy = get_policy_state(
+            self.runtime,
+            snapshot_date=current_business_date_iso(now),
+        )
 
         return WebVitrinaContractV1(
             contract_name=WEB_VITRINA_CONTRACT_NAME,
@@ -262,6 +272,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 generated_at=_to_utc_timestamp(now),
                 refreshed_at=refreshed_at,
                 row_count=len(rows),
+                incident_policy_badge=policy_badge(current_incident_policy),
             ),
             status_summary=WebVitrinaContractStatusSummary(
                 refresh_status=str(period_refresh_summary["status"]),

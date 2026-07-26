@@ -28,8 +28,11 @@ related_tables:
   - "registry_upload_config_v2"
   - "sheet_vitrina_v1_user_configs"
   - "sheet_vitrina_v1_sku_action_events"
+  - "sheet_vitrina_v1_wb_incident_policy_revisions"
+  - "sheet_vitrina_v1_wb_incident_projection_cache"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/sku-management"
+  - "GET /v1/sheet-vitrina-v1/sku-management/sku/{nm_id}"
   - "GET|POST /v1/sheet-vitrina-v1/sku-management/settings"
   - "POST /v1/sheet-vitrina-v1/sku-management/price/preview"
   - "POST /v1/sheet-vitrina-v1/sku-management/price/commit"
@@ -43,8 +46,9 @@ related_runners:
   - "apps/sku_management_browser_smoke.py"
   - "apps/wb_warehouse_exclusion_browser_smoke.py"
   - "apps/sku_management_metrics_smoke.py"
+  - "apps/wb_incident_policy_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Exact business D-2 cumulative metrics, latest-successful snapshot facts, canonical shared warehouse exclusions and mandatory sticky product-column UX."
+update_note: "Seller-level effective-dated incident stock projection, read-only shared policy badge and narrow Vitrina SKU quick-management modal over the existing guarded write state machine."
 ---
 
 # 1. Identity, authorization and truth
@@ -57,7 +61,7 @@ update_note: "Exact business D-2 cumulative metrics, latest-successful snapshot 
 
 Settings and table preferences use `sheet_vitrina_v1_user_configs` under the `sku_management` config key with optimistic revision checks. `localStorage` is not a source of truth. Server defaults are 14 sales days, 90 forecast days, 30-day future order cadence, 30-day production, 30-day factory-to-FF, 7-day FF-to-WB, 14 safety-stock days and three-day price/bid stabilization. Sales period is one of `7/14/30/60`; all other bounds are validated server-side. Zero stabilization disables that warning.
 
-The warehouse list edited in `Поставки → Расчёты → Не учитывать при расчёте` is a second config record in the same server-owned table, under canonical key `wb_warehouse_exclusions`. The Supply selector and SKU read/calculation use that exact record and optimistic revision; they do not maintain independent copies. Existing browser-only `excluded_wb_warehouse_ids` is migrated once only when the canonical record does not yet exist. After migration `localStorage` is merely a recoverable UI cache.
+The warehouse incident policy is seller/account-level and edited only in `Остатки → Склад WB → Инциденты на складах WB`. Supply and SKU Management display the same policy read-only. Revisions are append-only and effective-dated; the selected list is retained when disabled. Legacy per-user `wb_warehouse_exclusions` rows are read without mutation as migration evidence: a single consistent set remains current-compatible until explicit Apply, while conflicting sets fail closed. Browser/localStorage copies never own calculation truth.
 
 # 2. Forecast semantics
 
@@ -69,7 +73,7 @@ After the last registered inbound plan, the model may add synthetic future facto
 
 Output contains risk (`low/medium/high/unknown`), first deficit date, minimum projected stock including negative values, deficit units, norm coverage percent, first risky district when fresh district stock and demand are both available, compact reason and explicit quality/warnings. Authoritative zero demand remains zero rather than `unknown`. Missing WB or FF stock/demand makes the overall forecast `unknown`; absent or stale regional evidence produces district `unknown`. Missing district fields are never converted to zero. Default sort is highest risk, then nearest deficit.
 
-Before total-WB and district forecast fields are formed, the engine applies the canonical warehouse exclusion contract to warehouse-granular current stocks. Selected warehouse quantities are subtracted from both `stock_total` and their mapped federal-district field, so risk, deficit date, coverage, deficit units and regional warning state share the same effective opening. An empty list is identity. Several selected IDs are additive. A selected ID absent from the current snapshot remains selected but contributes no invented quantity. Any non-empty exclusion requires a complete official warehouse snapshot; incomplete evidence fails closed to unknown stock/forecast instead of fabricating zero.
+Before total-WB and district forecast fields are formed, the engine consumes `build_incident_stock_projection`. It does not perform a second subtraction. Only physical warehouse quantity is removed from the operational opening; un-attributed in-way fields are untouched. Risk, deficit date, coverage, deficit units and regional warning state therefore share the same policy revision and effective snapshot as Supply and Vitrina. Any active non-empty policy requires complete official warehouse evidence and digest; incomplete evidence fails closed to unknown stock/forecast.
 
 # 3. Commercial table and presentation state
 
@@ -84,9 +88,11 @@ The only table filter is case-insensitive SKU/nmID/name search. Risk, promo, cov
 
 `Ближ. поставка` is a compact projection of the exact supplier inbound evidence admitted to the forecast. It selects the earliest non-overdue calculated arrival for the SKU, then ties by case-folded invoice number and shipment id. The cell shows invoice number, calculated arrival date and the quantity of this SKU aggregated within the invoice; missing or non-deterministic evidence stays `—`. Sorting uses calculated arrival date with empty values always last.
 
-The first header/body column is independently sticky on the left as well as under the sticky header, with opaque backgrounds, explicit z-index, separator/shadow and hover background. Its header is `Название / nmID`; the bold primary line is the product name, the muted secondary line is `nmID`, internal SKU is not rendered, and the full long name remains accessible through `title`. Cumulative headers include `за DD.MM`; snapshot cells include `обновлено DD.MM[ время]`. A read-only line above the grid lists `В расчёте не участвуют склады: …` or states that all warehouses are included. The rest of the table retains restrained row/column separators, numeric alignment, row hover, truncation and horizontal scrolling; history is visually separated from the grid.
+The first header/body column is independently sticky on the left as well as under the sticky header, with opaque backgrounds, explicit z-index, separator/shadow and hover background. Its header is `Название / nmID`; the bold primary line is the product name, the muted secondary line is `nmID`, internal SKU is not rendered, and the full long name remains accessible through `title`. Cumulative headers include `за DD.MM`; snapshot cells include `обновлено DD.MM[ время]`. A read-only line shows `Учитывается политика инцидентов · Не участвуют: …` only when the revision is effective, otherwise operational stock equals fact. The rest of the table retains restrained row/column separators, numeric alignment, row hover, truncation and horizontal scrolling; history is visually separated from the grid.
 
 Loading, empty, partial evidence, stale and validation states are explicit. Price and bid modals use the state machine `preview_loading → preview_ready → commit_running → readback_pending → success|controlled_error`. The common operator modal card is fully opaque on the dark theme and sits above sticky headers inside a translucent dimming backdrop; Ads, Prices and SKU flows share this styling without changing drawers/selectors. `success` is entered only for `status=success`, `readback_status=matching` and a confirmed value. It shows old and confirmed values plus the WB-readback statement and remains open until `Закрыть`; mismatches and upstream errors never render green success.
+
+The main Vitrina SKU separator is clickable for users who have the same `sku_management` section. It calls narrow `GET /v1/sheet-vitrina-v1/sku-management/sku/{nm_id}`, which filters the existing SKU Management service before expensive reads and returns that nmID plus its filtered audit history. The opaque quick modal exposes seller price and an exact required `advert_id + placement` selector for bids, then delegates to the unchanged preview/commit/readback endpoints and state machine. TOTAL is never clickable. Focus stays trapped, Escape/backdrop/Cancel are side-effect-free outside commit/readback, and focus returns to the opener. A matching success patches only confirmed readback state; it never rewrites historical Vitrina cells.
 
 After closing confirmed success, the browser patches only the target row cells from the backend readback: seller price, confirmed price timestamp and factual observed buyer price when supplied, or the exact `advert_id + placement` bid and its timestamp. Search, sort, column configuration and table scroll remain intact; non-target rows are not rebuilt and the SKU table endpoint is not refetched. An already-open history block may refresh independently. Controlled errors restore the unchanged target display and do not apply requested values.
 

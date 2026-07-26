@@ -549,7 +549,15 @@ def _settings_and_table(block) -> None:
         raise AssertionError(row)
     warehouse_settings = block.save_warehouse_exclusion_settings(
         user_key="operator",
-        payload={"base_revision": 0, "excluded_wb_warehouse_ids": [101, 102]},
+        payload={
+            "base_revision": 0,
+            "active": True,
+            "excluded_wb_warehouse_ids": [101, 102],
+            "reason": "fixture incident",
+            "effective_from": "2026-07-13",
+            "effective_to": "",
+            "status": "active",
+        },
     )
     if warehouse_settings["excluded_wb_warehouse_ids"] != [101, 102]:
         raise AssertionError("warehouse exclusions must use one server-owned config")
@@ -564,7 +572,6 @@ def _settings_and_table(block) -> None:
     evidence = block._collect_forecast_evidence(
         active=block._active_skus(),
         settings=ForecastSettings(),
-        excluded_warehouse_ids=(101, 102),
     )[NM_ID]
     if evidence["stock_wb"] != 130:
         raise AssertionError(f"warehouse exclusions must change total SKU stock: {evidence}")
@@ -575,7 +582,6 @@ def _settings_and_table(block) -> None:
     incomplete = block._collect_forecast_evidence(
         active=block._active_skus(),
         settings=ForecastSettings(),
-        excluded_warehouse_ids=(101,),
     )[NM_ID]
     block.stocks_block = complete_stocks
     if incomplete["stock_wb"] is not None or not any(
@@ -586,7 +592,12 @@ def _settings_and_table(block) -> None:
         user_key="operator",
         payload={
             "base_revision": warehouse_settings["revision"],
-            "excluded_wb_warehouse_ids": [],
+            "active": False,
+            "excluded_wb_warehouse_ids": [101, 102],
+            "reason": "fixture incident resolved",
+            "effective_from": "2026-07-14",
+            "effective_to": "",
+            "status": "resolved",
         },
     )
 

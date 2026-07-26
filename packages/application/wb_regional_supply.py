@@ -22,6 +22,7 @@ from packages.application.stocks_block import (
     build_wb_warehouse_exclusion,
     parse_excluded_wb_warehouse_ids,
 )
+from packages.application.wb_incident_policy import build_incident_stock_projection
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
 from packages.application.wb_supply_overlay import (
     apply_stock_ff_overlay,
@@ -249,10 +250,10 @@ class WbRegionalSupplyBlock:
             getattr(stock_response, "planning_reconciliation", {}) or {}
         )
         stock_warehouse_rows = list(getattr(stock_response, "warehouse_rows", []) or [])
-        wb_warehouse_exclusion = build_wb_warehouse_exclusion(
+        wb_warehouse_exclusion = build_incident_stock_projection(
+            self.runtime,
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=stock_warehouse_rows,
-            excluded_warehouse_ids=settings.excluded_wb_warehouse_ids,
             snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
             pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
@@ -288,29 +289,55 @@ class WbRegionalSupplyBlock:
             wb_regional_overlay_warnings,
         ) = regional_overlay_quantities(overlay=wb_supply_overlay, planning_zone_mode=True)
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in effective_stock_ff_rows}
+        incident_projection_by_nm = {
+            int(nm_id): dict(row)
+            for nm_id, row in dict(wb_warehouse_exclusion.get("by_nm_id") or {}).items()
+        }
         current_stock_by_nm = {
             nm_id: {
-                district_key: float(getattr(stock_items[nm_id], _DISTRICT_FIELD_BY_KEY[district_key], 0.0) or 0.0)
+                district_key: float(
+                    incident_projection_by_nm.get(nm_id, {}).get(
+                        f"effective_{_DISTRICT_FIELD_BY_KEY[district_key]}",
+                        0.0,
+                    )
+                    or 0.0
+                )
                 for district_key in SUPPLY_PLANNING_ZONE_KEYS
             }
             for nm_id in nm_ids
         }
-        excluded_ids = set(settings.excluded_wb_warehouse_ids)
-        exclusion_zone_by_nm: dict[int, dict[str, float]] = {}
-        for row in stock_warehouse_rows:
-            if row.warehouse_id not in excluded_ids or not row.planning_zone_key:
-                continue
-            by_zone = exclusion_zone_by_nm.setdefault(int(row.nm_id), {})
-            by_zone[row.planning_zone_key] = (
-                float(by_zone.get(row.planning_zone_key, 0.0))
-                + max(float(row.quantity), 0.0)
-            )
-        for nm_id, by_zone in exclusion_zone_by_nm.items():
-            for zone_key, excluded_qty in by_zone.items():
-                current_stock_by_nm[nm_id][zone_key] = max(
-                    current_stock_by_nm[nm_id][zone_key] - excluded_qty,
-                    0.0,
+        exclusion_zone_by_nm = {
+            nm_id: {
+                district_key: float(
+                    projection_row.get(
+                        f"excluded_{_DISTRICT_FIELD_BY_KEY[district_key]}",
+                        0.0,
+                    )
+                    or 0.0
                 )
+                for district_key in SUPPLY_PLANNING_ZONE_KEYS
+                if float(
+                    projection_row.get(
+                        f"excluded_{_DISTRICT_FIELD_BY_KEY[district_key]}",
+                        0.0,
+                    )
+                    or 0.0
+                )
+                > 0
+            }
+            for nm_id, projection_row in incident_projection_by_nm.items()
+            if any(
+                float(
+                    projection_row.get(
+                        f"excluded_{_DISTRICT_FIELD_BY_KEY[district_key]}",
+                        0.0,
+                    )
+                    or 0.0
+                )
+                > 0
+                for district_key in SUPPLY_PLANNING_ZONE_KEYS
+            )
+        }
         regional_demand_by_nm = _estimate_wb_regional_demand(
             runtime=self.runtime,
             report_date=report_date_obj,
