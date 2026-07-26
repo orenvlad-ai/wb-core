@@ -341,8 +341,16 @@ def _run_warehouse_ui_flow(
                 and int(recovery_orphans.get("orphan_count") or 0) == 0,
                 "production recovery status has no orphan or quarantine leak",
             )
+            _assert(
+                bool(recovery_orphans.get("policy_activation_at"))
+                and "pre_policy_legacy_count" in recovery_orphans,
+                "production recovery status exposes the activation baseline",
+            )
         recovery_status_text = page.locator(
             "[data-warehouse-recovery-status]"
+        ).inner_text().strip()
+        recovery_orphan_text = page.locator(
+            "[data-warehouse-recovery-orphans]"
         ).inner_text().strip()
         recovery_table_text = page.locator(
             "[data-warehouse-recovery-operations]"
@@ -352,6 +360,15 @@ def _run_warehouse_ui_flow(
             and bool(recovery_table_text),
             "recovery lifecycle renders visibly",
         )
+        pre_policy_legacy_count = int(
+            recovery_orphans.get("pre_policy_legacy_count") or 0
+        )
+        if pre_policy_legacy_count:
+            _assert(
+                f"pre-policy baseline {pre_policy_legacy_count}"
+                in recovery_orphan_text,
+                "pre-policy backup baseline renders visibly",
+            )
         recovery_screenshot = evidence_dir / "warehouse_recovery_policy.png"
         page.screenshot(path=str(recovery_screenshot), full_page=False)
         screenshots.append(str(recovery_screenshot))
@@ -359,6 +376,7 @@ def _run_warehouse_ui_flow(
             "contract_name": recovery_payload.get("contract_name"),
             "status": recovery_payload.get("status"),
             "visible_status": recovery_status_text,
+            "visible_orphan_status": recovery_orphan_text,
             "operation_count": len(recovery_operations),
             "tiers": sorted(
                 {str(item.get("tier") or "") for item in recovery_operations}

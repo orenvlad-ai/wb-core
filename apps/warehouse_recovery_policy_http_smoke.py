@@ -140,6 +140,14 @@ def main() -> int:
             "tiers",
         } <= set(payload):
             raise AssertionError("recovery API omitted operator status fields")
+        if not {
+            "policy_activation_at",
+            "pre_policy_legacy_count",
+            "pre_policy_legacy_paths",
+        } <= set(payload["orphan_scanner"]):
+            raise AssertionError(
+                "recovery API omitted pre-policy baseline evidence"
+            )
 
     adapter = (
         ROOT / "packages/adapters/registry_upload_http_entrypoint.py"
@@ -165,6 +173,8 @@ def main() -> int:
             "rollback.available",
             "quarantine_candidates",
             "expired_reservations",
+            "pre_policy_legacy_count",
+            "pre-policy baseline",
         ):
         if marker not in template:
             raise AssertionError(f"recovery operator UI marker is missing: {marker}")

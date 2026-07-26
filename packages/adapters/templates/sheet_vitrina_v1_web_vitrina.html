@@ -8588,8 +8588,10 @@
           String(writer.state || "unknown") + " / " + String(timer.state || timer.status || "unknown");
       }
       if (warehouseRecoveryOrphansNode) {
+        const prePolicyLegacy = Number(orphan.pre_policy_legacy_count || 0);
         warehouseRecoveryOrphansNode.textContent =
           String(Number(orphan.orphan_count || 0)) + " / " + String(quarantined) +
+          (prePolicyLegacy ? " · pre-policy baseline " + String(prePolicyLegacy) : "") +
           (expiredReservations ? " · expired reservations " + String(expiredReservations) : "");
       }
       if (warehouseRecoveryNextNode) {
