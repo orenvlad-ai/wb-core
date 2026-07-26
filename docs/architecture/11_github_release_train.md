@@ -20,7 +20,7 @@ Task class и task continuity независимы. `TaskContinuity` в `apps/gi
 ## Repo-Owned Артефакты
 
 - `.github/workflows/baseline-ci.yml` — обязательный check `baseline`;
-- `.github/workflows/release-train.yml` — один repository-wide queue worker и GitHub-native LOOP command handler;
+- `.github/workflows/release-train.yml` — один repository-wide queue worker, GitHub-native LOOP handler и two-stage trusted-main production-mutation terminalizer;
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
 - `apps/github_release_train_wait.py` — bounded CLI waiter и канонический Goal queue shepherd для Codex;
 - `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
@@ -46,15 +46,15 @@ LOOP дополнительно требует exact-head repo-owned registratio
 - `release:awaiting-agent` — LOOP прошёл sync/baseline и ждёт exact-head acknowledgement активной Codex-сессии;
 - `release:needs-resume` — non-terminal overlay на активном LOOP `ready/running/awaiting-agent/awaiting-ui`: owner heartbeat истёк, но primary state и gate не изменяются;
 - `release:awaiting-ui` — LOOP merge задеплоен и ждёт production UI Flow/acceptance;
-- `release:blocked` — PR-specific failure до merge;
+- `release:blocked` — PR-specific fail-closed state; обычно pre-merge, а human-gated production mutation может сохранять его после merge/apply до exact terminalization;
 - `release:done` — terminal success STANDARD `repo-only` без deploy;
-- `release:production` — terminal success STANDARD live/runtime или принятой LOOP-цепочки;
+- `release:production` — terminal success STANDARD live/runtime, Actions-terminalized human-gated production mutation или принятой LOOP-цепочки;
 - `release:halted` — failure после merge; вся очередь остановлена.
 - `release:superseded` — terminal audit state незамёрженной LOOP-итерации, однозначно заменённой завершённой production recovery-chain; root/task/scope/history сохраняются, активные queue/failure labels снимаются.
 
 Active states: `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
 
-Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query, marker names и Goal disposition contract. Runtime, waiter/shepherd и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/gate/merge/root/evidence.
+Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query, marker names и Goal disposition contract. Runtime, waiter/shepherd и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance, halted recovery и production-mutation completion требуют repo-owned marker и exact PR/head/gate/merge/deployed/evidence.
 
 Goal disposition является отдельной интерпретацией durable state, а не новым transition graph:
 
@@ -119,6 +119,22 @@ STANDARD PR проходит существующую последователь
 8. worker best-effort удаляет feature branch и dispatch-ит следующий queue run.
 
 `scope:production-mutation` никогда не выпускается автоматически и до merge получает `release:blocked` с требованием отдельного human-gated production-mutation protocol.
+
+## Production-Mutation Terminalization
+
+Human merge/deploy/apply не выполняется queue worker и не возникает из `release:ready`. После отдельного exact human gate, exact-head merge, canonical deploy/apply и bounded reconciliation `task:standard + scope:production-mutation` закрывается только PR comment:
+
+```text
+/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>
+```
+
+Two-stage workflow разделяет authority:
+
+1. `production_mutation_command` checkout-ит trusted `main` без production environment и требует command actor `OWNER`/`MEMBER`, current PR, `task:standard + scope:production-mutation`, merged GitHub state, exact retained pre-merge head, successful `baseline` на exact head, exact merge SHA и fail-closed `blocked/halted` state. Gate comment обязан принадлежать тому же PR, иметь `OWNER`/`MEMBER`, предшествовать merge, содержать exact head и human-authorization semantics; его exact UTF-8 body SHA-256 совпадает с command. Reconciliation comment отличается от gate, следует после merge, принадлежит `OWNER`/`MEMBER`, содержит exact deployed SHA, completion semantics и exact 64-hex payload command evidence fingerprint (исторический comment может не иметь текстового `sha256:` prefix); его body SHA-256 также совпадает. GitHub compare доказывает, что deployed SHA равен merge либо является его потомком.
+2. Только успешный preflight открывает `terminalize_production_mutation` с environment `production`. Existing hosted-runtime reconciler запускается с обязательным `--read-only` и сверяет canonical target id, deploy metadata SHA, runtime SHA, `deployment_complete=true`, auth binding, active unit/MainPID и loopback probes с exact deployed SHA. В этом режиме он не выполняет deploy, daemon-reload, restart, repair probes, business mutation или reconciliation apply.
+3. Trusted-main handler повторно проверяет immutable GitHub evidence, связывает canonical deploy evidence digest с PR/head/merge/deployed SHA, gate identity/actor/association/digest, reconciliation identity/actor/association/digest и evidence fingerprint. Только GitHub Actions создаёт `wb-core-production-mutation-completion-proof`, атомарно заменяет stale active/failure/overlay state на `release:production` и dispatch-ит queue observation.
+
+Повтор exact command после proven terminal state возвращает `already-completed` без новых comments/labels и безопасно re-dispatch-ит queue observation. Stale head/SHA/comment digest, missing gate/deploy/reconciliation/evidence, unauthorized actor, wrong PR/task/scope, non-ancestor deployed SHA, forged owner marker или local invocation fail closed. Terminal proof readback повторно проверяет current source-comment digests и bot-owned marker; ручной `release:production` не даёт `TERMINAL_SUCCESS`.
 
 ## LOOP Pre-Deploy Handshake
 
@@ -196,7 +212,7 @@ Terminal cleanup механический, root-bounded и idempotent. До пе
 
 `apps/github_release_train_wait.py` получает номер PR, выводит только изменения `class/scope/state/head/queue/gate` и использует GitHub CLI auth/repository context, если env не задан.
 
-- STANDARD ждёт `release:done` для `scope:repo-only` или `release:production` для `scope:live-runtime`;
+- STANDARD ждёт `release:done` для `scope:repo-only` или proven `release:production` для `scope:live-runtime`/terminalized `scope:production-mutation`;
 - чужой exclusive gate выводится как normal `wait-foreign-gate`; waiter продолжает polling без terminal timeout и никогда не называет это blocked;
 - LOOP заново читает actual head, автоматически выполняет exact-head ack только на собственном `release:awaiting-agent` и продолжает polling через merge/deploy;
 - до heartbeat/resume/ack LOOP waiter проверяет new/recovery registration proof и terminal boundary;
@@ -212,7 +228,7 @@ Goal/shepherd command:
 python3 apps/github_release_train_wait.py <OWN_PR> --shepherd
 ```
 
-Shepherd читает own PR и global gate, выводит machine-readable Goal disposition и не принимает UI без evidence. `--phase-state <JSON>` передаёт `current_phase`/capability evidence в тот же classifier; `--once` нужен для bounded pre-handoff проверки. Exit codes: `0` = `TERMINAL_SUCCESS`; `2` = доказанный `EXTERNAL_BLOCKER`; `3` = `RECOVER_OWN_CHAIN`; `4` = `TAKEOVER_PREDECESSOR`/ownership resumed next action; `5` = `OWN_ACTION`; `6` = одно наблюдение `CONTINUE_WAITING`; `7` = доказанный `TERMINAL_FAILURE`; `8` = `CONTINUE_SAFE_PHASES`; `9` = `AWAIT_PHASE_CAPABILITY`; `130` = interrupt. Timeout, unchanged state и коды `3/4/5/6/8/9` не terminal. После кода `4` выполняется exact resume/action predecessor, затем та же команда с `OWN_PR` возвращает наблюдение к исходной очереди.
+Shepherd читает own PR и global gate, выводит machine-readable Goal disposition и не принимает UI без evidence. `--phase-state <JSON>` передаёт `current_phase`/capability evidence в тот же classifier; `--once` нужен для bounded pre-handoff проверки. Exit codes: `0` = `TERMINAL_SUCCESS`; `2` = доказанный `EXTERNAL_BLOCKER`; `3` = `RECOVER_OWN_CHAIN`; `4` = `TAKEOVER_PREDECESSOR`/ownership resumed next action; `5` = `OWN_ACTION`; `6` = одно наблюдение `CONTINUE_WAITING`; `7` = доказанный `TERMINAL_FAILURE`; `8` = `CONTINUE_SAFE_PHASES`; `9` = `AWAIT_PHASE_CAPABILITY`; `130` = interrupt. Timeout, unchanged state и коды `3/4/5/6/8/9` не terminal. Merged production-mutation `blocked/halted` получает `OWN_ACTION / production-mutation-terminalization-available`, пока repo-owned exact command может проверить evidence; старое отсутствие `complete-standard --contour production-verified` больше не является blocker. `AWAIT_PHASE_CAPABILITY` остаётся phase-local и не является terminal failure. После кода `4` выполняется exact resume/action predecessor, затем та же команда с `OWN_PR` возвращает наблюдение к исходной очереди.
 
 Минимальный phase-state для будущей недоступной production capability:
 
@@ -247,6 +263,7 @@ Classifier сам выводит `blocked_phase`: при непустом `safe_
 - repeated label/push/dispatch events не выбирают PR без `release:ready` и не повторяют terminal merge/deploy;
 - repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
 - repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
+- repeated production-mutation completion сохраняет один Actions-owned exact-evidence marker и terminal label без новых comments/labels и безопасно re-dispatch-ит queue observation; partial label/marker state лечится только повторной полной проверкой canonical deploy evidence.
 - repeated enqueue/correction events не дублируют proof и не меняют другие roots.
 
 Исправленный own технический pre-merge blocker повторно входит в очередь только через trusted comment `/wb-core loop retry-blocked <PR> head <HEAD_SHA>`; underlying runner остаётся `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`, но task owner не запускает его локальным user token. New/recovery enrollment не может снять technical blocker. Command требует open non-draft PR, exact head, `OWNER`/`MEMBER`/`COLLABORATOR` association и successful `baseline`, сохраняет task class/scope/root и не удаляет LOOP labels. Если fix изменил LOOP head, command выпускает новый exact-head marker только при наличии prior repo-owned proof той же identity; для recovery дополнительно остаются обязательны тот же active gate/root и отсутствие terminal member. Classification provenance остаётся unresolved через любое число последующих head changes, поэтому generic retry отклоняется, пока более поздний trusted new/recovery/correction proof явно не разрешит identity. Codex waiter не выполняет classification mutations: он только сообщает mismatch и завершается fail-closed, оставляя durable transition trusted workflow.
@@ -274,7 +291,7 @@ halted только после healthy exact PR/head/merge/target JSON evidence;
 
 `baseline-ci.yml` выполняет `compileall`, `git diff --check` и `apps/github_release_train_smoke.py`. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
 
-`pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP commands проходят exact parsing и association checks. Production SSH material доступен только job с GitHub Environment `production`; required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Release Train не выполняет WB writes, backfill или production business mutation.
+`pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP и production-mutation commands проходят exact parsing и association checks. Production-mutation command preflight работает без production secrets; SSH material получает только следующий job с GitHub Environment `production` после успешного immutable-evidence preflight. Required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Production-mutation terminalizer выполняет только `--read-only` deploy readback и GitHub terminal state transition; Release Train не выполняет WB writes, backfill или production business mutation.
 
 ## Проверенный LOOP Canary
 

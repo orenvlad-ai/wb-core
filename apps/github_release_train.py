@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,7 @@ from apps.github_release_train_spec import (
     NEW_ROOT_PROOF_MARKER,
     PRIMARY_STATE_LABELS,
     PRODUCTION_LABEL,
+    PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
     READY_LABEL,
     RECONCILE_PROOF_MARKER,
     RECOVERY_PROOF_MARKER,
@@ -64,6 +66,7 @@ LOOP_TASK_LABEL = "task:loop"
 LOOP_ROOT_PREFIX = "loop:root-"
 LOOP_ACK_PREFIX = "loop:ack-"
 LOOP_ACCEPT_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS = {"OWNER", "MEMBER"}
 DEFAULT_NEEDS_RESUME_AFTER_SECONDS = 30 * 60
 
 STATE_LABELS = set(PRIMARY_STATE_LABELS)
@@ -205,6 +208,19 @@ class Candidate:
 class MergeResult:
     merge_sha: str
     skip_release: bool = False
+
+
+@dataclass(frozen=True)
+class ProductionMutationTerminalizationCommand:
+    pr: int
+    head_sha: str
+    merge_sha: str
+    deployed_sha: str
+    gate_comment_id: int
+    gate_digest: str
+    reconciliation_comment_id: int
+    reconciliation_digest: str
+    evidence_fingerprint: str
 
 
 class GitHubApi:
@@ -544,6 +560,113 @@ def _latest_label_timestamp(
 def _proof_marker(marker: str, **values: object) -> str:
     rendered = " ".join(f"{key}={value}" for key, value in sorted(values.items()))
     return f"<!-- {marker} {rendered} -->"
+
+
+def _exact_sha(value: str, field: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) != 40 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ReleaseBlocked(f"{field} must be an exact 40-character SHA")
+    return normalized
+
+
+def _sha256_fingerprint(value: str, field: str) -> str:
+    normalized = value.strip().lower()
+    if (
+        not normalized.startswith("sha256:")
+        or len(normalized) != 71
+        or any(character not in "0123456789abcdef" for character in normalized[7:])
+    ):
+        raise ReleaseBlocked(f"{field} must be an exact sha256 fingerprint")
+    return normalized
+
+
+def _comment_body_digest(comment: Mapping[str, Any]) -> str:
+    body = str(comment.get("body") or "")
+    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _comment_by_id(
+    api: ReleaseApi,
+    number: int,
+    comment_id: int,
+    field: str,
+) -> Mapping[str, Any]:
+    for item in api.list_comments(number):
+        if int(item.get("id") or 0) == comment_id:
+            return item
+    raise ReleaseBlocked(f"{field} does not identify a comment on PR #{number}")
+
+
+def _comment_identity(
+    comment: Mapping[str, Any],
+    *,
+    field: str,
+) -> tuple[str, str]:
+    author = comment.get("user")
+    actor = str(author.get("login") or "") if isinstance(author, Mapping) else ""
+    association = str(comment.get("author_association") or "").upper()
+    if (
+        not actor
+        or actor in {"github-actions", "github-actions[bot]"}
+        or association not in PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS
+    ):
+        raise ReleaseBlocked(
+            f"{field} requires a non-bot OWNER or MEMBER GitHub identity"
+        )
+    return actor, association
+
+
+def parse_production_mutation_terminalization_command(
+    command: str,
+) -> ProductionMutationTerminalizationCommand:
+    parts = command.strip().split()
+    if (
+        len(parts) != 20
+        or parts[:3] != ["/wb-core", "production-mutation", "complete"]
+        or parts[4] != "head"
+        or parts[6] != "merge"
+        or parts[8] != "deployed"
+        or parts[10] != "gate"
+        or parts[12] != "gate-digest"
+        or parts[14] != "reconciliation"
+        or parts[16] != "reconciliation-digest"
+        or parts[18] != "evidence"
+    ):
+        raise ReleaseBlocked(
+            "production-mutation completion must bind PR, head, merge, deployed SHA, "
+            "gate comment/digest, reconciliation comment/digest and evidence fingerprint"
+        )
+    try:
+        number = int(parts[3])
+        gate_comment_id = int(parts[11])
+        reconciliation_comment_id = int(parts[15])
+    except ValueError as exc:
+        raise ReleaseBlocked(
+            "production-mutation completion contains an invalid PR or comment identity"
+        ) from exc
+    if number <= 0 or gate_comment_id <= 0 or reconciliation_comment_id <= 0:
+        raise ReleaseBlocked(
+            "production-mutation completion requires positive PR and comment identities"
+        )
+    if gate_comment_id == reconciliation_comment_id:
+        raise ReleaseBlocked(
+            "human gate and reconciliation must be different evidence comments"
+        )
+    return ProductionMutationTerminalizationCommand(
+        pr=number,
+        head_sha=_exact_sha(parts[5], "head"),
+        merge_sha=_exact_sha(parts[7], "merge"),
+        deployed_sha=_exact_sha(parts[9], "deployed"),
+        gate_comment_id=gate_comment_id,
+        gate_digest=_sha256_fingerprint(parts[13], "gate-digest"),
+        reconciliation_comment_id=reconciliation_comment_id,
+        reconciliation_digest=_sha256_fingerprint(
+            parts[17], "reconciliation-digest"
+        ),
+        evidence_fingerprint=_sha256_fingerprint(parts[19], "evidence"),
+    )
 
 
 def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: object) -> bool:
@@ -2086,6 +2209,271 @@ def complete_standard_release(
     return target
 
 
+def _production_mutation_proof_for_command(
+    api: ReleaseApi,
+    command: ProductionMutationTerminalizationCommand,
+    proof_values: Mapping[str, object],
+) -> bool:
+    expected = {key: str(value) for key, value in proof_values.items()}
+    for fields in _repo_owned_marker_fields(
+        api,
+        command.pr,
+        PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
+    ):
+        if all(fields.get(key) == value for key, value in expected.items()):
+            deployment_evidence = str(fields.get("deployment_evidence") or "")
+            try:
+                _sha256_fingerprint(
+                    deployment_evidence,
+                    "deployment_evidence",
+                )
+            except ReleaseBlocked:
+                continue
+            return True
+    return False
+
+
+def production_mutation_terminalization_preflight(
+    api: ReleaseApi,
+    number: int,
+    command: ProductionMutationTerminalizationCommand,
+    *,
+    actor: str,
+    association: str,
+) -> dict[str, Any]:
+    """Validate immutable human/deploy/reconciliation identities before secrets are exposed."""
+
+    normalized_association = association.upper()
+    if normalized_association not in PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires OWNER or MEMBER association"
+        )
+    if not actor or actor in {"github-actions", "github-actions[bot]"}:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires a non-bot command actor"
+        )
+    if command.pr != number:
+        raise ReleaseBlocked(
+            "production-mutation terminalization must target the current PR"
+        )
+
+    pull = api.get_pull(number)
+    labels = label_names(pull)
+    if task_class_from_labels(labels) != STANDARD_TASK_LABEL:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires task:standard"
+        )
+    if scope_from_labels(labels) != PRODUCTION_MUTATION_LABEL:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires scope:production-mutation"
+        )
+    state = release_state_from_labels(labels)
+    if state not in {BLOCKED_LABEL, HALTED_LABEL, PRODUCTION_LABEL}:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires the fail-closed blocked/halted "
+            "state or its already-proven terminal result"
+        )
+    actual_head = str((pull.get("head") or {}).get("sha") or "").lower()
+    actual_merge = str(pull.get("merge_commit_sha") or "").lower()
+    if actual_head != command.head_sha:
+        raise ReleaseBlocked(
+            "production-mutation terminalization head SHA is stale"
+        )
+    if not bool(pull.get("merged")) or actual_merge != command.merge_sha:
+        raise ReleaseBlocked(
+            "production-mutation terminalization merge SHA does not match the merged PR"
+        )
+    if not _has_successful_check(api, command.head_sha, "baseline"):
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires successful baseline on exact head"
+        )
+    merged_at = _github_timestamp(pull.get("merged_at"))
+    if merged_at is None:
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires the exact GitHub merge timestamp"
+        )
+
+    gate_comment = _comment_by_id(
+        api,
+        number,
+        command.gate_comment_id,
+        "human gate",
+    )
+    gate_actor, gate_association = _comment_identity(
+        gate_comment,
+        field="human gate",
+    )
+    if _comment_body_digest(gate_comment) != command.gate_digest:
+        raise ReleaseBlocked("human gate comment digest is stale")
+    gate_time = _github_timestamp(gate_comment.get("created_at"))
+    gate_body = str(gate_comment.get("body") or "")
+    gate_folded = gate_body.casefold()
+    if (
+        gate_time is None
+        or gate_time > merged_at
+        or command.head_sha not in gate_body.lower()
+        or not any(
+            phrase in gate_folded
+            for phrase in ("human gate", "human authorization", "user authorizes")
+        )
+    ):
+        raise ReleaseBlocked(
+            "human gate must be a pre-merge OWNER/MEMBER authorization bound to exact head"
+        )
+
+    reconciliation_comment = _comment_by_id(
+        api,
+        number,
+        command.reconciliation_comment_id,
+        "reconciliation",
+    )
+    reconciliation_actor, reconciliation_association = _comment_identity(
+        reconciliation_comment,
+        field="reconciliation",
+    )
+    if _comment_body_digest(reconciliation_comment) != command.reconciliation_digest:
+        raise ReleaseBlocked("reconciliation comment digest is stale")
+    reconciliation_time = _github_timestamp(reconciliation_comment.get("created_at"))
+    reconciliation_body = str(reconciliation_comment.get("body") or "")
+    reconciliation_folded = reconciliation_body.casefold()
+    if (
+        reconciliation_time is None
+        or reconciliation_time < merged_at
+        or command.deployed_sha not in reconciliation_body.lower()
+        or command.evidence_fingerprint[7:] not in reconciliation_body.lower()
+        or "reconciliation" not in reconciliation_folded
+        or "complete" not in reconciliation_folded
+    ):
+        raise ReleaseBlocked(
+            "reconciliation must be post-merge, bind deployed SHA and contain the exact "
+            "evidence fingerprint"
+        )
+
+    comparison = api.compare(command.merge_sha, command.deployed_sha)
+    if (
+        str(comparison.get("status") or "") not in {"ahead", "identical"}
+        or int(comparison.get("behind_by") or 0) != 0
+    ):
+        raise ReleaseBlocked(
+            "deployed SHA must be the exact PR merge or a verified descendant"
+        )
+
+    proof_values: dict[str, object] = {
+        "actor": actor,
+        "association": normalized_association,
+        "deployed": command.deployed_sha,
+        "evidence": command.evidence_fingerprint,
+        "gate_actor": gate_actor,
+        "gate_association": gate_association,
+        "gate_digest": command.gate_digest,
+        "gate_id": command.gate_comment_id,
+        "head": command.head_sha,
+        "merge": command.merge_sha,
+        "pr": number,
+        "reconciliation_actor": reconciliation_actor,
+        "reconciliation_association": reconciliation_association,
+        "reconciliation_digest": command.reconciliation_digest,
+        "reconciliation_id": command.reconciliation_comment_id,
+    }
+    already_completed = (
+        PRODUCTION_LABEL in labels
+        and _production_mutation_proof_for_command(api, command, proof_values)
+    )
+    return {
+        "status": "already-completed" if already_completed else "ready",
+        "pr": number,
+        "head": command.head_sha,
+        "merge": command.merge_sha,
+        "deployed": command.deployed_sha,
+        "already_completed": already_completed,
+        "proof_values": proof_values,
+    }
+
+
+def complete_production_mutation_release(
+    api: ReleaseApi,
+    number: int,
+    command: ProductionMutationTerminalizationCommand,
+    deploy_evidence: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+) -> str:
+    """Terminalize only after trusted-main Actions validates every exact evidence edge."""
+
+    if not actions_owned:
+        raise ReleaseBlocked(
+            "production-mutation terminalization is restricted to trusted-main GitHub Actions"
+        )
+    plan = production_mutation_terminalization_preflight(
+        api,
+        number,
+        command,
+        actor=actor,
+        association=association,
+    )
+    if plan["already_completed"]:
+        api.dispatch_workflow("release-train.yml", "main")
+        return "already-completed"
+    if not isinstance(deploy_evidence, Mapping):
+        raise ReleaseBlocked(
+            "production-mutation terminalization requires repo-owned deployment evidence"
+        )
+    required_deploy = {
+        "healthy": True,
+        "status": "reconciled",
+        "pr": number,
+        "head": command.head_sha,
+        "merge": command.deployed_sha,
+        "expected_sha": command.deployed_sha,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "read_only": True,
+        "repairs_applied": False,
+    }
+    mismatches = [
+        key for key, value in required_deploy.items() if deploy_evidence.get(key) != value
+    ]
+    if mismatches:
+        raise ReleaseBlocked(
+            "production deployment evidence does not match exact PR/head/deployed/target: "
+            + ", ".join(mismatches)
+        )
+    deployment_evidence_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            deploy_evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    proof_values = {
+        **dict(plan["proof_values"]),
+        "deployment_evidence": deployment_evidence_digest,
+    }
+    proof = _proof_marker(
+        PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
+        **proof_values,
+    )
+    if not _has_comment_proof(
+        api,
+        number,
+        PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
+        **proof_values,
+    ):
+        api.add_comment(
+            number,
+            "Release Train verified human-gated production-mutation completion for "
+            f"head `{command.head_sha}`, merge `{command.merge_sha}` and deployed SHA "
+            f"`{command.deployed_sha}` with reconciliation evidence "
+            f"`{command.evidence_fingerprint}`.\n\n{proof}",
+        )
+    labels = label_names(api.get_pull(number))
+    set_release_state(api, number, PRODUCTION_LABEL, current_labels=labels)
+    api.dispatch_workflow("release-train.yml", "main")
+    return PRODUCTION_LABEL
+
+
 def halt_merged_release(
     api: ReleaseApi,
     number: int,
@@ -2165,6 +2553,70 @@ def retry_blocked_release(
     return READY_LABEL
 
 
+def production_mutation_terminal_state_proven(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+) -> bool:
+    """Verify the Actions-owned terminal marker and its still-exact source comments."""
+
+    number = int(pull.get("number") or 0)
+    labels = label_names(pull)
+    if number <= 0 or PRODUCTION_LABEL not in labels:
+        return False
+    for fields in _repo_owned_marker_fields(
+        api,
+        number,
+        PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
+    ):
+        try:
+            command = ProductionMutationTerminalizationCommand(
+                pr=int(fields.get("pr") or 0),
+                head_sha=_exact_sha(str(fields.get("head") or ""), "head"),
+                merge_sha=_exact_sha(str(fields.get("merge") or ""), "merge"),
+                deployed_sha=_exact_sha(
+                    str(fields.get("deployed") or ""),
+                    "deployed",
+                ),
+                gate_comment_id=int(fields.get("gate_id") or 0),
+                gate_digest=_sha256_fingerprint(
+                    str(fields.get("gate_digest") or ""),
+                    "gate_digest",
+                ),
+                reconciliation_comment_id=int(
+                    fields.get("reconciliation_id") or 0
+                ),
+                reconciliation_digest=_sha256_fingerprint(
+                    str(fields.get("reconciliation_digest") or ""),
+                    "reconciliation_digest",
+                ),
+                evidence_fingerprint=_sha256_fingerprint(
+                    str(fields.get("evidence") or ""),
+                    "evidence",
+                ),
+            )
+            _sha256_fingerprint(
+                str(fields.get("deployment_evidence") or ""),
+                "deployment_evidence",
+            )
+            plan = production_mutation_terminalization_preflight(
+                api,
+                number,
+                command,
+                actor=str(fields.get("actor") or ""),
+                association=str(fields.get("association") or ""),
+            )
+            expected = {
+                key: str(value)
+                for key, value in dict(plan["proof_values"]).items()
+            }
+            if not all(fields.get(key) == value for key, value in expected.items()):
+                continue
+            return True
+        except (ReleaseBlocked, TypeError, ValueError):
+            continue
+    return False
+
+
 def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
     """Reject terminal labels that lack their repo-owned exact-SHA transition proof."""
 
@@ -2176,6 +2628,8 @@ def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
     task_class = task_class_from_labels(labels)
     if task_class == STANDARD_TASK_LABEL:
         scope = scope_from_labels(labels)
+        if scope == PRODUCTION_MUTATION_LABEL:
+            return production_mutation_terminal_state_proven(api, pull)
         contour = "repo-only" if scope == REPO_ONLY_LABEL else "production-verified"
         expected = DONE_LABEL if scope == REPO_ONLY_LABEL else PRODUCTION_LABEL
         completion = _has_comment_proof(
@@ -2848,6 +3302,28 @@ def handle_loop_comment(
     raise ReleaseBlocked("unsupported LOOP command")
 
 
+def handle_production_mutation_comment(
+    api: ReleaseApi,
+    number: int,
+    command_text: str,
+    *,
+    actor: str,
+    association: str,
+    deploy_evidence: Mapping[str, Any] | None,
+    actions_owned: bool,
+) -> str:
+    command = parse_production_mutation_terminalization_command(command_text)
+    return complete_production_mutation_release(
+        api,
+        number,
+        command,
+        deploy_evidence,
+        actor=actor,
+        association=association,
+        actions_owned=actions_owned,
+    )
+
+
 def write_github_output(path: str | None, values: Mapping[str, Any]) -> None:
     if not path:
         return
@@ -3204,16 +3680,75 @@ def command_await_ui(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_handle_comment(args: argparse.Namespace) -> int:
+def command_preflight_production_mutation(args: argparse.Namespace) -> int:
     api = _api_from_env()
     try:
-        status = handle_loop_comment(
+        command = parse_production_mutation_terminalization_command(args.command)
+        plan = production_mutation_terminalization_preflight(
             api,
             args.pr,
-            args.command,
+            command,
             actor=args.actor,
             association=args.association,
         )
+    except ReleaseBlocked as exc:
+        _json_print({"status": "rejected", "pr_number": args.pr, "reason": str(exc)})
+        return 2
+    write_github_output(
+        args.output_path,
+        {
+            "head_sha": command.head_sha,
+            "merge_sha": command.merge_sha,
+            "deployed_sha": command.deployed_sha,
+            "already_completed": plan["already_completed"],
+        },
+    )
+    _json_print(
+        {
+            "status": plan["status"],
+            "pr_number": args.pr,
+            "head_sha": command.head_sha,
+            "merge_sha": command.merge_sha,
+            "deployed_sha": command.deployed_sha,
+        }
+    )
+    return 0
+
+
+def command_handle_comment(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    try:
+        if args.command.strip().startswith("/wb-core production-mutation "):
+            deploy_evidence: Mapping[str, Any] | None = None
+            if args.deploy_evidence_file is not None:
+                loaded = json.loads(
+                    args.deploy_evidence_file.read_text(encoding="utf-8")
+                )
+                if not isinstance(loaded, dict):
+                    raise ReleaseBlocked(
+                        "deployment evidence must be a JSON object"
+                    )
+                deploy_evidence = loaded
+            status = handle_production_mutation_comment(
+                api,
+                args.pr,
+                args.command,
+                actor=args.actor,
+                association=args.association,
+                deploy_evidence=deploy_evidence,
+                actions_owned=(
+                    os.environ.get("GITHUB_ACTIONS") == "true"
+                    and os.environ.get("GITHUB_EVENT_NAME") == "issue_comment"
+                ),
+            )
+        else:
+            status = handle_loop_comment(
+                api,
+                args.pr,
+                args.command,
+                actor=args.actor,
+                association=args.association,
+            )
     except ReleaseBlocked as exc:
         _json_print({"status": "rejected", "pr_number": args.pr, "reason": str(exc)})
         return 2
@@ -3342,11 +3877,27 @@ def build_parser() -> argparse.ArgumentParser:
     await_ui.add_argument("--merge-sha", required=True)
     await_ui.set_defaults(handler=command_await_ui)
 
+    preflight_production_mutation = subparsers.add_parser(
+        "preflight-production-mutation"
+    )
+    preflight_production_mutation.add_argument("--pr", type=int, required=True)
+    preflight_production_mutation.add_argument("--command", required=True)
+    preflight_production_mutation.add_argument("--actor", required=True)
+    preflight_production_mutation.add_argument("--association", required=True)
+    preflight_production_mutation.add_argument(
+        "--output-path",
+        default=os.environ.get("GITHUB_OUTPUT"),
+    )
+    preflight_production_mutation.set_defaults(
+        handler=command_preflight_production_mutation
+    )
+
     handle_comment = subparsers.add_parser("handle-comment")
     handle_comment.add_argument("--pr", type=int, required=True)
     handle_comment.add_argument("--command", required=True)
     handle_comment.add_argument("--actor", required=True)
     handle_comment.add_argument("--association", required=True)
+    handle_comment.add_argument("--deploy-evidence-file", type=Path)
     handle_comment.set_defaults(handler=command_handle_comment)
 
     cleanup = subparsers.add_parser("cleanup-branch")

@@ -2,6 +2,8 @@
 
 Only daemon-reload, service restart, probes and readback may be retried here.  File
 sync, metadata writes and dependency installation deliberately remain fail-closed.
+The explicit read-only mode disables even those bounded service repairs and is
+used when Release Train needs deployment proof without runtime mutation.
 """
 
 from __future__ import annotations
@@ -179,6 +181,7 @@ def reconcile(
     failed_stage: str = "readback",
     attempts: int = DEFAULT_ATTEMPTS,
     require_deployment_complete: bool = True,
+    allow_repairs: bool = True,
     runner: Runner = _default_runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
@@ -215,6 +218,7 @@ def reconcile(
                     "healthy": True,
                     "mixed_deployment": False,
                     "repairs_applied": repairs_applied,
+                    "read_only": not allow_repairs,
                     "attempts": attempt,
                     "evidence": history,
                 }
@@ -230,7 +234,11 @@ def reconcile(
                 )
             ):
                 break
-            if failed_stage in SAFE_RETRY_STAGES or evidence.unit != "active" or evidence.main_pid <= 0:
+            if allow_repairs and (
+                failed_stage in SAFE_RETRY_STAGES
+                or evidence.unit != "active"
+                or evidence.main_pid <= 0
+            ):
                 for operation in ("daemon-reload", "restart", "probes"):
                     result = runner(_remote_command(target, operation))
                     history.append(
@@ -256,6 +264,7 @@ def reconcile(
         "target_id": target.target_id,
         "healthy": False,
         "repairs_applied": repairs_applied,
+        "read_only": not allow_repairs,
         "attempts": len({int(item["attempt"]) for item in history}),
         "evidence": history,
     }
@@ -270,6 +279,11 @@ def main() -> int:
     parser.add_argument("--merge", required=True)
     parser.add_argument("--failed-stage", choices=sorted(SAFE_RETRY_STAGES | {"metadata", "sync"}), default="readback")
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="disable daemon-reload, restart and probe repair operations",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     payload = reconcile(
@@ -280,6 +294,7 @@ def main() -> int:
         merge=args.merge,
         failed_stage=args.failed_stage,
         attempts=args.attempts,
+        allow_repairs=not args.read_only,
     )
     rendered = json.dumps(payload, sort_keys=True)
     if args.output:

@@ -74,7 +74,12 @@ class ScenarioRunner:
         return _result()
 
 
-def _run(runner: ScenarioRunner, *, stage: str = "readback") -> dict[str, object]:
+def _run(
+    runner: ScenarioRunner,
+    *,
+    stage: str = "readback",
+    allow_repairs: bool = True,
+) -> dict[str, object]:
     return reconcile(
         target_file=CANONICAL,
         expected_sha=MERGE,
@@ -83,6 +88,7 @@ def _run(runner: ScenarioRunner, *, stage: str = "readback") -> dict[str, object
         merge=MERGE,
         failed_stage=stage,
         attempts=3,
+        allow_repairs=allow_repairs,
         runner=runner,
         sleep=lambda _: None,
     )
@@ -124,6 +130,19 @@ def main() -> None:
         result = _run(runner, stage=stage)
         assert result["healthy"] is True and result["repairs_applied"] is True
         assert runner.operations == ["readback", "daemon-reload", "restart", "probes", "readback"]
+
+    read_only = ScenarioRunner(
+        [
+            _result(payload=_evidence(unit="inactive", pid=0, probes="000")),
+            _result(payload=_evidence(unit="inactive", pid=0, probes="000")),
+            _result(payload=_evidence(unit="inactive", pid=0, probes="000")),
+        ]
+    )
+    read_only_result = _run(read_only, allow_repairs=False)
+    assert read_only_result["healthy"] is False
+    assert read_only_result["read_only"] is True
+    assert read_only_result["repairs_applied"] is False
+    assert read_only.operations == ["readback", "readback", "readback"]
 
     wrong_sha = ScenarioRunner([_result(payload=_evidence(OLD, OLD))])
     assert _run(wrong_sha)["healthy"] is False

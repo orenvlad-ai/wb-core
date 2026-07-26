@@ -69,6 +69,9 @@ class GoalReasonCode(str, Enum):
     OWN_RELEASE_ENQUEUE_REQUIRED = "own-release-enqueue-required"
     QUEUE_RECONCILIATION_AVAILABLE = "queue-reconciliation-available"
     HALTED_RECONCILIATION_AVAILABLE = "halted-reconciliation-available"
+    PRODUCTION_MUTATION_TERMINALIZATION_AVAILABLE = (
+        "production-mutation-terminalization-available"
+    )
     EXTERNAL_AUTHORITY_REQUIRED = "external-authority-required"
     PROTOCOL_IRRECOVERABLE = "protocol-irrecoverable"
 
@@ -611,7 +614,7 @@ TRANSITION_MATRIX = {
     ),
     AWAITING_AGENT_LABEL: frozenset({READY_LABEL, BLOCKED_LABEL, SUPERSEDED_LABEL}),
     AWAITING_UI_LABEL: frozenset({PRODUCTION_LABEL, HALTED_LABEL, SUPERSEDED_LABEL}),
-    BLOCKED_LABEL: frozenset({READY_LABEL, SUPERSEDED_LABEL}),
+    BLOCKED_LABEL: frozenset({READY_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL}),
     HALTED_LABEL: frozenset({AWAITING_UI_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL}),
     DONE_LABEL: frozenset(),
     PRODUCTION_LABEL: frozenset(),
@@ -627,6 +630,7 @@ CRITICAL_TRANSITIONS = frozenset(
         (AWAITING_UI_LABEL, PRODUCTION_LABEL),
         (HALTED_LABEL, AWAITING_UI_LABEL),
         (HALTED_LABEL, PRODUCTION_LABEL),
+        (BLOCKED_LABEL, PRODUCTION_LABEL),
     }
 )
 
@@ -645,6 +649,9 @@ DEPLOY_PROOF_MARKER = "wb-core-loop-deploy-proof"
 CHAIN_AUDIT_MARKER = "wb-core-loop-chain-audit"
 RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
+PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER = (
+    "wb-core-production-mutation-completion-proof"
+)
 HALT_PROOF_MARKER = "wb-core-release-halt-proof"
 RETRY_PROOF_MARKER = "wb-core-release-retry-proof"
 NEW_ROOT_PROOF_MARKER = "wb-core-loop-new-root-proof"

@@ -245,6 +245,12 @@ Manual server patch, broad catch-all nginx edit и server-only workaround не �
 - post-run reconciliation;
 - targeted data checks и non-target invariants.
 
+`release:ready` для `task:standard + scope:production-mutation` всегда заканчивается fail-closed `release:blocked` до merge: queue worker не имеет auto-merge/auto-deploy пути для этого contour. После отдельного exact human gate, merge, canonical deploy/apply и bounded reconciliation terminal state создаётся только trusted-main Actions command:
+
+`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
+
+Первый job без production secrets проверяет `OWNER`/`MEMBER`, exact current PR, pre-merge head и merge SHA, successful `baseline` на exact head, pre-merge human-gate identity/body digest, post-merge reconciliation identity/body digest, evidence fingerprint и merge ancestry deployed SHA. Только после этого production-environment job запускает canonical deploy readback в строгом `--read-only` режиме: metadata/runtime SHA, `deployment_complete`, auth binding, service/MainPID и probes читаются без deploy, daemon-reload, restart или repair. Совпавший exact target создаёт GitHub-Actions-owned marker `wb-core-production-mutation-completion-proof`, одним state replacement снимает stale `blocked`/`halted`/active/overlay labels и ставит `release:production`. Повтор exact command идемпотентен. Ручной label/marker, local agent token, stale head/comment/SHA, missing approval/baseline/deploy/reconciliation/evidence, wrong task/scope/PR или unauthorized association fail closed.
+
 Ad-hoc SQL, произвольные SSH-команды, незафиксированный server-only script и обход safety gates запрещены. Итог фиксирует точные `changed/skipped/failed` и reconciliation evidence.
 
 ### `archived GAS guard`
@@ -317,7 +323,7 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 
 Для `live/runtime` после всего `repo-only` closure обязательны canonical deploy, deploy-commit equality и live/service/public verify.
 
-Для `production data mutation/backfill` выполняются применимый GitHub/runtime closure, обязательный safety-контур и human gates.
+Для `production data mutation/backfill` выполняются применимый GitHub/runtime closure, обязательный safety-контур, human gates и Actions-owned terminalization до proven `release:production`.
 
 Если PR явно поставлен в repo-owned GitHub Release Train, Codex не передаёт ответственность очереди и не завершает task на метке `release:ready`. `user-artifact` этого раздела не достигает, потому что не создаёт PR. Task owner PR-backed задачи обязан:
 
@@ -327,6 +333,7 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 - ставить STANDARD `release:ready` только после targeted checks, semantic review, fixes/recheck и docs sync;
 - LOOP после successful baseline регистрировать только одной из разных repo-owned commands: `/wb-core loop enqueue-new <PR> head <HEAD_SHA>` или `/wb-core loop enqueue-recovery <PR> head <HEAD_SHA> gate <ACTIVE_GATE_PR> root <ROOT>`; вручную `loop:root-*`/`release:ready` не назначать;
 - для STANDARD наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
+- для уже human-gated, merged, deployed и reconciled production-mutation STANDARD использовать только exact terminalization command выше; не снимать `release:blocked` вручную и не создавать marker локальным token;
 - для LOOP подтвердить exact-head `release:awaiting-agent`, продолжить на `release:awaiting-ui`, выполнить production UI Flow и закрыть gate GitHub-native acceptance-командой;
 - считать gate другой LOOP-цепочки штатным waiting независимо от числа polls, goal-turns и продолжительности: не называть его blocker, не снимать/обходить/перехватывать и не завершать task handoff-сообщением;
 - не разрешать Release Train автоматически выполнять production data mutation/backfill.
@@ -345,7 +352,7 @@ Goal Mode обязан использовать канонический queue s
 
 Shepherd не создаёт второй state machine: он интерпретирует machine specification из `apps/github_release_train_spec.py` и возвращает структурированные `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`, `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`. Допустимые disposition: `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE`. Опциональный `--phase-state <JSON>` передаёт текущий dependency/capability context в этот же classifier.
 
-Неизменившееся состояние не доказывает impasse. Elapsed time, число polling-итераций или одинаковых goal-turns, отсутствие GitHub changes, чужой gate, `release:awaiting-ui`, `release:needs-resume`, слова MCP/browser/credentials/database и отсутствие embedded Browser в Codex CLI по отдельности никогда не дают `EXTERNAL_BLOCKER`/`TERMINAL_FAILURE`. При `CONTINUE_WAITING` shepherd продолжает polling/heartbeat; `--once` возвращает код `6` как bounded snapshot, после которого следующий goal-turn продолжает общий Goal. `CONTINUE_SAFE_PHASES` выполняет repository-safe dependency steps. `AWAIT_PHASE_CAPABILITY` приостанавливает только непосредственную production/UI phase и не объявляет всю цель сломанной. При `OWN_ACTION`, `TAKEOVER_PREDECESSOR` и `RECOVER_OWN_CHAIN` агент выполняет разрешённое действие сам.
+Неизменившееся состояние не доказывает impasse. Elapsed time, число polling-итераций или одинаковых goal-turns, отсутствие GitHub changes, чужой gate, `release:awaiting-ui`, `release:needs-resume`, слова MCP/browser/credentials/database и отсутствие embedded Browser в Codex CLI по отдельности никогда не дают `EXTERNAL_BLOCKER`/`TERMINAL_FAILURE`. При `CONTINUE_WAITING` shepherd продолжает polling/heartbeat; `--once` возвращает код `6` как bounded snapshot, после которого следующий goal-turn продолжает общий Goal. `CONTINUE_SAFE_PHASES` выполняет repository-safe dependency steps. `AWAIT_PHASE_CAPABILITY` приостанавливает только непосредственную production/UI phase и не объявляет всю цель сломанной. Merged `scope:production-mutation` в `blocked/halted` получает `OWN_ACTION` с reason `production-mutation-terminalization-available`, пока exact Actions command остаётся repo-owned следующим шагом; отсутствие прежнего `complete-standard --contour production-verified` не создаёт global blocker. При `OWN_ACTION`, `TAKEOVER_PREDECESSOR` и `RECOVER_OWN_CHAIN` агент выполняет разрешённое действие сам.
 
 Exit-code contract shepherd: `0` — proven terminal success; `2` — proven external blocker; `3` — own LOOP UI/recovery; `4` — predecessor ownership resumed/takeover next action; `5` — другое repo-owned own action; `6` — normal waiting snapshot; `7` — proven irrecoverable terminal failure; `8` — `CONTINUE_SAFE_PHASES`; `9` — `AWAIT_PHASE_CAPABILITY`; `130` — interrupt. Только `0`, `2`, `7` terminal для Goal; `8` продолжает работу, `9` — phase-local capability wait. Перед blocked handoff обязателен `--shepherd --once` с актуальным `--phase-state`; он допустим только при disposition `EXTERNAL_BLOCKER`/`TERMINAL_FAILURE`, canonical reason, конкретном evidence, перечне recovery attempts и `remediation_exhausted=true`. `EXTERNAL_BLOCKER` запрещён, пока доступна repo-owned команда или незавершённая независимая safe phase.
 
