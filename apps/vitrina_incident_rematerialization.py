@@ -44,6 +44,7 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-dir", default="")
+    parser.add_argument("--seller-id", default="")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     dry_run = subparsers.add_parser("dry-run")
@@ -68,6 +69,7 @@ def main() -> int:
             date_from=args.date_from,
             date_to=args.date_to,
             max_dates=args.max_dates,
+            seller_id=str(args.seller_id or "").strip() or None,
         )
         output = Path(args.output).resolve() if args.output else None
         if output is None and not args.stdout_plan:
@@ -111,6 +113,7 @@ def main() -> int:
         fingerprint=args.fingerprint,
         approval_reference=args.approval_reference,
         actor=args.actor,
+        seller_id=str(args.seller_id or "").strip() or None,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
