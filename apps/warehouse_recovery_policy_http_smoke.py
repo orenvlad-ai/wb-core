@@ -21,9 +21,38 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
+from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
+    _exact_canary_lifecycles,
+)
 
 
 def main() -> int:
+    deployed_sha = "a" * 40
+    historical_sha = "b" * 40
+    exact_lifecycles = _exact_canary_lifecycles(
+        [
+            {
+                "tier": "T2",
+                "lifecycle": "retained",
+                "scope": {"canary": True, "deployed_sha": deployed_sha},
+            },
+            {
+                "tier": "T1",
+                "lifecycle": "rolled_back",
+                "scope": {"canary": True, "deployed_sha": deployed_sha},
+            },
+            {
+                "tier": "T2",
+                "lifecycle": "released",
+                "scope": {"canary": True, "deployed_sha": historical_sha},
+            },
+        ],
+        deployed_sha=deployed_sha,
+    )
+    if exact_lifecycles != {"T1": ["rolled_back"], "T2": ["retained"]}:
+        raise AssertionError(
+            "historical canary overwrote exact deployed-SHA acceptance"
+        )
     with TemporaryDirectory(prefix="warehouse-recovery-http-") as raw:
         runtime_dir = Path(raw)
         db_path = runtime_dir / "registry_upload_runtime.sqlite3"

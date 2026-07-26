@@ -332,8 +332,16 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
         self.assertEqual(result["noop"]["tier"], "T0")
         self.assertEqual(result["bounded_replay"]["lifecycle"], "rolled_back")
         self.assertEqual(
+            result["bounded_replay"]["scope"]["deployed_sha"],
+            deployed_sha,
+        )
+        self.assertEqual(
             result["wide_domain_publication"]["lifecycle"],
             "retained",
+        )
+        self.assertEqual(
+            result["wide_domain_publication"]["scope"]["deployed_sha"],
+            deployed_sha,
         )
         self.assertEqual(result["orphan_scanner"]["status"], "clean")
         self.assertEqual(

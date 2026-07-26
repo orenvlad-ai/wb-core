@@ -80,14 +80,17 @@ hosted runner as:
 
 - `warehouse-recovery-canary-dry-run --deployed-sha <40-hex>`;
 - `warehouse-recovery-canary-apply --deployed-sha <40-hex> --fingerprint <sha256>`;
-- `warehouse-ui-flow --acceptance-profile warehouse_recovery_policy_20260726`.
+- `warehouse-ui-flow --acceptance-profile warehouse_recovery_policy_20260726
+  --deployed-sha <exact merge SHA>`.
 
 The hosted wrapper verifies `.wb-core-runtime-sha` before either canary mode.
 Apply creates no T0 row or bytes, proves one exact T1 marker replay and rollback,
 creates one T2 domain checkpoint without a business-row mutation, compares the
 warehouse-domain digest before/after and requires a clean orphan scan. The UI
-profile requires the canary T1/T2 operations to be terminal and the recovery
-surface to be visibly ready with zero orphan/quarantine leak. A later
+profile verifies the same runtime marker and requires canary T1/T2 operations
+bound to that full deployed SHA to be terminal; historical iterations cannot
+overwrite or satisfy the acceptance. The recovery surface must be visibly
+ready with zero policy-era orphan/quarantine leak. A later
 deployed-SHA attempt releases only older canary-scoped failures whose durable
 transition history proves that business mutation never began; ordinary failed
 or quarantined operations remain fail-closed.
