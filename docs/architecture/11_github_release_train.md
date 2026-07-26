@@ -148,6 +148,21 @@ Workflow запускает queue observation каждые пять минут. 
 
 Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновременных machine evidence: `release:needs-resume`, exact status `owner=unowned`, отсутствие подтверждённого живого owner, проверенный exact head/root, для UI gate — exact deployed SHA, repo-owned resume command и сохранение root isolation. Takeover без overlay запрещён. После resume агент восстанавливает predecessor context из PR/status/diff/docs, завершает его точный stage, выполняет UI Flow при `awaiting-ui`, принимает только exact deployed SHA, ждёт terminal predecessor и повторно продолжает shepherd собственного PR. UI defect создаёт same-root recovery либо сохраняет gate fail-closed. Resume/takeover никогда автоматически не выполняет ack-agent или accept-ui.
 
+## Desktop Thread Heartbeat И Canonical Monitoring
+
+Если в текущей Codex/ChatGPT Desktop task фактически доступна recurring thread-heartbeat automation, task owner обеспечивает ровно один 10-минутный heartbeat exact task/thread identity по contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). Surface name не является capability proof; отсутствие callable automation не блокирует GitHub closure и не позволяет заявлять о созданном monitor.
+
+Thread heartbeat не создаёт второй state machine. Он только возобновляет исходную task и запускает `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`, после чего следует canonical disposition. Поэтому heartbeat:
+
+- не хранит собственную копию `class/scope/state/head/queue/gate`, progress или ownership truth;
+- не меняет labels/transitions напрямую и не заменяет repo-owned status comment;
+- не выполняет ack-agent, accept-ui, resume/takeover или recovery без соответствующего canonical disposition и exact evidence;
+- при исполняющемся основном turn не создаёт конкурирующую работу;
+- при idle/non-terminal выполняет ближайшее безопасное действие, а при human-only boundary сообщает exact blocker;
+- останавливается/удаляется после доказанного terminal success, terminal failure (canonical `TERMINAL_SUCCESS`/`TERMINAL_FAILURE`) или explicit user stop.
+
+Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter по умолчанию обновляет waiting heartbeat каждые 300 секунд, а Desktop thread heartbeat будит task каждые 10 минут. 10-минутный wakeup не заменяет и не замедляет 5-минутное GitHub observation, не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого owner без canonical exact-head status heartbeat и не обходит `release:needs-resume`. Если Desktop capability недоступна или локальный компьютер/проект выключен, GitHub monitoring остаётся canonical; task продолжается обычным waiter/shepherd при следующем доступном turn.
+
 ## Exclusive Production UI Gate
 
 После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он повторно проверяет зарегистрированный root/proof, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.

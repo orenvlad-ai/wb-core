@@ -1978,6 +1978,37 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     ):
         assert required in release_train
 
+    assert "## Thread heartbeat automation" in agents
+    assert "## Thread Heartbeat Automation" in execution
+    assert "## Desktop Thread Heartbeat И Canonical Monitoring" in release_train
+    for source in (agents, execution, release_train):
+        folded = source.casefold()
+        for required in (
+            "ровно один",
+            "10 минут",
+            "task/thread identity",
+            "capability",
+            "не создаёт второй state machine",
+            "terminal failure",
+            "останавливается/удаляется",
+        ):
+            assert required.casefold() in folded
+    for source in (agents, execution):
+        assert "Chat → Codex" in source
+        assert "создаваемой либо получаемой" in source
+        assert (
+            "`Прогресс ≈<процент>% · ETA ≈<диапазон> · "
+            "сделано: <одна короткая фраза>.`"
+        ) in source
+        assert "ETA ≈зависит от" in source
+        assert "компьютер и Desktop должны быть запущены" in source
+    assert "каждые пять минут" in release_train
+    assert "каждые 300 секунд" in release_train
+    assert "каждые 10 минут" in release_train
+    assert "WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES" in release_train
+    assert "если capability недоступна" in agents.casefold()
+    assert "если automation capability недоступна" in execution.casefold()
+
     query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
     tokens = shlex.split(query)
     assert "is:pr" in tokens

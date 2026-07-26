@@ -123,6 +123,55 @@ Production evidence извлекается через canonical server-side read
 
 Scope должен быть явным и bounded. Не добавляй unrelated redesign, application/business logic, production config или runtime data к docs/governance задаче.
 
+## Thread Heartbeat Automation
+
+Этот protocol применяется к Codex/ChatGPT Desktop и любой иной поверхности только тогда, когда в текущем контексте фактически доступен callable automation contract, способный периодически возобновлять exact target thread и поддерживающий остановку либо удаление. Название macOS, Desktop, Codex, ChatGPT, IDE, CLI, project path или client version само по себе ничего не доказывает. Capability проверяется по реально доступной операции; её отсутствие не является blocker, не меняет task class/continuity/closure и не разрешает утверждать, что monitor создан.
+
+### Trigger, Identity И Ownership
+
+Для каждой новой нетерминальной задачи, создаваемой либо получаемой на capability-enabled поверхности, нужен ровно один recurring heartbeat с интервалом 10 минут, связанный с той же task/thread identity:
+
+1. инициирующий Chat/ChatGPT после появления пригодной target thread identity ищет существующий heartbeat этой exact identity и создаёт его только при отсутствии;
+2. при передаче Chat → Codex принимающая задача повторяет exact-identity lookup при первой безопасной возможности и служит idempotent fallback, если инициатор не создал monitor;
+3. найденный heartbeat переиспользуется независимо от того, кто его создал; новый owner не создаёт второй schedule;
+4. если конкурентное создание всё же оставило дубликаты, владелец сохраняет один exact-identity heartbeat, а остальные останавливает/удаляет через поддерживаемый contract;
+5. heartbeat не создаёт новую задачу, thread, branch, PR, LOOP root или параллельного исполнителя и не меняет continuity.
+
+Target identity должна однозначно указывать на исходную задачу, а не только на проект, репозиторий или экран. До появления такой identity инициатор не создаёт приблизительный monitor. Принимающий Codex не считает отсутствие monitor доказательством отсутствия capability: сначала он проверяет фактически доступный contract и existing exact-identity schedules.
+
+### Run Contract
+
+Каждый 10-минутный запуск сначала читает фактическое состояние target task:
+
+- `active`: основной turn ещё исполняется — heartbeat не запускает конкурирующую работу, не форкает task и не повторяет действие;
+- `idle + non-terminal`: основной turn не исполняется — heartbeat продолжает ближайшее безопасное действие в рамках исходных scope, authority, class и continuity;
+- `human-only`: непосредственное продолжение требует только login, approval, permission, unavailable source или иной доказанный human-only action — heartbeat сообщает точный blocker и минимальное действие пользователя, не имитируя прогресс;
+- `terminal success`, доказанный `terminal failure` или явная остановка пользователем: heartbeat не возобновляет работу и немедленно останавливается/удаляется по поддерживаемому automation contract.
+
+Ни один heartbeat run не расширяет authorization, не повторяет небезопасную mutation и не подменяет active task owner. Временная ошибка, отсутствие изменения state, elapsed time или внешний queue wait сами по себе не являются terminal failure.
+
+### Progress Report
+
+Каждый осмысленный запуск публикует одну короткую строку:
+
+`Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`
+
+Процент строится по уже доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Проверка, обнаружившая всё ещё исполняющийся основной turn и не изменившая task state, не считается осмысленным запуском для ложного progress update.
+
+### PR-Backed `wb-core`
+
+Thread heartbeat является только 10-минутным wakeup/orchestration layer. Для PR-backed `wb-core` durable truth остаётся в GitHub, а каждое возобновление вызывает canonical:
+
+`python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`
+
+Heartbeat интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE` и выполняет только разрешённое ближайшее действие. Он не создаёт второй state machine, не переводит PR labels, не выполняет automatic ack/acceptance и не объявляет blocker вопреки disposition. `TAKEOVER_PREDECESSOR` допустим только по существующему exact `release:needs-resume` lost-owner proof; наличие thread heartbeat само по себе ownership не передаёт.
+
+10-минутный Desktop heartbeat и 5-минутное GitHub observation независимы по назначению: первый будит exact task/thread, второй наблюдает durable repository queue и публикует `release:needs-resume` после своего threshold. Thread heartbeat не меняет schedule/threshold worker, не заменяет waiter status comment и не снимает fail-closed gates. Если automation capability недоступна, canonical waiter/shepherd и обычная task continuity продолжают работать без деградации protocol.
+
+### Cleanup И Local Availability
+
+После доказанного terminal state или явного user stop owner проверяет, что exact-identity schedule действительно остановлен либо удалён; одной финальной фразы без supported automation result недостаточно. Для задач, зависящих от локальных файлов, действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+
 ## Шесть Execution-Контуров
 
 ### `read-only`
