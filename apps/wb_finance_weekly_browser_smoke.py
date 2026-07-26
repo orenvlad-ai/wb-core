@@ -135,6 +135,8 @@ def main() -> None:
                     horizontalOverflow: wrap.scrollWidth > wrap.clientWidth,
                     horizontalScrollWorks: wrap.scrollLeft !== before,
                     note: document.getElementById('wbFinanceReportNotes').innerText,
+                    storageHealth: document.getElementById('wbFinanceStorageHealth').innerText,
+                    storageHealthTone: document.querySelector('#wbFinanceStorageHealth .section-message').className,
                   };
                 }
                 """
@@ -191,6 +193,19 @@ def main() -> None:
             )
         if "стоимость того же nmId на 01.07" not in facts["note"] or "retro-map" not in facts["note"]:
             raise AssertionError(f"temporal source note missing: {facts}")
+        if (
+            "canonical: monolith" not in facts["storageHealth"]
+            or "raw-epoch-1" not in facts["storageHealth"]
+            or "operational-epoch-1" not in facts["storageHealth"]
+            or "consumer lag: 0" not in facts["storageHealth"]
+            or "live-tail cursor/lag: 42 / 0" not in facts["storageHealth"]
+            or "mismatches: 0" not in facts["storageHealth"]
+            or "rollback: готов" not in facts["storageHealth"]
+            or "success" not in facts["storageHealthTone"]
+        ):
+            raise AssertionError(
+                f"Finance storage health UI contract mismatch: {facts}"
+            )
         if console_errors or failed_responses:
             raise AssertionError(
                 f"local Finance UI emitted errors: console={console_errors}, network={failed_responses}"
@@ -285,6 +300,31 @@ def _finance_payload() -> dict[str, object]:
 
     return {
         "status": "ok",
+        "storage_health": {
+            "state": "shadow",
+            "canonical_source": "monolith",
+            "implicit_manifest": False,
+            "raw": {
+                "generation_id": "raw-epoch-1",
+                "schema_revision": "finance_raw_v1",
+                "size_bytes": 10_000_000_000,
+            },
+            "operational": {
+                "generation_id": "operational-epoch-1",
+                "schema_revision": "operational_v1",
+                "size_bytes": 300_000_000,
+            },
+            "raw_ack_cursor": 42,
+            "operational_cursor": 42,
+            "consumer_lag_events": 0,
+            "live_tail_cursor": 42,
+            "live_tail_lag_events": 0,
+            "shadow_mismatch_count": 0,
+            "actionable_dead_letters": 0,
+            "filesystem": {"free_bytes": 20_000_000_000},
+            "rollback_ready": True,
+            "cutover_ready": False,
+        },
         "weeks": [
             week(
                 "2026-06-22",

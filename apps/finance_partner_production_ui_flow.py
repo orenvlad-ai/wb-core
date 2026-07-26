@@ -186,6 +186,24 @@ def run_finance_partner_ui_flow(
             finance_weeks = list(finance_payload.get("weeks") or [])
             _assert(finance_payload.get("status") == "ok", "Finance API status")
             _assert(bool(finance_weeks), "Finance API contains persisted weeks")
+            storage_health = dict(finance_payload.get("storage_health") or {})
+            _assert(
+                storage_health.get("state") == "monolith"
+                and storage_health.get("canonical_source") == "monolith"
+                and storage_health.get("implicit_manifest") is True,
+                "Finance storage remains on the implicit canonical monolith",
+            )
+            _assert(
+                (storage_health.get("raw") or {}).get("generation_id") == "monolith"
+                and (storage_health.get("operational") or {}).get("generation_id")
+                == "monolith",
+                "Finance logical stores expose the exact monolith generation",
+            )
+            _assert(
+                storage_health.get("rollback_ready") is True
+                and storage_health.get("cutover_ready") is False,
+                "Finance rollback is ready and cutover is not selected",
+            )
             finance_facts = reports.locator("body").evaluate(
                 """
                 () => {
@@ -212,6 +230,7 @@ def run_finance_partner_ui_flow(
                     hasDuplicatePercentRow: value('Расходы WB, % от чистой выручки').length > 0,
                     expenseCells: [...table.querySelectorAll('.wb-finance-expense-share')].map((cell) => cell.innerText.trim()),
                     notes: document.getElementById('wbFinanceReportNotes').innerText.trim(),
+                    storageHealth: document.getElementById('wbFinanceStorageHealth').innerText.trim(),
                     horizontalOverflow: Boolean(wrap && wrap.scrollWidth > wrap.clientWidth),
                     bodyBackground: bodyStyle.backgroundColor,
                   };
@@ -245,6 +264,13 @@ def run_finance_partner_ui_flow(
             _assert("недоступен" not in finance_facts["status"].casefold(), "Finance UI is available")
             _assert("стоимость того же nmid на 01.07" in finance_facts["notes"].casefold(), "Finance temporal method is visible")
             _assert("retro-map" in finance_facts["notes"], "Finance rejects an independent retro-cost source")
+            _assert(
+                "canonical: monolith" in finance_facts["storageHealth"]
+                and "rollback: готов" in finance_facts["storageHealth"]
+                and "cutover: не разрешён/не готов"
+                in finance_facts["storageHealth"],
+                "Finance storage health is visible without cutover",
+            )
             _assert(bool(finance_facts["horizontalOverflow"]), "Finance table scrolls locally")
             finance_screenshot = evidence_dir / "finance_weekly_desktop.png"
             page.screenshot(path=str(finance_screenshot), full_page=True)
@@ -535,6 +561,7 @@ def run_finance_partner_ui_flow(
                 "first_week": finance_weeks[0].get("week_start"),
                 "last_week": finance_weeks[-1].get("week_end"),
                 "facts": finance_facts,
+                "storage_health": storage_health,
             },
             "partner": {
                 "card_count": len(partner_payload.get("cards") or []),

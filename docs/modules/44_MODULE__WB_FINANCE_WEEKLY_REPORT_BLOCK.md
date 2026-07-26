@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V4`
+`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V4 / STORAGE PRE-CUTOVER`
 
 ## Purpose and source boundary
 
@@ -14,7 +14,14 @@ Raw identity is `(seller_id, report_id, rrd_id)`. Different `reportType` values 
 
 ## Storage and rebuildability
 
-The existing runtime SQLite owns:
+The logical store registry currently resolves both `finance_raw` and
+`operational` to the existing canonical runtime SQLite. This implicit-monolith
+default creates no manifest or destination file and preserves every existing
+reader/writer. Finance and Partner runtime opens use the logical registry and
+emit store/mode/operation observations; CI rejects a direct-open regression in
+those migrated modules.
+
+The current canonical runtime SQLite owns:
 
 - `wb_finance_weekly_raw_rows`, reports and sync state;
 - replaceable `wb_finance_weekly_aggregates`, coverage and reconciliation;
@@ -22,6 +29,14 @@ The existing runtime SQLite owns:
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
 The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v4`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
+
+The staged split adds `finance_raw_ingest_batches`, immutable
+`finance_raw_rows`, transactional `finance_raw_outbox` and raw consumer
+cursors, plus operational inbox/receipts/cursors/dead letters and shadow
+comparisons. Their schema is inert unless explicitly invoked. Optional shadow
+ingest is disabled by default; while the monolith is selected it may be enabled
+only so legacy Finance rows and raw/outbox evidence commit in that same
+transaction. It cannot write across two files.
 
 `wb_finance_retro_cost_map` is not created, read or written by the active schema/calculation/apply path. A table left by an earlier deployed revision may remain untouched as historical migration evidence, but its fixed `unit_cost_rub` is not business truth and cannot affect COGS.
 
@@ -114,11 +129,24 @@ The all-history evidence path is bounded-memory: ordered raw and non-target iden
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 
-Hosted operations expose only:
+Canonical-cost hosted operations expose only:
 
 - `finance-canonical-dry-run`;
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
+
+The separate storage-split pre-cutover contour exposes:
+
+- `finance-storage-split-dry-run --output <external-0600-json>`;
+- `finance-storage-split-health`;
+- later-gated `finance-storage-split-apply --plan-file ... --fingerprint ...
+  --approval-reference ...`.
+
+The first two are query-only. The apply action requires an exact reviewed
+dry-run, sufficient fresh capacity, an active canonical
+`business-data-maintenance` quiet hold and the warehouse writer lock, and may
+create only an unselected candidate generation. It cannot switch canonical
+readers/writers or retire the monolith. See migration 124.
 
 Apply requires a newly reviewed exact fingerprint, external plan file, approval
 reference and the retained compatibility backup-directory argument. That
@@ -147,7 +175,7 @@ Production apply is not implied by merge/deploy and remains forbidden until the 
 
 ## UI and verification
 
-The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons.
+The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store.
 
 Targeted checks:
 
@@ -157,12 +185,14 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_canonical_scale_smoke.py`;
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
+- `python3 apps/finance_storage_split_smoke.py`;
+- `python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated`;
 - `python3 apps/warehouse_functional_maintenance_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
-Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data. Acceptance is fail-closed: `preview.attempted=true`, `preview.ready=true`, empty blockers, visible table, enabled download and an actually downloaded/opened semantic XLSX that reconciles nmId, selected weeks, source/formula digest and displayed Decimal amounts are all mandatory. A non-empty but wrong workbook, hidden sheet, external link, missing download or incomplete preview fails the flow.
+Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data. It also requires the storage API/card to prove the implicit canonical monolith, identical logical generation ids, rollback readiness and no selected cutover. Acceptance is fail-closed: `preview.attempted=true`, `preview.ready=true`, empty blockers, visible table, enabled download and an actually downloaded/opened semantic XLSX that reconciles nmId, selected weeks, source/formula digest and displayed Decimal amounts are all mandatory. A non-empty but wrong workbook, hidden sheet, external link, missing download or incomplete preview fails the flow.
 
 ## Unified recovery-policy boundary
 

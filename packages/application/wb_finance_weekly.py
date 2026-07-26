@@ -17,7 +17,12 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
-from packages.application.sqlite_contention import connect_sqlite
+from packages.application.finance_raw_storage import (
+    FinanceRawIngestor,
+    ensure_raw_schema,
+    storage_health,
+)
+from packages.application.storage_registry import StoreRegistry
 from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
@@ -500,7 +505,8 @@ class WbFinanceWeeklyBlock:
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
-        self.db_path = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        self.store_registry = StoreRegistry(self.runtime_dir)
+        self.db_path = self.store_registry.resolve("operational")
         self.seller_id = seller_id or "canonical"
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._capitalization_cache_key = ""
@@ -699,6 +705,23 @@ class WbFinanceWeeklyBlock:
             )
         ).hexdigest()
         with self._connect() as conn:
+            shadow_ingest_enabled = (
+                os.environ.get("WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes"}
+            )
+            if shadow_ingest_enabled:
+                manifest = self.store_registry.load()
+                if (
+                    manifest.state != "monolith"
+                    or self.store_registry.resolve("finance_raw", manifest=manifest)
+                    != self.store_registry.resolve("operational", manifest=manifest)
+                ):
+                    raise ValueError(
+                        "Finance shadow ingest may only share the canonical monolith transaction"
+                    )
+                ensure_raw_schema(conn)
             previous = conn.execute(
                 "SELECT content_hash,unchanged_sync_count,first_loaded_at FROM wb_finance_weekly_sync WHERE seller_id=? AND week_start=? AND week_end=?",
                 (self.seller_id, week_start.isoformat(), week_end.isoformat()),
@@ -822,6 +845,25 @@ class WbFinanceWeeklyBlock:
                     unchanged,
                 ),
             )
+            outbox_result = None
+            if shadow_ingest_enabled:
+                outbox_result = FinanceRawIngestor(
+                    self.store_registry,
+                    seller_id=self.seller_id,
+                    now_factory=lambda: synced,
+                ).ingest_batch(
+                    normalized_rows,
+                    source_identity=(
+                        "wb-finance-week:"
+                        + week_start.isoformat()
+                        + "/"
+                        + week_end.isoformat()
+                    ),
+                    source_sha256="sha256:" + full_hash,
+                    week_start=week_start,
+                    week_end=week_end,
+                    connection=conn,
+                )
             conn.commit()
         aggregate = self.recalculate_week(week_start, week_end)
         return {
@@ -831,6 +873,19 @@ class WbFinanceWeeklyBlock:
             "report_count": len(by_report),
             "raw_row_count": len(normalized_rows),
             "aggregate": aggregate,
+            "storage_outbox": (
+                {
+                    "status": outbox_result.status,
+                    "batch_id": outbox_result.batch_id,
+                    "event_id": outbox_result.event_id,
+                    "sequence_no": outbox_result.sequence_no,
+                }
+                if outbox_result is not None
+                else {
+                    "status": "disabled",
+                    "reason": "WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED is not enabled",
+                }
+            ),
         }
 
     def recalculate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
@@ -2414,6 +2469,7 @@ class WbFinanceWeeklyBlock:
             "weeks": weeks,
             "week_count": len(weeks),
             "classifier_version": CLASSIFIER_VERSION,
+            "storage_health": storage_health(self.store_registry),
             "generated_at": self.now_factory()
             .astimezone(timezone.utc)
             .isoformat()
@@ -3290,9 +3346,12 @@ class WbFinanceWeeklyBlock:
     ) -> dict[str, Any]:
         """Read-only all-history Finance preflight bound to canonical cost truth."""
 
-        uri = f"file:{self.db_path.resolve()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=60) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.store_registry.session(
+            "operational",
+            mode="ro",
+            operation="finance_canonical_backfill_plan",
+            timeout_ms=60_000,
+        ) as conn:
             return self._plan_canonical_finance_backfill_in_connection(
                 conn,
                 date_from=date_from,
@@ -4684,10 +4743,11 @@ class WbFinanceWeeklyBlock:
         ).hexdigest()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return self.store_registry.connect(
+            "operational",
+            mode="rw",
+            operation="wb_finance_weekly",
+        )
 
 
 def block_from_env(runtime_dir: Path) -> WbFinanceWeeklyBlock:

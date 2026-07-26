@@ -33,7 +33,7 @@ from packages.application.wb_finance_weekly import (
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.canonical_wb_cost_resolver import resolve_canonical_wb_cost
-from packages.application.sqlite_contention import connect_sqlite
+from packages.application.storage_registry import StoreRegistry
 
 
 PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v4"
@@ -236,7 +236,8 @@ class PartnerReportBlock:
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
-        self.db_path = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        self.store_registry = StoreRegistry(self.runtime_dir)
+        self.db_path = self.store_registry.resolve("operational")
         self.seller_id = seller_id or "canonical"
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.finance = WbFinanceWeeklyBlock(
@@ -2885,10 +2886,11 @@ class PartnerReportBlock:
         return cleaned[:80]
 
     def _connect(self) -> sqlite3.Connection:
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return self.store_registry.connect(
+            "operational",
+            mode="rw",
+            operation="partner_report",
+        )
 
 
 def block_from_env(runtime_dir: Path) -> PartnerReportBlock:

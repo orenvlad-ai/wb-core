@@ -28,6 +28,7 @@ from packages.application.registry_upload_bundle_v1 import (
 )
 from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.storage_registry import StoreRegistry
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
@@ -88,6 +89,8 @@ _SQLITE_BUSY_TIMEOUT_MS: ContextVar[int | None] = ContextVar(
     "registry_upload_sqlite_busy_timeout_ms",
     default=None,
 )
+_OPERATIONAL_STORE_REGISTRIES: dict[Path, StoreRegistry] = {}
+_OPERATIONAL_STORE_REGISTRIES_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -139,8 +142,11 @@ class RegistryUploadDbBackedRuntime:
         bundle_block: RegistryUploadBundleV1Block | None = None,
         cost_price_block: CostPriceUploadBlock | None = None,
     ) -> None:
-        self.runtime_dir = runtime_dir
-        self.db_path = runtime_dir / DB_FILENAME
+        self.runtime_dir = Path(runtime_dir)
+        self.store_registry = StoreRegistry(self.runtime_dir)
+        self.db_path = self.store_registry.resolve("operational")
+        with _OPERATIONAL_STORE_REGISTRIES_LOCK:
+            _OPERATIONAL_STORE_REGISTRIES[self.db_path.resolve()] = self.store_registry
         self.bundle_block = bundle_block or RegistryUploadBundleV1Block()
         self.cost_price_block = cost_price_block or CostPriceUploadBlock()
 
@@ -9376,6 +9382,15 @@ def _to_namespace(value: Any) -> Any:
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     timeout_ms = _SQLITE_BUSY_TIMEOUT_MS.get() or DEFAULT_SQLITE_BUSY_TIMEOUT_MS
+    with _OPERATIONAL_STORE_REGISTRIES_LOCK:
+        registry = _OPERATIONAL_STORE_REGISTRIES.get(Path(db_path).resolve())
+    if registry is not None:
+        return registry.connect(
+            "operational",
+            mode="rw",
+            operation="registry_upload_db_backed_runtime",
+            timeout_ms=timeout_ms,
+        )
     conn = connect_sqlite(db_path, timeout_ms=timeout_ms)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
