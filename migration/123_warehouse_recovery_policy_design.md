@@ -34,7 +34,9 @@ The tactical contracts now available are:
 
 - `apps/sqlite_backup_archive.py`: immutable `mode=ro`, `query_only=ON`
   planning; source stat/SHA/integrity and sidecar inventory; exact capacity
-  reservation; private temp/archive/manifest; independent retained readback
+  reservation, including measured two-filesystem staging/destination contours;
+  private unnamed cross-device staging plus fsynced archive/manifest;
+  independent retained readback
   before raw removal; crash-safe `verified_pending_source_removal → retained`
   lifecycle; exact owned-sidecar cleanup; non-target directory digest; and
   idempotent resume;

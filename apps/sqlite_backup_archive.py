@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from typing import Any, BinaryIO
 from urllib.parse import quote
 from uuid import uuid4
@@ -28,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="Existing immutable SQLite file below a backups directory.")
     parser.add_argument("--archive", help="Output .zst path in the same directory; defaults to SOURCE.zst.")
+    parser.add_argument(
+        "--staging-directory",
+        help=(
+            "Existing directory for a private unnamed compression staging file. "
+            "Defaults to the archive directory."
+        ),
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--fingerprint", default="")
     parser.add_argument(
@@ -43,6 +51,7 @@ def build_plan(
     *,
     source: Path,
     archive: Path | None = None,
+    staging_directory: Path | None = None,
     reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
 ) -> dict[str, Any]:
     source_input = source.expanduser()
@@ -51,6 +60,12 @@ def build_plan(
         raise ValueError("SQLite backup source and archive paths must not be symlinks")
     source = source_input.resolve()
     archive = archive_input.resolve()
+    staging_input = (staging_directory or archive.parent).expanduser()
+    if staging_input.is_symlink():
+        raise ValueError("SQLite backup staging directory must not be a symlink")
+    staging_directory = staging_input.resolve()
+    if not staging_directory.is_dir():
+        raise ValueError("SQLite backup staging directory must already exist")
     manifest_path = archive.with_name(archive.name + ".manifest.json")
     if manifest_path.is_symlink():
         raise ValueError("SQLite backup archive manifest must not be a symlink")
@@ -77,25 +92,42 @@ def build_plan(
             "archive": verified,
             "manifest_path": str(manifest_path),
             "filesystem_free_bytes": shutil.disk_usage(source.parent).free,
+            "staging_directory": str(staging_directory),
         }
     stat = source.stat()
     sidecars_before = _source_sidecars(source)
     _validate_source_sidecars(sidecars_before)
     integrity = _integrity_check(source)
     source_sha256 = _file_hash(source)
+    staging_same_filesystem = _same_filesystem(
+        staging_directory,
+        archive.parent,
+    )
+    projected_archive_size_bytes = (
+        None
+        if staging_same_filesystem
+        else _compressed_size(zstd=zstd, source=source)
+    )
     sidecars_after = _source_sidecars(source)
     if sidecars_after != sidecars_before:
         raise ValueError("query-only immutable planning changed SQLite sidecars")
-    available_free_bytes = shutil.disk_usage(source.parent).free
+    destination_available_free_bytes = shutil.disk_usage(archive.parent).free
+    staging_available_free_bytes = shutil.disk_usage(staging_directory).free
     archive_expansion_bytes = max(
         MIN_ARCHIVE_EXPANSION_BYTES,
         (int(stat.st_size) + 19) // 20,
     )
-    required_free_bytes = (
+    staging_required_free_bytes = (
         int(stat.st_size)
         + int(archive_expansion_bytes)
         + int(reserved_free_bytes)
     )
+    destination_required_free_bytes = (
+        staging_required_free_bytes
+        if staging_same_filesystem
+        else int(projected_archive_size_bytes or 0) + int(reserved_free_bytes)
+    )
+    required_free_bytes = staging_required_free_bytes
     directory_non_target_digest = _directory_non_target_digest(
         source=source,
         archive=archive,
@@ -103,22 +135,49 @@ def build_plan(
     capacity_requirement = {
         "source_size_bytes": int(stat.st_size),
         "archive_worst_case_expansion_bytes": int(archive_expansion_bytes),
+        "projected_archive_size_bytes": projected_archive_size_bytes,
         "reserved_free_bytes": int(reserved_free_bytes),
+        "staging_directory": str(staging_directory),
+        "staging_same_filesystem": staging_same_filesystem,
+        "staging_required_free_bytes": int(staging_required_free_bytes),
+        "destination_required_free_bytes": int(destination_required_free_bytes),
         "required_free_bytes": int(required_free_bytes),
     }
+    staging_sufficient = (
+        int(staging_available_free_bytes) >= int(staging_required_free_bytes)
+    )
+    destination_sufficient = (
+        int(destination_available_free_bytes)
+        >= int(destination_required_free_bytes)
+    )
     capacity = {
         **capacity_requirement,
-        "available_free_bytes": int(available_free_bytes),
+        "available_free_bytes": int(staging_available_free_bytes),
         "shortfall_bytes": max(
             0,
-            int(required_free_bytes) - int(available_free_bytes),
+            int(staging_required_free_bytes) - int(staging_available_free_bytes),
         ),
-        "sufficient": int(available_free_bytes) >= int(required_free_bytes),
+        "staging_available_free_bytes": int(staging_available_free_bytes),
+        "staging_shortfall_bytes": max(
+            0,
+            int(staging_required_free_bytes) - int(staging_available_free_bytes),
+        ),
+        "staging_sufficient": staging_sufficient,
+        "destination_available_free_bytes": int(destination_available_free_bytes),
+        "destination_shortfall_bytes": max(
+            0,
+            int(destination_required_free_bytes)
+            - int(destination_available_free_bytes),
+        ),
+        "destination_sufficient": destination_sufficient,
+        "sufficient": staging_sufficient and destination_sufficient,
     }
     evidence = {
         "contract_name": "sqlite_backup_lossless_archive_v1",
         "source_path": str(source),
         "archive_path": str(archive),
+        "staging_directory": str(staging_directory),
+        "staging_same_filesystem": staging_same_filesystem,
         "source_size_bytes": stat.st_size,
         "source_sha256": source_sha256,
         "source_inode": stat.st_ino,
@@ -140,6 +199,7 @@ def build_plan(
             "exact source stat and sha256 recheck before deletion",
             "zstd frame test",
             "streamed decompressed size and sha256 equality",
+            "cross-filesystem staging capacity plus measured destination publication capacity",
             "independent retained archive/manifest readback before source deletion",
             "0600 archive and manifest plus fsynced parent directory",
             "non-target directory digest equality and owned-sidecar lifecycle",
@@ -154,7 +214,7 @@ def build_plan(
         "status": "resume_ready" if existing_archive else "ready",
         "mode": "dry-run",
         "fingerprint": _hash(evidence),
-        "filesystem_free_bytes": int(available_free_bytes),
+        "filesystem_free_bytes": int(destination_available_free_bytes),
         "capacity": capacity,
         "would_change": True,
         "applied": False,
@@ -166,6 +226,7 @@ def apply_archive(
     *,
     source: Path,
     archive: Path | None,
+    staging_directory: Path | None = None,
     fingerprint: str,
     reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
 ) -> dict[str, Any]:
@@ -175,6 +236,7 @@ def apply_archive(
     plan = build_plan(
         source=source,
         archive=archive,
+        staging_directory=staging_directory,
         reserved_free_bytes=reserved_free_bytes,
     )
     if approved != plan["fingerprint"]:
@@ -191,12 +253,16 @@ def apply_archive(
     if not bool((plan.get("capacity") or {}).get("sufficient")):
         raise ValueError(
             "insufficient archive headroom: "
-            f"required_free_bytes={plan['capacity']['required_free_bytes']}, "
-            f"available_free_bytes={plan['capacity']['available_free_bytes']}, "
-            f"shortfall_bytes={plan['capacity']['shortfall_bytes']}"
+            f"staging_required_free_bytes={plan['capacity']['staging_required_free_bytes']}, "
+            f"staging_available_free_bytes={plan['capacity']['staging_available_free_bytes']}, "
+            f"staging_shortfall_bytes={plan['capacity']['staging_shortfall_bytes']}, "
+            f"destination_required_free_bytes={plan['capacity']['destination_required_free_bytes']}, "
+            f"destination_available_free_bytes={plan['capacity']['destination_available_free_bytes']}, "
+            f"destination_shortfall_bytes={plan['capacity']['destination_shortfall_bytes']}"
         )
     source_path = Path(plan["source_path"])
     archive_path = Path(plan["archive_path"])
+    staging_path = Path(str(plan["staging_directory"]))
     temp_path = archive_path.with_name(archive_path.name + f".tmp-{uuid4().hex}")
     manifest_path = archive_path.with_name(archive_path.name + ".manifest.json")
     zstd = shutil.which("zstd")
@@ -207,41 +273,61 @@ def apply_archive(
             manifest = verify_archive_manifest(manifest_path)
             _validate_manifest_source_identity(manifest, plan)
         else:
-            temp_descriptor = os.open(
-                temp_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            with os.fdopen(temp_descriptor, "wb") as output:
-                completed = subprocess.run(
-                    [zstd, "-1", "-T0", "-q", "-c", "--", str(source_path)],
-                    stdout=output,
-                    stderr=subprocess.PIPE,
-                    check=False,
+            if bool(plan["staging_same_filesystem"]):
+                (
+                    archive_sha256,
+                    decompressed_sha256,
+                    decompressed_size,
+                ) = _compress_to_named_temp(
+                    zstd=zstd,
+                    source=source_path,
+                    temp_path=temp_path,
                 )
-                output.flush()
-                os.fsync(output.fileno())
-            if completed.returncode:
-                raise ValueError(_command_error("zstd compression failed", completed))
-            tested = subprocess.run(
-                [zstd, "-q", "-t", "--", str(temp_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if tested.returncode:
-                raise ValueError(_command_error("zstd archive test failed", tested))
-            decompressed_sha256, decompressed_size = _decompressed_hash_and_size(
-                zstd=zstd,
-                archive=temp_path,
-            )
+            else:
+                with tempfile.TemporaryFile(
+                    mode="w+b",
+                    dir=staging_path,
+                ) as staged:
+                    (
+                        archive_sha256,
+                        decompressed_sha256,
+                        decompressed_size,
+                        archive_size,
+                    ) = _compress_to_unnamed_stage(
+                        zstd=zstd,
+                        source=source_path,
+                        staged=staged,
+                    )
+                    projected_size = int(
+                        plan["capacity_requirement"][
+                            "projected_archive_size_bytes"
+                        ]
+                    )
+                    if archive_size != projected_size:
+                        raise ValueError(
+                            "compressed archive size changed from exact dry-run"
+                        )
+                    destination_free = shutil.disk_usage(archive_path.parent).free
+                    destination_required = (
+                        archive_size + int(reserved_free_bytes)
+                    )
+                    if destination_free < destination_required:
+                        raise ValueError(
+                            "insufficient destination publication headroom: "
+                            f"required_free_bytes={destination_required}, "
+                            f"available_free_bytes={destination_free}, "
+                            f"shortfall_bytes={destination_required - destination_free}"
+                        )
+                    _copy_stage_to_named_temp(
+                        staged=staged,
+                        temp_path=temp_path,
+                        expected_sha256=archive_sha256,
+                    )
             if decompressed_size != int(plan["source_size_bytes"]):
                 raise ValueError("decompressed archive size does not match source")
             if decompressed_sha256 != plan["source_sha256"]:
                 raise ValueError("decompressed archive sha256 does not match source")
             _recheck_source_identity(source_path, plan)
-            archive_sha256 = _file_hash(temp_path)
-            temp_path.chmod(0o600)
             os.replace(temp_path, archive_path)
             _fsync_directory(source_path.parent)
             manifest = {
@@ -258,6 +344,10 @@ def apply_archive(
                 "source_sidecars": plan["source_sidecars"],
                 "directory_non_target_digest": plan["directory_non_target_digest"],
                 "capacity": plan["capacity"],
+                "staging_directory": str(staging_path),
+                "staging_same_filesystem": bool(
+                    plan["staging_same_filesystem"]
+                ),
                 "archive_path": str(archive_path),
                 "archive_size_bytes": archive_path.stat().st_size,
                 "archive_sha256": archive_sha256,
@@ -314,6 +404,7 @@ def apply_archive(
             "orphan_artifacts": _owned_orphan_artifacts(
                 source=source_path,
                 archive=archive_path,
+                staging_directory=staging_path,
             ),
         }
     except Exception:
@@ -389,6 +480,11 @@ def verify_archive_manifest(manifest_path: Path) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     source = Path(args.source)
     archive = Path(args.archive) if str(args.archive or "").strip() else None
+    staging_directory = (
+        Path(args.staging_directory)
+        if str(getattr(args, "staging_directory", "") or "").strip()
+        else None
+    )
     reserved_free_bytes = int(
         getattr(args, "reserved_free_bytes", DEFAULT_RESERVED_FREE_BYTES)
     )
@@ -396,11 +492,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return build_plan(
             source=source,
             archive=archive,
+            staging_directory=staging_directory,
             reserved_free_bytes=reserved_free_bytes,
         )
     return apply_archive(
         source=source,
         archive=archive,
+        staging_directory=staging_directory,
         fingerprint=args.fingerprint,
         reserved_free_bytes=reserved_free_bytes,
     )
@@ -545,9 +643,19 @@ def _validate_manifest_source_identity(
         raise ValueError("verified archive fingerprint does not match current dry-run")
 
 
-def _owned_orphan_artifacts(*, source: Path, archive: Path) -> list[str]:
+def _owned_orphan_artifacts(
+    *,
+    source: Path,
+    archive: Path,
+    staging_directory: Path,
+) -> list[str]:
     candidates = [
         *source.parent.glob(archive.name + ".tmp-*"),
+        *(
+            staging_directory.glob(archive.name + ".tmp-*")
+            if staging_directory != source.parent
+            else []
+        ),
         Path(str(source) + "-wal"),
         Path(str(source) + "-shm"),
         Path(str(source) + "-journal"),
@@ -555,9 +663,144 @@ def _owned_orphan_artifacts(*, source: Path, archive: Path) -> list[str]:
     return sorted(str(path) for path in candidates if path.exists())
 
 
-def _decompressed_hash_and_size(*, zstd: str, archive: Path) -> tuple[str, int]:
+def _same_filesystem(left: Path, right: Path) -> bool:
+    return left.stat().st_dev == right.stat().st_dev
+
+
+def _compressed_size(*, zstd: str, source: Path) -> int:
     process = subprocess.Popen(
-        [zstd, "-q", "-d", "-c", "--", str(archive)],
+        [zstd, "-1", "-T0", "-q", "-c", "--", str(source)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.stdout is None:
+        raise ValueError("zstd compression measurement stdout is unavailable")
+    size = 0
+    for chunk in iter(lambda: process.stdout.read(CHUNK_SIZE), b""):
+        size += len(chunk)
+    stderr = process.stderr.read() if process.stderr is not None else b""
+    return_code = process.wait()
+    if return_code:
+        message = stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            f"zstd compression measurement failed: {message or return_code}"
+        )
+    return size
+
+
+def _compress_to_named_temp(
+    *,
+    zstd: str,
+    source: Path,
+    temp_path: Path,
+) -> tuple[str, str, int]:
+    temp_descriptor = os.open(
+        temp_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    with os.fdopen(temp_descriptor, "wb") as output:
+        completed = subprocess.run(
+            [zstd, "-1", "-T0", "-q", "-c", "--", str(source)],
+            stdout=output,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        output.flush()
+        os.fsync(output.fileno())
+    if completed.returncode:
+        raise ValueError(_command_error("zstd compression failed", completed))
+    tested = subprocess.run(
+        [zstd, "-q", "-t", "--", str(temp_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if tested.returncode:
+        raise ValueError(_command_error("zstd archive test failed", tested))
+    decompressed_sha256, decompressed_size = _decompressed_hash_and_size(
+        zstd=zstd,
+        archive=temp_path,
+    )
+    return _file_hash(temp_path), decompressed_sha256, decompressed_size
+
+
+def _compress_to_unnamed_stage(
+    *,
+    zstd: str,
+    source: Path,
+    staged: BinaryIO,
+) -> tuple[str, str, int, int]:
+    completed = subprocess.run(
+        [zstd, "-1", "-T0", "-q", "-c", "--", str(source)],
+        stdout=staged,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    staged.flush()
+    os.fsync(staged.fileno())
+    if completed.returncode:
+        raise ValueError(_command_error("zstd compression failed", completed))
+    archive_size = int(os.fstat(staged.fileno()).st_size)
+    staged.seek(0)
+    tested = subprocess.run(
+        [zstd, "-q", "-t"],
+        stdin=staged,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if tested.returncode:
+        raise ValueError(_command_error("zstd archive test failed", tested))
+    staged.seek(0)
+    decompressed_sha256, decompressed_size = _decompressed_stream_hash_and_size(
+        zstd=zstd,
+        source=staged,
+    )
+    staged.seek(0)
+    archive_sha256 = _stream_hash(staged)
+    staged.seek(0)
+    return (
+        archive_sha256,
+        decompressed_sha256,
+        decompressed_size,
+        archive_size,
+    )
+
+
+def _copy_stage_to_named_temp(
+    *,
+    staged: BinaryIO,
+    temp_path: Path,
+    expected_sha256: str,
+) -> None:
+    descriptor = os.open(
+        temp_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    staged.seek(0)
+    with os.fdopen(descriptor, "wb") as output:
+        shutil.copyfileobj(staged, output, length=CHUNK_SIZE)
+        output.flush()
+        os.fsync(output.fileno())
+    if _file_hash(temp_path) != expected_sha256:
+        raise ValueError("cross-filesystem archive publication copy changed")
+
+
+def _decompressed_hash_and_size(*, zstd: str, archive: Path) -> tuple[str, int]:
+    with archive.open("rb") as source:
+        return _decompressed_stream_hash_and_size(zstd=zstd, source=source)
+
+
+def _decompressed_stream_hash_and_size(
+    *,
+    zstd: str,
+    source: BinaryIO,
+) -> tuple[str, int]:
+    process = subprocess.Popen(
+        [zstd, "-q", "-d", "-c"],
+        stdin=source,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -574,6 +817,12 @@ def _decompressed_hash_and_size(*, zstd: str, archive: Path) -> tuple[str, int]:
         message = stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(f"zstd decompression verification failed: {message or return_code}")
     return "sha256:" + digest.hexdigest(), size
+
+
+def _stream_hash(handle: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    _update_hash(handle, digest)
+    return "sha256:" + digest.hexdigest()
 
 
 def _write_manifest_atomic(path: Path, payload: dict[str, Any]) -> None:
