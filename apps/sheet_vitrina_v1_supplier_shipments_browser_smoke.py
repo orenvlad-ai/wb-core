@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
+from decimal import Decimal
 import hashlib
 from io import BytesIO
 import json
@@ -516,11 +517,46 @@ def main() -> None:
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Контракт")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("КП логистов")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Не загружен")
+                allocation_row = frame.locator(
+                    "#financialDocumentsRows tr[data-financial-document-row]",
+                    has_text="BROWSER-EXPENSE",
+                ).first
+                expect(allocation_row).to_contain_text("Распределено")
+                for document_number, amount_pattern, warning_text in (
+                    (
+                        "VTB-26GN582-COMPLETE",
+                        re.compile(r"13\s*525,89 RUB"),
+                        "",
+                    ),
+                    (
+                        "VTB-26GN583-WEAK",
+                        re.compile(r"18\s*713,34 RUB"),
+                        "Есть fee rows со слабым совпадением",
+                    ),
+                ):
+                    completed_statement_row = frame.locator(
+                        "#financialDocumentsRows tr[data-financial-document-row]",
+                        has_text=document_number,
+                    ).first
+                    expect(completed_statement_row).to_be_visible()
+                    expect(completed_statement_row.locator("td").nth(1)).to_have_text(
+                        "Загружен"
+                    )
+                    if warning_text:
+                        expect(completed_statement_row).to_contain_text(warning_text)
+                    completed_statement_row.click()
+                    expect(frame.locator("#bankFeeStatementPreview")).to_be_visible()
+                    expect(frame.locator("#bankFeePreviewContent")).to_contain_text(
+                        amount_pattern
+                    )
+                    frame.locator("#cancelBankFeeImportButton").click()
+                    expect(frame.locator("#bankFeeStatementPreview")).to_be_hidden()
                 statement_row = frame.locator(
                     "#financialDocumentsRows tr[data-financial-document-row]",
                     has_text="VTB-REVIEW",
                 ).first
                 expect(statement_row).to_be_visible()
+                expect(statement_row.locator("td").nth(1)).to_have_text("Проверить")
                 if frame.locator("#bankFeeStatementPreview").is_hidden():
                     statement_row.click()
                 expect(frame.locator("#bankFeePreviewTitle")).to_have_text(
@@ -1508,6 +1544,130 @@ def _seed_first_supplier_bank_fee_review_document(runtime: RegistryUploadDbBacke
             "raw_parse": {},
             "parser_version": "browser-smoke",
             "warnings": [review_warning],
+            "errors": [],
+        },
+        expense_lines=[],
+    )
+    _save_browser_confirmed_bank_fee_statement(
+        runtime,
+        shipment_id=shipment_id,
+        suffix="26gn582",
+        document_number="VTB-26GN582-COMPLETE",
+        amounts=("951.08", "12574.81"),
+    )
+    _save_browser_confirmed_bank_fee_statement(
+        runtime,
+        shipment_id=shipment_id,
+        suffix="26gn583",
+        document_number="VTB-26GN583-WEAK",
+        amounts=("1081.03", "17632.31"),
+        warning=(
+            "Есть fee rows со слабым совпадением; автоматический импорт "
+            "не выполняется для weak match"
+        ),
+    )
+
+
+def _save_browser_confirmed_bank_fee_statement(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    shipment_id: str,
+    suffix: str,
+    document_number: str,
+    amounts: tuple[str, str],
+    warning: str = "",
+) -> None:
+    logical_fee_id = f"browser-vtb-{suffix}-logical"
+    operation_ids = [
+        f"browser-vtb-{suffix}-atomic-{index}"
+        for index in range(1, len(amounts) + 1)
+    ]
+    rows = [
+        {
+            "semantic_operation_id": operation_id,
+            "logical_fee_id": logical_fee_id,
+            "operation_date": "2026-07-24",
+            "account_number": "40802810012480001092",
+            "currency": "RUB",
+            "fee_category": "bank_transfer_fee",
+            "amount": amount,
+            "matched_anchor_operation_number": "9",
+            "operation_status": "already_imported",
+            "already_imported": True,
+            "import_allowed": True,
+            "selected_by_default": False,
+            "confidence": "strong",
+            "payment_purpose": "Подтверждённая комиссия по платежу №9",
+            "match_reasons": ["номер платежа", "RUB-счёт"],
+        }
+        for operation_id, amount in zip(operation_ids, amounts)
+    ]
+    total = str(sum(Decimal(amount) for amount in amounts))
+    weak_candidates = (
+        [
+            {
+                "semantic_operation_id": f"browser-vtb-{suffix}-weak",
+                "confidence": "weak",
+                "amount": "99.99",
+                "currency": "RUB",
+                "operation_status": "needs_review",
+                "import_allowed": False,
+            }
+        ]
+        if warning
+        else []
+    )
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_browser_bank_fee_{suffix}",
+            "supplier_order_id": shipment_id,
+            "document_type": "bank_fee_statement",
+            "original_filename": f"browser-vtb-{suffix}.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": hashlib.sha256(suffix.encode("utf-8")).hexdigest(),
+            "uploaded_at": "2026-07-24T09:00:00Z",
+            "updated_at": "2026-07-24T09:00:00Z",
+            "parse_status": "confirmed",
+            "vendor": "Банк ВТБ",
+            "document_number": document_number,
+            "document_date": "2026-07-24",
+            "currency": "RUB",
+            "total_amount": None,
+            "total_amount_rub": None,
+            "normalized_parse": {
+                "document_type": "bank_fee_statement",
+                "statement_import": {
+                    "status": "ready_to_confirm",
+                    "import_status": "confirmed_partial_or_complete",
+                    "match_confidence": "strong",
+                    "confirmed_operation_ids": operation_ids,
+                    "matched_fee_rows": rows,
+                    "logical_fee_groups": [
+                        {
+                            "logical_fee_id": logical_fee_id,
+                            "operation_status": "already_imported",
+                            "import_allowed": False,
+                            "selected_by_default": False,
+                            "date_from": "2026-07-24",
+                            "date_to": "2026-07-24",
+                            "fee_category": "bank_fee_group",
+                            "amount": total,
+                            "currency": "RUB",
+                            "matched_anchor_operation_number": "9",
+                            "atomic_count": len(rows),
+                            "atomic_operation_ids": operation_ids,
+                            "atomic_rows": rows,
+                        }
+                    ],
+                    "fee_totals_by_currency": {"RUB": total},
+                    "weak_candidates": weak_candidates,
+                    "warnings": [warning] if warning else [],
+                },
+            },
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [warning] if warning else [],
             "errors": [],
         },
         expense_lines=[],
