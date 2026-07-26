@@ -174,6 +174,12 @@ def main() -> int:
             "expenses_complete alone cannot make exact green",
         )
         _assert(
+            provisional_exact["note"]
+            == "Предварительно: active functional version ещё не сертифицирована."
+            and "Ожидается" not in provisional_exact["note"],
+            "completed provisional cost never reports stale replay waiting",
+        )
+        _assert(
             unavailable_exact["value"] is None
             and unavailable_exact["status"] == "unavailable",
             "unavailable exact never exposes a stale number",
