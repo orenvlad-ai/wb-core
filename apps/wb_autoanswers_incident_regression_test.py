@@ -4,17 +4,26 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+import time
 import unittest
+from unittest.mock import patch
 
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_result
+from packages.application.wb_autoanswers_coordinator import (
+    AutoanswersCoordinator,
+    _error_evidence,
+)
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
+    autoanswers_settings_revision,
     rating_only_template,
 )
+from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
 
 
@@ -176,16 +185,208 @@ class IncidentRegressionTest(unittest.TestCase):
                   (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs)
                 """
             ).fetchone()
+            acknowledgements = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=? AND outcome='skipped_preserved'
+                """,
+                (applied["sweep"]["sweep_id"],),
+            ).fetchone()[0]
         self.assertEqual(after, before)
+        self.assertEqual(acknowledgements, 5)
         self.assertEqual([row[0] for row in rows], sorted(processing_keys))
         for row in rows:
             self.assertEqual(row[1], "skipped")
             self.assertEqual(row[2], "empty_five_star")
-            self.assertEqual(row[3], applied["settings"].policy_epoch)
-            self.assertEqual(row[4], applied["sweep"]["transition_run_id"])
+            self.assertNotEqual(row[3], applied["settings"].policy_epoch)
+            self.assertIsNone(row[4])
             self.assertEqual(row[5], "settled")
             self.assertEqual(float(row[6]), 0.0)
             self.assertIsNotNone(row[7])
+        self.clock.advance(60)
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env={},
+        )
+        replay = restarted.reconcile_policy_sweep_once(
+            worker_id="reconcile-after-restart",
+            batch_size=25,
+        )
+        self.assertIsNone(replay)
+        status_after_restart = restarted.reconciliation_status(
+            applied["sweep"]["sweep_id"]
+        )
+        self.assertEqual(
+            status_after_restart["cursor"]["acknowledged_total"],
+            5,
+        )
+        self.assertEqual(status_after_restart["cursor"]["rate_per_minute"], 0.0)
+
+    def test_40k_scope_progress_is_bounded_indexed_and_restart_idempotent(
+        self,
+    ) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="manual",
+            max_materialized_processing_jobs=100,
+            actor_id="admin",
+        )
+        self.repo.upsert_feedback(
+            feedback("bulk-seed", text="Содержательный отзыв"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_usd="500.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        sweep_id = str(applied["sweep"]["sweep_id"])
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                WITH RECURSIVE
+                left_digit(value) AS (
+                    VALUES(0) UNION ALL
+                    SELECT value+1 FROM left_digit WHERE value<199
+                ),
+                right_digit(value) AS (
+                    VALUES(0) UNION ALL
+                    SELECT value+1 FROM right_digit WHERE value<199
+                ),
+                numbered(value) AS (
+                    SELECT left_digit.value*200+right_digit.value+1
+                    FROM left_digit CROSS JOIN right_digit
+                )
+                INSERT INTO sheet_vitrina_v1_wb_feedbacks(
+                    feedback_id,created_at_wb,updated_at_wb,content_version,
+                    content_version_hash,wb_observation_hash,content_json,
+                    observation_json,raw_json,answer_text,rating,nm_id,
+                    supplier_article,product_name,brand_name,has_photo,has_video,
+                    source_stream,first_seen_at,last_seen_at,sync_status,
+                    auto_eligible_epoch,last_sync_run_id,content_classification
+                )
+                SELECT
+                    printf('bulk-%05d',numbered.value),
+                    seed.created_at_wb,seed.updated_at_wb,1,
+                    printf('bulk-hash-%05d',numbered.value),
+                    seed.wb_observation_hash,seed.content_json,
+                    seed.observation_json,seed.raw_json,'',2,seed.nm_id,
+                    seed.supplier_article,seed.product_name,seed.brand_name,0,0,
+                    seed.source_stream,seed.first_seen_at,seed.last_seen_at,
+                    seed.sync_status,NULL,NULL,'content_bearing'
+                FROM numbered
+                CROSS JOIN sheet_vitrina_v1_wb_feedbacks seed
+                WHERE seed.feedback_id='bulk-seed'
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_feedback_versions(
+                    feedback_id,content_version,content_version_hash,
+                    content_json,source_raw_json,created_at
+                )
+                SELECT feedback_id,content_version,content_version_hash,
+                       content_json,raw_json,first_seen_at
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id GLOB 'bulk-[0-9]*'
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(
+                    sweep_id,feedback_id,content_version_at_preview,
+                    content_version_hash_at_preview,ordinal,
+                    content_classification_at_preview
+                )
+                SELECT ?,feedback_id,content_version,content_version_hash,
+                       1+CAST(substr(feedback_id,6) AS INTEGER),'content_bearing'
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id GLOB 'bulk-[0-9]*'
+                """,
+                (sweep_id,),
+            )
+
+        started = time.monotonic()
+        first = self.repo.reconcile_policy_sweep_once(
+            worker_id="bulk-reconcile-1",
+            batch_size=25,
+        )
+        first_elapsed = time.monotonic() - started
+        self.assertLess(first_elapsed, 5.0)
+        self.assertEqual(first["cursor"]["membership_total"], 40_001)
+        self.assertEqual(first["cursor"]["acknowledged_total"], 25)
+        self.assertEqual(first["cursor"]["reconciliation_remaining"], 39_976)
+        self.assertEqual(first["cursor"]["action_total"], 25)
+
+        self.clock.advance(60)
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env={},
+        )
+        second = restarted.reconcile_policy_sweep_once(
+            worker_id="bulk-reconcile-2",
+            batch_size=25,
+        )
+        self.assertEqual(second["cursor"]["acknowledged_total"], 50)
+        self.assertEqual(second["cursor"]["reconciliation_remaining"], 39_951)
+        self.assertEqual(second["cursor"]["rate_per_minute"], 25.0)
+        with sqlite3.connect(restarted.db_path) as conn:
+            acknowledgement_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=?
+                """,
+                (sweep_id,),
+            ).fetchone()[0]
+            job_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                WHERE policy_epoch=?
+                """,
+                (applied["settings"].policy_epoch,),
+            ).fetchone()[0]
+            lookup_plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=? AND feedback_id=?
+                  AND content_version=? AND content_version_hash=?
+                """,
+                (sweep_id, "bulk-00001", 1, "bulk-hash-00001"),
+            ).fetchall()
+            scope_plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope
+                WHERE sweep_id=? AND feedback_id=?
+                  AND content_version_at_preview=?
+                  AND content_version_hash_at_preview=?
+                """,
+                (sweep_id, "bulk-00001", 1, "bulk-hash-00001"),
+            ).fetchall()
+        self.assertEqual(acknowledgement_count, 50)
+        self.assertEqual(job_count, 50)
+        self.assertTrue(
+            any("INDEX" in str(row[3]).upper() for row in lookup_plan),
+            lookup_plan,
+        )
+        self.assertTrue(
+            any("INDEX" in str(row[3]).upper() for row in scope_plan),
+            scope_plan,
+        )
 
     def test_retry_terminal_and_lease_loss_release_reservations(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="draft_only", actor_id="admin")
@@ -218,6 +419,421 @@ class IncidentRegressionTest(unittest.TestCase):
         self.assertEqual(lease["state"], "processing")
         self.assertEqual(self.repo.progress_status()["stop_reason"], "budget_state_unknown")
         self.assertIsNone(self.repo.claim_processing_job(worker_id="blocked-after-lease-loss"))
+
+    def test_readonly_process_uses_background_contention_and_reports_exhaustion(
+        self,
+    ) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="draft_only",
+            actor_id="contention-test",
+        )
+        before_revision = autoanswers_settings_revision(self.repo.settings())
+        with patch.dict(
+            os.environ,
+            {"WB_CORE_SQLITE_OWNER": "wb_autoanswers_readonly.py"},
+        ), patch(
+            "packages.application.sqlite_contention.DEFAULT_BACKGROUND_TIMEOUT_MS",
+            200,
+        ):
+            probe = self.repo._connect()
+            try:
+                self.assertEqual(probe._contention_priority, "background")
+                self.assertEqual(probe._contention_timeout_ms, 200)
+            finally:
+                probe.close()
+            blocker = sqlite3.connect(
+                self.repo.db_path,
+                timeout=1,
+                isolation_level=None,
+            )
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                with self.assertRaises(SQLiteContentionExhausted) as raised:
+                    self.repo.update_settings(
+                        hourly_cap_usd="0.60",
+                        actor_id="contention-test",
+                    )
+            finally:
+                blocker.rollback()
+                blocker.close()
+        failure = raised.exception
+        self.assertGreaterEqual(failure.wait_ms, 150)
+        self.assertGreaterEqual(failure.retries, 1)
+        self.assertEqual(
+            autoanswers_settings_revision(self.repo.settings()),
+            before_revision,
+        )
+        evidence = _error_evidence("reconciliation", failure)
+        self.repo.record_scheduler_tick(errors=[evidence])
+        progress = self.repo.progress_status()
+        self.assertEqual(progress["stop_reason"], "retry_backoff")
+        self.assertEqual(
+            progress["stop_details"],
+            {
+                "code": "sqlite_contention_exhausted",
+                "stage": "reconciliation",
+                "wait_ms": failure.wait_ms,
+                "retry_count": failure.retries,
+                "contention_phase": failure.phase,
+            },
+        )
+        self.assertIn(
+            "sqlite_contention_exhausted",
+            {alert["code"] for alert in progress["stall_alerts"]},
+        )
+
+    def test_coordinator_contains_stage_contention_and_keeps_bounded_tick_alive(
+        self,
+    ) -> None:
+        stage_failure = SQLiteContentionExhausted(
+            wait_ms=321,
+            retries=4,
+            phase="begin",
+        )
+        tick_failure = SQLiteContentionExhausted(
+            wait_ms=654,
+            retries=5,
+            phase="commit",
+        )
+
+        class Repository:
+            def sync_cursor(_self, _name: str) -> dict:
+                return {"cursor": {"tick": 7}}
+
+            def claim_sync_command(_self, *, worker_id: str) -> None:
+                self.assertEqual(worker_id, "coordinator-test")
+                return None
+
+            def save_sync_cursor(_self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def refresh_rolling_admissions(
+                _self,
+                *,
+                actor_id: str,
+                batch_size: int,
+            ) -> None:
+                self.assertEqual((actor_id, batch_size), ("coordinator-test", 250))
+                raise stage_failure
+
+            def reconcile_stale_reservations(_self) -> int:
+                return 2
+
+            def reconcile_policy_sweep_once(
+                _self,
+                *,
+                worker_id: str,
+                batch_size: int,
+            ) -> dict:
+                self.assertEqual((worker_id, batch_size), ("coordinator-test", 25))
+                return {"state": "queued"}
+
+            def record_scheduler_tick(
+                _self,
+                *,
+                errors: list[dict],
+            ) -> None:
+                self.assertEqual(errors[0]["stage"], "rolling_admission")
+                raise tick_failure
+
+        class Sync:
+            def steady_sync_tick(_self, *, is_answered: bool) -> dict:
+                return {"answered": is_answered}
+
+            def initial_backfill_tick(_self, *, is_answered: bool) -> dict:
+                return {"backfill_answered": is_answered}
+
+        class Worker:
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+            def run_once(self) -> dict:
+                return {"result": self.result}
+
+        report = AutoanswersCoordinator(
+            repository=Repository(),  # type: ignore[arg-type]
+            sync_service=Sync(),  # type: ignore[arg-type]
+            processing_worker=Worker("processed"),  # type: ignore[arg-type]
+            publication_worker=Worker("published"),  # type: ignore[arg-type]
+            worker_id="coordinator-test",
+        ).run_once()
+        self.assertEqual(report["tick"], 8)
+        self.assertEqual(report["stale_reservations_released"], 2)
+        self.assertEqual(report["processing"], {"result": "processed"})
+        self.assertEqual(report["publication"], {"result": "published"})
+        self.assertEqual(
+            [(item["stage"], item["contention_phase"]) for item in report["errors"]],
+            [
+                ("rolling_admission", "begin"),
+                ("scheduler_tick_write", "commit"),
+            ],
+        )
+
+    def test_business_throughput_keeps_published_ai_completion_visible(self) -> None:
+        item = feedback("throughput-published", text="Нужен ответ")
+        item["productValuation"] = 1
+        self.repo.upsert_feedback(
+            item,
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        job = self.repo.claim_processing_job(worker_id="ai")
+        self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            job["processing_key"],
+            result=successful_result(),
+            worker_id="ai",
+        )
+        publication = self.repo.claim_publication_job(worker_id="publication")
+        started = self.repo.begin_publication_write(
+            publication["publication_key"],
+            worker_id="publication",
+        )
+        self.repo.record_publication_transport(
+            publication["publication_key"],
+            attempt_id=started["attempt_id"],
+            outcome="http_response",
+            http_status=204,
+            worker_id="publication",
+        )
+        readback = self.repo.claim_publication_job(worker_id="publication")
+        self.repo.record_publication_readback(
+            readback["publication_key"],
+            answer_text=readback["exact_reply"],
+            worker_id="publication",
+        )
+
+        throughput = self.repo.progress_status()["business_throughput"]
+        self.assertEqual(throughput["new_ai_completions_last_hour"], 1)
+        self.assertEqual(throughput["confirmed_wb_publications_last_hour"], 1)
+
+    def test_actionable_regeneration_keeps_literal_priority_but_terminal_does_not(
+        self,
+    ) -> None:
+        self.repo.update_settings(
+            master_enabled=True,
+            mode="manual",
+            actor_id="admin",
+        )
+        one_star = feedback("actionable-regeneration-1star", text="Нужен ответ")
+        one_star["productValuation"] = 1
+        two_star = feedback("fresh-action-2star", text="Нужен ответ")
+        two_star["productValuation"] = 2
+        self.repo.upsert_feedback(
+            one_star,
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        regeneration = self.repo.enqueue_manual_processing(
+            "actionable-regeneration-1star",
+            content_version=1,
+            actor_id="admin",
+        )
+        self.repo.claim_processing_job(worker_id="ai")
+        self.repo.settle_budget(
+            regeneration["processing_key"],
+            actual_cost_usd="0.01",
+        )
+        self.repo.complete_generation(
+            regeneration["processing_key"],
+            result=successful_result(media_uncertain=True),
+            worker_id="ai",
+        )
+        self.repo.upsert_feedback(
+            two_star,
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+
+        self.repo.reconcile_policy_sweep_once(
+            worker_id="reconciliation",
+            batch_size=1,
+        )
+        claimed = self.repo.claim_processing_job(worker_id="ai")
+        self.assertEqual(
+            claimed["feedback_id"],
+            "actionable-regeneration-1star",
+        )
+        self.assertFalse(self.repo.get_feedback("fresh-action-2star")["ai_jobs"])
+
+    def test_external_answer_after_preview_is_acknowledged_without_new_work(
+        self,
+    ) -> None:
+        self.repo.upsert_feedback(
+            feedback("answered-after-preview", text="Нужен ответ"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.upsert_feedback(
+            feedback(
+                "answered-after-preview",
+                text="Нужен ответ",
+                answer="Уже отвечено продавцом",
+            ),
+            source_stream="answered",
+            run_kind="steady",
+        )
+
+        status = self.repo.reconcile_policy_sweep_once(
+            worker_id="reconciliation",
+        )
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["progress"]["external_answer_skipped"], 1)
+        self.assertEqual(status["cursor"]["acknowledged_total"], 1)
+        self.assertFalse(
+            self.repo.get_feedback("answered-after-preview")["ai_jobs"]
+        )
+        self.assertIsNone(
+            self.repo.reconcile_policy_sweep_once(
+                worker_id="reconciliation-restart",
+            )
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                    WHERE sweep_id=?
+                    """,
+                    (applied["sweep"]["sweep_id"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_restart_acknowledges_action_that_committed_before_member_ack(
+        self,
+    ) -> None:
+        self.repo.upsert_feedback(
+            feedback("action-before-ack", text="Нужен ответ"),
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        applied = self.repo.apply_mode_transition(
+            "draft_only",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.repo.reconcile_policy_sweep_once(
+            worker_id="interrupted-reconciliation",
+            batch_size=1,
+        )
+        job = self.repo.get_feedback("action-before-ack")["ai_jobs"][0]
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                WHERE sweep_id=?
+                """,
+                (applied["sweep"]["sweep_id"],),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+                SET state='queued',cursor_json='{}',progress_json='{}',
+                    completed_at=NULL
+                WHERE sweep_id=?
+                """,
+                (applied["sweep"]["sweep_id"],),
+            )
+        self.repo.claim_processing_job(worker_id="ai")
+        self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            job["processing_key"],
+            result=successful_result(),
+            worker_id="ai",
+        )
+
+        restarted = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env={},
+        )
+        status = restarted.reconcile_policy_sweep_once(
+            worker_id="restart",
+        )
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["progress"]["already_reconciled"], 1)
+        self.assertEqual(status["cursor"]["acknowledged_total"], 1)
+        self.assertEqual(status["cursor"]["unchanged_total"], 1)
+        self.assertEqual(
+            restarted.get_feedback("action-before-ack")["ai_jobs"][0]["state"],
+            "generated",
+        )
+        self.assertEqual(
+            restarted.reconciliation_status(applied["sweep"]["sweep_id"])[
+                "cursor"
+            ]["reconciliation_remaining"],
+            0,
+        )
+
+    def test_zero_output_automatic_sweep_surfaces_truthful_stall(self) -> None:
+        content = feedback("stalled-action", text="Нужен ответ")
+        content["productValuation"] = 1
+        self.repo.upsert_feedback(
+            content,
+            source_stream="archive",
+            run_kind="backfill",
+        )
+        preview = self.repo.preview_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            run_max_usd="1.00",
+        )
+        self.repo.apply_mode_transition(
+            "auto_all",
+            actor_id="admin",
+            preview_id=preview["preview_id"],
+        )
+        self.clock.advance(15 * 60 + 1)
+        self.repo.record_scheduler_tick(errors=[])
+        progress = self.repo.progress_status()
+        self.assertEqual(progress["stop_reason"], "automatic_pipeline_stalled")
+        alerts = {item["code"]: item for item in progress["stall_alerts"]}
+        self.assertEqual(alerts["automatic_pipeline_stalled"]["severity"], "error")
+        self.assertEqual(
+            alerts["automatic_pipeline_stalled"]["priority_bucket"],
+            "content_bearing_1_star",
+        )
+        self.assertEqual(progress["claimable_ai_jobs"], 0)
+        self.assertEqual(progress["business_throughput"]["new_ai_completions_last_hour"], 0)
 
     def test_transition_requires_run_cap_and_materializes_only_bounded_batch(self) -> None:
         for index in range(12):
@@ -532,6 +1148,14 @@ class IncidentRegressionTest(unittest.TestCase):
             )
             conn.execute(
                 """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state='generated'
+                WHERE processing_key=?
+                """,
+                (processing_keys[0],),
+            )
+            conn.execute(
+                """
                 UPDATE sheet_vitrina_v1_wb_publication_jobs
                 SET state='needs_review', last_error_code='policy_epoch_stale'
                 """
@@ -554,6 +1178,19 @@ class IncidentRegressionTest(unittest.TestCase):
                   (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_attempts)
                 """
             ).fetchone()
+            identity_before = [
+                tuple(row)
+                for row in conn.execute(
+                """
+                SELECT j.state,j.policy_epoch,j.transition_run_id,
+                       p.state,p.policy_epoch,p.transition_run_id
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                JOIN sheet_vitrina_v1_wb_publication_jobs p
+                  ON p.processing_key=j.processing_key
+                ORDER BY j.processing_key
+                """
+                ).fetchall()
+            ]
 
         preview = self.repo.preview_mode_transition(
             "auto_all",
@@ -569,7 +1206,11 @@ class IncidentRegressionTest(unittest.TestCase):
             worker_id="reconcile",
             batch_size=25,
         )
-        self.assertEqual(status["progress"]["review_required_preserved"], 5)
+        self.assertEqual(status["progress"]["review_required_preserved"], 4)
+        self.assertEqual(
+            status["progress"]["publication_bound_regeneration_preserved"],
+            1,
+        )
         self.repo.record_scheduler_tick(errors=[])
         progress = self.repo.progress_status()
         self.assertNotEqual(progress["stop_reason"], "worker_error")
@@ -600,22 +1241,21 @@ class IncidentRegressionTest(unittest.TestCase):
                 WHERE event_type='publication_conflict_worker_latch_reconciled'
                 """
             ).fetchone()[0]
+            acknowledgements = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                    WHERE sweep_id=? AND outcome IN (
+                        'review_required_preserved',
+                        'publication_bound_regeneration_preserved'
+                    )
+                """,
+                (applied["sweep"]["sweep_id"],),
+            ).fetchone()[0]
         self.assertEqual(after, tuple(before))
         self.assertEqual(latch_audits, 1)
-        self.assertEqual(
-            rows,
-            [
-                (
-                    "needs_review",
-                    applied["settings"].policy_epoch,
-                    applied["sweep"]["transition_run_id"],
-                    "needs_review",
-                    applied["settings"].policy_epoch,
-                    applied["sweep"]["transition_run_id"],
-                )
-            ]
-            * 5,
-        )
+        self.assertEqual(rows, identity_before)
+        self.assertEqual(acknowledgements, 5)
         self.repo.record_scheduler_tick(errors=[])
         with sqlite3.connect(self.repo.db_path) as conn:
             self.assertEqual(

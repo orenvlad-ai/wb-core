@@ -229,6 +229,77 @@ class RuntimeTest(unittest.TestCase):
             blocker.rollback()
             blocker.close()
 
+    def test_schema_v8_adds_acknowledgements_without_rewriting_execution_evidence(
+        self,
+    ) -> None:
+        self.enable("auto_all")
+        self.insert_new("schema-v8-evidence")
+        job = self.repo.enqueue_processing(
+            "schema-v8-evidence",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.settle_budget(job["processing_key"], actual_cost_usd="0.01")
+        self.repo.complete_generation(
+            job["processing_key"],
+            result=successful_result(),
+            worker_id="worker",
+        )
+        immutable_tables = (
+            "sheet_vitrina_v1_wb_autoanswer_jobs",
+            "sheet_vitrina_v1_wb_publication_jobs",
+            "sheet_vitrina_v1_wb_autoanswers_budget_reservations",
+            "sheet_vitrina_v1_wb_autoanswers_cost_events",
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            before = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=8"
+            )
+            conn.execute(
+                "DROP TABLE sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements"
+            )
+
+        migrated = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env=self.env,
+        )
+        with sqlite3.connect(migrated.db_path) as conn:
+            after = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            versions = {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT version FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations"
+                ).fetchall()
+            }
+            acknowledgement_table = conn.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type='table'
+                  AND name='sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements'
+                """
+            ).fetchone()
+        self.assertEqual(after, before)
+        self.assertEqual(versions, set(range(1, SCHEMA_VERSION + 1)))
+        self.assertIsNotNone(acknowledgement_table)
+        self.assertEqual(
+            migrated.verified_schema_backup_status()["integrity_check"],
+            "ok",
+        )
+
     def test_new_isolated_store_does_not_modify_unrelated_registry_database(self) -> None:
         with TemporaryDirectory() as directory:
             runtime_dir = Path(directory)
@@ -1386,13 +1457,26 @@ class RuntimeTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(job["state"], "skipped")
         self.assertEqual(job["last_error_code"], "empty_five_star")
-        self.assertEqual(job["transition_run_id"], run_id)
+        self.assertIsNone(job["transition_run_id"])
+        self.assertNotEqual(job["policy_epoch"], applied["settings"].policy_epoch)
         self.assertEqual(job["attempts"], 1)
         self.assertEqual(reservation["status"], "settled")
         self.assertEqual(float(reservation["actual_cost_usd"]), 0.0)
         self.assertIsNotNone(reservation["provider_call_started_at"])
         self.assertEqual(boundary_count, 1)
         self.assertGreaterEqual(status["progress"]["skipped_preserved"], 1)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
+                    WHERE sweep_id=? AND outcome='skipped_preserved'
+                    """,
+                    (applied["sweep"]["sweep_id"],),
+                ).fetchone()[0],
+                1,
+            )
         self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
 
     def test_budget_pause_and_human_only_content_do_not_open_or_deadlock_rating_gate(self) -> None:

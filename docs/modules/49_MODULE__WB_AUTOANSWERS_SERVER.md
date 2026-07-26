@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "The current runtime adds server-validated persistent operator-limit controls with optimistic readback and next-tick budget resume while preserving schema-v7 rolling admission, the frozen bundle and the owner-confirmed active run cap."
+update_note: "Schema v8 adds exact per-sweep/member/version reconciliation acknowledgements, action-first materialization, terminal/human-only barrier exclusion, truthful stall telemetry and fingerprint-bound incident recovery while preserving immutable execution evidence, schema-v7 rolling admission, the frozen bundle and the owner-confirmed active run cap."
 ---
 
 # WB Autoanswers Server v1
@@ -60,7 +60,7 @@ Frozen identity:
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
 | Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
 | Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
-| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py` |
+| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py`, `apps/wb_autoanswers_reconciliation_recovery.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
 | Backend/UI | `registry_upload_http_entrypoint.py`, `sheet_vitrina_v1_web_vitrina.html` |
 
@@ -91,9 +91,17 @@ Schema v7 adds:
   Node exits;
 - indexes used by admission and the literal cross-stage priority barrier.
 
-The schema-v7 migration does not rewrite the initial membership, content
+Schema v8 adds one append-only
+`sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements` row for each
+exact `sweep_id + feedback_id + content_version`. The row binds the content
+hash, policy epoch, transition run, outcome class, member fingerprint and
+acknowledgement time. A preserved publication, terminal/human-only result or
+already-current job therefore advances a sweep exactly once without changing
+its immutable job/publication/readback/cost identity.
+
+The schema-v8 migration does not rewrite the initial membership, content
 versions, frozen bundle identity, policy epoch, transition run or cap. Schema
-v4 fields retained by v7 include:
+v4 fields retained by v8 include:
 
 - `policy_epoch` to settings, processing jobs and publication jobs;
 - media preview metadata and media processing version;
@@ -184,6 +192,19 @@ jobs remain immutable evidence but are excluded from current content capacity
 accounting and cannot be claimed ahead of content. An in-flight provider call
 or WB write is not interrupted. A write already started retains mandatory GET
 readback priority and never creates a second POST.
+
+Reconciliation selects candidates action-first. Exact automatic actions in the
+current priority bucket are considered before lower-value preserved/unchanged
+bookkeeping, even when the preserved row is an older 1-star publication.
+Terminal/human-only rows remain visible evidence but are excluded from the
+automatic barrier. Sweep progress is rebuilt from unique acknowledgements,
+not per-tick return counts: a restart or repeated candidate is idempotent and
+cannot report another synthetic `+N/min`. The runtime exposes acknowledged,
+action/preserved/unchanged, remaining, recent delta rate, ETA, repeated-batch
+fingerprint, priority-bucket age, real AI/WB throughput and sanitized SQLite
+contention evidence. A budget-free automatic bucket with no claimable action
+or real output for 15 minutes is surfaced as a stall; ordinary budget,
+rate-limit and retry-backoff pauses remain ordinary pauses.
 
 Current valid drafts are reused, in-flight jobs are not duplicated, stale results are quarantined, existing WB answers skip permanently, and published answers are never recreated. Downgrades immediately invalidate old-epoch pre-write claims without making preserved work terminal.
 
@@ -280,11 +301,24 @@ and no revision conflict. It archives the prior job projection, requeues the
 same processing identity under the unchanged frozen bundle, preserves every
 legacy hold/cost/audit row and appends recovery audit. Replay is an exact no-op.
 
+`wb_autoanswers_reconciliation_recovery_v1` repairs only exact preserved
+members of a stalled active sweep after schema v8 is deployed. Dry-run and
+readback use SQLite `mode=ro` plus `PRAGMA query_only=ON`. The approval
+fingerprint binds the sweep/run/policy/caps, exact candidate execution
+projection and verified pre-v8 backup. Apply uses `BEGIN IMMEDIATE`, inserts
+only missing preservation acknowledgements, rebuilds the derived sweep
+projection and appends one audit event. It never rewrites an AI job,
+publication/readback/POST attempt, reservation, provider boundary, cost,
+uncertainty hold or run limit. Readback verifies exact member fingerprints and
+the immutable target execution projection plus sweep identity/caps. The apply
+transaction separately proves its non-target snapshot unchanged; later normal
+queue progress does not invalidate readback. Replay is a confirmed no-op.
+
 Policy reconciliation never sends an immutable publication aggregate back
 through regeneration. Existing `needs_review`/terminal evidence is adopted
 before regeneration checks; any other unpublished publication-bound
-regeneration candidate is quarantined as
-`publication_bound_regeneration_requires_review`. A clean scheduler tick may
+regeneration candidate remains unchanged and receives only an exact preserved
+acknowledgement for explicit operator handling. A clean scheduler tick may
 release only a prior reconciliation-stage
 `worker_error/publication_already_exists` presentation latch (including the
 legacy stage-less form), and only after exact current-run scope readback proves
@@ -363,9 +397,9 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. The deploy-only quiet window records active Autoanswers timers, stops the worker/readonly timers and registry HTTP service, then copies all legacy Autoanswers tables from one query-only snapshot into a candidate isolated store. It verifies every table row count and deterministic row digest, foreign keys, integrity and an unchanged source `data_version`, fsyncs a `prepared` manifest before the atomic store rename, and restores the registry plus exactly the previously active timers; interrupted one-shot executions resume idempotently on those timers. An interrupted publish is accepted only after full store re-verification. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries. Legacy main-DB tables are retained for bounded rollback.
 
-Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v7 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation compresses only that owned snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v8 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
-After that current v7 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v7 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
+After that current v8 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v8 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
 
 Required local checks:
 
@@ -382,6 +416,7 @@ PYTHONPATH=. python3 -m unittest \
   apps.wb_autoanswers_readonly_test \
   apps.wb_autoanswers_release_safety_test \
   apps.wb_autoanswers_incident_regression_test \
+  apps.wb_autoanswers_reconciliation_recovery_test \
   apps.wb_autoanswers_ui_browser_test \
   apps.wb_autoanswers_rolling_recovery_test
 PYTHONPATH=. python3 apps/business_data_maintenance_status_smoke.py

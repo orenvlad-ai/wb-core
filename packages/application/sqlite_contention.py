@@ -304,6 +304,9 @@ class ObservedSQLiteConnection(sqlite3.Connection):
                         event="sqlite_contention_exhausted",
                         state=state,
                         transaction_duration_ms=self._transaction_duration_ms(),
+                        context=_effective_connection_context(
+                            self._contention_priority
+                        ),
                     )
                     raise SQLiteContentionExhausted(
                         wait_ms=elapsed_ms,
@@ -332,6 +335,9 @@ class ObservedSQLiteConnection(sqlite3.Connection):
                     event="sqlite_contention_recovered",
                     state=state,
                     transaction_duration_ms=self._transaction_duration_ms(),
+                    context=_effective_connection_context(
+                        self._contention_priority
+                    ),
                 )
             return result
 
@@ -378,6 +384,9 @@ class ObservedSQLiteConnection(sqlite3.Connection):
                     exhausted=False,
                 ),
                 transaction_duration_ms=duration_ms,
+                context=_effective_connection_context(
+                    self._contention_priority
+                ),
             )
         self._transaction_started_at = None
         self._transaction_retry_count = 0
@@ -408,6 +417,17 @@ def emit_controlled_contention_response_event(
             priority=context.priority,
             owner=context.owner,
         ),
+    )
+
+
+def _effective_connection_context(priority: str) -> SQLiteOperationContext:
+    current = _OPERATION_CONTEXT.get()
+    return SQLiteOperationContext(
+        endpoint=current.endpoint,
+        operation=current.operation,
+        phase=current.phase,
+        priority=_normalize_priority(priority),
+        owner=current.owner,
     )
 
 
@@ -480,6 +500,7 @@ def _process_default_priority() -> str:
     owner = _default_owner().casefold()
     background_markers = (
         "worker",
+        "readonly",
         "sync",
         "refresh",
         "maintenance",

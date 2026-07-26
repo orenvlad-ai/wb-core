@@ -38,10 +38,15 @@ External HTTP calls, PDF/XLSX parsing, file generation, hashing, source migratio
 - individual SQLite attempt: 250 ms;
 - exponential bounded backoff with jitter;
 - retries only for `SQLITE_BUSY`/`SQLITE_LOCKED`;
+- worker and readonly-sync process owners are always classified as background,
+  including their direct query-only/status connections;
 - warehouse functional sync keeps its process-local 120-second override;
 - transaction rollback and business idempotency remain authoritative.
 
-Sanitized JSON observability includes endpoint, operation, phase, priority, process owner, actual wait, retry count and write-transaction duration. It excludes SQL, paths, payloads, documents, bank data, credentials and secrets.
+Sanitized JSON observability includes endpoint, operation, phase, the effective
+connection priority, process owner, actual wait, retry count and
+write-transaction duration. It excludes SQL, paths, payloads, documents, bank
+data, credentials and secrets.
 
 Bound exhaustion before commit returns `503`, `Retry-After: 2`, `retryable=true`, contract `wb_core_sqlite_contention_v1` and a Russian retry message. No raw SQLite error or partial committed business state is returned. Bank-fee confirmation commits its document/expense/assignment/CNY-document unit atomically; contention only in subsequent derived replay returns Russian `202 pending`, `operation_applied=true`, and exact idempotent resume.
 
