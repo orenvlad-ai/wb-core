@@ -35,6 +35,8 @@ AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
+FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS = 3600.0
+FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS = 43_200.0
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
@@ -2783,6 +2785,145 @@ def _run_remote_finance_canonical_action(
     return payload
 
 
+def run_finance_storage_split_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.finance_storage_split_action)
+    plan_path = (
+        Path(str(args.plan_file)).resolve() if action == "apply" else None
+    )
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("Finance storage reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_finance_storage_split_action(
+        target,
+        action=action,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        chunk_size=int(getattr(args, "chunk_size", 10_000) or 10_000),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("Finance storage evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"finance-storage-split-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_finance_storage_split_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    chunk_size: int,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"finance-storage-split-{action}"
+    )
+    if action not in {"dry-run", "health", "apply"}:
+        raise ValueError(f"unsupported Finance storage split action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target, action="finance-storage-split-apply", dry_run=False
+        )
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Finance storage split runner requires the canonical active runtime dir")
+    if chunk_size <= 0 or chunk_size > 500_000:
+        raise ValueError("Finance storage split chunk size must be within 1..500000")
+    runner_args = [
+        "python3",
+        "apps/finance_storage_split.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--repo-root",
+        target.target_dir,
+        "--deployed-sha-file",
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+        "--chunk-size",
+        str(chunk_size),
+    ]
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("Finance storage split apply requires an existing --plan-file")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_split_plan_v1"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or str(plan.get("mode") or "") != "dry_run"
+            or not bool(plan.get("apply_allowed_by_machine_preflight"))
+        ):
+            raise ValueError("Finance storage reviewed plan is not ready for apply")
+        if not approval_reference.strip():
+            raise ValueError("Finance storage split apply requires --approval-reference")
+        runner_args.extend(
+            [
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=(
+            FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS
+            if action == "apply"
+            else FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS
+        ),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Finance storage split {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    try:
+        payload = json.loads(stdout_lines[-1] if stdout_lines else "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Finance storage split runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Finance storage split runner returned non-object JSON")
+    if action in {"dry-run", "health"}:
+        if action == "dry-run" and (
+            payload.get("query_only_contract", {}).get("production_mutation_count") != 0
+            or payload.get("query_only_contract", {}).get("destination_bytes_created") != 0
+        ):
+            raise RuntimeError("Finance storage dry-run did not prove zero mutation/bytes")
+    elif bool(payload.get("global_manifest_switched")):
+        raise RuntimeError("candidate builder unexpectedly switched the global manifest")
+    return payload
+
+
 def run_partner_finance_diagnostic_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -4759,6 +4900,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_canonical_readback.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="readback",
+    )
+
+    finance_storage_split_dry_run = subparsers.add_parser(
+        "finance-storage-split-dry-run",
+        help=(
+            "Build the exact query-only Finance raw/operational split plan; "
+            "create no destination bytes and keep the monolith canonical."
+        ),
+    )
+    finance_storage_split_dry_run.add_argument("--output", required=True)
+    finance_storage_split_dry_run.add_argument("--chunk-size", type=int, default=10_000)
+    finance_storage_split_dry_run.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="dry-run",
+    )
+
+    finance_storage_split_health = subparsers.add_parser(
+        "finance-storage-split-health",
+        help="Read generation/cursor/lag/mismatch/capacity/rollback health without mutation.",
+    )
+    finance_storage_split_health.add_argument("--output", default="")
+    finance_storage_split_health.add_argument("--chunk-size", type=int, default=10_000)
+    finance_storage_split_health.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="health",
+    )
+
+    finance_storage_split_apply = subparsers.add_parser(
+        "finance-storage-split-apply",
+        help=(
+            "Build only the reviewed candidate raw/operational generation; "
+            "never switch the global manifest or canonical readers."
+        ),
+    )
+    finance_storage_split_apply.add_argument("--plan-file", required=True)
+    finance_storage_split_apply.add_argument("--fingerprint", required=True)
+    finance_storage_split_apply.add_argument("--approval-reference", required=True)
+    finance_storage_split_apply.add_argument("--chunk-size", type=int, default=10_000)
+    finance_storage_split_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="apply",
     )
 
     partner_finance_diagnostic = subparsers.add_parser(

@@ -266,6 +266,133 @@ def main() -> None:
         command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
         if any(name.startswith("finance-retro-") for name in command_choices):
             raise AssertionError("revoked hosted Finance retro commands remain executable")
+        storage_plan_path = Path(finance_temp_dir) / "finance-storage-plan.json"
+        storage_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_version": "wb_core_finance_storage_split_plan_v1",
+                    "mode": "dry_run",
+                    "fingerprint": "sha256:storage-reviewed",
+                    "apply_allowed_by_machine_preflight": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        storage_payloads = {
+            "dry-run": {
+                "contract_version": "wb_core_finance_storage_split_plan_v1",
+                "query_only_contract": {
+                    "production_mutation_count": 0,
+                    "destination_bytes_created": 0,
+                },
+                "fingerprint": "sha256:storage-reviewed",
+            },
+            "health": {
+                "contract_version": "wb_core_storage_generation_manifest_v1",
+                "canonical_source": "monolith",
+            },
+            "apply": {
+                "contract_version": "wb_core_finance_storage_split_candidate_v1",
+                "global_manifest_switched": False,
+                "canonical_source": "monolith",
+            },
+        }
+        for action, expected_timeout in (
+            ("dry-run", hosted_runtime.FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS),
+            ("health", hosted_runtime.FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS),
+            ("apply", hosted_runtime.FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS),
+        ):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(storage_payloads[action]),
+                stderr="",
+            )
+            with mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                hosted_runtime._run_remote_finance_storage_split_action(
+                    active_target,
+                    action=action,
+                    plan_path=storage_plan_path if action == "apply" else None,
+                    fingerprint=(
+                        "sha256:storage-reviewed" if action == "apply" else ""
+                    ),
+                    approval_reference=(
+                        "human-gate-storage-123" if action == "apply" else ""
+                    ),
+                    chunk_size=100_000,
+                )
+            if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
+                raise AssertionError(
+                    f"Finance storage {action} lost its bounded timeout"
+                )
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if "apps/finance_storage_split.py" not in remote_command:
+                raise AssertionError(
+                    "Finance storage command bypassed the repo-owned runner"
+                )
+            if action == "apply":
+                for token in (
+                    "--confirm-fingerprint",
+                    "sha256:storage-reviewed",
+                    "--approval-reference",
+                    "human-gate-storage-123",
+                ):
+                    if token not in remote_command:
+                        raise AssertionError(
+                            f"Finance storage apply lost {token}"
+                        )
+            elif "--confirm-fingerprint" in remote_command:
+                raise AssertionError(
+                    "Finance storage read-only command unexpectedly enables apply"
+                )
+        storage_dry_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-split-dry-run",
+                "--output",
+                str(Path(finance_temp_dir) / "finance-storage-review.json"),
+            ]
+        )
+        storage_apply_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-split-apply",
+                "--plan-file",
+                str(storage_plan_path),
+                "--fingerprint",
+                "sha256:storage-reviewed",
+                "--approval-reference",
+                "human-gate-storage-123",
+            ]
+        )
+        if (
+            storage_dry_args.handler
+            is not hosted_runtime.run_finance_storage_split_command
+            or storage_dry_args.finance_storage_split_action != "dry-run"
+            or storage_apply_args.finance_storage_split_action != "apply"
+        ):
+            raise AssertionError(
+                "hosted runner must expose gated Finance storage commands"
+            )
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                return_value=storage_payloads["dry-run"],
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_storage_split_command(storage_dry_args)
+        storage_evidence_path = Path(storage_dry_args.output)
+        if (
+            not storage_evidence_path.is_file()
+            or storage_evidence_path.stat().st_mode & 0o777 != 0o600
+        ):
+            raise AssertionError(
+                "Finance storage reviewed evidence must be written mode 0600"
+            )
     with TemporaryDirectory(prefix="partner-ads-hosted-smoke-") as partner_temp_dir:
         partner_output = Path(partner_temp_dir) / "partner-diagnostic.json"
         partner_args = hosted_runtime.build_arg_parser().parse_args(

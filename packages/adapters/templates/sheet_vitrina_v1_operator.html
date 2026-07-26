@@ -3978,6 +3978,11 @@
               <p id="wbFinanceReportPeriod" class="report-period">Еженедельные отчёты Wildberries с начала 2026 года.</p>
               <p class="field-note">Официальный Finance API WB и единая каноническая «Себестоимость WB наша»: для операций до 01.07.2026 — утверждённая ретроспективная проекция стоимости того же nmId на 01.07, начиная с 01.07 — exact-date стоимость по дате операции.</p>
               <p id="wbFinanceReportStatus" class="section-message">Читаем финансовые отчёты...</p>
+              <section class="report-card">
+                <h3>Хранилища Finance</h3>
+                <p class="field-note">Текущие generation, outbox cursor/lag, shadow mismatches, capacity и готовность rollback. Этот статус ничего не переключает.</p>
+                <div id="wbFinanceStorageHealth" class="report-notes"></div>
+              </section>
               <div id="wbFinanceReportContent" hidden>
                 <div id="wbFinanceReportTableWrap" class="wb-finance-table-wrap"></div>
               </div>
@@ -5267,6 +5272,7 @@
       const dailyReportNotes = document.getElementById("dailyReportNotes");
       const wbFinanceReportPeriod = document.getElementById("wbFinanceReportPeriod");
       const wbFinanceReportStatus = document.getElementById("wbFinanceReportStatus");
+      const wbFinanceStorageHealth = document.getElementById("wbFinanceStorageHealth");
       const wbFinanceReportContent = document.getElementById("wbFinanceReportContent");
       const wbFinanceReportTableWrap = document.getElementById("wbFinanceReportTableWrap");
       const wbFinanceReportNotes = document.getElementById("wbFinanceReportNotes");
@@ -13401,6 +13407,7 @@
 
       function renderWbFinanceReport(payload) {
         const weeks = Array.isArray(payload && payload.weeks) ? payload.weeks : [];
+        renderWbFinanceStorageHealth(payload && payload.storage_health);
         if (!weeks.length) {
           wbFinanceReportContent.hidden = true;
           wbFinanceReportStatus.textContent = "Сформированные недели пока не загружены.";
@@ -13481,6 +13488,39 @@
           (sourceProblemWeeks.length ? "<p class=\"wb-finance-warning\">Finance source требует внимания: " + sourceProblemWeeks.map((week) => formatFinanceWeek(week) + " — " + financeStatusLabel(week.status, false)).join("; ") + ".</p>" : "");
         window.requestAnimationFrame(() => { wbFinanceReportTableWrap.scrollLeft = wbFinanceReportTableWrap.scrollWidth; });
         scheduleEmbeddedHeightPost();
+      }
+
+      function renderWbFinanceStorageHealth(rawHealth) {
+        if (!wbFinanceStorageHealth) return;
+        const health = rawHealth && typeof rawHealth === "object" ? rawHealth : {};
+        const raw = health.raw && typeof health.raw === "object" ? health.raw : {};
+        const operational = health.operational && typeof health.operational === "object" ? health.operational : {};
+        const filesystem = health.filesystem && typeof health.filesystem === "object" ? health.filesystem : {};
+        const state = String(health.state || "unknown");
+        const canonical = String(health.canonical_source || "unknown");
+        const lag = Number(health.consumer_lag_events || 0);
+        const tailLag = Number(health.live_tail_lag_events || 0);
+        const mismatches = Number(health.shadow_mismatch_count || 0);
+        const deadLetters = Number(health.actionable_dead_letters || 0);
+        const safe = Boolean(health.rollback_ready) && lag === 0 && tailLag === 0 && mismatches === 0 && deadLetters === 0;
+        const tone = safe ? "success" : "warning";
+        const formatBytes = (value) => {
+          const bytes = Number(value || 0);
+          if (!Number.isFinite(bytes) || bytes < 0) return "—";
+          if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(2).replace(".", ",") + " ГБ";
+          if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(1).replace(".", ",") + " МБ";
+          return new Intl.NumberFormat("ru-RU").format(bytes) + " Б";
+        };
+        wbFinanceStorageHealth.innerHTML =
+          "<p class=\"section-message " + tone + "\">" +
+          escapeHtml("Состояние: " + state + "; canonical: " + canonical + (health.implicit_manifest ? "; implicit monolith" : "") + ".") +
+          "</p>" +
+          "<ul>" +
+          "<li>Raw generation: <code>" + escapeHtml(String(raw.generation_id || "—")) + "</code>, schema <code>" + escapeHtml(String(raw.schema_revision || "—")) + "</code>, " + escapeHtml(formatBytes(raw.size_bytes)) + ".</li>" +
+          "<li>Operational generation: <code>" + escapeHtml(String(operational.generation_id || "—")) + "</code>, schema <code>" + escapeHtml(String(operational.schema_revision || "—")) + "</code>, " + escapeHtml(formatBytes(operational.size_bytes)) + ".</li>" +
+          "<li>Cursor raw/operational: " + escapeHtml(String(health.raw_ack_cursor || 0)) + " / " + escapeHtml(String(health.operational_cursor || 0)) + "; consumer lag: " + escapeHtml(String(lag)) + "; live-tail cursor/lag: " + escapeHtml(String(health.live_tail_cursor || 0)) + " / " + escapeHtml(String(tailLag)) + "; mismatches: " + escapeHtml(String(mismatches)) + "; dead letters: " + escapeHtml(String(deadLetters)) + ".</li>" +
+          "<li>Свободная ёмкость: " + escapeHtml(formatBytes(filesystem.free_bytes)) + "; rollback: " + escapeHtml(health.rollback_ready ? "готов" : "не доказан") + "; cutover: " + escapeHtml(health.cutover_ready ? "готов" : "не разрешён/не готов") + ".</li>" +
+          "</ul>";
       }
 
       function financeCostQualityDiagnostic(week) {

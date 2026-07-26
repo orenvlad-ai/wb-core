@@ -1,7 +1,9 @@
 # Migration 124 — Finance raw and warehouse/cost storage split design
 
-Status: staged design only. No storage migration is performed by the
-production-cleanup task that introduced this document.
+Status: **implemented through the inert pre-cutover capability and exact
+query-only dry-run boundary**. The canonical source remains the monolith.
+Candidate creation, live-tail apply, manifest cutover and old-generation
+retirement remain separately human-gated production mutations.
 
 ## Measured production boundary
 
@@ -53,6 +55,54 @@ never by feature code hardcoding filesystem paths:
 Cross-store foreign keys are forbidden. Stable source identities and revisions
 replace them at the boundary.
 
+## Current repository implementation
+
+The implementation is deliberately inert on deploy:
+
+- `packages/application/storage_registry.py` resolves `finance_raw` and
+  `operational`, records logical opens and defaults both stores to the existing
+  `registry_upload_runtime.sqlite3` without creating a manifest or another
+  database. A selected split manifest must bind one epoch, exact generation
+  ids, schema revisions and the identities stored inside both database files;
+  mixed files or schema identities fail closed.
+- `packages/application/finance_raw_storage.py` owns the raw batch/row/outbox
+  schema and the operational inbox/receipt/cursor/dead-letter/shadow schema.
+  Raw rows and one replay event commit in one SQLite transaction. The
+  operational consumer is at-least-once, receipt-idempotent and keeps poison
+  events actionable. Its live-tail bridge mirrors committed batches and outbox
+  sequence into an unselected candidate with its own cursor; crash-before-event
+  rolls back, crash-after-commit retries as a no-op.
+- `packages/application/finance_storage_migration.py` builds a coherent
+  query-only source plan with the complete table owner/read/write matrix,
+  direct-open inventory, ordered logical digests, watermarks, chunks, actual
+  query plans, allocation/capacity evidence, writers/timers, target generations,
+  non-target invariants and rollback scope. The fingerprint excludes only
+  volatile free-byte/PID/timer-clock counters that are rechecked immediately
+  before apply.
+- `apps/finance_storage_split.py` defaults to `dry-run`. Its separately gated
+  `apply` can build only an unselected candidate generation: it requires an
+  exact reviewed fingerprint, approval reference, active private
+  `business-data-maintenance` hold, the warehouse writer lock and sufficient
+  freshly rechecked capacity. It never writes the global generation manifest.
+- `apps/finance_storage_sqlite_open_inventory.py --check-migrated` inventories
+  every Python SQLite open and rejects registry bypasses in migrated Finance
+  and Partner runtime modules.
+- hosted `finance-storage-split-dry-run` and
+  `finance-storage-split-health` are query-only. Hosted
+  `finance-storage-split-apply` exists for a later exact human gate; deployment
+  does not call it.
+
+`WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED` defaults off. If a later
+reviewed stage enables it while the implicit monolith is still selected,
+legacy Finance writes and the new raw/outbox rows share the same transaction.
+It fails closed if the logical files differ. This is shadow infrastructure,
+not a canonical-writer switch.
+
+The operator Finance card exposes generation ids, schema revisions, raw and
+operational cursors, lag, mismatches, dead letters, filesystem free bytes and
+rollback/cutover readiness. Reading it creates no schema and performs no
+business mutation.
+
 ## Schemas and event flow
 
 The Finance raw store introduces:
@@ -96,6 +146,10 @@ They do not scan Finance raw during an ordinary publication or recovery.
 
 No production data movement occurs.
 
+Repository status: implemented. The full per-table matrix and full direct-open
+list are machine-readable parts of every dry-run rather than a manually
+maintained partial list.
+
 ### Stage 1 — schemas, outbox and shadow infrastructure
 
 - Add raw-store schema and migrations, operational inbox/receipt/cursor schema,
@@ -107,6 +161,9 @@ No production data movement occurs.
 
 No read cutover occurs.
 
+Repository status: implemented but disabled by default. No production shadow
+ingest or operational replay is enabled by deployment.
+
 ### Stage 2 — exact dry-run and capacity reservation
 
 The repo-owned migration runner is dry-run by default and emits:
@@ -116,6 +173,8 @@ The repo-owned migration runner is dry-run by default and emits:
 - Finance raw row count (`2,414,082` at the evidence baseline), min/max
   business watermarks and ordered chunk manifest;
 - per-chunk and full logical row digests independent of SQLite page layout;
+- per-chunk and full length-framed `raw_json` payload digests, so an unchanged
+  business key/hash cannot hide destination payload corruption;
 - current derived and operational table row counts/digests;
 - projected destination sizes from real shadow chunks, not the `277 MB`
   warehouse-only subset;
@@ -130,6 +189,11 @@ raw allocation, the complete non-raw generation, index-build overhead,
 verification scratch and an operational margin. Apply is forbidden until a
 fresh exact dry-run and explicit human gate match.
 
+Repository status: implemented. A production dry-run is valid only when it
+reports `mode=ro`, `PRAGMA query_only=1`, zero mutations, zero destination
+bytes, exact deployed SHA, per-object `sqlite_dbstat` allocation and sufficient
+capacity. The output file stays outside Git with mode `0600`.
+
 ### Stage 3 — raw backfill
 
 - Copy immutable raw rows in bounded primary-key/source-period chunks.
@@ -143,6 +207,9 @@ fresh exact dry-run and explicit human gate match.
   criterion.
 
 The live reader still uses the monolith.
+
+Repository status: candidate-builder code and fixtures are implemented;
+production execution is **not approved** by repository/deploy closure.
 
 ### Stage 4 — dual/shadow read and live-tail catch-up
 
@@ -159,6 +226,9 @@ The live reader still uses the monolith.
 There is no distributed transaction: raw commit is authoritative, and every
 operational effect is replayable from the durable outbox.
 
+Repository status: bounded shadow comparison code exists; production candidate
+bytes, live-tail apply and soak have not started.
+
 ### Stage 5 — cutover
 
 - Acquire only the exact Finance ingestion/derivation writers and affected
@@ -170,6 +240,9 @@ operational effect is replayable from the durable outbox.
 - Read paths fail closed on mixed generation or cursor lag beyond policy.
 
 The old monolith remains immutable rollback evidence.
+
+Repository status: not authorized. No command in the current pre-cutover
+closure switches the global manifest.
 
 ### Stage 6 — rollback and observation
 
