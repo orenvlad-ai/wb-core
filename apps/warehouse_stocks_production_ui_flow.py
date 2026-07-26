@@ -1625,7 +1625,7 @@ def _assert_vitrina_incident_provisional_profile(
             row_id = str(cell.get_attribute("data-row-id") or "")
             text = cell.inner_text().strip()
             value = None if text in {"", "—"} else _visible_decimal(text)
-            result[row_id] = (value, cell)
+            result[_vitrina_incident_projection_scope(row_id)] = (value, cell)
         return result
 
     family_evidence: dict[str, Any] = {}
@@ -1704,18 +1704,9 @@ def _assert_vitrina_incident_provisional_profile(
         total_incident_cells = _cells("total_" + incident_key)
         total_effective_cells = _cells("total_" + effective_key)
         total_triple = (
-            total_fact_cells.get(
-                "TOTAL|total_" + fact_key,
-                (None, None),
-            )[0],
-            total_incident_cells.get(
-                "TOTAL|total_" + incident_key,
-                (None, None),
-            )[0],
-            total_effective_cells.get(
-                "TOTAL|total_" + effective_key,
-                (None, None),
-            )[0],
+            total_fact_cells.get("TOTAL", (None, None))[0],
+            total_incident_cells.get("TOTAL", (None, None))[0],
+            total_effective_cells.get("TOTAL", (None, None))[0],
         )
         _assert(
             all(value is not None for value in total_triple),
@@ -1768,6 +1759,10 @@ def _assert_vitrina_incident_provisional_profile(
         "provisional_filled_cell_count": provisional_filled_cells,
         "screenshots": [str(screenshot)],
     }
+
+
+def _vitrina_incident_projection_scope(row_id: str) -> str:
+    return str(row_id).partition("|")[0]
 
 
 def _warehouse_action_theme_evidence(page: Page) -> dict[str, Any]:

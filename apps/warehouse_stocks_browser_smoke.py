@@ -26,6 +26,7 @@ from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
     _metric_date_coverage,
     _sku_management_dom_summary,
     _supplier_financial_detail_url,
+    _vitrina_incident_projection_scope,
     _visible_money,
     run_warehouse_ui_flow,
 )
@@ -53,6 +54,28 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert(
+        {
+            _vitrina_incident_projection_scope(
+                "SKU:210183142|wb_stock_fact_qty"
+            ),
+            _vitrina_incident_projection_scope(
+                "SKU:210183142|wb_stock_incident_qty"
+            ),
+            _vitrina_incident_projection_scope(
+                "SKU:210183142|wb_stock_effective_qty"
+            ),
+        }
+        == {"SKU:210183142"},
+        "Vitrina acceptance joins all incident families by SKU scope",
+    )
+    _assert(
+        _vitrina_incident_projection_scope(
+            "TOTAL|total_wb_stock_effective_qty"
+        )
+        == "TOTAL",
+        "Vitrina acceptance joins TOTAL incident families by TOTAL scope",
+    )
     _assert_warehouse_balance_cardinality(
         warehouse_key="ff",
         expected_sku_count=1,
