@@ -411,6 +411,174 @@ class RegistryUploadDbBackedRuntime:
             source_outcomes=list(semantic_summary["sources"]),
         )
 
+    def apply_sheet_vitrina_incident_rematerialization(
+        self,
+        *,
+        operation_id: str,
+        plan_fingerprint: str,
+        approval_reference: str,
+        actor: str,
+        applied_at: str,
+        snapshots: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically replace only reviewed derived incident cells.
+
+        Each snapshot carries an exact semantic before/after digest plus compact
+        target before/after images.  The audit images are sufficient to recover
+        the bounded derived cells without copying the multi-gigabyte runtime
+        store.  Source stock snapshots and unrelated ready-plan cells are never
+        updated by this method.
+        """
+
+        normalized_operation_id = str(operation_id or "").strip()
+        normalized_fingerprint = str(plan_fingerprint or "").strip()
+        normalized_approval = str(approval_reference or "").strip()
+        if not normalized_operation_id:
+            raise ValueError("incident rematerialization operation_id is required")
+        if not normalized_fingerprint.startswith("sha256:"):
+            raise ValueError("incident rematerialization plan fingerprint is required")
+        if not normalized_approval:
+            raise ValueError("incident rematerialization approval_reference is required")
+        _validate_timestamp(applied_at, field_name="applied_at")
+
+        changed_snapshots = 0
+        changed_cells = 0
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for item in snapshots:
+                    bundle_version = str(item.get("bundle_version") or "")
+                    as_of_date = str(item.get("as_of_date") or "")
+                    expected_snapshot_id = str(item.get("snapshot_id") or "")
+                    before_digest = str(item.get("before_plan_digest") or "")
+                    after_digest = str(item.get("after_plan_digest") or "")
+                    after_plan = item.get("after_plan")
+                    if not isinstance(after_plan, SheetVitrinaV1Envelope):
+                        raise ValueError(
+                            "incident rematerialization after_plan must be a SheetVitrinaV1Envelope"
+                        )
+                    row = conn.execute(
+                        """
+                        SELECT snapshot_id, plan_json
+                        FROM sheet_vitrina_v1_ready_snapshots
+                        WHERE bundle_version = ? AND as_of_date = ?
+                        """,
+                        (bundle_version, as_of_date),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(
+                            "incident rematerialization ready snapshot disappeared: "
+                            f"{bundle_version} {as_of_date}"
+                        )
+                    if str(row["snapshot_id"] or "") != expected_snapshot_id:
+                        raise ValueError(
+                            "incident rematerialization snapshot identity changed"
+                        )
+                    current_plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
+                    current_digest = _sheet_vitrina_plan_digest(current_plan)
+                    if current_digest not in {before_digest, after_digest}:
+                        raise ValueError(
+                            "incident rematerialization ready snapshot changed after review"
+                        )
+                    existing_audit = conn.execute(
+                        """
+                        SELECT plan_fingerprint
+                        FROM sheet_vitrina_v1_incident_rematerialization_audit
+                        WHERE operation_id = ? AND bundle_version = ? AND as_of_date = ?
+                        """,
+                        (normalized_operation_id, bundle_version, as_of_date),
+                    ).fetchone()
+                    if existing_audit is not None and str(
+                        existing_audit["plan_fingerprint"] or ""
+                    ) != normalized_fingerprint:
+                        raise ValueError(
+                            "incident rematerialization operation identity conflict"
+                        )
+                    if current_digest == before_digest:
+                        serialized_after = _serialize_sheet_vitrina_plan(after_plan)
+                        conn.execute(
+                            """
+                            UPDATE sheet_vitrina_v1_ready_snapshots
+                            SET plan_json = ?
+                            WHERE bundle_version = ? AND as_of_date = ?
+                            """,
+                            (serialized_after, bundle_version, as_of_date),
+                        )
+                        changed_snapshots += 1
+                        changed_cells += int(item.get("changed_cells") or 0)
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_incident_rematerialization_audit(
+                            operation_id, bundle_version, as_of_date, snapshot_id,
+                            plan_fingerprint, approval_reference, actor,
+                            target_dates_json, before_plan_digest, after_plan_digest,
+                            non_target_digest, changed_cells, before_manifest_json,
+                            after_manifest_json, applied_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(operation_id, bundle_version, as_of_date) DO NOTHING
+                        """,
+                        (
+                            normalized_operation_id,
+                            bundle_version,
+                            as_of_date,
+                            expected_snapshot_id,
+                            normalized_fingerprint,
+                            normalized_approval,
+                            str(actor or ""),
+                            json.dumps(
+                                list(item.get("target_dates") or []),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            before_digest,
+                            after_digest,
+                            str(item.get("non_target_digest") or ""),
+                            int(item.get("changed_cells") or 0),
+                            json.dumps(
+                                item.get("before_manifest") or {},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            json.dumps(
+                                item.get("after_manifest") or {},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            applied_at,
+                        ),
+                    )
+                    readback = conn.execute(
+                        """
+                        SELECT plan_json
+                        FROM sheet_vitrina_v1_ready_snapshots
+                        WHERE bundle_version = ? AND as_of_date = ?
+                        """,
+                        (bundle_version, as_of_date),
+                    ).fetchone()
+                    if readback is None or _sheet_vitrina_plan_digest(
+                        _deserialize_sheet_vitrina_plan(readback["plan_json"])
+                    ) != after_digest:
+                        raise ValueError(
+                            "incident rematerialization transactional readback mismatch"
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "applied" if changed_snapshots else "no_op",
+            "operation_id": normalized_operation_id,
+            "plan_fingerprint": normalized_fingerprint,
+            "changed_snapshots": changed_snapshots,
+            "changed_cells": changed_cells,
+            "audit_rows": len(snapshots),
+            "applied_at": applied_at,
+        }
+
     def load_sheet_vitrina_ready_snapshot(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
         current_state = self.load_current_state()
         with _connect(self.db_path) as conn:
@@ -8023,6 +8191,17 @@ def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _sheet_vitrina_plan_digest(plan: SheetVitrinaV1Envelope) -> str:
+    payload = json.loads(_serialize_sheet_vitrina_plan(plan))
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
     try:
         payload = json.loads(raw_value)
@@ -9509,6 +9688,31 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             projection_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY (seller_id, snapshot_digest, policy_revision, snapshot_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_incident_rematerialization_audit (
+            operation_id TEXT NOT NULL,
+            bundle_version TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            plan_fingerprint TEXT NOT NULL,
+            approval_reference TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            target_dates_json TEXT NOT NULL,
+            before_plan_digest TEXT NOT NULL,
+            after_plan_digest TEXT NOT NULL,
+            non_target_digest TEXT NOT NULL,
+            changed_cells INTEGER NOT NULL,
+            before_manifest_json TEXT NOT NULL,
+            after_manifest_json TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            PRIMARY KEY (operation_id, bundle_version, as_of_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_incident_rematerialization_by_date
+        ON sheet_vitrina_v1_incident_rematerialization_audit(
+            as_of_date,
+            applied_at DESC
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_sku_action_events (

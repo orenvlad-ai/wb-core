@@ -37,6 +37,7 @@ FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
+VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
@@ -2901,6 +2902,205 @@ def run_ads_historical_recovery_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_vitrina_incident_rematerialization_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.vitrina_incident_action)
+    plan_path = (
+        Path(str(args.plan_file)).resolve()
+        if action == "apply"
+        else None
+    )
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError(
+            "Vitrina incident reviewed plan must stay outside the Git checkout"
+        )
+    payload = _run_remote_vitrina_incident_rematerialization(
+        target,
+        action=action,
+        date_from=str(args.date_from or ""),
+        date_to=str(args.date_to or ""),
+        max_dates=int(args.max_dates),
+        plan_path=plan_path,
+        fingerprint=str(args.fingerprint or ""),
+        approval_reference=str(args.approval_reference or ""),
+        actor=str(args.actor or ""),
+    )
+    output = str(args.output or "").strip()
+    if action == "dry-run" and output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError(
+                "Vitrina incident reviewed plan must stay outside the Git checkout"
+            )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"vitrina-incident-rematerialization-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_vitrina_incident_rematerialization(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    date_from: str,
+    date_to: str,
+    max_dates: int,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"vitrina-incident-rematerialization-{action}",
+    )
+    if action not in {"dry-run", "apply"}:
+        raise ValueError(
+            f"unsupported Vitrina incident rematerialization action: {action}"
+        )
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="vitrina-incident-rematerialization-apply",
+            dry_run=False,
+        )
+    try:
+        normalized_from = date.fromisoformat(date_from).isoformat()
+        normalized_to = date.fromisoformat(date_to).isoformat()
+    except ValueError as exc:
+        raise ValueError(
+            "Vitrina incident rematerialization dates must be YYYY-MM-DD"
+        ) from exc
+    if normalized_from > normalized_to:
+        raise ValueError(
+            "Vitrina incident rematerialization date_from cannot exceed date_to"
+        )
+    bounded_max_dates = int(max_dates)
+    if not 1 <= bounded_max_dates <= 14:
+        raise ValueError(
+            "Vitrina incident rematerialization max_dates must be within 1..14"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "Vitrina incident rematerialization requires the canonical active runtime dir"
+        )
+    runner_args = [
+        "python3",
+        "apps/vitrina_incident_rematerialization.py",
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    reviewed_plan_json = ""
+    if action == "dry-run":
+        runner_args.extend(
+            [
+                "dry-run",
+                "--date-from",
+                normalized_from,
+                "--date-to",
+                normalized_to,
+                "--max-dates",
+                str(bounded_max_dates),
+                "--stdout-plan",
+            ]
+        )
+    else:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Vitrina incident rematerialization apply requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        reviewed_plan = json.loads(reviewed_plan_json)
+        if not isinstance(reviewed_plan, dict):
+            raise ValueError(
+                "Vitrina incident rematerialization plan must be an object"
+            )
+        if (
+            reviewed_plan.get("contract_name")
+            != "vitrina_incident_rematerialization"
+            or int(reviewed_plan.get("contract_version") or 0) != 1
+            or reviewed_plan.get("mode") != "dry_run"
+            or not reviewed_plan.get("apply_allowed")
+            or reviewed_plan.get("date_from_requested") != normalized_from
+            or reviewed_plan.get("date_to") != normalized_to
+            or int(reviewed_plan.get("max_dates") or 0) != bounded_max_dates
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError(
+                "Vitrina incident rematerialization plan does not match the exact apply scope"
+            )
+        if not approval_reference.strip():
+            raise ValueError(
+                "Vitrina incident rematerialization apply requires --approval-reference"
+            )
+        if not actor.strip():
+            raise ValueError(
+                "Vitrina incident rematerialization apply requires --actor"
+            )
+        runner_args.extend(
+            [
+                "apply",
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Vitrina incident rematerialization {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Vitrina incident rematerialization runner returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        raise RuntimeError(
+            "Vitrina incident rematerialization runner returned an invalid result"
+        )
+    return payload
+
+
 def _run_remote_ads_historical_recovery(
     target: HostedRuntimeTarget,
     *,
@@ -4068,10 +4268,13 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     else:
         raise ValueError("warehouse UI evidence must be stored outside the repository")
     deployed_sha = str(args.deployed_sha or "").strip().lower()
-    if str(args.acceptance_profile or "") == "warehouse_recovery_policy_20260726":
+    if str(args.acceptance_profile or "") in {
+        "warehouse_recovery_policy_20260726",
+        "vitrina_incident_provisional_20260727",
+    }:
         if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
             raise ValueError(
-                "warehouse recovery UI flow requires an exact deployed SHA"
+                "profiled warehouse UI flow requires an exact deployed SHA"
             )
         runtime_sha_path = (
             f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
@@ -4092,7 +4295,7 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
         )
         if verify.returncode != 0:
             raise RuntimeError(
-                "warehouse recovery UI flow deployed SHA does not match "
+                "profiled warehouse UI flow deployed SHA does not match "
                 "the canonical runtime marker"
             )
     readback = _run_remote_warehouse_functional_action(target, action="readback")
@@ -4607,6 +4810,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ads_historical_action="readback",
     )
 
+    vitrina_incident_dry_run = subparsers.add_parser(
+        "vitrina-incident-rematerialization-dry-run",
+        help=(
+            "Build a bounded read-only plan for derived Web Vitrina incident metrics "
+            "from accepted stock snapshots."
+        ),
+    )
+    vitrina_incident_dry_run.add_argument("--date-from", required=True)
+    vitrina_incident_dry_run.add_argument("--date-to", required=True)
+    vitrina_incident_dry_run.add_argument("--max-dates", type=int, default=14)
+    vitrina_incident_dry_run.add_argument("--output", required=True)
+    vitrina_incident_dry_run.add_argument("--plan-file", default="")
+    vitrina_incident_dry_run.add_argument("--fingerprint", default="")
+    vitrina_incident_dry_run.add_argument("--approval-reference", default="")
+    vitrina_incident_dry_run.add_argument("--actor", default="")
+    vitrina_incident_dry_run.set_defaults(
+        handler=run_vitrina_incident_rematerialization_command,
+        vitrina_incident_action="dry-run",
+    )
+
+    vitrina_incident_apply = subparsers.add_parser(
+        "vitrina-incident-rematerialization-apply",
+        help=(
+            "Apply one exact reviewed bounded Web Vitrina incident-metric plan "
+            "and reconcile it."
+        ),
+    )
+    vitrina_incident_apply.add_argument("--date-from", required=True)
+    vitrina_incident_apply.add_argument("--date-to", required=True)
+    vitrina_incident_apply.add_argument("--max-dates", type=int, default=14)
+    vitrina_incident_apply.add_argument("--plan-file", required=True)
+    vitrina_incident_apply.add_argument("--fingerprint", required=True)
+    vitrina_incident_apply.add_argument("--approval-reference", required=True)
+    vitrina_incident_apply.add_argument("--actor", required=True)
+    vitrina_incident_apply.add_argument("--output", default="")
+    vitrina_incident_apply.set_defaults(
+        handler=run_vitrina_incident_rematerialization_command,
+        vitrina_incident_action="apply",
+    )
+
     archival_estimate_dry_run = subparsers.add_parser(
         "warehouse-archival-estimate-dry-run",
         help="Build the exact read-only 18-SKU archival estimate correction plan.",
@@ -5057,6 +5300,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "warehouse_chain_recovery_20260719",
             "warehouse_cost_transparency_20260720",
             "warehouse_recovery_policy_20260726",
+            "vitrina_incident_provisional_20260727",
         ),
         default=None,
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",

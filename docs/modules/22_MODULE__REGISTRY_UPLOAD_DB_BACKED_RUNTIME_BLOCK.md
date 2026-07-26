@@ -241,7 +241,9 @@ The same SQLite runtime owns `sheet_vitrina_v1_sku_action_events`. It is append-
 
 The runtime owns append-only `sheet_vitrina_v1_wb_incident_policy_revisions` by canonical seller and revision. Each row stores activity, stable warehouse IDs plus exact historical name identities, reason, effective interval, status, actor/source, created timestamp and preserved legacy per-user payload evidence. Date resolution selects the latest revision that owns the exact date; inactive/end-state revisions stop current/future adjustment without rewriting prior published dates.
 
-`sheet_vitrina_v1_wb_incident_projection_cache` is derived-only materialization keyed by seller, exact snapshot digest, policy revision and snapshot date. It stores the deterministic fact/incident/effective projection and cannot mutate canonical stock snapshots, warehouse balances, WAC or capital events.
+`sheet_vitrina_v1_wb_incident_projection_cache` is derived-only materialization keyed by seller, exact snapshot/cache digest, policy revision and snapshot date. Confirmed entries use the upstream raw digest. The Vitrina-only provisional namespace uses `vitrina-accepted-payload:sha256:...`, a deterministic digest of the actually accepted items/warehouse rows; quality metadata explicitly records that this identity is not proof of completeness. It stores deterministic fact/incident/effective projections and cannot mutate canonical stock snapshots, warehouse balances, WAC or capital events.
+
+`sheet_vitrina_v1_incident_rematerialization_audit` owns the bounded ready-snapshot publication audit. One operation/date row pins operation and plan fingerprint, approval reference/actor, bundle/snapshot identity, target dates, semantic before/after plan digests, non-target digest, changed-cell count, compact before/after incident manifests and apply timestamp. Apply updates only the matching ready snapshot `plan_json` inside `BEGIN IMMEDIATE`, accepts only the reviewed before/after digest, preserves raw temporal stocks and unrelated fields, and requires transactional plus second-plan idempotent readback.
 
 ## Global SQLite contention contract
 

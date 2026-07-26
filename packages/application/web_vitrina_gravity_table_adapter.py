@@ -211,6 +211,9 @@ def _build_rows(
                 presentation_state=str(cell.get("presentation_state") or ""),
                 presentation_tone=str(cell.get("presentation_tone") or ""),
                 presentation_reason=str(cell.get("presentation_reason") or ""),
+                quality_state=str(cell.get("quality_state") or ""),
+                quality_label=str(cell.get("quality_label") or ""),
+                quality_reason=str(cell.get("quality_reason") or ""),
             )
             for cell in row["cells"]
         }

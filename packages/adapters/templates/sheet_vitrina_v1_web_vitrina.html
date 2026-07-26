@@ -1907,7 +1907,8 @@
       display: none;
     }
 
-    [data-vitrina-incident-policy-badge][hidden] {
+    [data-vitrina-incident-policy-badge][hidden],
+    [data-vitrina-incident-quality-badge][hidden] {
       display: none;
     }
 
@@ -3423,6 +3424,14 @@
       box-shadow:
         inset 3px 0 0 rgba(124, 108, 245, 0.94),
         inset 0 0 0 1px rgba(139, 92, 246, 0.3);
+    }
+
+    .vitrina-table td.cell-incident-provisional {
+      text-decoration-line: underline;
+      text-decoration-style: dotted;
+      text-decoration-color: rgba(148, 163, 184, 0.72);
+      text-underline-offset: 4px;
+      cursor: help;
     }
 
     .vitrina-table td.cell-history-unavailable {
@@ -5041,6 +5050,7 @@
             <div class="table-heading-left">
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
               <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>Учитывается политика инцидентов</span>
+              <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Полученный снимок</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
               <span class="seller-top-session tone-neutral" data-seller-top-session title="сессия" aria-label="сессия">
@@ -6343,6 +6353,7 @@
     const tableBodyNode = document.querySelector("[data-table-body]");
     const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
     const vitrinaIncidentPolicyBadge = document.querySelector("[data-vitrina-incident-policy-badge]");
+    const vitrinaIncidentQualityBadge = document.querySelector("[data-vitrina-incident-quality-badge]");
     const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
     const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
@@ -8306,6 +8317,30 @@
       vitrinaIncidentPolicyBadge.title = String(badge.detail || "");
     }
 
+    function renderVitrinaIncidentQualityBadge(quality) {
+      if (!vitrinaIncidentQualityBadge) return;
+      const active = Boolean(
+        quality && typeof quality === "object" &&
+        quality.active &&
+        String(quality.state || "") === "provisional_received_rows"
+      );
+      vitrinaIncidentQualityBadge.hidden = !active;
+      if (!active) {
+        vitrinaIncidentQualityBadge.removeAttribute("title");
+        return;
+      }
+      vitrinaIncidentQualityBadge.textContent = String(
+        quality.label || "Полученный снимок"
+      );
+      vitrinaIncidentQualityBadge.title = String(
+        quality.detail || "Рассчитано по полученному снимку, полнота WB не подтверждена"
+      );
+      vitrinaIncidentQualityBadge.setAttribute(
+        "aria-label",
+        vitrinaIncidentQualityBadge.title
+      );
+    }
+
     async function applyWbIncidentPolicy() {
       if (!wbIncidentApply || state.warehouses.incidentLoading) return;
       const selected = Array.from(document.querySelectorAll("[data-wb-incident-warehouse-id]:checked")).map(function(node) {
@@ -8334,8 +8369,24 @@
         state.warehouses.incidentPolicy = result;
         renderWbIncidentPolicy();
         if (wbIncidentResult) {
-          wbIncidentResult.textContent = "Политика применена. Supply, SKU Management и следующий publish витрины используют revision " + String(result.revision || 0) + ".";
-          wbIncidentResult.setAttribute("data-tone", "success");
+          const rematerialization = result && typeof result.rematerialization === "object"
+            ? result.rematerialization
+            : {};
+          const rematerializationStatus = String(rematerialization.status || "");
+          if (rematerializationStatus === "failed") {
+            wbIncidentResult.textContent = "Политика revision " + String(result.revision || 0) +
+              " сохранена, но bounded rematerialization витрины не завершена: " +
+              String(rematerialization.error || "неизвестная ошибка") + ".";
+            wbIncidentResult.setAttribute("data-tone", "error");
+          } else {
+            const changedCells = Number(rematerialization.changed_cells || 0);
+            const snapshotCount = Number(rematerialization.snapshot_count || 0);
+            wbIncidentResult.textContent = "Политика revision " + String(result.revision || 0) +
+              " применена. Затронутые ready-даты витрины обработаны автоматически: " +
+              String(snapshotCount) + " снимк., " + String(changedCells) +
+              " ячеек; Supply и SKU Management сохраняют строгую проверку полноты.";
+            wbIncidentResult.setAttribute("data-tone", "success");
+          }
           wbIncidentResult.hidden = false;
         }
       } catch (error) {
@@ -12033,6 +12084,7 @@
       }
       const meta = payload.meta || {};
       renderVitrinaIncidentPolicyBadge(meta.incident_policy_badge);
+      renderVitrinaIncidentQualityBadge(meta.incident_projection_quality);
       pageMetaNode.textContent = "";
       pageMetaNode.hidden = true;
       filterMetaNode.textContent =
@@ -12361,7 +12413,11 @@
       } else if (String(cell.presentation_state || "") === "unavailable") {
         classes.push("cell-history-unavailable");
       }
+      if (String(cell.quality_state || "") === "provisional_received_rows") {
+        classes.push("cell-incident-provisional");
+      }
       const title = formatCellTitle(column, row, cell);
+      const ariaLabel = title || formatCellValue(cell);
       return (
         '<td class="' +
         classes.join(" ") +
@@ -12373,10 +12429,14 @@
         escapeHtml(cellValue(row, "metric_key") || "") +
         '" data-cell-date="' +
         escapeHtml(cellDate || "") +
+        '" data-quality-state="' +
+        escapeHtml(String(cell.quality_state || "")) +
         '" style="' +
         columnStyle(column, stickyLeft) +
         '" title="' +
         escapeHtml(title) +
+        '" aria-label="' +
+        escapeHtml(ariaLabel) +
         '">' +
         formatCellContent(column, row, cell) +
         "</td>"
@@ -12482,8 +12542,13 @@
         return scopeKindLabel(String(row.row_kind || ""));
       }
       const value = formatCellValue(cell);
-      const reason = String(cell.presentation_reason || "").trim();
-      return reason ? value + " · WebCore: " + reason : value;
+      const reasons = [
+        String(cell.presentation_reason || "").trim(),
+        String(cell.quality_reason || "").trim()
+      ].filter(function(item, index, items) {
+        return item && items.indexOf(item) === index;
+      });
+      return reasons.length ? value + " · WebCore: " + reasons.join(" · ") : value;
     }
 
     function buildStickyOffsets(columns) {

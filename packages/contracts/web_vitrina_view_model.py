@@ -62,6 +62,9 @@ class WebVitrinaViewModelCell:
     presentation_state: str = ""
     presentation_tone: str = ""
     presentation_reason: str = ""
+    quality_state: str = ""
+    quality_label: str = ""
+    quality_reason: str = ""
 
 
 @dataclass(frozen=True)

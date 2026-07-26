@@ -136,6 +136,9 @@ def build_web_vitrina_page_composition(
             "incident_policy_badge": dict(
                 contract_payload["meta"].get("incident_policy_badge") or {}
             ),
+            "incident_projection_quality": dict(
+                contract_payload["meta"].get("incident_projection_quality") or {}
+            ),
         },
         "historical_access": _build_historical_access(
             page_route=page_route,

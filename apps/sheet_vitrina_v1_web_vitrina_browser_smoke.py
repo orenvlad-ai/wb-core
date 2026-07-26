@@ -404,6 +404,81 @@ def run_browser_checks(
                     raise AssertionError(f"unconfirmed cell must not use a bright yellow fill: {unconfirmed_style}")
                 if "inset" not in unconfirmed_style["shadow"]:
                     raise AssertionError(f"unconfirmed cell must retain a restrained edge marker: {unconfirmed_style}")
+                for _index in range(100):
+                    collapsed_toggle = page.locator(
+                        '[data-metric-anchor-toggle][aria-expanded="false"]'
+                    )
+                    if collapsed_toggle.count() == 0:
+                        break
+                    collapsed_toggle.first.click()
+                provisional_cell = page.locator(
+                    'td.cell-incident-provisional[data-metric-key="wb_stock_fact_qty"]'
+                    '[data-cell-date="2026-04-20"]'
+                )
+                if provisional_cell.count() != 1:
+                    raise AssertionError(
+                        "provisional incident fact fixture cell must render once"
+                    )
+                quality_phrase = (
+                    "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                )
+                if (
+                    quality_phrase not in (
+                        provisional_cell.get_attribute("title") or ""
+                    )
+                    or quality_phrase
+                    not in (provisional_cell.get_attribute("aria-label") or "")
+                ):
+                    raise AssertionError(
+                        "provisional incident cell must expose one accessible quality explanation"
+                    )
+                incident_cell = page.locator(
+                    'td.cell-incident-adjusted.cell-incident-provisional'
+                    '[data-metric-key="wb_stock_incident_qty"]'
+                    '[data-cell-date="2026-04-20"]'
+                )
+                if incident_cell.count() != 1:
+                    raise AssertionError(
+                        "positive provisional incident cell must retain the separate "
+                        "blue-violet incident marker"
+                    )
+                incident_style = incident_cell.evaluate(
+                    """node => {
+                      const style = getComputedStyle(node);
+                      return {background: style.backgroundColor, color: style.color, shadow: style.boxShadow};
+                    }"""
+                )
+                if incident_style["background"] in {
+                    "rgb(255, 247, 194)",
+                    "rgb(255, 239, 154)",
+                }:
+                    raise AssertionError(
+                        "provisional incident cells must not restore the bright yellow fill"
+                    )
+                if "inset" not in incident_style["shadow"]:
+                    raise AssertionError(
+                        f"incident marker must remain restrained and separate: {incident_style}"
+                    )
+                quality_badge = page.locator(
+                    "[data-vitrina-incident-quality-badge]:not([hidden])"
+                )
+                if (
+                    quality_badge.count() != 1
+                    or quality_phrase
+                    not in (quality_badge.get_attribute("title") or "")
+                    or quality_phrase
+                    not in (quality_badge.get_attribute("aria-label") or "")
+                ):
+                    raise AssertionError(
+                        "Vitrina must expose an accessible neutral provisional-quality badge"
+                    )
+                for _index in range(100):
+                    expanded_toggle = page.locator(
+                        '[data-metric-anchor-toggle][aria-expanded="true"]'
+                    )
+                    if expanded_toggle.count() == 0:
+                        break
+                    expanded_toggle.first.click()
             auto_schedule_block = _check_auto_schedule_block(page)
             activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)
@@ -4579,8 +4654,14 @@ def _build_plan(
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                     [f"SKU A: WAC WB", f"SKU:{first_nm_id}|our_wb_unit_cost_rub", 100],
                     [f"SKU B: WAC WB", f"SKU:{second_nm_id}|our_wb_unit_cost_rub", 110],
+                    ["Итого: Остаток WB факт", "TOTAL|total_wb_stock_fact_qty", 15],
+                    ["Итого: Остаток WB инцидент", "TOTAL|total_wb_stock_incident_qty", 10],
+                    ["Итого: Остаток WB effective", "TOTAL|total_wb_stock_effective_qty", 5],
+                    [f"SKU A: Остаток WB факт", f"SKU:{first_nm_id}|wb_stock_fact_qty", 15],
+                    [f"SKU A: Остаток WB инцидент", f"SKU:{first_nm_id}|wb_stock_incident_qty", 10],
+                    [f"SKU A: Остаток WB effective", f"SKU:{first_nm_id}|wb_stock_effective_qty", 5],
                 ],
-                row_count=19,
+                row_count=25,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(
@@ -4653,8 +4734,61 @@ def _build_plan(
                         "reason": "Тест: numeric value не должен отображаться без доказанного снимка.",
                         "source": "WebCore",
                     }
+                },
+                f"SKU:{first_nm_id}|wb_stock_fact_qty": {
+                    as_of_date: {
+                        "state": "",
+                        "tone": "neutral",
+                        "reason": "Рассчитано по фактически полученным строкам.",
+                        "source": "WebCore incident policy",
+                        "quality_state": "provisional_received_rows",
+                        "quality_label": "Полнота WB не подтверждена",
+                        "quality_reason": (
+                            "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                        ),
+                    }
+                },
+                f"SKU:{first_nm_id}|wb_stock_incident_qty": {
+                    as_of_date: {
+                        "state": "incident_adjusted",
+                        "tone": "blue_violet",
+                        "reason": "На выбранном складе получено 10 шт.",
+                        "source": "WebCore incident policy",
+                        "quality_state": "provisional_received_rows",
+                        "quality_label": "Полнота WB не подтверждена",
+                        "quality_reason": (
+                            "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                        ),
+                    }
+                },
+                f"SKU:{first_nm_id}|wb_stock_effective_qty": {
+                    as_of_date: {
+                        "state": "incident_adjusted",
+                        "tone": "blue_violet",
+                        "reason": "15 − 10 = 5 шт.",
+                        "source": "WebCore incident policy",
+                        "quality_state": "provisional_received_rows",
+                        "quality_label": "Полнота WB не подтверждена",
+                        "quality_reason": (
+                            "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                        ),
+                    }
+                },
+            },
+            "incident_projection_quality_by_date": {
+                as_of_date: {
+                    "state": "provisional_received_rows",
+                    "label_ru": "Полнота WB не подтверждена",
+                    "message_ru": (
+                        "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                    ),
+                    "pagination_complete": False,
+                    "accepted_item_count": 2,
+                    "accepted_warehouse_row_count": 3,
+                    "policy_revision": 2,
+                    "policy_effective_date": "2026-04-20",
                 }
-            }
+            },
         },
     )
 

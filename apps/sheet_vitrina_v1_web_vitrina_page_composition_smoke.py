@@ -184,6 +184,16 @@ def main() -> None:
             raise AssertionError(f"page composition namespace mismatch, got {composition['meta']}")
         if composition["meta"]["browser_state_persistence"] != "none":
             raise AssertionError(f"browser state persistence mismatch, got {composition['meta']}")
+        quality = composition["meta"].get("incident_projection_quality") or {}
+        if (
+            quality.get("state") != "provisional_received_rows"
+            or "Рассчитано по полученному снимку, полнота WB не подтверждена"
+            not in quality.get("detail", "")
+        ):
+            raise AssertionError(
+                "page composition must preserve the server-owned provisional "
+                f"quality badge: {quality}"
+            )
         historical_access = composition["historical_access"]
         if historical_access["current_mode"] != "default":
             raise AssertionError(f"historical mode mismatch, got {historical_access}")
@@ -598,7 +608,26 @@ def _build_plan(
                 column_count=len(STATUS_HEADER),
             ),
         ],
-        )
+        metadata=(
+            {
+                "incident_projection_quality_by_date": {
+                    as_of_date: {
+                        "state": "provisional_received_rows",
+                        "label_ru": "Полнота WB не подтверждена",
+                        "message_ru": (
+                            "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                        ),
+                        "accepted_item_count": 2,
+                        "accepted_warehouse_row_count": 3,
+                        "policy_revision": 2,
+                        "policy_effective_date": as_of_date,
+                    }
+                }
+            }
+            if as_of_date == "2026-04-20"
+            else {}
+        ),
+    )
 
 
 def _build_activity_surface_fixture() -> dict[str, object]:

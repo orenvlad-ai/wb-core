@@ -452,6 +452,9 @@ def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> We
         presentation_state=str(presentation.get("state") or ""),
         presentation_tone=str(presentation.get("tone") or ""),
         presentation_reason=str(presentation.get("reason") or ""),
+        quality_state=str(presentation.get("quality_state") or ""),
+        quality_label=str(presentation.get("quality_label") or ""),
+        quality_reason=str(presentation.get("quality_reason") or ""),
     )
 
 

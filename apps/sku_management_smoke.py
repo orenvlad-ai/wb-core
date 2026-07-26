@@ -561,6 +561,15 @@ def _settings_and_table(block) -> None:
     )
     if warehouse_settings["excluded_wb_warehouse_ids"] != [101, 102]:
         raise AssertionError("warehouse exclusions must use one server-owned config")
+    rematerialization = warehouse_settings.get("rematerialization") or {}
+    if (
+        rematerialization.get("status") != "no_ready_dates"
+        or rematerialization.get("snapshot_count") != 0
+    ):
+        raise AssertionError(
+            "policy Apply must invoke the bounded idempotent Vitrina "
+            f"rematerialization path: {rematerialization}"
+        )
     entrypoint = object.__new__(RegistryUploadHttpEntrypoint)
     entrypoint.sku_management_block = block
     canonical_payload = entrypoint._with_canonical_warehouse_exclusions(
