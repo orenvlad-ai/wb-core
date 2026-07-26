@@ -3323,6 +3323,8 @@ def _run_remote_sqlite_backup_archive(
         "apps/sqlite_backup_archive.py",
         "--source",
         str(source_path),
+        "--staging-directory",
+        runtime_dir,
         "--reserved-free-bytes",
         str(int(reserved_free_bytes)),
     ]

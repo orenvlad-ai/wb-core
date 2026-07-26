@@ -212,6 +212,98 @@ def main() -> int:
             "unrelated backup entry is unchanged",
         )
 
+        cross_source = backup_dir / "runtime.cross-filesystem.sqlite3"
+        with sqlite3.connect(cross_source) as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT)")
+            conn.executemany(
+                "INSERT INTO evidence(value) VALUES(?)",
+                [(f"cross-filesystem-{index}",) for index in range(200)],
+            )
+            conn.commit()
+        cross_source_sha = _sha256(cross_source.read_bytes())
+        staging_dir = root / "runtime-staging"
+        staging_dir.mkdir()
+        destination_reads = 0
+        real_disk_usage = shutil.disk_usage
+
+        def fail_final_destination_capacity(path):
+            nonlocal destination_reads
+            if Path(path).resolve() == backup_dir.resolve():
+                destination_reads += 1
+                if destination_reads >= 2:
+                    return shutil._ntuple_diskusage(1, 1, 0)
+            return real_disk_usage(root)
+
+        with mock.patch(
+            "apps.sqlite_backup_archive._same_filesystem",
+            return_value=False,
+        ):
+            cross_dry = run(
+                _args(
+                    cross_source,
+                    staging_directory=staging_dir,
+                )
+            )
+            _assert(
+                cross_dry["staging_same_filesystem"] is False
+                and cross_dry["capacity"]["projected_archive_size_bytes"] > 0
+                and cross_dry["capacity"]["staging_sufficient"]
+                and cross_dry["capacity"]["destination_sufficient"],
+                "cross-filesystem dry-run proves both capacity contours",
+            )
+            with mock.patch(
+                "apps.sqlite_backup_archive.shutil.disk_usage",
+                side_effect=fail_final_destination_capacity,
+            ):
+                try:
+                    run(
+                        _args(
+                            cross_source,
+                            staging_directory=staging_dir,
+                            apply=True,
+                            fingerprint=cross_dry["fingerprint"],
+                        )
+                    )
+                except ValueError as exc:
+                    _assert(
+                        "destination publication headroom" in str(exc),
+                        "final destination capacity race fails explicitly",
+                    )
+                else:
+                    raise AssertionError(
+                        "cross-filesystem destination capacity race was accepted"
+                    )
+            _assert(
+                cross_source.is_file()
+                and not Path(str(cross_source) + ".zst").exists()
+                and not list(backup_dir.glob("*.zst.tmp-*"))
+                and not list(staging_dir.iterdir()),
+                "destination capacity failure preserves raw and leaks no temp",
+            )
+            cross_applied = run(
+                _args(
+                    cross_source,
+                    staging_directory=staging_dir,
+                    apply=True,
+                    fingerprint=cross_dry["fingerprint"],
+                )
+            )
+        cross_archive = Path(cross_applied["archive"]["archive_path"])
+        _assert(
+            cross_applied["source_removed"]
+            and cross_applied["archive"]["staging_same_filesystem"] is False
+            and not cross_applied["orphan_artifacts"]
+            and not list(staging_dir.iterdir()),
+            "cross-filesystem staging is private, bounded and leaves no orphan",
+        )
+        cross_decompressed = subprocess.check_output(
+            ["zstd", "-q", "-d", "-c", "--", str(cross_archive)]
+        )
+        _assert(
+            _sha256(cross_decompressed) == cross_source_sha,
+            "cross-filesystem archive is lossless",
+        )
+
         live = root / "registry_upload_runtime.sqlite3"
         with sqlite3.connect(live) as conn:
             conn.execute("CREATE TABLE live(id INTEGER)")
@@ -229,12 +321,18 @@ def _args(
     source: Path,
     *,
     archive: Path | None = None,
+    staging_directory: Path | None = None,
     apply: bool = False,
     fingerprint: str = "",
 ) -> Namespace:
     return Namespace(
         source=str(source),
         archive=str(archive) if archive is not None else None,
+        staging_directory=(
+            str(staging_directory)
+            if staging_directory is not None
+            else None
+        ),
         apply=apply,
         fingerprint=fingerprint,
     )

@@ -688,6 +688,8 @@ def main() -> None:
         if (
             run_mock.call_args.kwargs.get("timeout") != 7200.0
             or archive_source not in archive_command
+            or "--staging-directory /opt/wb-core-runtime/state"
+            not in archive_command
             or "--reserved-free-bytes 4294967296" not in archive_command
             or "--apply" not in archive_command
         ):

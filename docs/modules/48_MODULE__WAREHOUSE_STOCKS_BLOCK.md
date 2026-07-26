@@ -214,6 +214,16 @@ shared lock, and completes only reviewed queue identities. Completion proves
 target quantities and non-target queue/warehouse digests unchanged and the
 exact repeat is a no-op.
 
+Hosted checkpoint archiving automatically uses the canonical runtime
+filesystem as private staging when the backup directory is a separate mount.
+The dry-run remains immutable/query-only and measures zstd bytes without
+persisting them, so both the conservative staging envelope and the exact
+destination archive-plus-reserve contour must pass before apply. Cross-device
+apply uses an unnamed staged file, rechecks exact compressed size and
+destination free space, publishes through a private fsynced destination temp,
+and performs the same independent retained readback before raw removal; it
+cannot leave a named staging artifact.
+
 Lossless archive is a file lifecycle, not a warehouse publication. Its hosted
 boundary accepts one raw checkpoint below the canonical
 `state/backups/warehouse-functional-sync` directory. Immutable query-only
