@@ -6,6 +6,7 @@ from argparse import Namespace
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -53,6 +54,39 @@ def main() -> int:
         dry = run(_args(source))
         _assert(dry["status"] == "ready", "dry-run ready")
         _assert(dry["source_integrity_check"] == "ok", "source integrity")
+        _assert(
+            dry["source_sqlite_open"]
+            == {"mode": "ro", "immutable": True, "query_only": True},
+            "dry-run uses immutable query-only SQLite",
+        )
+        _assert(
+            dry["capacity"]["sufficient"],
+            "dry-run proves archive capacity",
+        )
+        with mock.patch(
+            "apps.sqlite_backup_archive.shutil.disk_usage",
+            return_value=shutil._ntuple_diskusage(1, 1, 0),
+        ):
+            try:
+                run(
+                    _args(
+                        source,
+                        apply=True,
+                        fingerprint=dry["fingerprint"],
+                    )
+                )
+            except ValueError as exc:
+                _assert(
+                    "insufficient archive headroom" in str(exc),
+                    "capacity rejection is explicit",
+                )
+            else:
+                raise AssertionError("insufficient archive headroom was accepted")
+        _assert(
+            source.is_file()
+            and not list(backup_dir.glob("*.tmp-*")),
+            "capacity failure creates no archive artifact",
+        )
         try:
             run(_args(source, apply=True, fingerprint="sha256:wrong"))
         except ValueError as exc:
@@ -86,6 +120,12 @@ def main() -> int:
         _assert(_sha256(decompressed) == source_sha, "lossless decompressed sha")
         manifest = json.loads(Path(applied["manifest_path"]).read_text(encoding="utf-8"))
         _assert(manifest["decompressed_sha256"] == source_sha, "manifest sha")
+        _assert(
+            manifest["lifecycle_state"] == "retained"
+            and manifest["source_removed"] is True
+            and not applied["orphan_artifacts"],
+            "retained lifecycle has no raw or orphan artifact",
+        )
         manifest_link = backup_dir / "linked-manifest.json"
         manifest_link.symlink_to(Path(applied["manifest_path"]))
         try:
@@ -94,6 +134,83 @@ def main() -> int:
             _assert("manifest is unavailable" in str(exc), "manifest symlink rejected")
         else:
             raise AssertionError("manifest symlink unexpectedly accepted")
+
+        resumed_source = backup_dir / "runtime.resume.sqlite3"
+        with sqlite3.connect(resumed_source) as conn:
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT)")
+            conn.execute("INSERT INTO evidence(value) VALUES('resume')")
+            conn.commit()
+        Path(str(resumed_source) + "-wal").write_bytes(b"")
+        Path(str(resumed_source) + "-shm").write_bytes(b"\0" * 32768)
+        unrelated = backup_dir / "unrelated.retained"
+        unrelated.write_text("do-not-change", encoding="utf-8")
+        unrelated_identity = (
+            unrelated.stat().st_ino,
+            unrelated.stat().st_size,
+            unrelated.stat().st_mtime_ns,
+        )
+        resumed_dry = run(_args(resumed_source))
+        real_verify = verify_archive_manifest
+        with mock.patch(
+            "apps.sqlite_backup_archive.verify_archive_manifest",
+            side_effect=ValueError("injected independent readback failure"),
+        ):
+            try:
+                run(
+                    _args(
+                        resumed_source,
+                        apply=True,
+                        fingerprint=resumed_dry["fingerprint"],
+                    )
+                )
+            except ValueError as exc:
+                _assert(
+                    "injected independent readback failure" in str(exc),
+                    "independent archive readback failure is surfaced",
+                )
+            else:
+                raise AssertionError("archive readback failure was ignored")
+        _assert(
+            resumed_source.is_file()
+            and Path(str(resumed_source) + ".zst").is_file()
+            and Path(str(resumed_source) + ".zst.manifest.json").is_file(),
+            "failed readback preserves raw and verified resume artifacts",
+        )
+        _assert(
+            Path(str(resumed_source) + "-wal").is_file()
+            and Path(str(resumed_source) + "-shm").is_file(),
+            "failed readback preserves owned sidecars",
+        )
+        _assert(
+            real_verify(
+                Path(str(resumed_source) + ".zst.manifest.json")
+            )["lifecycle_state"]
+            == "verified_pending_source_removal",
+            "interrupted lifecycle is machine-readable",
+        )
+        resumed = run(
+            _args(
+                resumed_source,
+                apply=True,
+                fingerprint=resumed_dry["fingerprint"],
+            )
+        )
+        _assert(
+            resumed["source_removed"]
+            and not resumed_source.exists()
+            and not Path(str(resumed_source) + "-wal").exists()
+            and not Path(str(resumed_source) + "-shm").exists(),
+            "exact resume removes only raw source and owned sidecars",
+        )
+        _assert(
+            (
+                unrelated.stat().st_ino,
+                unrelated.stat().st_size,
+                unrelated.stat().st_mtime_ns,
+            )
+            == unrelated_identity,
+            "unrelated backup entry is unchanged",
+        )
 
         live = root / "registry_upload_runtime.sqlite3"
         with sqlite3.connect(live) as conn:

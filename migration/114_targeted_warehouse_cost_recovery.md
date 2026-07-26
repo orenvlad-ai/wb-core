@@ -42,10 +42,34 @@ The economics checkpoint is pinned to the same affected nmID closure and the ear
 
 The former transit/reservation entrypoint cannot build its monolithic snapshot even in CLI diagnostic mode and its imported apply helper fails closed. It only points operators to the canonical targeted runner.
 
+## Exact pending supplier-cost queue replay
+
+When the supplier bank document, expense lines and own-capital allocations are
+already durable and only their `supplier_costs:<shipment_id>` recalculation
+revisions remain queued, the reviewed path is
+`apps/warehouse_cost_queue_replay.py` rather than manufacturing a factual-date,
+physical or full-checkpoint mutation. Its dry-run is SQLite query-only and pins
+one or more exact invoice/shipment/document/expense/capital/queue identities,
+reconciles commission and capital totals, forecasts target-scoped undo bytes
+and reports `copy_bytes=0`, `full_database_copy=false` and
+`finance_raw_rows_read=0`.
+
+Apply requires the exact plan fingerprint, the shared writer lock and a durable
+pre-write audit. `WarehouseFunctionalBlock` completes only the selected queue
+ids/revisions; any other pending queue that overlaps the target nmID closure
+fails planning. The staged audit resumes a committed functional or economics
+step after a crash. Completion proves the exact queues are `complete`, target
+quantities and source records are unchanged, non-target queue/warehouse digests
+are unchanged, active supplier-cost states equal the reviewed publication,
+target-scoped economics is reconciled and the same fingerprint returns a no-op.
+Hosted `warehouse-cost-queue-replay-dry-run|apply` is the canonical production
+boundary.
+
 ## Verification
 
 - `python3 apps/warehouse_targeted_replay_smoke.py`
 - `python3 apps/warehouse_cost_unified_recovery_smoke.py`
+- `python3 apps/warehouse_cost_queue_replay_smoke.py`
 - `python3 apps/wb_supply_box_correction_smoke.py`
 - `python3 apps/ff_stock_reservation_smoke.py`
 - `python3 apps/our_wb_costs_smoke.py`

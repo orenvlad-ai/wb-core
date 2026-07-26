@@ -37,6 +37,7 @@ FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
+WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -2487,6 +2488,81 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_sqlite_backup_archive_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_sqlite_backup_archive(
+        target,
+        apply=bool(args.archive_apply),
+        source=str(args.source),
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        reserved_free_bytes=int(args.reserved_free_bytes),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": (
+                "sqlite-backup-archive-apply"
+                if bool(args.archive_apply)
+                else "sqlite-backup-archive-dry-run"
+            ),
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def run_warehouse_cost_queue_replay_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.queue_replay_apply)
+    payload = _run_remote_warehouse_cost_queue_replay(
+        target,
+        apply=apply,
+        invoice_numbers=list(args.invoice_no or []),
+        plan_path=(
+            Path(str(args.plan_file)).resolve()
+            if apply
+            else None
+        ),
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": (
+                "warehouse-cost-queue-replay-apply"
+                if apply
+                else "warehouse-cost-queue-replay-dry-run"
+            ),
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_finance_canonical_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -3199,6 +3275,199 @@ def _run_remote_warehouse_functional_action(
         raise RuntimeError("warehouse functional runner returned invalid JSON") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("warehouse functional runner returned a non-object JSON payload")
+    return payload
+
+
+def _run_remote_sqlite_backup_archive(
+    target: HostedRuntimeTarget,
+    *,
+    apply: bool,
+    source: str,
+    fingerprint: str,
+    reserved_free_bytes: int,
+) -> dict[str, Any]:
+    action = (
+        "sqlite-backup-archive-apply"
+        if apply
+        else "sqlite-backup-archive-dry-run"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(
+            target,
+            action=action,
+            dry_run=False,
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "SQLite backup archive requires the canonical active runtime dir"
+        )
+    source_path = Path(str(source))
+    backup_root = (Path(runtime_dir) / "backups").resolve()
+    if (
+        not source_path.is_absolute()
+        or source_path.resolve().parent != (
+            backup_root / "warehouse-functional-sync"
+        )
+        or source_path.suffix != ".sqlite3"
+    ):
+        raise ValueError(
+            "SQLite archive source must be one raw warehouse-functional-sync "
+            "checkpoint in the canonical runtime backup directory"
+        )
+    runner_args = [
+        "python3",
+        "apps/sqlite_backup_archive.py",
+        "--source",
+        str(source_path),
+        "--reserved-free-bytes",
+        str(int(reserved_free_bytes)),
+    ]
+    if apply:
+        if not str(fingerprint or "").strip():
+            raise ValueError("SQLite archive apply requires a fingerprint")
+        runner_args.extend(
+            ["--apply", "--fingerprint", str(fingerprint)]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "SQLite backup archive returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "SQLite backup archive returned a non-object payload"
+        )
+    return payload
+
+
+def _run_remote_warehouse_cost_queue_replay(
+    target: HostedRuntimeTarget,
+    *,
+    apply: bool,
+    invoice_numbers: list[str],
+    plan_path: Path | None,
+    fingerprint: str,
+) -> dict[str, Any]:
+    action = (
+        "warehouse-cost-queue-replay-apply"
+        if apply
+        else "warehouse-cost-queue-replay-dry-run"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(
+            target,
+            action=action,
+            dry_run=False,
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "warehouse cost queue replay requires the canonical active runtime dir"
+        )
+    normalized_invoices = sorted(
+        {str(value).strip() for value in invoice_numbers if str(value).strip()}
+    )
+    if len(normalized_invoices) != len(invoice_numbers):
+        raise ValueError(
+            "warehouse cost queue replay invoices must be non-empty and unique"
+        )
+    runner_args = [
+        "python3",
+        "apps/warehouse_cost_queue_replay.py",
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    for invoice in normalized_invoices:
+        runner_args.extend(["--invoice-no", invoice])
+    stdin_text: str | None = None
+    if apply:
+        if plan_path is None or not str(fingerprint or "").strip():
+            raise ValueError(
+                "warehouse cost queue replay apply requires plan and fingerprint"
+            )
+        stdin_text = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(stdin_text)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError(
+                "warehouse cost queue replay plan and fingerprint do not match"
+            )
+        runner_args.extend(
+            [
+                "--apply",
+                "--plan-file",
+                "/dev/stdin",
+                "--fingerprint",
+                fingerprint,
+            ]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        input=stdin_text,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "warehouse cost queue replay returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "warehouse cost queue replay returned a non-object payload"
+        )
     return payload
 
 
@@ -4339,6 +4608,83 @@ def build_arg_parser() -> argparse.ArgumentParser:
     functional_apply.set_defaults(
         handler=run_warehouse_functional_command,
         warehouse_functional_action="cutover-apply",
+    )
+
+    sqlite_archive_dry_run = subparsers.add_parser(
+        "sqlite-backup-archive-dry-run",
+        help=(
+            "Build an immutable query-only lossless archive plan for one "
+            "warehouse-functional-sync checkpoint."
+        ),
+    )
+    sqlite_archive_dry_run.add_argument("--source", required=True)
+    sqlite_archive_dry_run.add_argument(
+        "--reserved-free-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+    )
+    sqlite_archive_dry_run.add_argument("--output", default="")
+    sqlite_archive_dry_run.set_defaults(
+        handler=run_sqlite_backup_archive_command,
+        archive_apply=False,
+    )
+
+    sqlite_archive_apply = subparsers.add_parser(
+        "sqlite-backup-archive-apply",
+        help=(
+            "Apply one exact verified lossless archive plan and remove raw "
+            "bytes only after retained readback."
+        ),
+    )
+    sqlite_archive_apply.add_argument("--source", required=True)
+    sqlite_archive_apply.add_argument("--fingerprint", required=True)
+    sqlite_archive_apply.add_argument(
+        "--reserved-free-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+    )
+    sqlite_archive_apply.add_argument("--output", default="")
+    sqlite_archive_apply.set_defaults(
+        handler=run_sqlite_backup_archive_command,
+        archive_apply=True,
+    )
+
+    queue_replay_dry_run = subparsers.add_parser(
+        "warehouse-cost-queue-replay-dry-run",
+        help=(
+            "Build a query-only exact multi-invoice supplier-cost queue "
+            "replay plan without Finance raw reads or a full backup."
+        ),
+    )
+    queue_replay_dry_run.add_argument(
+        "--invoice-no",
+        action="append",
+        required=True,
+    )
+    queue_replay_dry_run.add_argument("--output", default="")
+    queue_replay_dry_run.set_defaults(
+        handler=run_warehouse_cost_queue_replay_command,
+        queue_replay_apply=False,
+    )
+
+    queue_replay_apply = subparsers.add_parser(
+        "warehouse-cost-queue-replay-apply",
+        help=(
+            "Apply one exact reviewed multi-invoice supplier-cost queue "
+            "replay with target-scoped undo and durable audit."
+        ),
+    )
+    queue_replay_apply.add_argument(
+        "--invoice-no",
+        action="append",
+        required=True,
+    )
+    queue_replay_apply.add_argument("--plan-file", required=True)
+    queue_replay_apply.add_argument("--fingerprint", required=True)
+    queue_replay_apply.add_argument("--output", default="")
+    queue_replay_apply.set_defaults(
+        handler=run_warehouse_cost_queue_replay_command,
+        queue_replay_apply=True,
     )
 
     functional_failed_backup_cleanup_dry_run = subparsers.add_parser(

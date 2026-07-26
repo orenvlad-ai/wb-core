@@ -120,6 +120,8 @@ related_runners:
   - "apps/supplier_26gn527_bank_statement_recovery.py"
   - "apps/warehouse_cost_unified_recovery.py"
   - "apps/warehouse_cost_unified_recovery_smoke.py"
+  - "apps/warehouse_cost_queue_replay.py"
+  - "apps/warehouse_cost_queue_replay_smoke.py"
   - "apps/warehouse_targeted_replay_smoke.py"
   - "apps/supplier_cny_payment_10_recovery.py"
   - "apps/supplier_cny_payment_10_recovery_smoke.py"
@@ -430,7 +432,7 @@ The first posted CNY supplier payment activates the full physical invoice compos
 - Active and archived projections are separate. `excluded` never maps to `needs_review`, and archived expense lines are absent from active source manifests, summaries, allocation controls and downstream capital layers. Exact SHA restore reuses the archived document; a semantic match with another SHA requires an explicit warning, confirmation and reason.
 - Exact cost presentation uses canonical `exact_cost_status`: `certified` is green, `provisional` is yellow with its precise reason, and `unavailable` suppresses the number and shows blockers. `expenses_complete` alone never makes cost green. Stage cost shows only a fingerprint-valid current active functional version; queued/running replay is `Ожидает пересчёта`, errors show the blocker, stale numbers are hidden, and a shipment that left the stage shows neutral `Не применяется`.
 
-`apps/supplier_26gn390_recovery.py` remains the bounded legacy invoice-136 recovery. `apps/supplier_26gn527_bank_statement_recovery.py` is read-only legacy diagnosis; its independent apply is disabled because it required another full-DB backup and separate replay. The canonical 26GN527/warehouse recovery is `apps/warehouse_cost_unified_recovery.py`: query-only dry-run by default, explicit exact-fingerprint apply, one shared writer lock, exact shipment/supply/statement/box identities, durable pre-write plan journal and per-step checkpoints, resumable idempotent steps, target-scoped undo manifests, post-apply no-op readback and zero Finance-raw/full-DB-copy I/O.
+`apps/supplier_26gn390_recovery.py` remains the bounded legacy invoice-136 recovery. `apps/supplier_26gn527_bank_statement_recovery.py` is read-only legacy diagnosis; its independent apply is disabled because it required another full-DB backup and separate replay. The canonical coupled 26GN527/warehouse recovery is `apps/warehouse_cost_unified_recovery.py`: query-only dry-run by default, explicit exact-fingerprint apply, one shared writer lock, exact shipment/supply/statement/box identities, durable pre-write plan journal and per-step checkpoints, resumable idempotent steps, target-scoped undo manifests, post-apply no-op readback and zero Finance-raw/full-DB-copy I/O. When supplier documents and own-capital events are already confirmed and only durable cost queues remain, `apps/warehouse_cost_queue_replay.py` pins one or more exact invoice/shipment/document/expense/capital/queue revisions, rejects overlapping non-target SKU queues, publishes one bounded functional version plus target-scoped economics, and proves complete queues, unchanged target quantities and non-target digests before returning a repeated no-op.
 
 # 20. Content-addressed bank statements and assignment boundary
 

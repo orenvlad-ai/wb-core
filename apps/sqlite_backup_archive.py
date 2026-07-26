@@ -13,11 +13,15 @@ import shutil
 import sqlite3
 import subprocess
 from typing import Any, BinaryIO
+from urllib.parse import quote
 from uuid import uuid4
 
 
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIX = ".zst"
+DEFAULT_RESERVED_FREE_BYTES = 256 * 1024 * 1024
+MIN_ARCHIVE_EXPANSION_BYTES = 64 * 1024 * 1024
+SOURCE_SIDECAR_SUFFIXES = ("-wal", "-shm")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,23 +30,91 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive", help="Output .zst path in the same directory; defaults to SOURCE.zst.")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--fingerprint", default="")
+    parser.add_argument(
+        "--reserved-free-bytes",
+        type=int,
+        default=DEFAULT_RESERVED_FREE_BYTES,
+        help="Free bytes that must remain after worst-case archive creation.",
+    )
     return parser
 
 
-def build_plan(*, source: Path, archive: Path | None = None) -> dict[str, Any]:
+def build_plan(
+    *,
+    source: Path,
+    archive: Path | None = None,
+    reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
+) -> dict[str, Any]:
     source_input = source.expanduser()
     archive_input = (archive or Path(str(source_input) + ARCHIVE_SUFFIX)).expanduser()
     if source_input.is_symlink() or archive_input.is_symlink():
         raise ValueError("SQLite backup source and archive paths must not be symlinks")
     source = source_input.resolve()
     archive = archive_input.resolve()
-    _validate_paths(source, archive)
+    manifest_path = archive.with_name(archive.name + ".manifest.json")
+    if manifest_path.is_symlink():
+        raise ValueError("SQLite backup archive manifest must not be a symlink")
+    _validate_paths(source, archive, manifest_path=manifest_path)
     zstd = shutil.which("zstd")
     if not zstd:
         raise ValueError("zstd executable is required")
+    if int(reserved_free_bytes) < 0:
+        raise ValueError("reserved free bytes must be non-negative")
+    if not source.is_file():
+        verified = verify_archive_manifest(manifest_path)
+        if not bool(verified.get("source_removed", True)):
+            raise ValueError("archive lifecycle is incomplete while source is unavailable")
+        return {
+            "contract_name": "sqlite_backup_lossless_archive_v1",
+            "source_path": str(source),
+            "archive_path": str(archive),
+            "status": "already_archived",
+            "mode": "dry-run",
+            "fingerprint": str(verified.get("fingerprint") or ""),
+            "would_change": False,
+            "applied": False,
+            "idempotent": True,
+            "archive": verified,
+            "manifest_path": str(manifest_path),
+            "filesystem_free_bytes": shutil.disk_usage(source.parent).free,
+        }
     stat = source.stat()
+    sidecars_before = _source_sidecars(source)
+    _validate_source_sidecars(sidecars_before)
     integrity = _integrity_check(source)
     source_sha256 = _file_hash(source)
+    sidecars_after = _source_sidecars(source)
+    if sidecars_after != sidecars_before:
+        raise ValueError("query-only immutable planning changed SQLite sidecars")
+    available_free_bytes = shutil.disk_usage(source.parent).free
+    archive_expansion_bytes = max(
+        MIN_ARCHIVE_EXPANSION_BYTES,
+        (int(stat.st_size) + 19) // 20,
+    )
+    required_free_bytes = (
+        int(stat.st_size)
+        + int(archive_expansion_bytes)
+        + int(reserved_free_bytes)
+    )
+    directory_non_target_digest = _directory_non_target_digest(
+        source=source,
+        archive=archive,
+    )
+    capacity_requirement = {
+        "source_size_bytes": int(stat.st_size),
+        "archive_worst_case_expansion_bytes": int(archive_expansion_bytes),
+        "reserved_free_bytes": int(reserved_free_bytes),
+        "required_free_bytes": int(required_free_bytes),
+    }
+    capacity = {
+        **capacity_requirement,
+        "available_free_bytes": int(available_free_bytes),
+        "shortfall_bytes": max(
+            0,
+            int(required_free_bytes) - int(available_free_bytes),
+        ),
+        "sufficient": int(available_free_bytes) >= int(required_free_bytes),
+    }
     evidence = {
         "contract_name": "sqlite_backup_lossless_archive_v1",
         "source_path": str(source),
@@ -53,109 +125,196 @@ def build_plan(*, source: Path, archive: Path | None = None) -> dict[str, Any]:
         "source_mtime_ns": stat.st_mtime_ns,
         "source_mode": oct(stat.st_mode & 0o777),
         "source_integrity_check": integrity,
+        "source_sqlite_open": {
+            "mode": "ro",
+            "immutable": True,
+            "query_only": True,
+        },
+        "source_sidecars": sidecars_before,
+        "directory_non_target_digest": directory_non_target_digest,
         "compression": "zstd-level-1",
+        "capacity_requirement": capacity_requirement,
         "verification": [
-            "source SQLite PRAGMA integrity_check=ok",
+            "source SQLite immutable mode=ro, query_only=ON, PRAGMA integrity_check=ok",
+            "source WAL is absent or empty and no rollback journal exists",
             "exact source stat and sha256 recheck before deletion",
             "zstd frame test",
             "streamed decompressed size and sha256 equality",
-            "0600 archive and fsynced parent directory",
+            "independent retained archive/manifest readback before source deletion",
+            "0600 archive and manifest plus fsynced parent directory",
+            "non-target directory digest equality and owned-sidecar lifecycle",
         ],
     }
+    existing_archive = archive.is_file() or manifest_path.is_file()
+    if existing_archive:
+        verified = verify_archive_manifest(manifest_path)
+        _validate_manifest_source_identity(verified, evidence)
     return {
         **evidence,
-        "status": "ready",
+        "status": "resume_ready" if existing_archive else "ready",
         "mode": "dry-run",
         "fingerprint": _hash(evidence),
-        "filesystem_free_bytes": shutil.disk_usage(source.parent).free,
+        "filesystem_free_bytes": int(available_free_bytes),
+        "capacity": capacity,
         "would_change": True,
         "applied": False,
+        "resume_from_verified_archive": bool(existing_archive),
     }
 
 
-def apply_archive(*, source: Path, archive: Path | None, fingerprint: str) -> dict[str, Any]:
+def apply_archive(
+    *,
+    source: Path,
+    archive: Path | None,
+    fingerprint: str,
+    reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
+) -> dict[str, Any]:
     approved = str(fingerprint or "").strip()
     if not approved:
         raise ValueError("--apply requires --fingerprint from the exact current dry-run")
-    plan = build_plan(source=source, archive=archive)
+    plan = build_plan(
+        source=source,
+        archive=archive,
+        reserved_free_bytes=reserved_free_bytes,
+    )
     if approved != plan["fingerprint"]:
         raise ValueError("apply requires the exact current dry-run fingerprint")
+    if not plan.get("would_change"):
+        return {
+            **plan,
+            "status": "archived",
+            "mode": "apply",
+            "applied": False,
+            "idempotent": True,
+            "source_removed": True,
+        }
+    if not bool((plan.get("capacity") or {}).get("sufficient")):
+        raise ValueError(
+            "insufficient archive headroom: "
+            f"required_free_bytes={plan['capacity']['required_free_bytes']}, "
+            f"available_free_bytes={plan['capacity']['available_free_bytes']}, "
+            f"shortfall_bytes={plan['capacity']['shortfall_bytes']}"
+        )
     source_path = Path(plan["source_path"])
     archive_path = Path(plan["archive_path"])
     temp_path = archive_path.with_name(archive_path.name + f".tmp-{uuid4().hex}")
     manifest_path = archive_path.with_name(archive_path.name + ".manifest.json")
-    if manifest_path.exists():
-        raise ValueError(f"archive manifest already exists: {manifest_path}")
     zstd = shutil.which("zstd")
     if not zstd:
         raise ValueError("zstd executable is required")
     try:
-        temp_descriptor = os.open(
-            temp_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        with os.fdopen(temp_descriptor, "wb") as output:
-            completed = subprocess.run(
-                [zstd, "-1", "-T0", "-q", "-c", "--", str(source_path)],
-                stdout=output,
+        if archive_path.is_file() and manifest_path.is_file():
+            manifest = verify_archive_manifest(manifest_path)
+            _validate_manifest_source_identity(manifest, plan)
+        else:
+            temp_descriptor = os.open(
+                temp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(temp_descriptor, "wb") as output:
+                completed = subprocess.run(
+                    [zstd, "-1", "-T0", "-q", "-c", "--", str(source_path)],
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                output.flush()
+                os.fsync(output.fileno())
+            if completed.returncode:
+                raise ValueError(_command_error("zstd compression failed", completed))
+            tested = subprocess.run(
+                [zstd, "-q", "-t", "--", str(temp_path)],
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 check=False,
             )
-            output.flush()
-            os.fsync(output.fileno())
-        if completed.returncode:
-            raise ValueError(_command_error("zstd compression failed", completed))
-        tested = subprocess.run(
-            [zstd, "-q", "-t", "--", str(temp_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=False,
+            if tested.returncode:
+                raise ValueError(_command_error("zstd archive test failed", tested))
+            decompressed_sha256, decompressed_size = _decompressed_hash_and_size(
+                zstd=zstd,
+                archive=temp_path,
+            )
+            if decompressed_size != int(plan["source_size_bytes"]):
+                raise ValueError("decompressed archive size does not match source")
+            if decompressed_sha256 != plan["source_sha256"]:
+                raise ValueError("decompressed archive sha256 does not match source")
+            _recheck_source_identity(source_path, plan)
+            archive_sha256 = _file_hash(temp_path)
+            temp_path.chmod(0o600)
+            os.replace(temp_path, archive_path)
+            _fsync_directory(source_path.parent)
+            manifest = {
+                "contract_name": plan["contract_name"],
+                "fingerprint": approved,
+                "source_path": str(source_path),
+                "source_size_bytes": plan["source_size_bytes"],
+                "source_sha256": plan["source_sha256"],
+                "source_inode": plan["source_inode"],
+                "source_mtime_ns": plan["source_mtime_ns"],
+                "source_mode": plan["source_mode"],
+                "source_integrity_check": plan["source_integrity_check"],
+                "source_sqlite_open": plan["source_sqlite_open"],
+                "source_sidecars": plan["source_sidecars"],
+                "directory_non_target_digest": plan["directory_non_target_digest"],
+                "capacity": plan["capacity"],
+                "archive_path": str(archive_path),
+                "archive_size_bytes": archive_path.stat().st_size,
+                "archive_sha256": archive_sha256,
+                "archive_mode": "0600",
+                "manifest_mode": "0600",
+                "zstd_test": "ok",
+                "decompressed_size_bytes": decompressed_size,
+                "decompressed_sha256": decompressed_sha256,
+                "lifecycle_state": "verified_pending_source_removal",
+                "source_removed": False,
+                "archived_at": _now(),
+            }
+            _write_manifest_atomic(manifest_path, manifest)
+            manifest = verify_archive_manifest(manifest_path)
+            _validate_manifest_source_identity(manifest, plan)
+        source_path.unlink()
+        removed_sidecars = _remove_owned_sidecars(
+            source=source_path,
+            expected=plan.get("source_sidecars") or [],
         )
-        if tested.returncode:
-            raise ValueError(_command_error("zstd archive test failed", tested))
-        decompressed_sha256, decompressed_size = _decompressed_hash_and_size(
-            zstd=zstd,
-            archive=temp_path,
-        )
-        if decompressed_size != int(plan["source_size_bytes"]):
-            raise ValueError("decompressed archive size does not match source")
-        if decompressed_sha256 != plan["source_sha256"]:
-            raise ValueError("decompressed archive sha256 does not match source")
-        _recheck_source_identity(source_path, plan)
-        archive_sha256 = _file_hash(temp_path)
-        temp_path.chmod(0o600)
-        os.replace(temp_path, archive_path)
         _fsync_directory(source_path.parent)
+        non_target_after = _directory_non_target_digest(
+            source=source_path,
+            archive=archive_path,
+        )
+        if non_target_after != str(plan["directory_non_target_digest"]):
+            raise ValueError("non-target backup directory entries changed during archiving")
         manifest = {
-            "contract_name": plan["contract_name"],
-            "fingerprint": approved,
-            "source_path": str(source_path),
-            "source_size_bytes": plan["source_size_bytes"],
-            "source_sha256": plan["source_sha256"],
-            "source_integrity_check": plan["source_integrity_check"],
-            "archive_path": str(archive_path),
-            "archive_size_bytes": archive_path.stat().st_size,
-            "archive_sha256": archive_sha256,
-            "archive_mode": "0600",
-            "zstd_test": "ok",
-            "decompressed_size_bytes": decompressed_size,
-            "decompressed_sha256": decompressed_sha256,
-            "archived_at": _now(),
+            **dict(manifest),
+            "lifecycle_state": "retained",
+            "source_removed": True,
+            "removed_source_sidecars": removed_sidecars,
+            "directory_non_target_digest_after": non_target_after,
+            "finalized_at": _now(),
         }
         _write_manifest_atomic(manifest_path, manifest)
-        source_path.unlink()
-        _fsync_directory(source_path.parent)
+        final_readback = verify_archive_manifest(manifest_path)
+        if (
+            not bool(final_readback.get("source_removed"))
+            or str(final_readback.get("lifecycle_state") or "") != "retained"
+        ):
+            raise ValueError("archive lifecycle final readback is incomplete")
         return {
             **plan,
             "status": "archived",
             "mode": "apply",
             "would_change": False,
             "applied": True,
+            "idempotent": False,
             "source_removed": True,
-            "archive": manifest,
+            "archive": final_readback,
             "manifest_path": str(manifest_path),
             "filesystem_free_bytes_after": shutil.disk_usage(archive_path.parent).free,
+            "orphan_artifacts": _owned_orphan_artifacts(
+                source=source_path,
+                archive=archive_path,
+            ),
         }
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -171,6 +330,8 @@ def verify_archive_manifest(manifest_path: Path) -> dict[str, Any]:
     manifest_path = manifest_path.resolve()
     if not manifest_path.is_file():
         raise ValueError("SQLite backup archive manifest is unavailable")
+    if manifest_path.stat().st_mode & 0o777 != 0o600:
+        raise ValueError("SQLite backup archive manifest failed provenance validation")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     archive = Path(str(manifest.get("archive_path") or "")).expanduser()
     archive_is_symlink = archive.is_symlink()
@@ -189,6 +350,8 @@ def verify_archive_manifest(manifest_path: Path) -> dict[str, Any]:
         != str(manifest.get("source_sha256") or "")
         or int(manifest.get("decompressed_size_bytes") or -1)
         != int(manifest.get("source_size_bytes") or -2)
+        or str(manifest.get("lifecycle_state") or "retained")
+        not in {"verified_pending_source_removal", "retained"}
     ):
         raise ValueError("SQLite backup archive manifest failed provenance validation")
     if _file_hash(archive) != str(manifest.get("archive_sha256") or ""):
@@ -226,13 +389,27 @@ def verify_archive_manifest(manifest_path: Path) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     source = Path(args.source)
     archive = Path(args.archive) if str(args.archive or "").strip() else None
+    reserved_free_bytes = int(
+        getattr(args, "reserved_free_bytes", DEFAULT_RESERVED_FREE_BYTES)
+    )
     if not args.apply:
-        return build_plan(source=source, archive=archive)
-    return apply_archive(source=source, archive=archive, fingerprint=args.fingerprint)
+        return build_plan(
+            source=source,
+            archive=archive,
+            reserved_free_bytes=reserved_free_bytes,
+        )
+    return apply_archive(
+        source=source,
+        archive=archive,
+        fingerprint=args.fingerprint,
+        reserved_free_bytes=reserved_free_bytes,
+    )
 
 
-def _validate_paths(source: Path, archive: Path) -> None:
-    if not source.is_file():
+def _validate_paths(source: Path, archive: Path, *, manifest_path: Path) -> None:
+    if not source.is_file() and not (
+        archive.is_file() and manifest_path.is_file()
+    ):
         raise ValueError(f"SQLite backup does not exist: {source}")
     if "backups" not in source.parts:
         raise ValueError("source must be below a backups directory")
@@ -242,12 +419,16 @@ def _validate_paths(source: Path, archive: Path) -> None:
         raise ValueError("archive must stay in the same backup directory as source")
     if archive == source or archive.suffix != ARCHIVE_SUFFIX:
         raise ValueError("archive must be a distinct .zst path")
-    if archive.exists():
-        raise ValueError(f"archive already exists: {archive}")
+    if archive.exists() != manifest_path.exists():
+        raise ValueError("archive and manifest lifecycle is incomplete")
 
 
 def _integrity_check(path: Path) -> str:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+    uri = f"file:{quote(str(path.resolve()), safe='/')}?mode=ro&immutable=1"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+            raise ValueError("SQLite immutable plan could not enable query_only")
         value = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
     if value.lower() != "ok":
         raise ValueError(f"SQLite integrity_check failed: {value}")
@@ -263,6 +444,115 @@ def _recheck_source_identity(source: Path, plan: dict[str, Any]) -> None:
         or _file_hash(source) != plan["source_sha256"]
     ):
         raise ValueError("source backup changed during archive creation")
+    sidecars = _source_sidecars(source)
+    if sidecars != list(plan.get("source_sidecars") or []):
+        raise ValueError("source SQLite sidecars changed during archive creation")
+    if _directory_non_target_digest(
+        source=source,
+        archive=Path(str(plan["archive_path"])),
+    ) != str(plan["directory_non_target_digest"]):
+        raise ValueError("non-target backup directory entries changed during archiving")
+
+
+def _source_sidecars(source: Path) -> list[dict[str, Any]]:
+    result = []
+    for suffix in SOURCE_SIDECAR_SUFFIXES:
+        path = Path(str(source) + suffix)
+        if path.is_symlink():
+            raise ValueError(f"SQLite source sidecar is not a regular file: {path}")
+        if not path.exists():
+            continue
+        if not path.is_file():
+            raise ValueError(f"SQLite source sidecar is not a regular file: {path}")
+        stat = path.stat()
+        result.append(
+            {
+                "path": str(path),
+                "suffix": suffix,
+                "size_bytes": int(stat.st_size),
+                "inode": int(stat.st_ino),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "mode": oct(stat.st_mode & 0o777),
+            }
+        )
+    rollback_journal = Path(str(source) + "-journal")
+    if rollback_journal.is_symlink():
+        raise ValueError("SQLite source rollback journal is not a regular file")
+    if rollback_journal.exists():
+        raise ValueError("SQLite source rollback journal exists")
+    return result
+
+
+def _validate_source_sidecars(sidecars: list[dict[str, Any]]) -> None:
+    for item in sidecars:
+        if str(item.get("suffix") or "") == "-wal" and int(
+            item.get("size_bytes") or 0
+        ) != 0:
+            raise ValueError("SQLite source WAL is non-empty; backup is not immutable")
+
+
+def _remove_owned_sidecars(
+    *,
+    source: Path,
+    expected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    actual = _source_sidecars(source)
+    if actual != list(expected):
+        raise ValueError("SQLite source sidecars drifted before owned cleanup")
+    _validate_source_sidecars(actual)
+    removed = []
+    for item in actual:
+        path = Path(str(item["path"]))
+        path.unlink()
+        removed.append(dict(item))
+    return removed
+
+
+def _directory_non_target_digest(*, source: Path, archive: Path) -> str:
+    excluded = {
+        source.name,
+        *(source.name + suffix for suffix in SOURCE_SIDECAR_SUFFIXES),
+        source.name + "-journal",
+        archive.name,
+        archive.name + ".manifest.json",
+    }
+    rows = []
+    for path in sorted(source.parent.iterdir(), key=lambda item: item.name):
+        if path.name in excluded or path.name.startswith(archive.name + ".tmp-"):
+            continue
+        stat = path.lstat()
+        rows.append(
+            {
+                "name": path.name,
+                "mode": oct(stat.st_mode & 0o7777),
+                "size_bytes": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "inode": int(stat.st_ino),
+                "symlink": path.is_symlink(),
+            }
+        )
+    return _hash(rows)
+
+
+def _validate_manifest_source_identity(
+    manifest: dict[str, Any],
+    plan: dict[str, Any],
+) -> None:
+    for key in ("source_path", "source_size_bytes", "source_sha256"):
+        if str(manifest.get(key)) != str(plan.get(key)):
+            raise ValueError("verified archive does not match current source identity")
+    if str(manifest.get("fingerprint") or "") != str(plan.get("fingerprint") or _hash(plan)):
+        raise ValueError("verified archive fingerprint does not match current dry-run")
+
+
+def _owned_orphan_artifacts(*, source: Path, archive: Path) -> list[str]:
+    candidates = [
+        *source.parent.glob(archive.name + ".tmp-*"),
+        Path(str(source) + "-wal"),
+        Path(str(source) + "-shm"),
+        Path(str(source) + "-journal"),
+    ]
+    return sorted(str(path) for path in candidates if path.exists())
 
 
 def _decompressed_hash_and_size(*, zstd: str, archive: Path) -> tuple[str, int]:

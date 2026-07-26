@@ -662,6 +662,85 @@ def main() -> None:
                     raise AssertionError(
                         "functional sync backup must use the mounted canonical runtime backup directory"
                     )
+        archive_source = (
+            "/opt/wb-core-runtime/state/backups/warehouse-functional-sync/"
+            "warehouse-functional-pre-sync-20260723T184346Z.sqlite3"
+        )
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"status":"ready"}',
+            stderr="",
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_mock:
+            hosted_runtime._run_remote_sqlite_backup_archive(
+                active_target,
+                apply=True,
+                source=archive_source,
+                fingerprint="sha256:archive-smoke",
+                reserved_free_bytes=4 * 1024 * 1024 * 1024,
+            )
+        archive_command = " ".join(run_mock.call_args.args[0])
+        if (
+            run_mock.call_args.kwargs.get("timeout") != 7200.0
+            or archive_source not in archive_command
+            or "--reserved-free-bytes 4294967296" not in archive_command
+            or "--apply" not in archive_command
+        ):
+            raise AssertionError(
+                "hosted SQLite archive lost exact path/reserve/apply lifecycle"
+            )
+        try:
+            hosted_runtime._run_remote_sqlite_backup_archive(
+                active_target,
+                apply=False,
+                source=(
+                    "/opt/wb-core-runtime/state/backups/"
+                    "supplier-26gn390-recovery/foreign.sqlite3"
+                ),
+                fingerprint="",
+                reserved_free_bytes=0,
+            )
+        except ValueError as exc:
+            if "warehouse-functional-sync" not in str(exc):
+                raise
+        else:
+            raise AssertionError(
+                "hosted SQLite archive accepted another backup scope"
+            )
+        queue_plan_path = Path(opening_temp_dir) / "queue-plan.json"
+        queue_plan_path.write_text(
+            '{"fingerprint":"sha256:queue-smoke"}\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_mock:
+            hosted_runtime._run_remote_warehouse_cost_queue_replay(
+                active_target,
+                apply=True,
+                invoice_numbers=["26GN582", "26GN583"],
+                plan_path=queue_plan_path,
+                fingerprint="sha256:queue-smoke",
+            )
+        queue_command = " ".join(run_mock.call_args.args[0])
+        if (
+            run_mock.call_args.kwargs.get("timeout") != 7200.0
+            or "warehouse_cost_queue_replay.py" not in queue_command
+            or queue_command.count("--invoice-no") != 2
+            or "--plan-file /dev/stdin" not in queue_command
+            or run_mock.call_args.kwargs.get("input")
+            != '{"fingerprint":"sha256:queue-smoke"}\n'
+        ):
+            raise AssertionError(
+                "hosted queue replay lost exact invoices/plan/fingerprint"
+            )
         failed_backup_source = (
             "/opt/wb-core-runtime/backups/warehouse-functional/"
             "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
