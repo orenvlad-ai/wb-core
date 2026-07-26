@@ -3250,6 +3250,7 @@ class WarehouseFunctionalBlock:
         *,
         affected_nm_ids: Iterable[int],
         stable_source_ids: Iterable[str],
+        targeted_recalc_requests: Iterable[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Reconcile bounded local mutations against the immutable last-good WB snapshot."""
 
@@ -3268,6 +3269,75 @@ class WarehouseFunctionalBlock:
             kind="targeted_recovery",
             wb_payload=self._last_good_wb_payload(),
         )
+        expected_requests = (
+            [
+                _targeted_recalc_request_identity(item)
+                for item in targeted_recalc_requests
+            ]
+            if targeted_recalc_requests is not None
+            else None
+        )
+        if expected_requests is not None:
+            expected_by_queue = {
+                str(item["queue_id"]): item for item in expected_requests
+            }
+            if len(expected_by_queue) != len(expected_requests):
+                raise WarehouseFunctionalError(
+                    "targeted recovery has duplicate exact queue identities"
+                )
+            captured_requests = [
+                _targeted_recalc_request_identity(item)
+                for item in plan.get("targeted_recalc_requests") or []
+            ]
+            captured_by_queue = {
+                str(item["queue_id"]): item for item in captured_requests
+            }
+            if any(
+                captured_by_queue.get(queue_id) != expected
+                for queue_id, expected in expected_by_queue.items()
+            ):
+                raise WarehouseFunctionalError(
+                    "targeted recalculation request drifted during exact planning"
+                )
+            selected_requests = [
+                captured_by_queue[queue_id]
+                for queue_id in sorted(expected_by_queue)
+            ]
+            selected_nm_ids = {
+                int(value)
+                for item in selected_requests
+                for value in item["affected_nm_ids"]
+            }
+            if not selected_requests or selected_nm_ids != set(nm_ids):
+                raise WarehouseFunctionalError(
+                    "exact targeted queue SKU closure does not match affected SKU scope"
+                )
+            stable_sources = {
+                str(value).strip()
+                for value in stable_source_ids
+                if str(value).strip()
+            }
+            if any(
+                str(item["stable_source_id"]) not in stable_sources
+                for item in selected_requests
+            ):
+                raise WarehouseFunctionalError(
+                    "exact targeted queue source is outside the approved source scope"
+                )
+            excluded_overlap = [
+                item
+                for item in captured_requests
+                if str(item["queue_id"]) not in expected_by_queue
+                and set(item["affected_nm_ids"]) & set(nm_ids)
+            ]
+            if excluded_overlap:
+                raise WarehouseFunctionalError(
+                    "another pending recalculation overlaps the exact target SKU scope: "
+                    + ",".join(
+                        str(item["queue_id"]) for item in excluded_overlap[:20]
+                    )
+                )
+            plan["targeted_recalc_requests"] = selected_requests
         unrelated = [
             dict(item)
             for item in (plan.get("diff") or {}).get("lines") or []
@@ -3297,6 +3367,14 @@ class WarehouseFunctionalBlock:
             "full_database_copy": False,
             "complexity": "O(operational warehouse sources + affected publication)",
         }
+        if expected_requests is not None:
+            plan["target_scope"]["targeted_recalc_queue_ids"] = [
+                str(item["queue_id"])
+                for item in plan["targeted_recalc_requests"]
+            ]
+            plan["target_scope"]["excluded_pending_queue_count"] = (
+                len(captured_requests) - len(expected_requests)
+            )
         plan["plan_fingerprint"] = _fingerprint(plan)
         return plan
 
@@ -8227,6 +8305,40 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
             "warehouse query-only read could not enable SQLite query_only"
         )
     return conn
+
+
+def _targeted_recalc_request_identity(
+    item: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw_nm_ids = item.get("affected_nm_ids")
+    if raw_nm_ids is None:
+        raw_nm_ids = _loads(item.get("affected_nm_ids_json"), [])
+    identity = {
+        "queue_id": str(item.get("queue_id") or "").strip(),
+        "stable_source_id": str(
+            item.get("stable_source_id") or ""
+        ).strip(),
+        "source_revision": str(item.get("source_revision") or "").strip(),
+        "effective_date": str(item.get("effective_date") or "")[:10],
+        "affected_nm_ids": sorted(
+            {
+                int(value)
+                for value in (raw_nm_ids or [])
+                if int(value) > 0
+            }
+        ),
+    }
+    if (
+        not identity["queue_id"]
+        or not identity["stable_source_id"]
+        or not identity["source_revision"]
+        or not identity["effective_date"]
+        or not identity["affected_nm_ids"]
+    ):
+        raise WarehouseFunctionalError(
+            "targeted recalculation request identity is incomplete"
+        )
+    return identity
 
 
 def _now() -> str:

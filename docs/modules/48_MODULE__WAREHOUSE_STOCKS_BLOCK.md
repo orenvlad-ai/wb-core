@@ -18,6 +18,8 @@ related_modules:
   - "packages/application/stocks_block.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "apps/warehouse_functional_runner.py"
+  - "apps/warehouse_cost_queue_replay.py"
+  - "apps/sqlite_backup_archive.py"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}"
@@ -191,6 +193,10 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functio
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance status
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance hold
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-maintenance restore
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-cost-queue-replay-dry-run --invoice-no 26GN582 --invoice-no 26GN583 --output /abs/queue-plan.json
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-cost-queue-replay-apply --invoice-no 26GN582 --invoice-no 26GN583 --plan-file /abs/queue-plan.json --fingerprint 'sha256:...'
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py sqlite-backup-archive-dry-run --source /opt/wb-core-runtime/state/backups/warehouse-functional-sync/exact.sqlite3 --reserved-free-bytes 4294967296 --output /abs/archive-plan.json
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py sqlite-backup-archive-apply --source /opt/wb-core-runtime/state/backups/warehouse-functional-sync/exact.sqlite3 --reserved-free-bytes 4294967296 --fingerprint 'sha256:...'
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-enable-hourly
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archival-estimate-dry-run --output /abs/estimate-plan.json
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archival-estimate-apply --plan-file /abs/estimate-plan.json --fingerprint 'sha256:...' --approval-reference '...'
@@ -198,6 +204,23 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archiva
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-archival-estimate-rollback --fingerprint 'sha256:...' --reason '...'
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-ui-flow --evidence-dir /abs/outside-repo
 ```
+
+Exact supplier-cost queue replay is distinct from full current-source sync:
+documents, expense lines and own-capital events must already reconcile, every
+selected `supplier_costs` queue revision is pinned, and any unselected pending
+queue that overlaps the target nmIDs fails closed. It copies no database,
+publishes one targeted functional version and target-scoped economics under the
+shared lock, and completes only reviewed queue identities. Completion proves
+target quantities and non-target queue/warehouse digests unchanged and the
+exact repeat is a no-op.
+
+Lossless archive is a file lifecycle, not a warehouse publication. Its hosted
+boundary accepts one raw checkpoint below the canonical
+`state/backups/warehouse-functional-sync` directory. Immutable query-only
+planning must prove capacity before temp bytes; apply finalizes a private
+verified archive/manifest before removing the raw source and its unchanged
+owned empty sidecars. Other backup scopes are never eligible through this
+command.
 
 # 7. UI and verification
 
@@ -218,6 +241,8 @@ Production UI status assertions wait for the visible warehouse label and timesta
 Targeted verification:
 
 - `python3 apps/warehouse_functional_smoke.py`;
+- `python3 apps/warehouse_cost_queue_replay_smoke.py`;
+- `python3 apps/sqlite_backup_archive_smoke.py`;
 - `python3 apps/warehouse_archival_estimate_smoke.py`;
 - `python3 apps/warehouse_supplier_cost_state_replay_smoke.py`;
 - `python3 apps/ff_stock_reservation_smoke.py`;
