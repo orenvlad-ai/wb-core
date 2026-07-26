@@ -2999,11 +2999,20 @@ def _run_remote_vitrina_incident_rematerialization(
         raise ValueError(
             "Vitrina incident rematerialization requires the canonical active runtime dir"
         )
+    seller_id = str(
+        target.runtime_env.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID") or ""
+    ).strip()
+    if not seller_id:
+        raise ValueError(
+            "Vitrina incident rematerialization requires the target-owned canonical seller ID"
+        )
     runner_args = [
         "python3",
         "apps/vitrina_incident_rematerialization.py",
         "--runtime-dir",
         runtime_dir,
+        "--seller-id",
+        seller_id,
     ]
     reviewed_plan_json = ""
     if action == "dry-run":

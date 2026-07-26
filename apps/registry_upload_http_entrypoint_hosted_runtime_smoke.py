@@ -143,6 +143,19 @@ def main() -> None:
                 raise AssertionError(
                     "Vitrina incident hosted action bypassed the repo-owned runner"
                 )
+            if (
+                "--seller-id" not in remote_command
+                or str(
+                    active_target.runtime_env.get(
+                        "SELLER_PORTAL_CANONICAL_SUPPLIER_ID"
+                    )
+                    or ""
+                )
+                not in remote_command
+            ):
+                raise AssertionError(
+                    "Vitrina incident hosted action lost the target-owned seller identity"
+                )
             if action == "apply":
                 if (
                     "--reviewed-plan-stdin" not in remote_command
