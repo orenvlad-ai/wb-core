@@ -153,6 +153,19 @@ BANK_FEE_CONFIDENCE_STRONG = "strong"
 BANK_FEE_CONFIDENCE_PROBABLE = "probable"
 BANK_FEE_CONFIDENCE_WEAK = "weak"
 BANK_FEE_IMPORTABLE_CONFIDENCES = {BANK_FEE_CONFIDENCE_STRONG, BANK_FEE_CONFIDENCE_PROBABLE}
+BANK_FEE_IMPORT_STATUS_CONFIRMED = "confirmed"
+BANK_FEE_IMPORT_STATUS_CONFIRMED_PARTIAL = "confirmed_partial"
+BANK_FEE_IMPORT_STATUS_LEGACY_PARTIAL_OR_COMPLETE = "confirmed_partial_or_complete"
+BANK_FEE_IMPORT_COMPLETE_OPERATION_STATES = {"already_imported", "confirmed"}
+BANK_FEE_IMPORT_BLOCKING_STATES = {
+    "conflict",
+    "error",
+    "excluded",
+    "mismatch",
+    "needs_review",
+    "new",
+    "parse_error",
+}
 BANK_FEE_PREVIEW_TTL_SECONDS = 24 * 60 * 60
 EXACT_COST_STATUS_OK = "ok"
 EXACT_COST_STATUS_UNAVAILABLE = "unavailable"
@@ -1451,11 +1464,26 @@ class SupplierFinancialDocumentsBlock:
                 ],
                 updated_preview_rows,
             ),
-            "import_status": "confirmed_partial_or_complete",
             "confirmed_at": now,
             "confirmed_fee_count": len(confirmed_operation_ids),
             "confirmed_operation_ids": sorted(confirmed_operation_ids),
         }
+        completion_candidate = {
+            **document,
+            "parse_status": FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+            "normalized_parse": {
+                **normalized,
+                "statement_import": updated_import,
+            },
+        }
+        updated_import["import_status"] = (
+            BANK_FEE_IMPORT_STATUS_CONFIRMED
+            if _bank_fee_statement_import_evidence_complete(
+                completion_candidate,
+                allow_empty_legacy_confirmation=False,
+            )
+            else BANK_FEE_IMPORT_STATUS_CONFIRMED_PARTIAL
+        )
         updated_document = {
             **document,
             "updated_at": now,
@@ -5487,6 +5515,114 @@ def _split_vtb_account_sections(text: str) -> list[str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         sections.append(text[start:end])
     return sections
+
+
+def bank_fee_statement_import_is_complete(
+    document: Mapping[str, Any],
+) -> bool:
+    """Return true only for a fully confirmed exact-order fee projection.
+
+    ``confirmed_partial_or_complete`` is retained as a read-compatible legacy
+    status. Its exact atomic/group evidence decides whether the import is
+    complete. A literal legacy ``confirmed`` remains accepted when older
+    payloads do not carry the newer row projection, but explicit blockers
+    always win.
+    """
+
+    normalized = dict(document.get("normalized_parse") or {})
+    statement_import = dict(normalized.get("statement_import") or {})
+    import_status = str(statement_import.get("import_status") or "").strip()
+    if import_status not in {
+        BANK_FEE_IMPORT_STATUS_CONFIRMED,
+        BANK_FEE_IMPORT_STATUS_LEGACY_PARTIAL_OR_COMPLETE,
+    }:
+        return False
+    return _bank_fee_statement_import_evidence_complete(
+        document,
+        allow_empty_legacy_confirmation=(
+            import_status == BANK_FEE_IMPORT_STATUS_CONFIRMED
+        ),
+    )
+
+
+def _bank_fee_statement_import_evidence_complete(
+    document: Mapping[str, Any],
+    *,
+    allow_empty_legacy_confirmation: bool,
+) -> bool:
+    normalized = dict(document.get("normalized_parse") or {})
+    statement_import = dict(normalized.get("statement_import") or {})
+    parse_status = str(
+        document.get("parse_status")
+        or normalized.get("parse_status")
+        or ""
+    ).strip()
+    if parse_status not in {
+        FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+        FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+    }:
+        return False
+
+    for error_value in (
+        document.get("errors"),
+        normalized.get("errors"),
+        statement_import.get("errors"),
+    ):
+        if _string_list(error_value):
+            return False
+
+    status_evidence = (
+        document.get("order_match_status"),
+        normalized.get("order_match_status"),
+        statement_import.get("order_match_status"),
+        document.get("payment_operation_match_status"),
+        normalized.get("payment_operation_match_status"),
+        statement_import.get("payment_operation_match_status"),
+        statement_import.get("status"),
+        statement_import.get("match_confidence"),
+    )
+    if any(
+        str(value or "").strip() in BANK_FEE_IMPORT_BLOCKING_STATES
+        for value in status_evidence
+    ):
+        return False
+
+    matched_rows = [
+        dict(item)
+        for item in statement_import.get("matched_fee_rows") or []
+        if isinstance(item, Mapping)
+        and str(item.get("confidence") or "") != BANK_FEE_CONFIDENCE_WEAK
+    ]
+    logical_groups = [
+        dict(item)
+        for item in statement_import.get("logical_fee_groups") or []
+        if isinstance(item, Mapping)
+    ]
+    if not matched_rows and not logical_groups:
+        return allow_empty_legacy_confirmation
+
+    for item in [*matched_rows, *logical_groups]:
+        operation_status = str(item.get("operation_status") or "").strip()
+        if operation_status not in BANK_FEE_IMPORT_COMPLETE_OPERATION_STATES:
+            return False
+
+    confirmed_operation_ids = {
+        str(value)
+        for value in statement_import.get("confirmed_operation_ids") or []
+        if str(value)
+    }
+    projected_operation_ids = {
+        str(item.get("semantic_operation_id") or "")
+        for item in matched_rows
+        if str(item.get("semantic_operation_id") or "")
+    }
+    if (
+        confirmed_operation_ids
+        and projected_operation_ids
+        and not projected_operation_ids.issubset(confirmed_operation_ids)
+    ):
+        return False
+    return True
 
 
 def build_bank_fee_statement_import_preview(

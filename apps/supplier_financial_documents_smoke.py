@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from decimal import Decimal
 import hashlib
 from io import BytesIO
 import json
@@ -36,7 +37,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.contracts.supplier_financial_documents import FINANCIAL_DOCUMENT_PARSER_VERSION  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    RegistryUploadHttpEntrypoint,
+    _supplier_order_financial_document_row,
+)
 from packages.application.supplier_customs_breakdown import DT_ANNEX_ITEMS_PARSER_VERSION  # noqa: E402
 from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
@@ -46,6 +50,7 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     _statement_row_from_segment,
     _statement_reference_identity,
     apply_supplier_order_document_match,
+    bank_fee_statement_import_is_complete,
     build_bank_fee_statement_import_preview,
     build_financial_summary,
     build_supplier_shipment_registry,
@@ -699,10 +704,181 @@ def _packing_list_workbook_bytes() -> bytes:
 
 
 def main() -> None:
+    _assert_bank_fee_checklist_completion_states()
     _assert_parser_smoke()
     _assert_parser_reclassification_staging()
     _assert_http_api_smoke()
     print("supplier_financial_documents_smoke: OK")
+
+
+def _assert_bank_fee_checklist_completion_states() -> None:
+    complete_26gn582 = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08", "12574.81"),
+    )
+    row_26gn582 = _supplier_order_financial_document_row(complete_26gn582)
+    if (
+        not bank_fee_statement_import_is_complete(complete_26gn582)
+        or row_26gn582.get("status_label") != "Загружен"
+    ):
+        raise AssertionError(
+            f"26GN582-like fully confirmed statement must be complete: {row_26gn582}"
+        )
+
+    weak_warning = (
+        "Есть fee rows со слабым совпадением; автоматический импорт "
+        "не выполняется для weak match"
+    )
+    complete_26gn583 = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("1081.03", "17632.31"),
+        warnings=[weak_warning],
+        weak_candidates=[{"confidence": "weak", "amount": "99.99"}],
+    )
+    row_26gn583 = _supplier_order_financial_document_row(complete_26gn583)
+    if (
+        not bank_fee_statement_import_is_complete(complete_26gn583)
+        or row_26gn583.get("status_label") != "Загружен"
+        or weak_warning not in row_26gn583.get("warnings", [])
+    ):
+        raise AssertionError(
+            "26GN583-like weak candidates outside the exact group must retain "
+            f"the warning without reopening confirmation: {row_26gn583}"
+        )
+
+    partial = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08", "12574.81"),
+        operation_statuses=("already_imported", "new"),
+    )
+    if _supplier_order_financial_document_row(partial).get("status_label") != "Проверить":
+        raise AssertionError("remaining importable new operation must stay fail-closed")
+
+    needs_review = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08",),
+        operation_statuses=("needs_review",),
+    )
+    conflict = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08",),
+        operation_statuses=("conflict",),
+    )
+    order_mismatch = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08",),
+        normalized_overrides={"order_match_status": "mismatch"},
+    )
+    for name, payload in (
+        ("needs_review", needs_review),
+        ("conflict", conflict),
+        ("order_mismatch", order_mismatch),
+    ):
+        if _supplier_order_financial_document_row(payload).get("status_label") != "Проверить":
+            raise AssertionError(f"{name} statement must stay fail-closed")
+
+    parse_error = _bank_fee_checklist_fixture(
+        import_status="confirmed_partial_or_complete",
+        amounts=("951.08",),
+        document_overrides={
+            "parse_status": "parse_error",
+            "errors": ["synthetic parser failure"],
+        },
+    )
+    if _supplier_order_financial_document_row(parse_error).get("status_label") != "Ошибка":
+        raise AssertionError("parse error must keep the canonical error status")
+
+    legacy_confirmed = _bank_fee_checklist_fixture(
+        import_status="confirmed",
+        amounts=(),
+    )
+    if _supplier_order_financial_document_row(legacy_confirmed).get("status_label") != "Загружен":
+        raise AssertionError("legacy literal confirmed import must remain complete")
+
+
+def _bank_fee_checklist_fixture(
+    *,
+    import_status: str,
+    amounts: tuple[str, ...],
+    operation_statuses: tuple[str, ...] | None = None,
+    warnings: list[str] | None = None,
+    weak_candidates: list[Mapping[str, Any]] | None = None,
+    normalized_overrides: Mapping[str, Any] | None = None,
+    document_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    statuses = operation_statuses or tuple("already_imported" for _ in amounts)
+    rows = [
+        {
+            "semantic_operation_id": f"bankop-{index}",
+            "logical_fee_id": "bankfee-exact-group",
+            "operation_status": status,
+            "already_imported": status == "already_imported",
+            "import_allowed": status == "new",
+            "confidence": "strong",
+            "amount": amount,
+            "currency": "RUB",
+        }
+        for index, (amount, status) in enumerate(zip(amounts, statuses), start=1)
+    ]
+    group_statuses = {str(item.get("operation_status") or "") for item in rows}
+    group_status = (
+        "already_imported"
+        if group_statuses == {"already_imported"}
+        else "new"
+        if group_statuses == {"new"}
+        else "conflict"
+        if "conflict" in group_statuses
+        else "needs_review"
+    )
+    groups = (
+        [
+            {
+                "logical_fee_id": "bankfee-exact-group",
+                "operation_status": group_status,
+                "import_allowed": group_status == "new",
+                "atomic_count": len(rows),
+                "atomic_operation_ids": [
+                    str(item.get("semantic_operation_id") or "") for item in rows
+                ],
+                "amount": str(
+                    sum(Decimal(str(item.get("amount") or "0")) for item in rows)
+                ),
+                "currency": "RUB",
+            }
+        ]
+        if rows
+        else []
+    )
+    normalized = {
+        "document_type": "bank_fee_statement",
+        "statement_import": {
+            "status": "ready_to_confirm",
+            "match_confidence": "strong",
+            "import_status": import_status,
+            "matched_fee_rows": rows,
+            "logical_fee_groups": groups,
+            "confirmed_operation_ids": [
+                str(item.get("semantic_operation_id") or "")
+                for item in rows
+                if item.get("operation_status") == "already_imported"
+            ],
+            "weak_candidates": [dict(item) for item in weak_candidates or []],
+            "warnings": list(warnings or []),
+        },
+        **dict(normalized_overrides or {}),
+    }
+    return {
+        "document_id": "fdoc-checklist-fixture",
+        "supplier_order_id": "supplier-checklist-fixture",
+        "document_type": "bank_fee_statement",
+        "parse_status": "confirmed",
+        "document_number": "VTB-CHECKLIST",
+        "currency": "RUB",
+        "normalized_parse": normalized,
+        "warnings": list(warnings or []),
+        "errors": [],
+        **dict(document_overrides or {}),
+    }
 
 
 def _assert_vtb_statement_parser_and_preview() -> None:
@@ -1016,6 +1192,42 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             str((item.get("atomic_operation_ids") or [""])[0])
             for item in logical_groups
         ]
+        if len(selected_ids) < 2:
+            raise AssertionError(
+                f"partial-confirm regression requires multiple logical groups: {logical_groups}"
+            )
+        block.confirm_bank_fee_statement_import(
+            "sup_financial",
+            document_id,
+            selected_operation_ids=selected_ids[:1],
+            expected_source_sha256="a" * 64,
+            expected_target_revision=str(
+                import_before_confirm["target_revision"]
+            ),
+            defer_downstream=True,
+        )
+        partial_document = runtime.load_supplier_financial_document(
+            supplier_order_id="sup_financial",
+            document_id=document_id,
+        ) or {}
+        partial_import = dict(
+            dict(partial_document.get("normalized_parse") or {}).get(
+                "statement_import"
+            )
+            or {}
+        )
+        if (
+            partial_import.get("import_status") != "confirmed_partial"
+            or not any(
+                item.get("operation_status") == "new"
+                for item in partial_import.get("matched_fee_rows") or []
+            )
+            or bank_fee_statement_import_is_complete(partial_document)
+        ):
+            raise AssertionError(
+                "partial confirmation must persist confirmed_partial and keep "
+                f"remaining exact operations reviewable: {partial_import}"
+            )
         with patch(
             "packages.application.warehouse_functional.enqueue_warehouse_targeted_recalculation",
             side_effect=RuntimeError("injected replay queue failure"),
@@ -1061,6 +1273,7 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             imported_amounts
             != sorted(["948.6", "13668.11", "4788.83", "20000.0", "58113.66"])
             or review_after
+            or stored_preview.get("import_status") != "confirmed"
             or not repeated.get("idempotent")
             or repeated.get("cny_fee_rows_for_ledger")
             or len(confirmed.get("expense_lines") or []) != 5

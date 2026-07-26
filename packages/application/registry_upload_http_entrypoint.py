@@ -73,6 +73,7 @@ from packages.application.supplier_shipment_factual_correction import (
 from packages.application.supplier_financial_documents import (
     SupplierFinancialDocumentsBlock,
     apply_supplier_order_document_match,
+    bank_fee_statement_import_is_complete,
     parse_financial_document_pdf,
 )
 from packages.application.supplier_customs_breakdown import (
@@ -8191,8 +8192,10 @@ def _supplier_order_financial_document_row(
         row["status"] = "needs_review"
         row["status_label"] = _supplier_order_document_status_label(row["status"])
     if document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
-        statement_import = dict(normalized.get("statement_import") or {})
-        if str(statement_import.get("import_status") or "") != "confirmed":
+        if (
+            row["status"] == "uploaded"
+            and not bank_fee_statement_import_is_complete(document)
+        ):
             row["status"] = "needs_review"
             row["status_label"] = _supplier_order_document_status_label(row["status"])
     return row
