@@ -127,17 +127,30 @@ Scope должен быть явным и bounded. Не добавляй unrelat
 
 Этот protocol применяется только тогда, когда в текущем контексте фактически доступен callable automation contract для recurring heartbeat, чтения target thread state, bounded follow-up и supported stop/delete. Название macOS, Desktop, Codex, ChatGPT, IDE, CLI, project path или client version само по себе capability не доказывает. Недоступность capability не является blocker, не меняет task class/continuity/closure и не разрешает утверждать, что monitor создан.
 
-### Две Mutually-Exclusive Роли
+### Mutually-Exclusive Роли И Reporting Intent
 
-Для каждой новой нетерминальной задачи, создаваемой либо получаемой на capability-enabled поверхности, нужен ровно один 10-минутный monitor exact target task/thread identity:
+Для каждой новой нетерминальной задачи, создаваемой либо получаемой на capability-enabled поверхности, нужна ровно одна active monitoring role для exact target task/thread identity. Одна reporter automation может обслуживать bounded multi-target list, но один target не может одновременно принадлежать external и self roles:
 
-1. preferred role для Chat → Codex — внешний supervisor heartbeat, прикреплённый к инициирующему Chat/потоку; его durable prompt содержит exact target thread identity;
-2. supervisor независимо читает target status и last proven progress, поэтому способен отчитаться, пока long-running target turn остаётся active;
-3. self-heartbeat, прикреплённый к самой target thread, допустим только как fallback для idle resume, когда внешний supervisor технически недоступен;
-4. self-heartbeat не считается independent observer и не обещает periodic status report во время active turn;
-5. external supervisor и fallback self-heartbeat никогда не работают одновременно для одной target identity и не создают новую task, branch, PR, LOOP root или continuity.
+1. `external supervisor reporter` — preferred Chat → Codex role. Automation имеет destination/attachment в инициирующем Chat/thread, а её durable prompt содержит bounded список exact target thread identities. Reporter независимо читает каждый target status и last proven progress, поэтому способен публиковать отчёты в initiating thread, пока long-running target turns остаются active;
+2. `self recovery heartbeat` (backward-compatible name `self-heartbeat`) прикреплён к самой target thread. Он только проверяет idle state и возобновляет ближайшее безопасное действие; это не independent observer и не reporter;
+3. external reporter и self recovery heartbeat никогда не работают одновременно для одной target identity и не создают новую task, branch, PR, LOOP root или continuity.
 
-Инициатор создаёт preferred supervisor после появления пригодных monitor и target thread identities. Принимающий Codex при первой безопасной возможности служит idempotent fallback: ищет monitor по exact target identity независимо от роли/имени; если monitor отсутствует, создаёт внешний supervisor, когда initiator thread доступна для supported operation, и только иначе — self-heartbeat. Если конкурентная доставка всё же оставила дубликаты, сохраняется preferred external supervisor, а остальные exact-target automations останавливаются/удаляются.
+Явный user intent имеет semantic priority: запрос «мониторинга», «отчётов каждые N минут», процента/ETA либо наблюдения в исходном чате удовлетворяет только `external supervisor reporter`. Silent `self recovery heartbeat` не удовлетворяет reporting intent, не обещает periodic reports во время active turn и не может быть представлен фразой «мониторинг работает» без явного сообщения, что periodic reports отсутствуют.
+
+### Chat → Codex Conflict Resolution
+
+После появления пригодных initiating и target thread identities инициатор либо принимающий Codex при первой безопасной возможности выполняет deterministic algorithm:
+
+1. до create читает existing heartbeat automations, attached/destination initiating thread и exact monitored target identities независимо от automation name;
+2. если exact target уже входит в active external reporter, сохраняет его и не создаёт duplicate либо self heartbeat;
+3. если reporter отсутствует, создаёт preferred `external supervisor reporter` с initiating thread как destination и exact target в durable target list;
+4. если initiating thread уже имеет active external reporter для другой non-terminal задачи, update/reuse эту единственную automation как multi-target supervisor: новый exact target добавляется к bounded list, а все прежние non-terminal targets сохраняются;
+5. если конкурентная доставка оставила exact-target duplicate, сохраняется external reporter, а duplicate/self automation останавливается либо удаляется с readback;
+6. если supported tool фактически не способен выполнить multi-target update или immediate target batch read, сообщает точную capability limitation. Только после этого допустим mutually-exclusive `self recovery heartbeat` как silent idle-resume safeguard; он не закрывает user request на reports и не разрешает обещать их.
+
+Multi-target list ограничивается фактическим callable batch contract. Если active targets больше поддерживаемого batch, нельзя молча потерять старый target или создать conflicting reporter: требуется явно зафиксировать capability limitation и сохранить уже обслуживаемые non-terminal targets до безопасного решения.
+
+Destination semantics не зависят от числа targets: automation attachment/destination — initiating reporting Chat/thread; exact monitored target identities находятся в durable prompt/target list. Destination thread нельзя выдавать за monitored target task.
 
 ### Create/Update И Readback
 
@@ -145,31 +158,40 @@ Automation создаётся или обновляется только под�
 
 - status равен `ACTIVE`;
 - cadence равна 10 минутам;
-- destination/monitor thread соответствует выбранной роли;
-- durable prompt содержит exact target thread identity;
-- для fallback destination является самой target thread, для preferred supervisor — отдельный инициирующий Chat/поток;
-- не существует второй active automation с той же exact target identity.
+- destination/monitor thread равен exact initiating reporting thread для external reporter либо самой target thread для self recovery role;
+- durable prompt явно содержит роль `external supervisor reporter` и каждый exact active target ID;
+- update сохранил все предыдущие non-terminal targets и добавил новый target без неоднозначных name/ID;
+- для тех же targets не существует active self recovery heartbeat либо duplicate reporter;
+- immediate bounded target batch `wait_threads(timeoutMs: 0)` успешно читает fresh status каждого listed target;
+- первый evidence-backed status report опубликован в initiating chat: одна подписанная строка на каждый осмысленно наблюдаемый target.
 
-Если любой invariant не подтверждён, исправляется существующая automation через update; новый duplicate не создаётся. UI-card, успешный create-call без readback или только совпадающее name monitor не являются verification.
+Если любой invariant не подтверждён, исправляется существующая automation через update; новый duplicate не создаётся. UI-card, successful create-call без readback, совпадающее name monitor или active silent self heartbeat без periodic report — не completion.
 
 ### Supervisor Run Contract
 
-Каждый 10-минутный запуск внешнего supervisor сначала читает фактическое состояние target task:
+Каждый 10-минутный запуск external supervisor reporter одним bounded target batch читает фактическое состояние всех listed target tasks и обрабатывает каждую отдельно:
 
 - `active`: supervisor не будит target и не отправляет follow-up; он читает last proven stage и публикует пользователю краткий status report;
 - `idle + non-terminal`: supervisor отправляет target ровно один bounded follow-up продолжить ближайшее безопасное действие в исходных scope, authority, class и continuity, затем сообщает о resume;
 - `human-only`: supervisor не имитирует продолжение, а сообщает exact blocker и минимальное действие пользователя;
-- `terminal success`, доказанный `terminal failure` или explicit user stop: supervisor публикует финальный статус и останавливает/удаляет exact monitor по supported contract.
+- `terminal success`, доказанный `terminal failure` или explicit user stop: supervisor публикует финальный статус и удаляет exact target из durable list с update/readback.
 
-Self-heartbeat fallback при запуске из target thread сначала проверяет, что основной turn idle и external supervisor для exact target отсутствует; только после этого продолжает ближайшее безопасное действие. Он не расширяет authorization, не повторяет небезопасную mutation и не подменяет active task owner. Временная ошибка, отсутствие state changes, elapsed time или внешний queue wait сами по себе не являются terminal failure.
+Reporter automation остаётся `ACTIVE`, пока в list есть хотя бы один non-terminal target. Она останавливается/удаляется только после cleanup последнего target либо explicit user stop всего reporter. `Self recovery heartbeat` при запуске из target thread сначала проверяет, что основной turn idle и external reporter для exact target отсутствует; только после этого продолжает ближайшее безопасное действие. Он не расширяет authorization, не повторяет небезопасную mutation и не подменяет active task owner. Временная ошибка, отсутствие state changes, elapsed time или внешний queue wait сами по себе не являются terminal failure.
 
 ### Progress Report
 
-Каждый осмысленный supervisor run публикует одну короткую строку:
+Каждый осмысленный supervisor run публикует отдельную короткую подписанную строку для каждого наблюдаемого target:
 
-`Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`
+`[<однозначное target name/ID>] Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`
 
-Процент строится по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
+Name/ID и progress weights для разных targets должны быть однозначны. Progress без evidence не начисляется: процент строится только по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
+
+### Нормативные Примеры
+
+- **Один новый target, свободный initiating thread.** Создать один `external supervisor reporter`, destination = initiating thread, durable list = exact target; затем readback, `wait_threads(timeoutMs: 0)` и первая подписанная report line.
+- **Второй параллельный target при active reporter.** Update existing reporter в multi-target mode, сохранив первый non-terminal exact target и добавив второй; выполнить batch smoke и опубликовать две отдельные строки. Silent self fallback и второй reporter не создаются.
+- **Reporter unavailable.** Явно сообщить, что periodic reports в initiating thread технически недоступны. Допустимый `self recovery heartbeat` может только молча возобновлять idle target, не удовлетворяет reporting intent и не называется работающим reporting monitor.
+- **Terminal cleanup одного из нескольких targets.** Опубликовать финальную строку terminal target, удалить только его из durable list, readback-подтвердить сохранение остальных targets и оставить reporter `ACTIVE`; pause/delete допустимы только после последнего target либо explicit user stop.
 
 ### PR-Backed `wb-core`
 
@@ -183,7 +205,7 @@ Target интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CON
 
 ### Cleanup И Local Availability
 
-Cleanup выполняет supervisor после доказанного terminal target state или explicit user stop и readback-подтверждает, что exact-target automation остановлена либо удалена; одной финальной фразы без supported result недостаточно. Self-heartbeat fallback выполняет тот же cleanup только при доказанном отсутствии external supervisor. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+Cleanup выполняет reporter после доказанного terminal target state или explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
 
 ## Шесть Execution-Контуров
 

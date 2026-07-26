@@ -2449,21 +2449,46 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
             "durable prompt",
             "automation tool",
             "active",
+            "external supervisor reporter",
+            "self recovery heartbeat",
+            "multi-target",
+            "reporting intent",
         ):
             assert required.casefold() in folded
+        assert "только `external supervisor reporter`" in folded
+        assert "`self recovery heartbeat`" in source
+        assert "не удовлетворяет reporting intent" in source
+        assert "wait_threads(timeoutMs: 0)" in source
+        assert "initiating" in folded and "destination" in folded
+        assert "non-terminal target" in folded
+        assert "successful create-call" in folded and "не completion" in folded
+        assert "progress без evidence не начисляется" in folded
+        assert "progress weights" in folded
+        assert "terminal target" in folded
         assert "FREQ=" not in source
+        assert "и только иначе — self-heartbeat" not in source
     for source in (agents, execution):
         assert "Chat → Codex" in source
         assert "создаваемой либо получаемой" in source
         assert "bounded follow-up" in source
         assert "update" in source and "duplicate" in source
         assert "`ACTIVE`" in source
+        assert "[<" in source
         assert (
-            "`Прогресс ≈<процент>% · ETA ≈<диапазон> · "
-            "сделано: <одна короткая фраза>.`"
+            "Прогресс ≈<процент>% · ETA ≈<диапазон> · "
+            "сделано: <одна короткая фраза>."
         ) in source
         assert "ETA ≈зависит от" in source
         assert "компьютер и Desktop должны быть запущены" in source
+    for required_example in (
+        "Один новый target, свободный initiating thread",
+        "Второй параллельный target при active reporter",
+        "Reporter unavailable",
+        "Terminal cleanup одного из нескольких targets",
+    ):
+        assert required_example in execution
+    assert "сохранив первый non-terminal exact target" in execution
+    assert "сохранение остальных targets" in execution
     assert "каждые пять минут" in release_train
     assert "каждые 300 секунд" in release_train
     assert "каждые 10 минут" in release_train
