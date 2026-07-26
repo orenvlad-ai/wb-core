@@ -327,6 +327,37 @@ def _integrity_check(path: Path) -> str:
         return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
 
+@contextmanager
+def _exclusive_checkpointed_main_file(path: Path) -> Any:
+    """Hold one SQLite main file stable with all committed WAL pages applied."""
+
+    with closing(sqlite3.connect(path, timeout=60, isolation_level=None)) as connection:
+        connection.execute("PRAGMA busy_timeout=60000")
+        locking_mode = str(
+            connection.execute("PRAGMA locking_mode=EXCLUSIVE").fetchone()[0]
+        )
+        if locking_mode.lower() != "exclusive":
+            raise RuntimeError("backup could not acquire exclusive SQLite locking")
+        connection.execute("BEGIN EXCLUSIVE")
+        connection.execute("COMMIT")
+        checkpoint = tuple(
+            int(value)
+            for value in connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        )
+        if checkpoint[0] != 0 or (
+            checkpoint[1] >= 0 and checkpoint[1] != checkpoint[2]
+        ):
+            raise RuntimeError("backup could not checkpoint the SQLite WAL")
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        if integrity != "ok":
+            raise RuntimeError("backup source failed integrity_check")
+        yield {
+            "integrity_check": integrity,
+            "wal_checkpoint": list(checkpoint),
+            "locking_mode": "exclusive",
+        }
+
+
 def _compress_verified_current_schema_backup(source: Path) -> dict[str, Any]:
     """Replace one complete current-schema raw backup with an exact zstd archive."""
 
@@ -339,64 +370,64 @@ def _compress_verified_current_schema_backup(source: Path) -> dict[str, Any]:
         or not source.name.startswith(expected_prefix)
     ):
         raise RuntimeError("current-schema capacity recovery target is outside the owned backup boundary")
-    integrity = _integrity_check(source)
-    if integrity != "ok":
-        raise RuntimeError("current-schema raw backup failed integrity_check before compression")
-
-    source_size = source.stat().st_size
-    source_sha256 = _sha256_file(source)
     archive = source.with_suffix(source.suffix + ".zst")
     manifest = archive.with_suffix(archive.suffix + ".manifest.json")
     temporary_archive = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
     temporary_manifest = manifest.with_name(f".{manifest.name}.tmp-{os.getpid()}")
     try:
-        if manifest.exists() and not archive.is_file():
-            raise RuntimeError("current-schema compressed manifest exists without its archive")
-        if not archive.exists():
-            completed = subprocess.run(
-                [
-                    "zstd",
-                    "-T1",
-                    "-6",
-                    "--no-progress",
-                    "--force",
-                    "-o",
-                    str(temporary_archive),
-                    str(source),
-                ],
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=7200,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    "current-schema backup compression failed: " + completed.stderr.strip()
+        with _exclusive_checkpointed_main_file(source) as snapshot:
+            integrity = str(snapshot["integrity_check"])
+            source_size = source.stat().st_size
+            source_sha256 = _sha256_file(source)
+            if manifest.exists() and not archive.is_file():
+                raise RuntimeError("current-schema compressed manifest exists without its archive")
+            if not archive.exists():
+                completed = subprocess.run(
+                    [
+                        "zstd",
+                        "-T1",
+                        "-6",
+                        "--no-progress",
+                        "--force",
+                        "-o",
+                        str(temporary_archive),
+                        str(source),
+                    ],
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=7200,
+                    check=False,
                 )
-            os.chmod(temporary_archive, 0o600)
-            subprocess.run(
-                ["zstd", "--test", "--quiet", str(temporary_archive)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=7200,
-                check=True,
-            )
-            if _zstd_decompressed_sha256(temporary_archive) != source_sha256:
-                raise RuntimeError("current-schema compressed backup does not restore exact bytes")
-            os.replace(temporary_archive, archive)
-        else:
-            subprocess.run(
-                ["zstd", "--test", "--quiet", str(archive)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=7200,
-                check=True,
-            )
-            if _zstd_decompressed_sha256(archive) != source_sha256:
-                raise RuntimeError("partial current-schema archive has a different restore hash")
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        "current-schema backup compression failed: " + completed.stderr.strip()
+                    )
+                os.chmod(temporary_archive, 0o600)
+                subprocess.run(
+                    ["zstd", "--test", "--quiet", str(temporary_archive)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=7200,
+                    check=True,
+                )
+                if _zstd_decompressed_sha256(temporary_archive) != source_sha256:
+                    raise RuntimeError(
+                        "current-schema compressed backup does not restore exact bytes"
+                    )
+                os.replace(temporary_archive, archive)
+            else:
+                subprocess.run(
+                    ["zstd", "--test", "--quiet", str(archive)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=7200,
+                    check=True,
+                )
+                if _zstd_decompressed_sha256(archive) != source_sha256:
+                    raise RuntimeError("partial current-schema archive has a different restore hash")
 
         metadata = {
             "contract": COMPRESSED_SCHEMA_BACKUP_CONTRACT,
@@ -411,6 +442,8 @@ def _compress_verified_current_schema_backup(source: Path) -> dict[str, Any]:
             "sqlite_integrity_check": integrity,
             "restore_command": f"zstd --decompress --stdout {archive.name} > {source.name}",
             "replaces_legacy_autoanswers_backup": None,
+            "snapshot_method": "exclusive_lock_checkpoint_raw",
+            "wal_checkpoint": list(snapshot["wal_checkpoint"]),
         }
         temporary_manifest.write_text(
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
@@ -726,6 +759,128 @@ def _create_current_compressed_schema_backup(
     }
 
 
+def _create_streamed_current_compressed_schema_backup(runtime_dir: Path) -> dict[str, Any]:
+    """Create a coherent current-schema archive without a second raw DB copy."""
+
+    database = runtime_dir / "registry_upload_runtime.sqlite3"
+    backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
+    snapshot_name = (
+        f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__streamed.sqlite3"
+    )
+    archive = backup_dir / f"{snapshot_name}.zst"
+    manifest = archive.with_suffix(archive.suffix + ".manifest.json")
+
+    existing = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
+    if int(existing.get("count") or 0) > 0:
+        return {"status": "already_verified", **existing}
+    if manifest.exists() and not archive.is_file():
+        raise RuntimeError("streamed current-schema manifest exists without its archive")
+
+    temporary_archive = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
+    temporary_manifest = manifest.with_name(f".{manifest.name}.tmp-{os.getpid()}")
+    published_archive = False
+    published_manifest = False
+    try:
+        # The deploy quiet window stops every repo-owned writer. Exclusive
+        # SQLite locking closes the remaining race, and the shared helper
+        # applies all committed WAL pages before direct compression.
+        with _exclusive_checkpointed_main_file(database) as snapshot:
+            integrity = str(snapshot["integrity_check"])
+            source_size = database.stat().st_size
+            source_sha256 = _sha256_file(database)
+            completed = subprocess.run(
+                [
+                    "zstd",
+                    "-T1",
+                    "-6",
+                    "--no-progress",
+                    "--force",
+                    "-o",
+                    str(temporary_archive),
+                    str(database),
+                ],
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=7200,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "streamed current-schema backup compression failed: "
+                    + completed.stderr.strip()
+                )
+            os.chmod(temporary_archive, 0o600)
+            subprocess.run(
+                ["zstd", "--test", "--quiet", str(temporary_archive)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=7200,
+                check=True,
+            )
+            if _zstd_decompressed_sha256(temporary_archive) != source_sha256:
+                raise RuntimeError(
+                    "streamed current-schema backup does not restore exact source bytes"
+                )
+
+        metadata = {
+            "contract": COMPRESSED_SCHEMA_BACKUP_CONTRACT,
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot_filename": snapshot_name,
+            "snapshot_size": source_size,
+            "snapshot_sha256": source_sha256,
+            "compressed_filename": archive.name,
+            "compressed_size": temporary_archive.stat().st_size,
+            "compressed_sha256": _sha256_file(temporary_archive),
+            "sqlite_integrity_check": integrity,
+            "restore_command": (
+                f"zstd --decompress --stdout {archive.name} > {snapshot_name}"
+            ),
+            "replaces_legacy_autoanswers_backup": None,
+            "snapshot_method": "exclusive_lock_checkpoint_stream",
+            "wal_checkpoint": list(snapshot["wal_checkpoint"]),
+        }
+        temporary_manifest.write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary_manifest, 0o600)
+        os.replace(temporary_archive, archive)
+        published_archive = True
+        os.replace(temporary_manifest, manifest)
+        published_manifest = True
+        verified = _verified_compressed_schema_backup_status(runtime_dir, verify_bytes=True)
+        if (
+            int(verified.get("count") or 0) < 1
+            or verified.get("integrity_check") != "ok"
+            or verified.get("snapshot_sha256") != f"sha256:{source_sha256}"
+        ):
+            raise RuntimeError("streamed current-schema backup readback is missing")
+    except Exception:
+        if published_manifest:
+            manifest.unlink(missing_ok=True)
+        if published_archive:
+            archive.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary_archive.unlink(missing_ok=True)
+        temporary_manifest.unlink(missing_ok=True)
+
+    return {
+        "status": "streamed_current_schema_backup",
+        **verified,
+        "source_size": source_size,
+        "snapshot_method": "exclusive_lock_checkpoint_stream",
+        "wal_checkpoint": list(snapshot["wal_checkpoint"]),
+        "raw_snapshot_required": False,
+    }
+
+
 def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     database = runtime_dir / "registry_upload_runtime.sqlite3"
     if not database.is_file():
@@ -811,13 +966,18 @@ def _prepare_backup_capacity(runtime_dir: Path) -> dict[str, Any]:
     staging = runtime_dir / ".wb_autoanswers_capacity_recovery" / (
         f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     )
-    if not candidates and not staging.is_file():
-        raise RuntimeError("insufficient backup capacity and no recoverable autoanswers backup exists")
     with _capacity_heartbeat():
-        compaction = _create_current_compressed_schema_backup(
-            runtime_dir,
-            legacy_source=candidates[-1] if candidates else None,
-        )
+        if not candidates and not staging.is_file():
+            if free_before < BACKUP_OPERATIONAL_HEADROOM_BYTES:
+                raise RuntimeError(
+                    "insufficient operational headroom for streamed autoanswers backup"
+                )
+            compaction = _create_streamed_current_compressed_schema_backup(runtime_dir)
+        else:
+            compaction = _create_current_compressed_schema_backup(
+                runtime_dir,
+                legacy_source=candidates[-1] if candidates else None,
+            )
     free_after = shutil.disk_usage(backup_root).free
     if free_after < BACKUP_OPERATIONAL_HEADROOM_BYTES:
         raise RuntimeError("verified replacement backup left insufficient operational headroom")

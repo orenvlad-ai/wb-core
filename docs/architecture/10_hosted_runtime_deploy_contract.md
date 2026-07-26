@@ -438,7 +438,18 @@ Archived MCP compatibility publication gate:
   snapshot handle before deleting a byte-verified raw snapshot and reading
   filesystem headroom. This prevents an unlinked multi-gigabyte snapshot from
   remaining charged to the backup mount until process exit and falsely
-  halting an otherwise complete deploy;
+  halting an otherwise complete deploy. An interrupted raw current-schema
+  snapshot is compressed only after exclusive locking checkpoints every
+  committed WAL page into its main file, so the archive never omits a valid
+  sidecar-backed page;
+- when the active volume cannot hold a second raw Autoanswers database and no
+  earlier recoverable Autoanswers backup exists, the schema preflight may
+  create the current-version restore point only through the repo-owned streamed
+  path: deployment services remain quiesced, exclusive SQLite locking and a
+  completed WAL checkpoint stabilize the main file, and zstd output is accepted
+  only after source integrity, frame, compressed-hash and exact
+  decompressed-SHA readback. The live source is not rewritten, and additive DDL
+  remains blocked on any verification or operational-headroom failure;
 - an Autoanswers runtime constructor first verifies the complete contiguous
   `1..current` schema-marker chain through a closed read-only connection and
   performs no DDL when that chain is already applied. Only a missing/new schema
