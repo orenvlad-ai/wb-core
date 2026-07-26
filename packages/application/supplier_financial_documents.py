@@ -4235,7 +4235,7 @@ def _exact_landed_cost_cell(context: Mapping[str, Any]) -> dict[str, Any]:
     elif canonical_status == "provisional":
         cell["note"] = (
             "; ".join(str(item) for item in (warnings or []))
-            or "Ожидается functional replay и совпадение source/calculation fingerprints."
+            or "Предварительно: active functional version ещё не сертифицирована."
         )
     elif canonical_status == "certified":
         cell["note"] = "Актуальные source/calculation fingerprints сертифицированы."
