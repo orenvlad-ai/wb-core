@@ -148,6 +148,22 @@ Workflow запускает queue observation каждые пять минут. 
 
 Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновременных machine evidence: `release:needs-resume`, exact status `owner=unowned`, отсутствие подтверждённого живого owner, проверенный exact head/root, для UI gate — exact deployed SHA, repo-owned resume command и сохранение root isolation. Takeover без overlay запрещён. После resume агент восстанавливает predecessor context из PR/status/diff/docs, завершает его точный stage, выполняет UI Flow при `awaiting-ui`, принимает только exact deployed SHA, ждёт terminal predecessor и повторно продолжает shepherd собственного PR. UI defect создаёт same-root recovery либо сохраняет gate fail-closed. Resume/takeover никогда автоматически не выполняет ack-agent или accept-ui.
 
+## Desktop Thread Heartbeat И Canonical Monitoring
+
+Если recurring thread-heartbeat capability фактически доступна, preferred 10-минутный monitor PR-backed задачи — external supervisor в инициирующем Chat/потоке с exact target thread identity в durable prompt. Он способен независимо читать target и GitHub status и давать пользователю отчёт, пока target turn active; active target он не будит. При idle/non-terminal supervisor отправляет target ровно один bounded follow-up, после которого target Codex запускает `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`. Self-heartbeat внутри target допустим только как mutually-exclusive idle-resume fallback, когда external supervisor недоступен, и не обещается как active-turn reporter.
+
+Monitor не создаёт второй state machine:
+
+- не хранит собственную копию `class/scope/state/head/queue/gate`, progress или ownership truth;
+- внешний supervisor только read-only наблюдает GitHub и сам не меняет code, labels, comments, transitions или production;
+- target после resume следует canonical disposition и не выполняет ack-agent, accept-ui, resume/takeover или recovery без exact evidence;
+- внешний supervisor и self-heartbeat не работают одновременно для одной exact target identity;
+- cleanup после proven terminal success, terminal failure или explicit user stop выполняет supervisor.
+
+Create/update выполняется supported automation tool без hardcoded raw schedule syntax. Readback обязан доказать `ACTIVE`, cadence 10 минут, правильный destination/monitor thread и exact target identity в durable prompt; mismatch лечится update existing automation, не duplicate create.
+
+Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter по умолчанию обновляет waiting heartbeat каждые 300 секунд, а Desktop supervisor наблюдает target каждые 10 минут. 10-минутный observation не заменяет и не замедляет 5-минутный GitHub worker, не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого owner без canonical exact-head status heartbeat и не обходит `release:needs-resume`. Если Desktop capability недоступна или локальный компьютер/проект выключен, GitHub monitoring остаётся canonical; task продолжается обычным waiter/shepherd при следующем доступном turn.
+
 ## Exclusive Production UI Gate
 
 После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он повторно проверяет зарегистрированный root/proof, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.

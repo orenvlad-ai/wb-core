@@ -123,6 +123,68 @@ Production evidence извлекается через canonical server-side read
 
 Scope должен быть явным и bounded. Не добавляй unrelated redesign, application/business logic, production config или runtime data к docs/governance задаче.
 
+## Thread Heartbeat Automation
+
+Этот protocol применяется только тогда, когда в текущем контексте фактически доступен callable automation contract для recurring heartbeat, чтения target thread state, bounded follow-up и supported stop/delete. Название macOS, Desktop, Codex, ChatGPT, IDE, CLI, project path или client version само по себе capability не доказывает. Недоступность capability не является blocker, не меняет task class/continuity/closure и не разрешает утверждать, что monitor создан.
+
+### Две Mutually-Exclusive Роли
+
+Для каждой новой нетерминальной задачи, создаваемой либо получаемой на capability-enabled поверхности, нужен ровно один 10-минутный monitor exact target task/thread identity:
+
+1. preferred role для Chat → Codex — внешний supervisor heartbeat, прикреплённый к инициирующему Chat/потоку; его durable prompt содержит exact target thread identity;
+2. supervisor независимо читает target status и last proven progress, поэтому способен отчитаться, пока long-running target turn остаётся active;
+3. self-heartbeat, прикреплённый к самой target thread, допустим только как fallback для idle resume, когда внешний supervisor технически недоступен;
+4. self-heartbeat не считается independent observer и не обещает periodic status report во время active turn;
+5. external supervisor и fallback self-heartbeat никогда не работают одновременно для одной target identity и не создают новую task, branch, PR, LOOP root или continuity.
+
+Инициатор создаёт preferred supervisor после появления пригодных monitor и target thread identities. Принимающий Codex при первой безопасной возможности служит idempotent fallback: ищет monitor по exact target identity независимо от роли/имени; если monitor отсутствует, создаёт внешний supervisor, когда initiator thread доступна для supported operation, и только иначе — self-heartbeat. Если конкурентная доставка всё же оставила дубликаты, сохраняется preferred external supervisor, а остальные exact-target automations останавливаются/удаляются.
+
+### Create/Update И Readback
+
+Automation создаётся или обновляется только поддерживаемым automation tool. Protocol не hardcode-ит raw schedule syntax: tool сам сериализует schedule. После каждого create/update обязателен readback сохранённого состояния:
+
+- status равен `ACTIVE`;
+- cadence равна 10 минутам;
+- destination/monitor thread соответствует выбранной роли;
+- durable prompt содержит exact target thread identity;
+- для fallback destination является самой target thread, для preferred supervisor — отдельный инициирующий Chat/поток;
+- не существует второй active automation с той же exact target identity.
+
+Если любой invariant не подтверждён, исправляется существующая automation через update; новый duplicate не создаётся. UI-card, успешный create-call без readback или только совпадающее name monitor не являются verification.
+
+### Supervisor Run Contract
+
+Каждый 10-минутный запуск внешнего supervisor сначала читает фактическое состояние target task:
+
+- `active`: supervisor не будит target и не отправляет follow-up; он читает last proven stage и публикует пользователю краткий status report;
+- `idle + non-terminal`: supervisor отправляет target ровно один bounded follow-up продолжить ближайшее безопасное действие в исходных scope, authority, class и continuity, затем сообщает о resume;
+- `human-only`: supervisor не имитирует продолжение, а сообщает exact blocker и минимальное действие пользователя;
+- `terminal success`, доказанный `terminal failure` или explicit user stop: supervisor публикует финальный статус и останавливает/удаляет exact monitor по supported contract.
+
+Self-heartbeat fallback при запуске из target thread сначала проверяет, что основной turn idle и external supervisor для exact target отсутствует; только после этого продолжает ближайшее безопасное действие. Он не расширяет authorization, не повторяет небезопасную mutation и не подменяет active task owner. Временная ошибка, отсутствие state changes, elapsed time или внешний queue wait сами по себе не являются terminal failure.
+
+### Progress Report
+
+Каждый осмысленный supervisor run публикует одну короткую строку:
+
+`Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`
+
+Процент строится по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
+
+### PR-Backed `wb-core`
+
+External supervisor является только read-only observation/resume layer. Для PR-backed `wb-core` durable truth остаётся в GitHub: supervisor читает фактический PR/Release Train state, но сам не меняет labels/comments/code/production и при idle отправляет bounded follow-up target Codex. Возобновлённый target вызывает canonical:
+
+`python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`
+
+Target интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE` и выполняет только разрешённое действие. Monitor не создаёт второй state machine, не выполняет automatic ack/acceptance и не объявляет blocker вопреки disposition. `TAKEOVER_PREDECESSOR` допустим только по existing exact `release:needs-resume` lost-owner proof; наличие thread monitor само ownership не передаёт.
+
+10-минутный Desktop supervisor и 5-минутное GitHub observation независимы по назначению: первый наблюдает/resume-ит exact target thread, второй обслуживает durable repository queue и публикует `release:needs-resume` после своего threshold. Supervisor не меняет schedule/threshold worker, не заменяет waiter status comment и не снимает fail-closed gates. Если automation capability недоступна, canonical waiter/shepherd и обычная task continuity продолжают работать без деградации.
+
+### Cleanup И Local Availability
+
+Cleanup выполняет supervisor после доказанного terminal target state или explicit user stop и readback-подтверждает, что exact-target automation остановлена либо удалена; одной финальной фразы без supported result недостаточно. Self-heartbeat fallback выполняет тот же cleanup только при доказанном отсутствии external supervisor. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+
 ## Шесть Execution-Контуров
 
 ### `read-only`
