@@ -121,6 +121,19 @@ def main() -> None:
             raise AssertionError(
                 f"Vitrina policy badge must come from the read-only contract, got {payload.meta}"
             )
+        quality = payload.meta.incident_projection_quality
+        if (
+            quality.get("state") != "provisional_received_rows"
+            or quality.get("dates") != ["2026-04-20"]
+            or quality.get("accepted_item_count") != 2
+            or quality.get("accepted_warehouse_row_count") != 3
+            or "Рассчитано по полученному снимку, полнота WB не подтверждена"
+            not in quality.get("detail", "")
+        ):
+            raise AssertionError(
+                "Vitrina contract must expose server-owned provisional quality evidence: "
+                f"{quality}"
+            )
         save_policy_revision(
             runtime,
             payload={
@@ -735,6 +748,21 @@ def _build_plan(
                 column_count=len(STATUS_HEADER),
             ),
         ],
+        metadata={
+            "incident_projection_quality_by_date": {
+                "2026-04-20": {
+                    "state": "provisional_received_rows",
+                    "label_ru": "Полнота WB не подтверждена",
+                    "message_ru": (
+                        "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                    ),
+                    "accepted_item_count": 2,
+                    "accepted_warehouse_row_count": 3,
+                    "policy_revision": 2,
+                    "policy_effective_date": "2026-04-20",
+                }
+            }
+        },
     )
 
 

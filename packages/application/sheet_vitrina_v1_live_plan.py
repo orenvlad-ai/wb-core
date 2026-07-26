@@ -136,7 +136,10 @@ from packages.application.warehouse_functional import _warehouse_balance_status_
 from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
-from packages.application.wb_incident_policy import build_incident_stock_projection
+from packages.application.wb_incident_policy import (
+    VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU,
+    build_vitrina_incident_stock_projection,
+)
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE,
@@ -397,6 +400,7 @@ class SlotLookups:
     promo_lookup: dict[int, dict[str, float]]
     incident_stocks_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     incident_policy: dict[str, Any] = field(default_factory=dict)
+    incident_projection_quality: dict[str, Any] = field(default_factory=dict)
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -1253,6 +1257,18 @@ class SheetVitrinaV1LivePlanBlock:
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
                 "refresh_diagnostics": diagnostics,
+                "incident_projection_quality_by_date": {
+                    slot.column_date: dict(
+                        live_sources.slot_lookups[
+                            slot.slot_key
+                        ].incident_projection_quality
+                    )
+                    for slot in temporal_slots
+                    if slot.slot_key in live_sources.slot_lookups
+                    and live_sources.slot_lookups[
+                        slot.slot_key
+                    ].incident_projection_quality
+                },
                 "server_cell_presentation": _merge_cell_presentations(
                     _own_product_capital_cell_presentation(
                         enabled_config=enabled_config,
@@ -1343,6 +1359,7 @@ class SheetVitrinaV1LivePlanBlock:
                 stocks_lookup={},
                 incident_stocks_lookup={},
                 incident_policy={},
+                incident_projection_quality={},
                 onec_stocks_lookup={},
                 our_wb_cost_lookup={},
                 own_product_capital_lookup={},
@@ -1590,7 +1607,7 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
                     stock_items = list(getattr(payload, "items", []) or [])
                     if all(hasattr(item, "stock_total") for item in stock_items):
-                        projection = build_incident_stock_projection(
+                        projection = build_vitrina_incident_stock_projection(
                             self.runtime,
                             items=stock_items,
                             warehouse_rows=list(getattr(payload, "warehouse_rows", []) or []),
@@ -1604,6 +1621,9 @@ class SheetVitrinaV1LivePlanBlock:
                             for nm_id, row in dict(projection.get("by_nm_id") or {}).items()
                         }
                         current_lookups.incident_policy = dict(projection.get("policy") or {})
+                        current_lookups.incident_projection_quality = dict(
+                            projection.get("quality") or {}
+                        )
                 elif source_key == ONEC_STOCKS_SOURCE_KEY:
                     current_lookups.onec_stocks_lookup = build_onec_stocks_lookup(
                         payload,
@@ -4836,6 +4856,22 @@ def _incident_stock_cell_presentation(
         policy = lookups.incident_policy
         if not policy.get("active"):
             continue
+        quality = lookups.incident_projection_quality
+        provisional = str(quality.get("state") or "") == "provisional_received_rows"
+        provisional_fields = (
+            {
+                "quality_state": "provisional_received_rows",
+                "quality_label": str(
+                    quality.get("label_ru") or "Полнота WB не подтверждена"
+                ),
+                "quality_reason": str(
+                    quality.get("message_ru")
+                    or VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU
+                ),
+            }
+            if provisional
+            else {}
+        )
         names = [
             str(item.get("warehouse_name") or f"warehouseId {item.get('warehouse_id')}")
             for item in policy.get("warehouse_identities") or []
@@ -4845,60 +4881,128 @@ def _incident_stock_cell_presentation(
             f"начало: {policy.get('effective_from') or 'не указано'}; "
             f"revision: {int(policy.get('revision') or 0)}"
         )
-        for region, _source_field, _suffix in INCIDENT_STOCK_FIELDS:
+        for region, source_field, _suffix in INCIDENT_STOCK_FIELDS:
             fact_key = incident_stock_metric_key("fact", region)
             incident_key = incident_stock_metric_key("incident", region)
             effective_key = incident_stock_metric_key("effective", region)
-            affected_rows: list[tuple[int, float, float, float]] = []
+            projected_rows: list[tuple[int, float, float, float]] = []
+            projection_field = (
+                "stock_total_mp" if source_field == "stock_total" else source_field
+            )
             for nm_id in enabled_ids:
                 projection_row = lookups.incident_stocks_lookup.get(nm_id)
                 fact = incident_stock_value(fact_key, projection_row)
                 incident = incident_stock_value(incident_key, projection_row)
                 effective = incident_stock_value(effective_key, projection_row)
-                if fact is None or incident is None or effective is None or incident <= 0:
+                if fact is None or incident is None or effective is None:
+                    blank_reason = str(
+                        (
+                            (projection_row or {}).get("blank_reasons_by_field")
+                            or {}
+                        ).get(projection_field)
+                        or ""
+                    )
+                    if not blank_reason:
+                        blank_reason = (
+                            "Недостаточно фактически сохранённых строк для расчёта; "
+                            "нулевое значение не предполагается."
+                        )
+                    for metric_key in (fact_key, incident_key, effective_key):
+                        if metric_key in available:
+                            result.setdefault(
+                                f"SKU:{nm_id}|{metric_key}", {}
+                            )[slot.column_date] = {
+                                "state": "unavailable",
+                                "tone": "neutral",
+                                "reason": blank_reason,
+                                "source": "WebCore incident projection",
+                                **provisional_fields,
+                            }
                     continue
-                affected_rows.append((nm_id, fact, incident, effective))
+                projected_rows.append((nm_id, fact, incident, effective))
                 reason = (
                     f"Факт: {fact:g} шт; на инцидентных складах: {incident:g} шт; "
                     f"operational остаток: {effective:g} шт. {policy_detail}"
                 )
-                for metric_key in (incident_key, effective_key):
+                for metric_key, _value in (
+                    (fact_key, fact),
+                    (incident_key, incident),
+                    (effective_key, effective),
+                ):
                     if metric_key in available:
-                        result.setdefault(f"SKU:{nm_id}|{metric_key}", {})[slot.column_date] = {
-                            "state": "incident_adjusted",
-                            "tone": "blue_violet",
-                            "reason": reason,
-                            "source": "WebCore incident policy",
+                        adjusted = (
+                            incident > 0 and metric_key in {incident_key, effective_key}
+                        )
+                        if provisional or adjusted:
+                            result.setdefault(
+                                f"SKU:{nm_id}|{metric_key}", {}
+                            )[slot.column_date] = {
+                                "state": "incident_adjusted" if adjusted else "",
+                                "tone": "blue_violet" if adjusted else "neutral",
+                                "reason": (
+                                    reason
+                                    if adjusted
+                                    else VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU
+                                ),
+                                "source": "WebCore incident policy",
+                                **provisional_fields,
+                            }
+            if not projected_rows:
+                for metric_key in (
+                    incident_stock_total_metric_key("fact", region),
+                    incident_stock_total_metric_key("incident", region),
+                    incident_stock_total_metric_key("effective", region),
+                ):
+                    if metric_key in available:
+                        result.setdefault(f"TOTAL|{metric_key}", {})[
+                            slot.column_date
+                        ] = {
+                            "state": "unavailable",
+                            "tone": "neutral",
+                            "reason": (
+                                "Нет SKU-строк с достаточным фактически сохранённым "
+                                "evidence; нулевое TOTAL не предполагается."
+                            ),
+                            "source": "WebCore incident projection",
+                            **provisional_fields,
                         }
-            if not affected_rows:
                 continue
-            all_values = [
-                (
-                    incident_stock_value(fact_key, lookups.incident_stocks_lookup.get(nm_id)),
-                    incident_stock_value(incident_key, lookups.incident_stocks_lookup.get(nm_id)),
-                    incident_stock_value(effective_key, lookups.incident_stocks_lookup.get(nm_id)),
-                )
-                for nm_id in enabled_ids
-            ]
-            fact_total = sum(float(item[0] or 0.0) for item in all_values)
-            incident_total = sum(float(item[1] or 0.0) for item in all_values)
-            effective_total = sum(float(item[2] or 0.0) for item in all_values)
+            fact_total = sum(float(item[1]) for item in projected_rows)
+            incident_total = sum(float(item[2]) for item in projected_rows)
+            effective_total = sum(float(item[3]) for item in projected_rows)
             total_reason = (
                 f"Факт: {fact_total:g} шт; на инцидентных складах: "
                 f"{incident_total:g} шт; operational остаток: "
                 f"{effective_total:g} шт. {policy_detail}"
             )
-            for metric_key in (
-                incident_stock_total_metric_key("incident", region),
-                incident_stock_total_metric_key("effective", region),
+            for metric_key, _value in (
+                (incident_stock_total_metric_key("fact", region), fact_total),
+                (incident_stock_total_metric_key("incident", region), incident_total),
+                (incident_stock_total_metric_key("effective", region), effective_total),
             ):
                 if metric_key in available:
-                    result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
-                        "state": "incident_adjusted",
-                        "tone": "blue_violet",
-                        "reason": total_reason,
-                        "source": "WebCore incident policy",
-                    }
+                    adjusted = (
+                        incident_total > 0
+                        and metric_key
+                        in {
+                            incident_stock_total_metric_key("incident", region),
+                            incident_stock_total_metric_key("effective", region),
+                        }
+                    )
+                    if provisional or adjusted:
+                        result.setdefault(f"TOTAL|{metric_key}", {})[
+                            slot.column_date
+                        ] = {
+                            "state": "incident_adjusted" if adjusted else "",
+                            "tone": "blue_violet" if adjusted else "neutral",
+                            "reason": (
+                                total_reason
+                                if adjusted
+                                else VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU
+                            ),
+                            "source": "WebCore incident policy",
+                            **provisional_fields,
+                        }
     return result
 
 

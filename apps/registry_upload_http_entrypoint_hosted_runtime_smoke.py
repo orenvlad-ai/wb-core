@@ -74,6 +74,88 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    with TemporaryDirectory(
+        prefix="vitrina-incident-hosted-smoke-"
+    ) as incident_temp_dir:
+        incident_plan = {
+            "contract_name": "vitrina_incident_rematerialization",
+            "contract_version": 1,
+            "mode": "dry_run",
+            "date_from_requested": "2026-07-25",
+            "date_to": "2026-07-25",
+            "max_dates": 14,
+            "apply_allowed": True,
+            "fingerprint": "sha256:vitrina-incident-reviewed",
+        }
+        incident_plan_path = Path(incident_temp_dir) / "plan.json"
+        incident_plan_path.write_text(
+            json.dumps(incident_plan),
+            encoding="utf-8",
+        )
+        for action in ("dry-run", "apply"):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    incident_plan
+                    if action == "dry-run"
+                    else {
+                        "status": "applied",
+                        "readback_status": "ok",
+                        "readback_changed_cells": 0,
+                    }
+                ),
+                stderr="",
+            )
+            with mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                hosted_runtime._run_remote_vitrina_incident_rematerialization(
+                    active_target,
+                    action=action,
+                    date_from="2026-07-25",
+                    date_to="2026-07-25",
+                    max_dates=14,
+                    plan_path=incident_plan_path if action == "apply" else None,
+                    fingerprint=(
+                        "sha256:vitrina-incident-reviewed"
+                        if action == "apply"
+                        else ""
+                    ),
+                    approval_reference=(
+                        "human-gate-vitrina-incident"
+                        if action == "apply"
+                        else ""
+                    ),
+                    actor="smoke" if action == "apply" else "",
+                )
+            if (
+                run_mock.call_args.kwargs.get("timeout")
+                != hosted_runtime.VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS
+            ):
+                raise AssertionError(
+                    "Vitrina incident hosted runner lost its bounded timeout"
+                )
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if "apps/vitrina_incident_rematerialization.py" not in remote_command:
+                raise AssertionError(
+                    "Vitrina incident hosted action bypassed the repo-owned runner"
+                )
+            if action == "apply":
+                if (
+                    "--reviewed-plan-stdin" not in remote_command
+                    or run_mock.call_args.kwargs.get("input")
+                    != incident_plan_path.read_text(encoding="utf-8")
+                ):
+                    raise AssertionError(
+                        "Vitrina incident apply lost the exact reviewed stdin plan"
+                    )
+            elif "--stdout-plan" not in remote_command:
+                raise AssertionError(
+                    "Vitrina incident dry-run must stream the exact reviewed plan"
+                )
     with TemporaryDirectory(prefix="finance-canonical-hosted-smoke-") as finance_temp_dir:
         finance_plan_path = Path(finance_temp_dir) / "plan.json"
         finance_plan_path.write_text(

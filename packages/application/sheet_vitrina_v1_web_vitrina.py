@@ -273,6 +273,9 @@ class SheetVitrinaV1WebVitrinaBlock:
                 refreshed_at=refreshed_at,
                 row_count=len(rows),
                 incident_policy_badge=policy_badge(current_incident_policy),
+                incident_projection_quality=_incident_projection_quality_badge(
+                    snapshot
+                ),
             ),
             status_summary=WebVitrinaContractStatusSummary(
                 refresh_status=str(period_refresh_summary["status"]),
@@ -606,6 +609,10 @@ def _build_period_snapshot(
         ],
         metadata={
             "server_cell_presentation": combined_presentation,
+            "incident_projection_quality_by_date": _merge_period_incident_projection_quality(
+                period_date_bindings=period_date_bindings,
+                snapshots_by_as_of_date=snapshots_by_as_of_date,
+            ),
             "warehouse_history_coverage": _merge_period_warehouse_history_coverage(
                 period_date_bindings=period_date_bindings,
                 snapshots_by_as_of_date=snapshots_by_as_of_date,
@@ -621,6 +628,67 @@ def _build_period_snapshot(
             },
         },
     ), period_date_bindings
+
+
+def _merge_period_incident_projection_quality(
+    *,
+    period_date_bindings: list[_PeriodDateBinding],
+    snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for binding in period_date_bindings:
+        if binding.missing:
+            continue
+        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        quality_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
+            "incident_projection_quality_by_date"
+        )
+        if not isinstance(quality_by_date, Mapping):
+            continue
+        quality = quality_by_date.get(binding.column_date)
+        if isinstance(quality, Mapping):
+            result[binding.requested_date] = deepcopy(dict(quality))
+    return result
+
+
+def _incident_projection_quality_badge(
+    snapshot: SheetVitrinaV1Envelope,
+) -> dict[str, Any]:
+    quality_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
+        "incident_projection_quality_by_date"
+    )
+    if not isinstance(quality_by_date, Mapping):
+        return {}
+    provisional = {
+        str(column_date): dict(quality)
+        for column_date, quality in quality_by_date.items()
+        if isinstance(quality, Mapping)
+        and str(quality.get("state") or "") == "provisional_received_rows"
+    }
+    if not provisional:
+        return {}
+    dates = sorted(provisional)
+    accepted_items = sum(
+        int(quality.get("accepted_item_count") or 0)
+        for quality in provisional.values()
+    )
+    accepted_rows = sum(
+        int(quality.get("accepted_warehouse_row_count") or 0)
+        for quality in provisional.values()
+    )
+    return {
+        "active": True,
+        "state": "provisional_received_rows",
+        "label": "Полученный снимок",
+        "detail": (
+            "Рассчитано по полученному снимку, полнота WB не подтверждена. "
+            f"Даты: {', '.join(dates)}; обработано items: {accepted_items}; "
+            f"warehouse rows: {accepted_rows}."
+        ),
+        "dates": dates,
+        "accepted_item_count": accepted_items,
+        "accepted_warehouse_row_count": accepted_rows,
+    }
 
 
 def _merge_period_warehouse_history_coverage(

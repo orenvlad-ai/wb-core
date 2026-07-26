@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -21,6 +22,7 @@ from packages.application.sheet_vitrina_v1_incident_stocks import (
 from packages.application.wb_incident_policy import (
     WbIncidentPolicyError,
     build_incident_stock_projection,
+    build_vitrina_incident_stock_projection,
     get_latest_policy_state,
     get_policy_state,
     save_policy_revision,
@@ -360,6 +362,156 @@ def main() -> None:
             pass
         else:
             raise AssertionError("active policy must fail closed for incomplete pagination")
+        try:
+            build_incident_stock_projection(
+                runtime,
+                items=items,
+                warehouse_rows=rows,
+                snapshot_date="2026-07-20",
+                fetched_at="2026-07-20T08:00:00+00:00",
+                pagination_complete=True,
+                raw_rows_digest="",
+                seller_id="fixture",
+            )
+        except WbIncidentPolicyError:
+            pass
+        else:
+            raise AssertionError(
+                "strict default must fail closed when the source digest is missing"
+            )
+
+        provisional = build_vitrina_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=[rows[0]],
+            snapshot_date="2026-07-20",
+            fetched_at="2026-07-20T08:00:00+00:00",
+            pagination_complete=False,
+            raw_rows_digest="",
+            seller_id="fixture",
+        )
+        provisional_row = provisional["by_nm_id"]["1"]
+        assert provisional["projection_mode"] == "vitrina_provisional_received_rows"
+        assert provisional["quality"]["completeness_confirmed"] is False
+        assert provisional["quality"]["accepted_item_count"] == 1
+        assert provisional["quality"]["accepted_warehouse_row_count"] == 1
+        assert provisional["snapshot_digest"] == ""
+        assert provisional["cache_identity_digest"].startswith(
+            "vitrina-accepted-payload:sha256:"
+        )
+        assert provisional_row["actual_stock_total_mp"] == 15
+        assert provisional_row["excluded_stock_total_mp"] == 10
+        assert provisional_row["effective_stock_total_mp"] == 5
+        assert "2" not in provisional["by_nm_id"]
+        assert provisional["invariants"]["status"] == "ok"
+        total_invariant = provisional["invariants"]["totals"]["total"]
+        assert total_invariant == {
+            "projected_sku_count": 1,
+            "fact": 15.0,
+            "incident": 10.0,
+            "effective": 5.0,
+        }
+        provisional_cached = build_vitrina_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=[rows[0]],
+            snapshot_date="2026-07-20",
+            fetched_at="2026-07-20T08:00:00+00:00",
+            pagination_complete=False,
+            raw_rows_digest="",
+            seller_id="fixture",
+        )
+        assert provisional_cached["cache"]["status"] == "hit"
+        changed_row = StocksWarehouseRow(
+            **{
+                **rows[0].__dict__,
+                "quantity": 9,
+            }
+        )
+        changed_provisional = build_vitrina_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=[changed_row],
+            snapshot_date="2026-07-20",
+            fetched_at="2026-07-20T08:00:00+00:00",
+            pagination_complete=False,
+            raw_rows_digest="",
+            seller_id="fixture",
+        )
+        assert (
+            changed_provisional["cache_identity_digest"]
+            != provisional["cache_identity_digest"]
+        )
+        assert changed_provisional["cache"]["status"] == "miss"
+
+        contradictory = build_vitrina_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=[
+                replace(rows[0], quantity=20),
+            ],
+            snapshot_date="2026-07-20",
+            fetched_at="2026-07-20T08:00:00+00:00",
+            pagination_complete=False,
+            raw_rows_digest="",
+            seller_id="fixture",
+            cache_enabled=False,
+        )
+        contradictory_row = contradictory["by_nm_id"]["1"]
+        assert contradictory_row["actual_stock_total_mp"] is None
+        assert contradictory_row["excluded_stock_total_mp"] is None
+        assert contradictory_row["effective_stock_total_mp"] is None
+        assert "превышает factual stock" in (
+            contradictory_row["blank_reasons_by_field"]["stock_total_mp"]
+        )
+        assert contradictory["invariants"]["status"] == "ok"
+        save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 0,
+                "active": True,
+                "excluded_wb_warehouse_ids": [0],
+                "reason": "official special bucket fixture",
+                "effective_from": "2026-07-20",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="operator",
+            warehouse_options=[
+                {
+                    "warehouse_id": 0,
+                    "warehouse_name": "Остальные — служебная группа WB",
+                }
+            ],
+            timestamp="2026-07-20T12:30:00Z",
+            seller_id="service-bucket-fixture",
+        )
+        service_bucket = build_vitrina_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=[
+                StocksWarehouseRow(
+                    nm_id=1,
+                    warehouse_id=None,
+                    warehouse_name="Остальные",
+                    region_name="",
+                    quantity=3,
+                    planning_zone_key=None,
+                    classification_status="unmapped",
+                    classification_source="fixture",
+                )
+            ],
+            snapshot_date="2026-07-20",
+            fetched_at="2026-07-20T08:00:00+00:00",
+            pagination_complete=False,
+            raw_rows_digest="",
+            seller_id="service-bucket-fixture",
+        )
+        assert (
+            service_bucket["by_nm_id"]["1"]["excluded_stock_total_mp"]
+            == 3
+        )
+        assert service_bucket["accepted_selected_warehouse_ids"] == [0]
 
         metrics = extend_metrics_with_incident_stock_metrics([])
         assert len(metrics) == 42

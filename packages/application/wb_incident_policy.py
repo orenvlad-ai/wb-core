@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, is_dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -10,6 +10,7 @@ import os
 from typing import Any, Mapping, Sequence
 
 from packages.application.stocks_block import (
+    REGION_TO_FIELD,
     build_wb_warehouse_exclusion,
     parse_excluded_wb_warehouse_ids,
 )
@@ -21,6 +22,9 @@ POLICY_CONTRACT_NAME = "wb_warehouse_incident_policy"
 POLICY_CONTRACT_VERSION = 1
 LEGACY_CONFIG_KEY = "wb_warehouse_exclusions"
 POLICY_STATUS_VALUES = {"active", "monitoring", "resolved", "disabled"}
+VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU = (
+    "Рассчитано по полученному снимку, полнота WB не подтверждена"
+)
 
 
 class WbIncidentPolicyError(ValueError):
@@ -328,6 +332,7 @@ def _historical_rows_with_exact_identity(
 ) -> list[StocksWarehouseRow]:
     identities = list(policy.get("warehouse_identities") or [])
     by_name: dict[str, int] = {}
+    identity_ids: set[int] = set()
     for identity in identities:
         name = _normalize_name(identity.get("warehouse_name"))
         warehouse_id = int(identity.get("warehouse_id") or 0)
@@ -336,14 +341,322 @@ def _historical_rows_with_exact_identity(
         if name in by_name and by_name[name] != warehouse_id:
             raise WbIncidentPolicyError("active policy contains an ambiguous historical warehouse identity")
         by_name[name] = warehouse_id
-    if policy.get("active") and policy.get("warehouse_ids") and len(by_name) != len(policy.get("warehouse_ids") or []):
+        identity_ids.add(warehouse_id)
+        if warehouse_id == 0 and name == _normalize_name(
+            "Остальные — служебная группа WB"
+        ):
+            # Historical CSV uses the exact official OfficeName while current
+            # WB warehouse options render the same canonical ID with an
+            # explanatory suffix.
+            by_name[_normalize_name("Остальные")] = 0
+    if (
+        policy.get("active")
+        and policy.get("warehouse_ids")
+        and identity_ids
+        != {int(item) for item in policy.get("warehouse_ids") or []}
+    ):
         raise WbIncidentPolicyError("historical incident projection has no exact identity for every selected warehouse")
-    return [
-        replace(row, warehouse_id=by_name.get(_normalize_name(row.warehouse_name)))
-        if row.warehouse_id is None and _normalize_name(row.warehouse_name) in by_name
-        else row
-        for row in rows
+    result: list[StocksWarehouseRow] = []
+    for row in rows:
+        mapped_id = by_name.get(_normalize_name(row.warehouse_name))
+        if row.warehouse_id is not None or mapped_id is None:
+            result.append(row)
+            continue
+        if is_dataclass(row):
+            result.append(replace(row, warehouse_id=mapped_id))
+            continue
+        result.append(
+            StocksWarehouseRow(
+                nm_id=int(getattr(row, "nm_id")),
+                warehouse_id=mapped_id,
+                warehouse_name=str(getattr(row, "warehouse_name", "") or ""),
+                region_name=str(getattr(row, "region_name", "") or ""),
+                quantity=float(getattr(row, "quantity", 0.0) or 0.0),
+                planning_zone_key=(
+                    str(getattr(row, "planning_zone_key"))
+                    if getattr(row, "planning_zone_key", None) is not None
+                    else None
+                ),
+                classification_status=str(
+                    getattr(row, "classification_status", "") or ""
+                ),
+                classification_source=str(
+                    getattr(row, "classification_source", "") or ""
+                ),
+                in_way_to_client=float(
+                    getattr(row, "in_way_to_client", 0.0) or 0.0
+                ),
+                in_way_from_client=float(
+                    getattr(row, "in_way_from_client", 0.0) or 0.0
+                ),
+                exclusion_codes=tuple(
+                    getattr(row, "exclusion_codes", ()) or ()
+                ),
+            )
+        )
+    return result
+
+
+def _projection_cache_policy_revision(policy: Mapping[str, Any]) -> int:
+    policy_revision = int(policy.get("revision") or 0)
+    if not policy.get("migration_pending"):
+        return policy_revision
+    legacy_identity = json.dumps(
+        {
+            "warehouse_ids": list(policy.get("warehouse_ids") or []),
+            "legacy_payloads": list(policy.get("legacy_payloads") or []),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return int(hashlib.sha256(legacy_identity.encode("utf-8")).hexdigest()[:12], 16)
+
+
+def _accepted_payload_digest(
+    *,
+    items: Sequence[StocksItem],
+    warehouse_rows: Sequence[StocksWarehouseRow],
+) -> str:
+    def _jsonable(value: Any) -> Any:
+        if is_dataclass(value):
+            return asdict(value)
+        if isinstance(value, Mapping):
+            return {str(key): _jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_jsonable(item) for item in value]
+        if hasattr(value, "__dict__"):
+            return {
+                str(key): _jsonable(item)
+                for key, item in vars(value).items()
+            }
+        return value
+
+    payload = {
+        "items": sorted(
+            (_jsonable(item) for item in items),
+            key=lambda item: (
+                int(item.get("nm_id") or 0),
+                json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            ),
+        ),
+        "warehouse_rows": sorted(
+            (_jsonable(row) for row in warehouse_rows),
+            key=lambda row: (
+                int(row.get("nm_id") or 0),
+                -1 if row.get("warehouse_id") is None else int(row.get("warehouse_id")),
+                str(row.get("warehouse_name") or ""),
+                str(row.get("region_name") or ""),
+                str(row.get("planning_zone_key") or ""),
+                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            ),
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _projection_cache_key(
+    *,
+    owner: str,
+    target_date: str,
+    cache_digest: str,
+    cache_policy_revision: int,
+    selected: Sequence[int],
+    mode: str,
+) -> str:
+    return hashlib.sha256(
+        (
+            f"{owner}|{target_date}|{cache_digest}|{cache_policy_revision}|"
+            f"{','.join(map(str, selected))}|{mode}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_projection_invariants(
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    field_names = [
+        ("total", "stock_total_mp"),
+        *[
+            (region, "stock_total_mp" if source_field == "stock_total" else source_field)
+            for region, source_field in (
+                ("central", "stock_ru_central"),
+                ("northwest", "stock_ru_northwest"),
+                ("volga", "stock_ru_volga"),
+                ("south_caucasus", "stock_ru_south_caucasus"),
+                ("ural", "stock_ru_ural"),
+                ("far_siberia", "stock_ru_far_siberia"),
+            )
+        ],
     ]
+    totals: dict[str, dict[str, float | int]] = {}
+    checked_cells = 0
+    for region, field_name in field_names:
+        fact_key = f"actual_{field_name}"
+        incident_key = f"excluded_{field_name}"
+        effective_key = f"effective_{field_name}"
+        fact_total = 0.0
+        incident_total = 0.0
+        effective_total = 0.0
+        projected_rows = 0
+        for row in dict(projection.get("by_nm_id") or {}).values():
+            values = (row.get(fact_key), row.get(incident_key), row.get(effective_key))
+            if values == (None, None, None):
+                continue
+            if any(value is None for value in values):
+                raise WbIncidentPolicyError(
+                    f"incident projection {region} has a partial fact/incident/effective triple"
+                )
+            fact, incident, effective = (float(value) for value in values)
+            if min(fact, incident, effective) < 0:
+                raise WbIncidentPolicyError(
+                    f"incident projection {region} contains a negative value"
+                )
+            if incident > fact + 1e-6:
+                raise WbIncidentPolicyError(
+                    f"incident projection {region} exceeds factual stock"
+                )
+            if abs(effective - (fact - incident)) > 1e-6:
+                raise WbIncidentPolicyError(
+                    f"incident projection {region} does not reconcile"
+                )
+            fact_total += fact
+            incident_total += incident
+            effective_total += effective
+            projected_rows += 1
+            checked_cells += 3
+        if abs(effective_total - (fact_total - incident_total)) > 1e-6:
+            raise WbIncidentPolicyError(
+                f"incident projection {region} TOTAL does not reconcile"
+            )
+        totals[region] = {
+            "projected_sku_count": projected_rows,
+            "fact": round(fact_total, 6),
+            "incident": round(incident_total, 6),
+            "effective": round(effective_total, 6),
+        }
+    return {
+        "status": "ok",
+        "checked_cells": checked_cells,
+        "totals": totals,
+    }
+
+
+def _apply_provisional_evidence_blanks(
+    projection: dict[str, Any],
+    *,
+    items: Sequence[StocksItem],
+    warehouse_rows: Sequence[StocksWarehouseRow],
+    selected: Sequence[int],
+) -> dict[str, Any]:
+    selected_ids = {int(item) for item in selected}
+    selected_rows_by_nm_and_id: dict[int, dict[int, list[StocksWarehouseRow]]] = {}
+    selected_quantity_by_nm_and_field: dict[int, dict[str, float]] = {}
+    selected_region_by_id: dict[int, str] = {}
+    ambiguous_region_ids: set[int] = set()
+    for row in warehouse_rows:
+        warehouse_id = row.warehouse_id
+        if warehouse_id is None or int(warehouse_id) not in selected_ids:
+            continue
+        numeric_id = int(warehouse_id)
+        selected_rows_by_nm_and_id.setdefault(int(row.nm_id), {}).setdefault(
+            numeric_id, []
+        ).append(row)
+        quantity_by_field = selected_quantity_by_nm_and_field.setdefault(
+            int(row.nm_id), {}
+        )
+        quantity_by_field["stock_total_mp"] = (
+            quantity_by_field.get("stock_total_mp", 0.0)
+            + max(float(row.quantity), 0.0)
+        )
+        region_field = REGION_TO_FIELD.get(str(row.region_name or "").strip())
+        if region_field:
+            quantity_by_field[region_field] = (
+                quantity_by_field.get(region_field, 0.0)
+                + max(float(row.quantity), 0.0)
+            )
+            previous = selected_region_by_id.get(numeric_id)
+            if previous is not None and previous != region_field:
+                ambiguous_region_ids.add(numeric_id)
+            else:
+                selected_region_by_id[numeric_id] = region_field
+    for warehouse_id in ambiguous_region_ids:
+        selected_region_by_id.pop(warehouse_id, None)
+
+    canonical_region_fields = sorted(set(REGION_TO_FIELD.values()))
+    blank_reasons: dict[str, dict[str, str]] = {}
+    for item in items:
+        nm_id = int(item.nm_id)
+        row_contract = dict(projection.get("by_nm_id", {}).get(str(nm_id)) or {})
+        if not row_contract:
+            continue
+        by_selected_id = selected_rows_by_nm_and_id.get(nm_id, {})
+        field_requirements: dict[str, set[int]] = {
+            "stock_total_mp": set(selected_ids),
+        }
+        for region_field in canonical_region_fields:
+            field_requirements[region_field] = {
+                warehouse_id
+                for warehouse_id, mapped_region in selected_region_by_id.items()
+                if mapped_region == region_field
+            }
+        unseen_selected_ids = selected_ids - {
+            int(row.warehouse_id)
+            for row in warehouse_rows
+            if row.warehouse_id is not None and int(row.warehouse_id) in selected_ids
+        }
+        for field_name, required_ids in field_requirements.items():
+            evidence_complete = (
+                bool(set(by_selected_id) & selected_ids)
+                if field_name == "stock_total_mp"
+                else (not required_ids or bool(required_ids & set(by_selected_id)))
+            )
+            if field_name != "stock_total_mp" and unseen_selected_ids:
+                evidence_complete = False
+            actual_value = row_contract.get(f"actual_{field_name}")
+            received_incident = selected_quantity_by_nm_and_field.get(
+                nm_id, {}
+            ).get(field_name, 0.0)
+            incident_exceeds_fact = (
+                actual_value is not None
+                and received_incident > float(actual_value) + 1e-6
+            )
+            if incident_exceeds_fact:
+                evidence_complete = False
+            if evidence_complete:
+                continue
+            for prefix in ("actual", "excluded", "effective"):
+                row_contract[f"{prefix}_{field_name}"] = None
+            reason = (
+                "Полученный физический incident quantity превышает factual stock; "
+                "конкретная SKU/региональная строка не доказана и оставлена пустой."
+                if incident_exceeds_fact
+                else (
+                    "Недостаточно фактически сохранённых строк выбранных складов для "
+                    "этого SKU/региона; нулевое значение не предполагается."
+                )
+            )
+            blank_reasons.setdefault(str(nm_id), {})[field_name] = reason
+            row_contract.setdefault("blank_reasons_by_field", {})[field_name] = reason
+            if field_name == "stock_total_mp":
+                row_contract["over_exclusion"] = None
+                row_contract["reconciliation_difference"] = None
+        projection["by_nm_id"][str(nm_id)] = row_contract
+    projection["blank_reasons_by_nm_id"] = blank_reasons
+    projection["accepted_selected_warehouse_ids"] = sorted(
+        {
+            int(row.warehouse_id)
+            for row in warehouse_rows
+            if row.warehouse_id is not None and int(row.warehouse_id) in selected_ids
+        }
+    )
+    return projection
 
 
 def build_incident_stock_projection(
@@ -356,6 +669,7 @@ def build_incident_stock_projection(
     pagination_complete: bool,
     raw_rows_digest: str,
     seller_id: str | None = None,
+    cache_enabled: bool = True,
 ) -> dict[str, Any]:
     """Project fact/incident/effective quantities without mutating canonical rows."""
 
@@ -369,25 +683,11 @@ def build_incident_stock_projection(
             "active incident policy requires a complete snapshot with a stable digest"
         )
     policy_revision = int(policy.get("revision") or 0)
-    cache_policy_revision = policy_revision
-    if policy.get("migration_pending"):
-        legacy_identity = json.dumps(
-            {
-                "warehouse_ids": list(policy.get("warehouse_ids") or []),
-                "legacy_payloads": list(policy.get("legacy_payloads") or []),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        cache_policy_revision = int(
-            hashlib.sha256(legacy_identity.encode("utf-8")).hexdigest()[:12],
-            16,
-        )
+    cache_policy_revision = _projection_cache_policy_revision(policy)
     cache_key = hashlib.sha256(
         f"{owner}|{target_date}|{digest}|{cache_policy_revision}|{','.join(map(str, selected))}".encode("utf-8")
     ).hexdigest()
-    if digest:
+    if digest and cache_enabled:
         cached = runtime.load_wb_incident_projection_cache(
             seller_id=owner,
             snapshot_digest=digest,
@@ -429,10 +729,192 @@ def build_incident_stock_projection(
             "cache": {"status": "miss", "key": cache_key},
         }
     )
-    if digest:
+    if digest and cache_enabled:
         runtime.save_wb_incident_projection_cache(
             seller_id=owner,
             snapshot_digest=digest,
+            policy_revision=cache_policy_revision,
+            snapshot_date=target_date,
+            projection=projection,
+            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+    return projection
+
+
+def build_vitrina_incident_stock_projection(
+    runtime: Any,
+    *,
+    items: Sequence[StocksItem],
+    warehouse_rows: Sequence[StocksWarehouseRow],
+    snapshot_date: str,
+    fetched_at: str,
+    pagination_complete: bool,
+    raw_rows_digest: str,
+    seller_id: str | None = None,
+    cache_enabled: bool = True,
+) -> dict[str, Any]:
+    """Build the information-only Vitrina projection from accepted rows.
+
+    This is intentionally a separate adapter from the strict shared API used by
+    Supply and SKU Management.  A partial snapshot may publish only triples
+    supported by actually persisted item/warehouse rows.  Missing evidence stays
+    blank and the result carries an explicit provisional quality contract.
+    """
+
+    target_date = _iso_date(snapshot_date, field_name="snapshot_date")
+    owner = seller_id or canonical_seller_id()
+    policy = get_policy_state(runtime, snapshot_date=target_date, seller_id=owner)
+    selected = (
+        tuple(int(item) for item in policy.get("warehouse_ids") or [])
+        if policy.get("active")
+        else ()
+    )
+    source_digest = str(raw_rows_digest or "").strip()
+    completeness_confirmed = bool(pagination_complete and source_digest)
+    if not selected or completeness_confirmed:
+        projection = build_incident_stock_projection(
+            runtime,
+            items=items,
+            warehouse_rows=warehouse_rows,
+            snapshot_date=target_date,
+            fetched_at=fetched_at,
+            pagination_complete=bool(pagination_complete),
+            raw_rows_digest=source_digest,
+            seller_id=owner,
+            cache_enabled=cache_enabled,
+        )
+        projection["projection_mode"] = "vitrina_information"
+        projection["quality"] = {
+            "state": "confirmed" if completeness_confirmed else "received_rows",
+            "label_ru": "Полнота WB подтверждена" if completeness_confirmed else "Полученный снимок",
+            "message_ru": (
+                "Полнота WB подтверждена"
+                if completeness_confirmed
+                else "Политика не требует исключения складов; показаны фактически полученные строки"
+            ),
+            "completeness_confirmed": completeness_confirmed,
+            "pagination_complete": bool(pagination_complete),
+            "raw_rows_digest_present": bool(source_digest),
+            "raw_rows_digest": source_digest,
+            "accepted_payload_digest": _accepted_payload_digest(
+                items=items,
+                warehouse_rows=warehouse_rows,
+            ),
+            "accepted_item_count": len(items),
+            "accepted_warehouse_row_count": len(warehouse_rows),
+            "policy_revision": int(policy.get("revision") or 0),
+            "policy_effective_date": str(policy.get("effective_from") or ""),
+            "snapshot_date": target_date,
+        }
+        projection["invariants"] = _validate_projection_invariants(projection)
+        return projection
+
+    accepted_payload_digest = _accepted_payload_digest(
+        items=items,
+        warehouse_rows=warehouse_rows,
+    )
+    cache_digest = f"vitrina-accepted-payload:{accepted_payload_digest}"
+    policy_revision = int(policy.get("revision") or 0)
+    cache_policy_revision = _projection_cache_policy_revision(policy)
+    cache_key = _projection_cache_key(
+        owner=owner,
+        target_date=target_date,
+        cache_digest=cache_digest,
+        cache_policy_revision=cache_policy_revision,
+        selected=selected,
+        mode="vitrina_provisional_received_rows_v1",
+    )
+    if cache_enabled:
+        cached = runtime.load_wb_incident_projection_cache(
+            seller_id=owner,
+            snapshot_digest=cache_digest,
+            policy_revision=cache_policy_revision,
+            snapshot_date=target_date,
+        )
+        if isinstance(cached, Mapping) and cached.get("status") == "ok":
+            projection = dict(cached.get("projection") or {})
+            projection["cache"] = {"status": "hit", "key": cache_key}
+            return projection
+
+    exact_rows = _historical_rows_with_exact_identity(warehouse_rows, policy=policy)
+    projection = build_wb_warehouse_exclusion(
+        items=list(items),
+        warehouse_rows=exact_rows,
+        excluded_warehouse_ids=selected,
+        snapshot_date=target_date,
+        fetched_at=fetched_at,
+        # The low-level arithmetic requires this flag to avoid the strict gate.
+        # The source quality below restores the truthful unconfirmed state and
+        # is the only contract exposed to Vitrina.
+        pagination_complete=True,
+        raw_rows_digest=cache_digest,
+        require_complete=False,
+    )
+    projection = _apply_provisional_evidence_blanks(
+        projection,
+        items=items,
+        warehouse_rows=exact_rows,
+        selected=selected,
+    )
+    affected_ids = [
+        int(nm_id)
+        for nm_id, row in projection.get("by_nm_id", {}).items()
+        if row.get("excluded_stock_total_mp") is not None
+        and float(row.get("excluded_stock_total_mp") or 0.0) > 0
+    ]
+    quality = {
+        "state": "provisional_received_rows",
+        "label_ru": "Полнота WB не подтверждена",
+        "message_ru": VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU,
+        "completeness_confirmed": False,
+        "pagination_complete": bool(pagination_complete),
+        "raw_rows_digest_present": bool(source_digest),
+        "raw_rows_digest": source_digest,
+        "accepted_payload_digest": accepted_payload_digest,
+        "accepted_item_count": len(items),
+        "accepted_warehouse_row_count": len(warehouse_rows),
+        "projected_item_count": sum(
+            1
+            for row in projection.get("by_nm_id", {}).values()
+            if row.get("actual_stock_total_mp") is not None
+        ),
+        "blank_item_count": sum(
+            1
+            for row in projection.get("by_nm_id", {}).values()
+            if row.get("actual_stock_total_mp") is None
+        ),
+        "policy_revision": policy_revision,
+        "policy_effective_date": str(policy.get("effective_from") or ""),
+        "snapshot_date": target_date,
+    }
+    projection.update(
+        {
+            "contract_name": "wb_incident_stock_projection",
+            "contract_version": 2,
+            "projection_mode": "vitrina_provisional_received_rows",
+            "seller_id": owner,
+            "policy": policy,
+            "policy_revision": policy_revision,
+            "projection_cache_policy_revision": cache_policy_revision,
+            "policy_active": True,
+            "affected_nm_ids": affected_ids,
+            # Never expose the accepted-payload digest as source completeness.
+            "snapshot_digest": source_digest,
+            "cache_identity_digest": cache_digest,
+            "quality": quality,
+            "cache": {
+                "status": "miss" if cache_enabled else "bypassed",
+                "key": cache_key,
+            },
+        }
+    )
+    projection["pagination_complete"] = bool(pagination_complete)
+    projection["raw_rows_digest"] = source_digest
+    projection["invariants"] = _validate_projection_invariants(projection)
+    if cache_enabled:
+        runtime.save_wb_incident_projection_cache(
+            seller_id=owner,
+            snapshot_digest=cache_digest,
             policy_revision=cache_policy_revision,
             snapshot_date=target_date,
             projection=projection,

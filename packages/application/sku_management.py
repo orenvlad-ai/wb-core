@@ -18,6 +18,11 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.stocks_block import (
     build_wb_warehouse_exclusion,
 )
+from packages.application.vitrina_incident_rematerialization import (
+    DEFAULT_MAX_DATES as VITRINA_INCIDENT_REMATERIALIZATION_MAX_DATES,
+    apply_vitrina_incident_rematerialization,
+    plan_vitrina_incident_rematerialization,
+)
 from packages.application.wb_incident_policy import (
     WbIncidentPolicyError,
     build_incident_stock_projection,
@@ -617,18 +622,96 @@ class SkuManagementBlock:
                     "status": "active" if legacy_ids else "disabled",
                 }
             )
+        policy_saved_at = self.timestamp_factory()
         try:
-            save_policy_revision(
+            saved_policy = save_policy_revision(
                 self.runtime,
                 payload=normalized_payload,
                 actor=user_key,
                 warehouse_options=list(options_contract.get("options") or []),
-                timestamp=self.timestamp_factory(),
+                timestamp=policy_saved_at,
             )
         except WbIncidentPolicyError as exc:
             status = 409 if "conflict" in str(exc).casefold() else 422
             raise SkuManagementError(str(exc), http_status=status) from exc
-        return self.get_warehouse_exclusion_settings(user_key=user_key)
+        rematerialization = self._rematerialize_incident_policy_ready_dates(
+            user_key=user_key,
+            revision=int(saved_policy.get("revision") or 0),
+            effective_from=str(normalized_payload.get("effective_from") or ""),
+            date_to=snapshot_date,
+            generated_at=policy_saved_at,
+        )
+        return {
+            **self.get_warehouse_exclusion_settings(user_key=user_key),
+            "rematerialization": rematerialization,
+        }
+
+    def _rematerialize_incident_policy_ready_dates(
+        self,
+        *,
+        user_key: str,
+        revision: int,
+        effective_from: str,
+        date_to: str,
+        generated_at: str,
+    ) -> dict[str, Any]:
+        if effective_from > date_to:
+            return {
+                "status": "scheduled",
+                "reason": "policy effective date is in the future",
+                "date_from": effective_from,
+                "date_to": date_to,
+            }
+        try:
+            reviewed_plan, _ = plan_vitrina_incident_rematerialization(
+                self.runtime,
+                date_from=effective_from,
+                date_to=date_to,
+                max_dates=VITRINA_INCIDENT_REMATERIALIZATION_MAX_DATES,
+                generated_at=generated_at,
+            )
+            if not reviewed_plan.get("apply_allowed"):
+                return {
+                    "status": "no_ready_dates",
+                    "date_from": reviewed_plan.get("date_from_effective"),
+                    "date_to": reviewed_plan.get("date_to"),
+                    "snapshot_count": 0,
+                    "changed_cells": 0,
+                    "fingerprint": reviewed_plan.get("fingerprint"),
+                }
+            applied = apply_vitrina_incident_rematerialization(
+                self.runtime,
+                reviewed_plan=reviewed_plan,
+                fingerprint=str(reviewed_plan.get("fingerprint") or ""),
+                approval_reference=f"policy-apply:revision:{revision}",
+                actor=user_key,
+                applied_at=generated_at,
+            )
+            return {
+                "status": str(applied.get("status") or "applied"),
+                "date_from": reviewed_plan.get("date_from_effective"),
+                "date_to": reviewed_plan.get("date_to"),
+                "snapshot_count": reviewed_plan.get("snapshot_count"),
+                "changed_snapshot_count": reviewed_plan.get(
+                    "changed_snapshot_count"
+                ),
+                "changed_cells": reviewed_plan.get("changed_cells"),
+                "fingerprint": reviewed_plan.get("fingerprint"),
+                "readback_status": applied.get("readback_status"),
+                "readback_changed_cells": applied.get("readback_changed_cells"),
+                "raw_stock_truth_mutated": False,
+                "non_target_invariant": applied.get("non_target_invariant"),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "date_from": effective_from,
+                "date_to": date_to,
+                "error": str(exc),
+                "retry_contract": (
+                    "repo-owned bounded vitrina incident rematerialization dry-run/apply"
+                ),
+            }
 
     def build_table(
         self,

@@ -29,6 +29,7 @@ WAREHOUSE_UI_PATH = "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=producti
 WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
 WAREHOUSE_RECOVERY_POLICY_PROFILE = "warehouse_recovery_policy_20260726"
+VITRINA_INCIDENT_PROVISIONAL_PROFILE = "vitrina_incident_provisional_20260727"
 
 
 def _exact_canary_lifecycles(
@@ -139,15 +140,20 @@ def _run_warehouse_ui_flow(
         WAREHOUSE_CHAIN_RECOVERY_PROFILE,
         WAREHOUSE_COST_TRANSPARENCY_PROFILE,
         WAREHOUSE_RECOVERY_POLICY_PROFILE,
+        VITRINA_INCIDENT_PROVISIONAL_PROFILE,
     }:
         raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
     normalized_deployed_sha = str(deployed_sha or "").strip().lower()
     if (
-        normalized_acceptance_profile == WAREHOUSE_RECOVERY_POLICY_PROFILE
+        normalized_acceptance_profile
+        in {
+            WAREHOUSE_RECOVERY_POLICY_PROFILE,
+            VITRINA_INCIDENT_PROVISIONAL_PROFILE,
+        }
         and not re.fullmatch(r"[0-9a-f]{40}", normalized_deployed_sha)
     ):
         raise ValueError(
-            "warehouse recovery UI acceptance requires an exact deployed SHA"
+            "profiled warehouse UI acceptance requires an exact deployed SHA"
         )
     documents = [
         dict(item)
@@ -220,6 +226,7 @@ def _run_warehouse_ui_flow(
     settings_evidence: dict[str, Any] = {}
     supplier_evidence: dict[str, Any] = {}
     consumer_evidence: dict[str, Any] = {}
+    vitrina_incident_provisional_evidence: dict[str, Any] = {}
     requested_url = normalized_base_url + WAREHOUSE_UI_PATH
 
     with sync_playwright() as playwright:
@@ -611,6 +618,12 @@ def _run_warehouse_ui_flow(
                     "badge": page.locator("[data-wb-incident-policy-badge]").inner_text().strip(),
                     "revision_audit": page.locator("[data-wb-incident-audit]").inner_text().strip(),
                     "numeric_warehouse_option_count": option_nodes.count(),
+                    "selected_warehouse_count": page.locator(
+                        "[data-wb-incident-warehouse-id]:checked"
+                    ).count(),
+                    "effective_from": page.locator(
+                        "[data-wb-incident-effective-from]"
+                    ).input_value(),
                     "active": page.locator("[data-wb-incident-active]").is_checked(),
                     "apply_not_clicked": True,
                 }
@@ -1316,11 +1329,11 @@ def _run_warehouse_ui_flow(
               return {
                 count: cells.length,
                 tooltipsComplete: cells.every(cell => {
-                  const value = cell.getAttribute("title") || "";
-                  return value.includes("Факт:")
-                    && value.includes("На инцидентных складах:")
-                    && value.includes("Operational остаток:")
-                    && value.includes("Revision");
+                  const value = (cell.getAttribute("title") || "").toLocaleLowerCase("ru-RU");
+                  return value.includes("факт:")
+                    && value.includes("на инцидентных складах:")
+                    && value.includes("operational остаток:")
+                    && value.includes("revision");
                 }),
                 styles: cells.slice(0, 10).map(cell => {
                   const style = getComputedStyle(cell);
@@ -1345,6 +1358,28 @@ def _run_warehouse_ui_flow(
                 ),
                 "Vitrina shows the active incident-policy read-only badge",
             )
+        if (
+            normalized_acceptance_profile
+            == VITRINA_INCIDENT_PROVISIONAL_PROFILE
+        ):
+            _assert(
+                incident_policy_evidence.get("active") is True
+                and incident_policy_evidence.get("selected_warehouse_count") == 5
+                and incident_policy_evidence.get("effective_from") == "2026-07-25"
+                and "Revision 2"
+                in str(incident_policy_evidence.get("revision_audit") or ""),
+                "seller-level incident policy revision 2 is active from 2026-07-25 "
+                "with exactly five selected warehouses",
+            )
+            vitrina_incident_provisional_evidence = (
+                _assert_vitrina_incident_provisional_profile(
+                    page,
+                    evidence_dir=evidence_dir,
+                )
+            )
+            screenshots.extend(
+                vitrina_incident_provisional_evidence.get("screenshots") or []
+            )
 
         sku_quick_popup_evidence: dict[str, Any] = {
             "checked": False,
@@ -1353,6 +1388,10 @@ def _run_warehouse_ui_flow(
         consumer_screenshots = [
             str(stock_report_screenshot),
             str(sku_screenshot),
+            *(
+                vitrina_incident_provisional_evidence.get("screenshots")
+                or []
+            ),
         ]
         if strict_business_acceptance:
             sku_opener = page.locator("[data-open-vitrina-sku]").first
@@ -1455,6 +1494,9 @@ def _run_warehouse_ui_flow(
                 "visible": vitrina_policy_badge.is_visible(),
                 "label": vitrina_policy_badge.inner_text().strip(),
             },
+            "vitrina_incident_provisional": (
+                vitrina_incident_provisional_evidence
+            ),
             "unconfirmed_cell_style": unconfirmed_style,
             "sku_quick_popup": sku_quick_popup_evidence,
             "warehouse_history_unavailable_reason_date": (
@@ -1532,6 +1574,200 @@ def _run_warehouse_ui_flow(
     report_path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     report["report_path"] = str(report_path)
     return report
+
+
+def _assert_vitrina_incident_provisional_profile(
+    page: Page,
+    *,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    target_date = "2026-07-25"
+    quality_phrase = (
+        "Рассчитано по полученному снимку, полнота WB не подтверждена"
+    )
+    for _index in range(200):
+        collapsed = page.locator(
+            '[data-metric-anchor-toggle][aria-expanded="false"]'
+        )
+        if collapsed.count() == 0:
+            break
+        collapsed.first.click()
+
+    quality_badge = page.locator(
+        "[data-vitrina-incident-quality-badge]:not([hidden])"
+    )
+    quality_badge.wait_for(state="visible", timeout=60_000)
+    _assert(
+        quality_phrase in str(quality_badge.get_attribute("title") or "")
+        and quality_phrase
+        in str(quality_badge.get_attribute("aria-label") or ""),
+        "provisional quality badge exposes the exact accessible explanation",
+    )
+
+    suffixes = (
+        "",
+        "_central",
+        "_northwest",
+        "_volga",
+        "_south_caucasus",
+        "_ural",
+        "_far_siberia",
+    )
+
+    def _cells(metric_key: str) -> dict[str, tuple[Decimal | None, Any]]:
+        locator = page.locator(
+            f'td[data-cell-date="{target_date}"]'
+            f'[data-metric-key="{metric_key}"]'
+        )
+        result: dict[str, tuple[Decimal | None, Any]] = {}
+        for index in range(locator.count()):
+            cell = locator.nth(index)
+            row_id = str(cell.get_attribute("data-row-id") or "")
+            text = cell.inner_text().strip()
+            value = None if text in {"", "—"} else _visible_decimal(text)
+            result[row_id] = (value, cell)
+        return result
+
+    family_evidence: dict[str, Any] = {}
+    positive_incident_cells = 0
+    provisional_filled_cells = 0
+    for suffix in suffixes:
+        fact_key = f"wb_stock_fact_qty{suffix}"
+        incident_key = f"wb_stock_incident_qty{suffix}"
+        effective_key = f"wb_stock_effective_qty{suffix}"
+        fact_cells = _cells(fact_key)
+        incident_cells = _cells(incident_key)
+        effective_cells = _cells(effective_key)
+        sku_ids = sorted(
+            {
+                row_id
+                for row_id in (
+                    set(fact_cells) | set(incident_cells) | set(effective_cells)
+                )
+                if row_id.startswith("SKU:")
+            }
+        )
+        projected: list[tuple[Decimal, Decimal, Decimal]] = []
+        blank_count = 0
+        for row_id in sku_ids:
+            triple = (
+                fact_cells.get(row_id, (None, None))[0],
+                incident_cells.get(row_id, (None, None))[0],
+                effective_cells.get(row_id, (None, None))[0],
+            )
+            if triple == (None, None, None):
+                blank_count += 1
+                continue
+            _assert(
+                all(value is not None for value in triple),
+                f"{row_id} {suffix or 'total'} keeps one complete "
+                "fact/incident/effective triple or three blanks",
+            )
+            fact = Decimal(triple[0])
+            incident = Decimal(triple[1])
+            effective = Decimal(triple[2])
+            _assert(
+                min(fact, incident, effective) >= 0
+                and incident <= fact
+                and effective == fact - incident,
+                f"{row_id} {suffix or 'total'} incident arithmetic reconciles",
+            )
+            projected.append((fact, incident, effective))
+            for mapping in (fact_cells, incident_cells, effective_cells):
+                cell = mapping[row_id][1]
+                classes = str(cell.get_attribute("class") or "")
+                title = str(cell.get_attribute("title") or "")
+                aria = str(cell.get_attribute("aria-label") or "")
+                _assert(
+                    "cell-incident-provisional" in classes
+                    and quality_phrase in title
+                    and quality_phrase in aria,
+                    f"{row_id} {suffix or 'total'} exposes provisional quality accessibly",
+                )
+                provisional_filled_cells += 1
+            if incident > 0:
+                incident_classes = str(
+                    incident_cells[row_id][1].get_attribute("class") or ""
+                )
+                _assert(
+                    "cell-incident-adjusted" in incident_classes,
+                    f"{row_id} {suffix or 'total'} positive incident keeps "
+                    "the separate blue-violet marker",
+                )
+                positive_incident_cells += 1
+
+        _assert(
+            projected,
+            f"{suffix or 'total'} incident family has received-row projections",
+        )
+        total_fact_cells = _cells("total_" + fact_key)
+        total_incident_cells = _cells("total_" + incident_key)
+        total_effective_cells = _cells("total_" + effective_key)
+        total_triple = (
+            total_fact_cells.get(
+                "TOTAL|total_" + fact_key,
+                (None, None),
+            )[0],
+            total_incident_cells.get(
+                "TOTAL|total_" + incident_key,
+                (None, None),
+            )[0],
+            total_effective_cells.get(
+                "TOTAL|total_" + effective_key,
+                (None, None),
+            )[0],
+        )
+        _assert(
+            all(value is not None for value in total_triple),
+            f"{suffix or 'total'} TOTAL triple is filled",
+        )
+        total_fact = Decimal(total_triple[0])
+        total_incident = Decimal(total_triple[1])
+        total_effective = Decimal(total_triple[2])
+        _assert(
+            total_fact == sum(item[0] for item in projected)
+            and total_incident == sum(item[1] for item in projected)
+            and total_effective == sum(item[2] for item in projected)
+            and total_incident <= total_fact
+            and total_effective == total_fact - total_incident,
+            f"{suffix or 'total'} TOTAL reconciles with available SKU projections",
+        )
+        family_evidence[suffix or "total"] = {
+            "projected_sku_count": len(projected),
+            "blank_sku_count": blank_count,
+            "fact": str(total_fact),
+            "incident": str(total_incident),
+            "effective": str(total_effective),
+        }
+
+    _assert(
+        family_evidence["total"]["projected_sku_count"] == 33,
+        "2026-07-25 base fact/incident/effective family covers all 33 accepted SKU",
+    )
+    _assert(
+        positive_incident_cells > 0,
+        "2026-07-25 contains positively adjusted incident cells",
+    )
+    screenshot = evidence_dir / "vitrina_incident_provisional_2026-07-25.png"
+    quality_badge.scroll_into_view_if_needed(timeout=60_000)
+    page.screenshot(path=str(screenshot), full_page=False)
+
+    for _index in range(200):
+        expanded = page.locator(
+            '[data-metric-anchor-toggle][aria-expanded="true"]'
+        )
+        if expanded.count() == 0:
+            break
+        expanded.first.click()
+    return {
+        "target_date": target_date,
+        "quality_badge": quality_badge.inner_text().strip(),
+        "quality_phrase": quality_phrase,
+        "family_reconciliation": family_evidence,
+        "positive_incident_cell_count": positive_incident_cells,
+        "provisional_filled_cell_count": provisional_filled_cells,
+        "screenshots": [str(screenshot)],
+    }
 
 
 def _warehouse_action_theme_evidence(page: Page) -> dict[str, Any]:
