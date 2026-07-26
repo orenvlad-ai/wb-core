@@ -917,6 +917,50 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
             operation["operation_id"],
         )
 
+    def test_failed_pre_mutation_canary_releases_only_owned_temp(self) -> None:
+        def fail_before_checkpoint(_: str, boundary: str) -> None:
+            if boundary == "before_checkpoint_write":
+                raise RuntimeError("synthetic canary checkpoint failure")
+
+        faulting = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            fault_injector=fail_before_checkpoint,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "synthetic canary checkpoint failure",
+        ):
+            faulting.prepare_t2(
+                mutation_kind="manual_warehouse_sync",
+                plan_fingerprint="sha256:failed-canary-release",
+                scope={"canary": True, "business_mutation": False},
+                source_digest="sha256:source",
+                non_target_digest="sha256:non-target",
+                source_watermarks={"canary": True},
+                schema_revision="smoke-v1",
+            )
+        failed = next(
+            operation
+            for operation in self.registry.list_operations(limit=100)
+            if operation["plan_fingerprint"]
+            == "sha256:failed-canary-release"
+        )
+        partial = (
+            self.registry.checkpoint_root
+            / f"{failed['operation_id']}.sqlite3.tmp"
+        )
+        partial.write_bytes(b"partial-canary-checkpoint")
+        release = self.registry.release_failed_canary_pre_mutations()
+        self.assertEqual(release["released_operation_ids"], [failed["operation_id"]])
+        self.assertFalse(partial.exists())
+        self.assertEqual(
+            self.registry.get_operation(failed["operation_id"])["lifecycle"],
+            RecoveryState.RELEASED.value,
+        )
+        self.assertEqual(self.registry.scan_orphans()["status"], "clean")
+
     def test_expired_retention_is_fingerprint_gated(self) -> None:
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
         clock_value = {"now": start}

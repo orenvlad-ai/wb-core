@@ -87,7 +87,10 @@ Apply creates no T0 row or bytes, proves one exact T1 marker replay and rollback
 creates one T2 domain checkpoint without a business-row mutation, compares the
 warehouse-domain digest before/after and requires a clean orphan scan. The UI
 profile requires the canary T1/T2 operations to be terminal and the recovery
-surface to be visibly ready with zero orphan/quarantine leak.
+surface to be visibly ready with zero orphan/quarantine leak. A later
+deployed-SHA attempt releases only older canary-scoped failures whose durable
+transition history proves that business mutation never began; ordinary failed
+or quarantined operations remain fail-closed.
 
 ## Current call-site matrix
 

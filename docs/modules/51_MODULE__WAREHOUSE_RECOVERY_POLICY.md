@@ -115,4 +115,8 @@ The canonical production sequence is:
 The canary's only temporary row is in the recovery-owned canary table and is
 removed by the exact T1 rollback. T2 performs no business mutation. Success
 requires identical warehouse-domain digests and zero unclassified raw,
-sidecar, temp or orphan evidence.
+sidecar, temp or orphan evidence. Before a new deployed-SHA attempt, the canary
+releases only older canary-scoped failures proven to have stopped before
+`mutation_running`; their deterministic owned temp/checkpoint paths and
+reservations are released, while any failed business mutation remains
+fail-closed.

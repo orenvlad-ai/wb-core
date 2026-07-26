@@ -126,6 +126,7 @@ ALLOWED_TRANSITIONS: Mapping[str, frozenset[str]] = {
             RecoveryState.VERIFIED.value,
             RecoveryState.MUTATION_RUNNING.value,
             RecoveryState.RETAINED.value,
+            RecoveryState.RELEASED.value,
             RecoveryState.ROLLED_BACK.value,
             RecoveryState.QUARANTINED.value,
         }
@@ -1669,6 +1670,107 @@ class WarehouseRecoveryRegistry:
             "status": "applied",
             "fingerprint": fingerprint,
             "removed_paths": removed,
+        }
+
+    def release_failed_canary_pre_mutations(self) -> dict[str, Any]:
+        """Release exact failed canary evidence that never reached mutation."""
+
+        candidates = [
+            operation
+            for operation in self.list_operations(limit=1000)
+            if operation.get("lifecycle")
+            == RecoveryState.FAILED_RECOVERABLE.value
+            and bool((operation.get("scope") or {}).get("canary"))
+            and operation.get("tier") in {RecoveryTier.T1.value, RecoveryTier.T2.value}
+            and self._failed_from_state(str(operation["operation_id"]))
+            in {
+                RecoveryState.PLANNED.value,
+                RecoveryState.RESERVED.value,
+                RecoveryState.WRITING.value,
+                RecoveryState.VERIFIED.value,
+            }
+        ]
+        released: list[str] = []
+        removed_paths: list[str] = []
+        for operation in candidates:
+            operation_id = str(operation["operation_id"])
+            owned_paths = {
+                Path(str(artifact["path"]))
+                for artifact in operation.get("artifacts", [])
+                if artifact.get("path")
+            }
+            if operation.get("tier") == RecoveryTier.T2.value:
+                checkpoint = self.checkpoint_root / f"{operation_id}.sqlite3"
+                owned_paths.update(
+                    {
+                        checkpoint,
+                        checkpoint.with_name(checkpoint.name + TEMP_SUFFIX),
+                        checkpoint.with_name(checkpoint.name + MANIFEST_SUFFIX),
+                        Path(str(checkpoint) + "-wal"),
+                        Path(str(checkpoint) + "-shm"),
+                        Path(str(checkpoint) + "-journal"),
+                    }
+                )
+            for path in sorted(owned_paths):
+                if not _path_is_below(path, self.recovery_root):
+                    self.quarantine(
+                        operation_id,
+                        "failed_canary_release_path_outside_recovery_root",
+                    )
+                    raise RecoveryPolicyError(
+                        "failed canary artifact escaped recovery root"
+                    )
+                if path.is_symlink() or (path.exists() and not path.is_file()):
+                    self.quarantine(
+                        operation_id,
+                        "failed_canary_release_unsafe_path",
+                    )
+                    raise RecoveryPolicyError(
+                        "failed canary artifact path is not a regular file"
+                    )
+                if path.is_file():
+                    path.unlink()
+                    removed_paths.append(str(path))
+            if self.checkpoint_root.is_dir():
+                _fsync_directory(self.checkpoint_root)
+            with _connect(self.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_recovery_undo_rows "
+                        "WHERE operation_id=?",
+                        (operation_id,),
+                    )
+                    conn.execute(
+                        "UPDATE sheet_vitrina_v1_recovery_artifacts "
+                        "SET state='released' WHERE operation_id=?",
+                        (operation_id,),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_recovery_capacity_reservations
+                        SET state='released',released_at=?
+                        WHERE operation_id=? AND state IN ('active','consumed')
+                        """,
+                        (self._now(), operation_id),
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            self._transition(
+                operation_id,
+                expected_state=RecoveryState.FAILED_RECOVERABLE.value,
+                next_state=RecoveryState.RELEASED.value,
+                next_action="none",
+                last_error="released failed pre-mutation canary evidence",
+                writer_state="idle",
+            )
+            released.append(operation_id)
+        return {
+            "status": "released" if released else "noop",
+            "released_operation_ids": released,
+            "removed_paths": removed_paths,
         }
 
     def scan_orphans(self) -> dict[str, Any]:
