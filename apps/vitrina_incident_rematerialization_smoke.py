@@ -288,9 +288,14 @@ def main() -> None:
             runtime,
             date_from=TARGET_DATE,
             date_to=TARGET_DATE,
-            generated_at="2026-07-25T08:15:00Z",
+            generated_at="2026-07-25T09:15:00Z",
         )
         assert repeat["changed_cells"] == 0
+        assert repeat["changed_snapshot_count"] == 0
+        assert (
+            repeat["snapshots"][0]["before_plan_digest"]
+            == repeat["snapshots"][0]["after_plan_digest"]
+        )
 
     print("vitrina_incident_rematerialization_smoke: OK")
 
