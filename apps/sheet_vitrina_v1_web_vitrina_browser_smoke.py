@@ -1403,6 +1403,35 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     scope_labels = [str(scope["label"]) for scope in panel_state["scopeTables"]]
     if scope_labels[:2] != ["Итого", "SKU"]:
         raise AssertionError(f"metrics presentation must render two scope tables Итого/SKU, got {panel_state}")
+    incident_metric_keys = {
+        "wb_stock_fact_qty",
+        "wb_stock_incident_qty",
+        "wb_stock_effective_qty",
+        "total_wb_stock_fact_qty",
+        "total_wb_stock_incident_qty",
+        "total_wb_stock_effective_qty",
+    }
+    metric_config_rows = {
+        str(row["metricKey"]): row
+        for scope in panel_state["scopeTables"]
+        for row in scope["rows"]
+    }
+    missing_incident_metric_keys = sorted(
+        incident_metric_keys - set(metric_config_rows)
+    )
+    if missing_incident_metric_keys:
+        raise AssertionError(
+            "stable incident metrics must remain in visibility settings without "
+            f"period rows, missing={missing_incident_metric_keys}"
+        )
+    if any(
+        str(metric_config_rows[metric_key]["status"]) != "collapsed"
+        for metric_key in incident_metric_keys
+    ):
+        raise AssertionError(
+            "incident metric visibility defaults must remain calm/collapsed, "
+            f"rows={metric_config_rows}"
+        )
     if int(panel_state["gridColumns"]) != 2:
         raise AssertionError(f"metrics presentation must use two compact desktop tables, got {panel_state}")
     if "Настроено:" not in str(panel_state["summary"]):
@@ -1446,7 +1475,17 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation needs a scope with at least four metrics from multiple groups, got {panel_state}")
     scope_id = str(target_scope["scopeId"])
     initial_order = [str(row["metricKey"]) for row in target_scope["rows"]]
-    bulk_selection = _check_metric_bulk_selection(page, scope_id=scope_id, initial_order=initial_order, storage_key=storage_key)
+    initial_statuses = {
+        str(row["metricKey"]): str(row["status"])
+        for row in target_scope["rows"]
+    }
+    bulk_selection = _check_metric_bulk_selection(
+        page,
+        scope_id=scope_id,
+        initial_order=initial_order,
+        initial_statuses=initial_statuses,
+        storage_key=storage_key,
+    )
     source_row = target_scope["rows"][0]
     target_row = next((row for row in target_scope["rows"][1:] if row["group"] != source_row["group"]), target_scope["rows"][2])
     source_key = str(source_row["metricKey"])
@@ -1508,7 +1547,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if expanded_order[anchor_index:anchor_index + 3] != expected_reveal:
         raise AssertionError(f"collapsed metrics must reveal after anchor in configured order, got {expanded_order[:12]}")
     expanded_disclosure = _metric_disclosure_state(page)
-    if set(expanded_disclosure["expandedValues"]) != {"true"} or set(expanded_disclosure["iconTexts"]) != {"▾"}:
+    expanded_anchor_index = expanded_disclosure["buttonMetricKeys"].index(anchor_key)
+    if (
+        expanded_disclosure["expandedValues"][expanded_anchor_index] != "true"
+        or expanded_disclosure["iconTexts"][expanded_anchor_index] != "▾"
+    ):
         raise AssertionError(f"expanded disclosure must update icon and aria-expanded, got {expanded_disclosure}")
     hierarchy_state = page.evaluate(
         """(keys) => {
@@ -1559,7 +1602,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"display statuses must persist after reload, got {persisted_display}")
     reloaded_disclosure = _metric_disclosure_state(page)
     reloaded_counts = _visible_metric_key_counts(page)
-    if set(reloaded_disclosure["expandedValues"]) != {"true"} or int(reloaded_counts.get(collapsed_one, 0)) <= 0:
+    reloaded_anchor_index = reloaded_disclosure["buttonMetricKeys"].index(anchor_key)
+    if (
+        reloaded_disclosure["expandedValues"][reloaded_anchor_index] != "true"
+        or int(reloaded_counts.get(collapsed_one, 0)) <= 0
+    ):
         raise AssertionError(
             f"expanded collapsed-metric disclosure must persist after reload, got disclosure={reloaded_disclosure}, counts={reloaded_counts}"
         )
@@ -1569,10 +1616,13 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     reset_order = _metric_scope_order(page, scope_id)
     reset_statuses = _metric_scope_statuses(page, scope_id)
-    if reset_order != initial_order or any(status != "shown" for status in reset_statuses.values()):
-        raise AssertionError(f"reset must restore default order and shown statuses, got order={reset_order}, statuses={reset_statuses}")
-    if page.locator("[data-metric-anchor-toggle]").count() != 0:
-        raise AssertionError("reset must clear collapsed disclosure state")
+    if reset_order != initial_order or reset_statuses != initial_statuses:
+        raise AssertionError(f"reset must restore default order and statuses, got order={reset_order}, statuses={reset_statuses}")
+    reset_disclosure = _metric_disclosure_state(page)
+    if any(value == "true" for value in reset_disclosure["expandedValues"]):
+        raise AssertionError(
+            f"reset must clear expanded collapsed-disclosure state, got {reset_disclosure}"
+        )
 
     page.evaluate("(key) => window.localStorage.setItem(key, '{broken-json')", storage_key)
     page.reload(wait_until="commit")
@@ -1926,7 +1976,14 @@ def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, o
     }
 
 
-def _check_metric_bulk_selection(page: object, *, scope_id: str, initial_order: list[str], storage_key: str) -> dict[str, object]:
+def _check_metric_bulk_selection(
+    page: object,
+    *,
+    scope_id: str,
+    initial_order: list[str],
+    initial_statuses: dict[str, str],
+    storage_key: str,
+) -> dict[str, object]:
     if len(initial_order) < 4:
         raise AssertionError(f"bulk selection check needs at least four metrics, got {initial_order}")
     other_scope_id = "sku" if scope_id == "total" else "total"
@@ -2019,7 +2076,7 @@ def _check_metric_bulk_selection(page: object, *, scope_id: str, initial_order: 
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     reset_order = _metric_scope_order(page, scope_id)
     reset_statuses = _metric_scope_statuses(page, scope_id)
-    if reset_order != initial_order or any(status != "shown" for status in reset_statuses.values()):
+    if reset_order != initial_order or reset_statuses != initial_statuses:
         raise AssertionError(f"reset must clear bulk order/status changes, got order={reset_order}, statuses={reset_statuses}")
     return {
         "scope": scope_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -15,6 +16,10 @@ if str(ROOT) not in sys.path:
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    INCIDENT_STOCK_METRIC_KEYS,
+    extend_metrics_with_incident_stock_metrics,
+)
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
 )
@@ -114,6 +119,46 @@ def main() -> None:
             selected_date_to=None,
             activity_surface=_build_activity_surface_fixture(),
         )
+        incident_catalog_composition = build_web_vitrina_page_composition(
+            contract=contract,
+            view_model=view_model,
+            adapter=adapter,
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(
+                descending=True
+            ),
+            selected_as_of_date=None,
+            selected_date_from=None,
+            selected_date_to=None,
+            activity_surface=_build_activity_surface_fixture(),
+            metric_catalog=[
+                asdict(item)
+                for item in extend_metrics_with_incident_stock_metrics([])
+            ],
+        )
+        incident_catalog_options = {
+            str(item["value"]): item
+            for item in incident_catalog_composition["filter_surface"]["controls"][-1][
+                "options"
+            ]
+        }
+        missing_incident_catalog_keys = sorted(
+            set(INCIDENT_STOCK_METRIC_KEYS) - set(incident_catalog_options)
+        )
+        if missing_incident_catalog_keys:
+            raise AssertionError(
+                "stable incident metrics must remain configurable without period rows: "
+                f"{missing_incident_catalog_keys}"
+            )
+        if any(
+            int(incident_catalog_options[metric_key]["count"]) != 0
+            for metric_key in INCIDENT_STOCK_METRIC_KEYS
+        ):
+            raise AssertionError(
+                "catalog-only incident metrics must not invent historical rows or values"
+            )
 
         if composition["composition_name"] != "web_vitrina_page_composition" or composition["composition_version"] != "v1":
             raise AssertionError(f"page composition identity mismatch, got {composition}")

@@ -66,6 +66,7 @@ def build_web_vitrina_page_composition(
     default_preset_id: str = WEB_VITRINA_DEFAULT_PRESET_ID,
     activity_surface: Mapping[str, Any] | None = None,
     include_table_data: bool = True,
+    metric_catalog: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     contract_payload = _to_payload(contract)
     view_model_payload = _to_payload(view_model)
@@ -84,7 +85,10 @@ def build_web_vitrina_page_composition(
     section_counts = _count_rows(rows, key="section_id")
     group_counts = _count_rows(rows, key="group_id")
     row_kind_counts = _count_rows(rows, key="row_kind")
-    metric_counts = _count_metric_rows(rows)
+    metric_counts = _merge_metric_catalog(
+        _count_metric_rows(rows),
+        metric_catalog=metric_catalog,
+    )
     metric_options = _build_metric_options(
         metric_counts,
         sections=view_model_payload["sections"],
@@ -684,6 +688,44 @@ def _count_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, Any
             bucket["section_label"] = section_label
         if row_kind:
             bucket["row_kinds"].add(row_kind)
+    return counts
+
+
+def _merge_metric_catalog(
+    metric_counts: Mapping[str, Mapping[str, Any]],
+    *,
+    metric_catalog: list[Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    counts = {
+        str(metric_key): {
+            **dict(item),
+            "row_kinds": {str(value) for value in (item.get("row_kinds") or set())},
+        }
+        for metric_key, item in metric_counts.items()
+    }
+    for item in metric_catalog or []:
+        metric_key = str(item.get("metric_key") or "")
+        if not metric_key or item.get("enabled") is False:
+            continue
+        scope = str(item.get("scope") or "").strip().upper()
+        row_kind = "total" if scope == "TOTAL" else "sku"
+        section_label = str(item.get("section") or "").strip() or "Без секции"
+        section_id = (
+            "section:unsectioned"
+            if section_label == "Без секции"
+            else f"section:{section_label}"
+        )
+        bucket = counts.setdefault(
+            metric_key,
+            {
+                "label": str(item.get("label_ru") or metric_key),
+                "count": 0,
+                "section_id": section_id,
+                "section_label": section_label,
+                "row_kinds": set(),
+            },
+        )
+        bucket["row_kinds"].add(row_kind)
     return counts
 
 
