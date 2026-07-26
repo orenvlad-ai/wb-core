@@ -552,6 +552,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             frame = page.locator('[data-settings-embed-frame]:not([hidden])')
             frame.wait_for()
             surface = page.frame_locator("[data-settings-embed-frame]")
+            surface.locator('html[data-settings-ready="true"]').wait_for()
             surface.locator('[data-settings-group-button="user-directory"]').click()
             rendered_values = surface.locator(
                 "#calculationReferenceRows tr:first-child td:not(:first-child)"
