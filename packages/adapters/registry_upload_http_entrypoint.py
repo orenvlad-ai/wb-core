@@ -184,6 +184,7 @@ DEFAULT_WB_BUYER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buy
 DEFAULT_WB_BUYER_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
 DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
 DEFAULT_SKU_MANAGEMENT_PATH = "/v1/sheet-vitrina-v1/sku-management"
+DEFAULT_SKU_MANAGEMENT_SKU_PREFIX = f"{DEFAULT_SKU_MANAGEMENT_PATH}/sku"
 DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/settings"
 DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/preview"
 DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/commit"
@@ -2824,6 +2825,31 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path.startswith(DEFAULT_SKU_MANAGEMENT_SKU_PREFIX + "/"):
+                try:
+                    actor = _current_web_user_config_key(self)
+                    payload = entrypoint.handle_sku_management_detail_request(
+                        _resolve_sku_management_nm_id(parsed.path),
+                        user_key=actor,
+                    )
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "sku management read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path in {DEFAULT_SKU_MANAGEMENT_PATH, DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH, DEFAULT_SKU_MANAGEMENT_HISTORY_PATH}:
                 try:
                     actor = _current_web_user_config_key(self)
@@ -5393,6 +5419,22 @@ def _resolve_sheet_ads_sku_nm_id(path: str) -> int:
         raise ValueError("ads sku nm_id must be numeric") from exc
     if nm_id <= 0:
         raise ValueError("ads sku nm_id must be positive")
+    return nm_id
+
+
+def _resolve_sku_management_nm_id(path: str) -> int:
+    prefix = DEFAULT_SKU_MANAGEMENT_SKU_PREFIX + "/"
+    if not path.startswith(prefix):
+        raise ValueError("unsupported sku management path")
+    remainder = path[len(prefix) :].strip("/")
+    if not remainder or "/" in remainder:
+        raise ValueError("sku management path must end with nm_id")
+    try:
+        nm_id = int(remainder)
+    except ValueError as exc:
+        raise ValueError("sku management nm_id must be numeric") from exc
+    if nm_id <= 0:
+        raise ValueError("sku management nm_id must be positive")
     return nm_id
 
 
@@ -8389,6 +8431,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "operator_path": operator_path,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_MONITORING_PATH,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
+        "wb_incident_policy_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
+        "wb_incident_policy_settings_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "user_config_path": DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
@@ -8444,6 +8488,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
         "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
         "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,
+        "sku_management_sku_path": DEFAULT_SKU_MANAGEMENT_SKU_PREFIX,
         "sku_management_settings_path": DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH,
         "sku_management_price_preview_path": DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH,
         "sku_management_price_commit_path": DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH,

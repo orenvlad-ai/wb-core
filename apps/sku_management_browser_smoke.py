@@ -206,9 +206,31 @@ def main() -> None:
                             "cumulative_no_fallback": True,
                         },
                         "warehouse_exclusion": {
+                            "active": True,
                             "excluded_wb_warehouse_ids": [101, 102],
                             "names": ["Альфа", "Бета"],
                         },
+                    },
+                }))
+                return
+            if path == "/v1/sheet-vitrina-v1/sku-management/sku/101":
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                    "contract_name": "sheet_vitrina_v1_sku_management_detail",
+                    "row": _rows()[0],
+                    "meta": {"warehouse_exclusion": {"active": True, "names": ["Альфа", "Бета"]}},
+                    "history": {
+                        "rows": [{
+                            "nm_id": 101,
+                            "parameter": "seller_price",
+                            "old_value": 1000,
+                            "requested_value": 990,
+                            "confirmed_value": 990,
+                            "actor": "operator",
+                            "commit_status": "confirmed",
+                            "readback_status": "matching",
+                            "confirmed_at": "2026-07-25T08:00:00Z",
+                            "warnings": [],
+                        }],
                     },
                 }))
                 return
@@ -235,7 +257,7 @@ def main() -> None:
             raise AssertionError("product cell must show title first, secondary nmID, and no internal SKU")
         if page.locator('[data-sku-sort="product"]').inner_text().strip() != "Название / nmID":
             raise AssertionError("compact product header is required")
-        if "В расчёте не участвуют склады: Альфа, Бета" not in page.locator("[data-sku-warehouse-exclusion-summary]").inner_text():
+        if "Учитывается политика инцидентов · Не участвуют: Альфа, Бета" not in page.locator("[data-sku-warehouse-exclusion-summary]").inner_text():
             raise AssertionError("SKU surface must explain the canonical warehouse exclusions")
         if "за 24.07" not in page.locator('[data-sku-sort="profit_rub"]').inner_text() or "за 24.07" not in page.locator('[data-sku-sort="ads_spend_rub"]').inner_text():
             raise AssertionError("cumulative metric headers must expose exact D-2")
@@ -265,6 +287,25 @@ def main() -> None:
               };
             }"""
         )
+        page.evaluate(
+            """() => {
+              const opener = document.createElement('button');
+              opener.id = 'fixture-vitrina-sku-opener';
+              document.body.appendChild(opener);
+              openVitrinaSkuModal(101, opener);
+            }"""
+        )
+        page.locator('[data-sku-management-modal][data-sku-modal-state="quick_ready"]').wait_for()
+        quick_modal = page.locator("[data-sku-management-modal]")
+        if "HIGH risk product" not in quick_modal.inner_text() or "nmID 101" not in quick_modal.inner_text():
+            raise AssertionError("Vitrina SKU popup must use the narrow canonical SKU detail")
+        if quick_modal.locator("[data-quick-sku-price]").count() != 1 or quick_modal.locator("[data-quick-sku-bid-option]").count() != 1:
+            raise AssertionError("Vitrina SKU popup must expose price and exact campaign/placement controls")
+        if "confirmed / matching" not in quick_modal.inner_text():
+            raise AssertionError("Vitrina SKU popup history must be filtered to the selected nmID and expose readback")
+        page.keyboard.press("Escape")
+        if not quick_modal.is_hidden():
+            raise AssertionError("Escape must close the side-effect-free SKU popup")
         if len(modal_styles["cards"]) < 3 or any(item != {"background": "rgb(23, 25, 31)", "opacity": "1"} for item in modal_styles["cards"]):
             raise AssertionError(f"all operator modal cards must be fully opaque: {modal_styles}")
         if "0.76" not in modal_styles["backdrop"] or modal_styles["modalZ"] <= modal_styles["headerZ"]:

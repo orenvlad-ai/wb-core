@@ -129,6 +129,9 @@ def build_web_vitrina_page_composition(
             "grid_library_name": str(adapter_payload["meta"]["library_name"]),
             "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
             "browser_state_persistence": "none",
+            "incident_policy_badge": dict(
+                contract_payload["meta"].get("incident_policy_badge") or {}
+            ),
         },
         "historical_access": _build_historical_access(
             page_route=page_route,

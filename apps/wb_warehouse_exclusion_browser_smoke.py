@@ -1,4 +1,4 @@
-"""Read-only browser smoke for the shared WB warehouse exclusion selector."""
+"""Read-only browser smoke for the shared WB incident-policy selector."""
 
 from __future__ import annotations
 
@@ -66,9 +66,11 @@ def main() -> None:
                         "status": "ok",
                         "exists": True,
                         "revision": revision[0],
+                        "active": True,
                         "updated_at": "",
                         "excluded_wb_warehouse_ids": [77],
-                        "canonical_store": "server_runtime_user_config",
+                        "effective_excluded_wb_warehouse_ids": [77],
+                        "canonical_store": "server_runtime_wb_incident_policy",
                     }
                 route.fulfill(
                     status=200,
@@ -128,7 +130,9 @@ def main() -> None:
         page.wait_for_function(
             "() => document.querySelectorAll('[data-wb-warehouse-exclusion-checkbox]').length === 5"
         )
-        page.wait_for_function("() => document.querySelector('#wbWarehouseExclusionMessage').textContent.includes('Список подтверждён')")
+        page.wait_for_function(
+            "() => document.querySelector('#wbWarehouseExclusionMessage').textContent.includes('Read-only политика подтверждена')"
+        )
         if saved:
             raise AssertionError("reading canonical settings must not cause a write")
         ids = page.locator(
@@ -148,16 +152,22 @@ def main() -> None:
             raise AssertionError(
                 f"missing selected warehouse must retain its warning: {row_77_text!r}"
             )
-        page.locator("#wbWarehouseExclusionSummary").click()
-        page.locator(
-            '[data-wb-warehouse-exclusion-checkbox][value="1"]'
-        ).check()
-        page.wait_for_function(
-            "() => document.querySelector('#wbWarehouseExclusionSummary').textContent.includes('2')"
-        )
-        page.wait_for_timeout(100)
-        if not saved or saved[-1].get("excluded_wb_warehouse_ids") != [1, 77]:
-            raise AssertionError("selector edits must persist to the canonical server config")
+        if not all(
+            page.locator("[data-wb-warehouse-exclusion-checkbox]")
+            .nth(index)
+            .is_disabled()
+            for index in range(
+                page.locator("[data-wb-warehouse-exclusion-checkbox]").count()
+            )
+        ):
+            raise AssertionError("Supply incident selector must be read-only")
+        if (
+            "Учитывается политика инцидентов"
+            not in page.locator("#wbWarehouseExclusionSummary").inner_text()
+        ):
+            raise AssertionError("Supply must show the effective policy badge")
+        if saved:
+            raise AssertionError("read-only Supply policy must never persist a browser copy")
         browser.close()
     print("wb_warehouse_exclusion_browser_smoke: OK")
 

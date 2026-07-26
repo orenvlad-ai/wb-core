@@ -1237,6 +1237,245 @@ class RegistryUploadDbBackedRuntime:
             config_key=normalized_config_key,
         )
 
+    def list_sheet_vitrina_user_configs(self, *, config_key: str) -> list[dict[str, Any]]:
+        """Read every legacy per-user value for one config key without mutating it."""
+
+        normalized_config_key = _normalize_required_storage_key(config_key, field_name="config_key")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT user_key, config_key, schema_version, payload_json, updated_at, revision
+                FROM sheet_vitrina_v1_user_configs
+                WHERE config_key = ?
+                ORDER BY user_key
+                """,
+                (normalized_config_key,),
+            ).fetchall()
+        return [_sheet_vitrina_user_config_row_to_dict(row) for row in rows]
+
+    def load_latest_wb_incident_policy(self, *, seller_id: str) -> dict[str, Any]:
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_incident_policy_revisions
+                WHERE seller_id = ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (normalized_seller_id,),
+            ).fetchone()
+        return _wb_incident_policy_row_to_dict(row, seller_id=normalized_seller_id)
+
+    def load_wb_incident_policy_for_date(
+        self,
+        *,
+        seller_id: str,
+        snapshot_date: str,
+    ) -> dict[str, Any]:
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        normalized_snapshot_date = date.fromisoformat(str(snapshot_date)).isoformat()
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_incident_policy_revisions
+                WHERE seller_id = ?
+                  AND effective_from <= ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (normalized_seller_id, normalized_snapshot_date),
+            ).fetchone()
+        return _wb_incident_policy_row_to_dict(row, seller_id=normalized_seller_id)
+
+    def load_wb_incident_policy_started_by_date(
+        self,
+        *,
+        seller_id: str,
+        snapshot_date: str,
+    ) -> dict[str, Any]:
+        """Return the latest revision that had started, regardless of its end date."""
+
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        normalized_snapshot_date = date.fromisoformat(str(snapshot_date)).isoformat()
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_incident_policy_revisions
+                WHERE seller_id = ? AND effective_from <= ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (normalized_seller_id, normalized_snapshot_date),
+            ).fetchone()
+        return _wb_incident_policy_row_to_dict(row, seller_id=normalized_seller_id)
+
+    def append_wb_incident_policy_revision(
+        self,
+        *,
+        seller_id: str,
+        active: bool,
+        warehouse_ids: Iterable[int],
+        warehouse_identities: Iterable[Mapping[str, Any]],
+        reason: str,
+        effective_from: str,
+        effective_to: str,
+        policy_status: str,
+        actor: str,
+        created_at: str,
+        source: str,
+        legacy_payloads: Iterable[Mapping[str, Any]] = (),
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Append an immutable seller-level policy revision with optimistic locking."""
+
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        normalized_from = date.fromisoformat(str(effective_from)).isoformat()
+        normalized_to = date.fromisoformat(str(effective_to)).isoformat() if effective_to else ""
+        _validate_timestamp(created_at, field_name="created_at")
+        normalized_ids = sorted({int(item) for item in warehouse_ids})
+        identities = [dict(item) for item in warehouse_identities]
+        legacy = [dict(item) for item in legacy_payloads]
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """
+                SELECT revision
+                FROM sheet_vitrina_v1_wb_incident_policy_revisions
+                WHERE seller_id = ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (normalized_seller_id,),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current is not None else 0
+            if expected_revision is not None and current_revision != int(expected_revision):
+                return {"status": "conflict", "current_revision": current_revision}
+            next_revision = current_revision + 1
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_incident_policy_revisions(
+                    seller_id,
+                    revision,
+                    active,
+                    warehouse_ids_json,
+                    warehouse_identities_json,
+                    reason,
+                    effective_from,
+                    effective_to,
+                    policy_status,
+                    actor,
+                    created_at,
+                    source,
+                    legacy_payloads_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_seller_id,
+                    next_revision,
+                    1 if active else 0,
+                    json.dumps(normalized_ids, ensure_ascii=False, sort_keys=True),
+                    json.dumps(identities, ensure_ascii=False, sort_keys=True),
+                    str(reason or ""),
+                    normalized_from,
+                    normalized_to,
+                    str(policy_status or ""),
+                    str(actor or ""),
+                    created_at,
+                    str(source or "incident_policy"),
+                    json.dumps(legacy, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            conn.commit()
+        return self.load_latest_wb_incident_policy(seller_id=normalized_seller_id)
+
+    def load_wb_incident_projection_cache(
+        self,
+        *,
+        seller_id: str,
+        snapshot_digest: str,
+        policy_revision: int,
+        snapshot_date: str,
+    ) -> dict[str, Any]:
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT projection_json, created_at
+                FROM sheet_vitrina_v1_wb_incident_projection_cache
+                WHERE seller_id = ?
+                  AND snapshot_digest = ?
+                  AND policy_revision = ?
+                  AND snapshot_date = ?
+                """,
+                (
+                    normalized_seller_id,
+                    str(snapshot_digest or ""),
+                    int(policy_revision),
+                    date.fromisoformat(str(snapshot_date)).isoformat(),
+                ),
+            ).fetchone()
+        if row is None:
+            return {"status": "missing"}
+        return {
+            "status": "ok",
+            "projection": json.loads(row["projection_json"]),
+            "created_at": str(row["created_at"] or ""),
+        }
+
+    def save_wb_incident_projection_cache(
+        self,
+        *,
+        seller_id: str,
+        snapshot_digest: str,
+        policy_revision: int,
+        snapshot_date: str,
+        projection: Mapping[str, Any],
+        created_at: str,
+    ) -> dict[str, Any]:
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        _validate_timestamp(created_at, field_name="created_at")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_incident_projection_cache(
+                    seller_id,
+                    snapshot_digest,
+                    policy_revision,
+                    snapshot_date,
+                    projection_json,
+                    created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(seller_id, snapshot_digest, policy_revision, snapshot_date) DO NOTHING
+                """,
+                (
+                    normalized_seller_id,
+                    str(snapshot_digest or ""),
+                    int(policy_revision),
+                    date.fromisoformat(str(snapshot_date)).isoformat(),
+                    json.dumps(dict(projection), ensure_ascii=False, sort_keys=True),
+                    created_at,
+                ),
+            )
+            conn.commit()
+        return {"status": "ok"}
+
     def create_sku_action_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
         """Persist one immutable SKU impact attempt/readback event in runtime SQLite."""
 
@@ -8856,6 +9095,31 @@ def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _wb_incident_policy_row_to_dict(
+    row: sqlite3.Row | None,
+    *,
+    seller_id: str,
+) -> dict[str, Any]:
+    if row is None:
+        return {"status": "missing", "seller_id": seller_id, "revision": 0}
+    return {
+        "status": "ok",
+        "seller_id": str(row["seller_id"]),
+        "revision": int(row["revision"]),
+        "active": bool(row["active"]),
+        "warehouse_ids": _loads_json_list(row["warehouse_ids_json"]),
+        "warehouse_identities": _loads_json_list(row["warehouse_identities_json"]),
+        "reason": str(row["reason"] or ""),
+        "effective_from": str(row["effective_from"] or ""),
+        "effective_to": str(row["effective_to"] or ""),
+        "policy_status": str(row["policy_status"] or ""),
+        "actor": str(row["actor"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "source": str(row["source"] or ""),
+        "legacy_payloads": _loads_json_list(row["legacy_payloads_json"]),
+    }
+
+
 def _sku_action_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "event_id": row["event_id"],
@@ -9204,6 +9468,40 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             revision INTEGER NOT NULL,
             PRIMARY KEY (user_key, config_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_incident_policy_revisions (
+            seller_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            active INTEGER NOT NULL CHECK (active IN (0, 1)),
+            warehouse_ids_json TEXT NOT NULL DEFAULT '[]',
+            warehouse_identities_json TEXT NOT NULL DEFAULT '[]',
+            reason TEXT NOT NULL DEFAULT '',
+            effective_from TEXT NOT NULL,
+            effective_to TEXT NOT NULL DEFAULT '',
+            policy_status TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'incident_policy',
+            legacy_payloads_json TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (seller_id, revision)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_incident_policy_by_effective_date
+        ON sheet_vitrina_v1_wb_incident_policy_revisions(
+            seller_id,
+            effective_from DESC,
+            revision DESC
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_incident_projection_cache (
+            seller_id TEXT NOT NULL,
+            snapshot_digest TEXT NOT NULL,
+            policy_revision INTEGER NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            projection_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (seller_id, snapshot_digest, policy_revision, snapshot_date)
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_sku_action_events (

@@ -237,6 +237,12 @@ update_note: "Обновлён под current temporal closure seam, plan-report
 
 The same SQLite runtime owns `sheet_vitrina_v1_sku_action_events`. It is append-only audit evidence for SKU-management price and exact campaign/placement bid attempts. Only rows with confirmed commit and matching successful readback participate in last-change and daily-delta projections. Business-day grouping uses `Asia/Yekaterinburg`; multiple confirmed deltas are summed, while a day with no event has no lookup value (`null`, not `0`). This table is also the only source for the operator history panel; no parallel experiment journal is created.
 
+## WB incident policy extension
+
+The runtime owns append-only `sheet_vitrina_v1_wb_incident_policy_revisions` by canonical seller and revision. Each row stores activity, stable warehouse IDs plus exact historical name identities, reason, effective interval, status, actor/source, created timestamp and preserved legacy per-user payload evidence. Date resolution selects the latest revision that owns the exact date; inactive/end-state revisions stop current/future adjustment without rewriting prior published dates.
+
+`sheet_vitrina_v1_wb_incident_projection_cache` is derived-only materialization keyed by seller, exact snapshot digest, policy revision and snapshot date. It stores the deterministic fact/incident/effective projection and cannot mutate canonical stock snapshots, warehouse balances, WAC or capital events.
+
 ## Global SQLite contention contract
 
 All shared runtime writers open SQLite through `packages/application/sqlite_contention.py`. Interactive requests have a 30-second bounded budget and shorter jittered backoff; background processes have a 10-second budget and yield longer between attempts. Each individual SQLite attempt uses a 250 ms busy timeout. Only `SQLITE_BUSY`/`SQLITE_LOCKED` is retried, so business validation and unrelated database errors are never repeated. The warehouse functional process retains its explicit process-local 120-second override.

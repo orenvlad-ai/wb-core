@@ -17,6 +17,7 @@ from packages.contracts.wb_supply_planning_zones import (
     PLANNING_ZONE_CENTRAL_EAST,
     PLANNING_ZONE_CENTRAL_NORTH,
     PLANNING_ZONE_CENTRAL_SOUTH,
+    SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD,
     resolve_central_storage_warehouse,
     warehouse_name_exclusion_codes,
 )
@@ -343,8 +344,11 @@ def build_wb_warehouse_exclusion(
             region_field = REGION_TO_FIELD.get(
                 str(getattr(row, "region_name", "") or "").strip()
             )
-            if region_field:
-                excluded_by_nm_and_field[int(row.nm_id)][region_field] += quantity
+            planning_field = SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD.get(
+                str(getattr(row, "planning_zone_key", "") or "").strip()
+            )
+            for field_name in {region_field, planning_field} - {None}:
+                excluded_by_nm_and_field[int(row.nm_id)][str(field_name)] += quantity
 
     options = []
     for warehouse_id, option in sorted(
@@ -411,7 +415,12 @@ def build_wb_warehouse_exclusion(
             ),
         }
         stock_item = item_by_nm[nm_id]
-        for region_field in REGION_TO_FIELD.values():
+        for region_field in sorted(
+            {
+                *REGION_TO_FIELD.values(),
+                *SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD.values(),
+            }
+        ):
             actual_region = max(float(getattr(stock_item, region_field, 0.0)), 0.0)
             raw_excluded_region = max(
                 float(excluded_by_nm_and_field[nm_id].get(region_field, 0.0)),

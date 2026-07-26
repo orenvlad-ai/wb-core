@@ -16,6 +16,7 @@ related_modules:
   - "packages/adapters/stocks_block.py"
   - "packages/application/stocks_block.py"
   - "packages/application/warehouse_stocks.py"
+  - "packages/application/wb_incident_policy.py"
 related_tables: []
 related_endpoints:
   - "POST /api/analytics/v1/stocks-report/wb-warehouses"
@@ -30,6 +31,7 @@ related_runners:
   - "apps/stocks_historical_csv_smoke.py"
   - "apps/sheet_vitrina_v1_stocks_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_stocks_historical_backfill.py"
+  - "apps/wb_incident_policy_smoke.py"
 related_docs:
   - "00_INDEX__MODULES.md"
   - "migration/41_stocks_block_contract.md"
@@ -95,11 +97,13 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
 - Целевой смысл блока: bounded stocks snapshot с сохранением coverage guard без буквального переноса Apps Script cursor/staging.
 - Для two-day sheet read model блок обязан оставаться честным: required `yesterday_closed` читается только из authoritative exact-date historical path/runtime cache, while `today_current` stays blank/`not_available` and is not filled through surrogate current values.
 
-## 3.1 Shared warehouse exclusion projection
+## 3.1 Seller-level incident policy and shared stock projection
 
-`build_wb_warehouse_exclusion` is the single calculation-only projection used by Supply and SKU Management. It accepts stable numeric IDs and a current official warehouse-granular result. Present options are ordered by `total_contour desc`, then case-folded Russian warehouse name and numeric ID; selected IDs absent from current rows are appended at the bottom with `temporarily_missing=true`.
+Canonical stock snapshots remain immutable. `wb_incident_policy` resolves one append-only seller/account revision for the exact snapshot date, then `build_incident_stock_projection` publishes three projections per nmID and canonical region: fact, physical quantity on incident warehouses, and operational/effective quantity. Supply, SKU Management and Vitrina consume that server projection; browsers and page calculators do not subtract warehouses independently. Derived materialization is keyed by seller, exact date, snapshot digest and policy revision.
 
-For every nmID it publishes actual/excluded/effective total WB stock and the same triple for each canonical regional field. Regional subtraction is derived only from the official row's mapped `region_name`; unmapped rows may affect total but never an invented district. Empty selection is an identity projection. Non-empty selection requires complete pagination; incomplete evidence raises a controlled error so downstream forecast quality remains unknown rather than zero.
+The low-level `build_wb_warehouse_exclusion` arithmetic accepts stable numeric warehouse IDs. It subtracts only `StocksWarehouseRow.quantity`; `in_way_to_client` and `in_way_from_client` remain factual WB-contour evidence and are never excluded without a separate exact attribution contract. Regional subtraction uses only the row's canonical `region_name`, while Supply planning-zone fields use only its canonical `planning_zone_key`; unmapped quantity can affect fact total but never an invented region or zone. An active non-empty policy requires complete pagination and a non-empty snapshot digest. Current rows use exact numeric IDs. Historical `OfficeName` rows can be mapped only through the exact, unambiguous name/ID identities captured in the applied policy revision; missing identity evidence fails closed.
+
+Policy revisions carry `active`, warehouse IDs and identities, reason, `effective_from`, optional `effective_to`, status, actor and audit timestamp. A revision is applied only inside its interval. Before the first revision, incident-aware metric rows remain unmaterialized; after an inactive/resolved revision or an ended interval, current/future operational quantity equals fact while already published exact-date incident history remains auditable. Existing per-user `wb_warehouse_exclusions` values are read as a non-mutating migration input; one consistent legacy set remains current-compatible until explicit Apply, while conflicting sets are preserved and disabled fail-closed.
 
 # 4. Артефакты по модулю
 

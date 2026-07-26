@@ -218,10 +218,10 @@ Canonical repo-owned public route allowlist:
 - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 
 Every browser-fetched protected API used by the public operator surface must be
-listed explicitly. In particular, the shared WB warehouse exclusion selector
+listed explicitly. In particular, the seller-level WB incident policy
 depends on the exact read-only options route
 `GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options` and the
-canonical persisted-settings route
+append-only revision settings route
 `GET|POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings`; a
 loopback-only implementation of either route is not a deploy-complete contract.
 Production probes validate only the read-only `GET` side of the settings route.
@@ -770,4 +770,4 @@ For server/operator-only changes that do not touch archived bound Apps Script gu
 
 ## SKU management runtime/write contract
 
-The authenticated public route family is exact GET `/v1/sheet-vitrina-v1/sku-management` plus narrow GET/POST prefix `/v1/sheet-vitrina-v1/sku-management/`; app session and `sku_management` section authorization remain authoritative. Dedicated price and exact-placement bid blocks are part of normal runtime construction and require no post-deploy feature-flag enablement. `WB_PRICES_WRITE_ENABLED` and `SHEET_VITRINA_ADS_WRITE_ENABLED` continue to gate their legacy standalone tabs but do not disable this separately authorized workflow. Its sufficient mandatory gates are one stored target/preview, explicit confirmation, stale/min/quarantine validation, backend-only WB call, audit and exact readback. Deploy itself performs no WB mutation.
+The authenticated public route family is exact GET `/v1/sheet-vitrina-v1/sku-management`, narrow per-SKU GET `/v1/sheet-vitrina-v1/sku-management/sku/{nm_id}`, and guarded GET/POST prefix `/v1/sheet-vitrina-v1/sku-management/`; app session and `sku_management` section authorization remain authoritative. Dedicated price and exact-placement bid blocks are part of normal runtime construction and require no post-deploy feature-flag enablement. `WB_PRICES_WRITE_ENABLED` and `SHEET_VITRINA_ADS_WRITE_ENABLED` continue to gate their legacy standalone tabs but do not disable this separately authorized workflow. Its sufficient mandatory gates are one stored target/preview, explicit confirmation, stale/min/quarantine validation, backend-only WB call, audit and exact readback. Deploy itself performs no WB mutation.

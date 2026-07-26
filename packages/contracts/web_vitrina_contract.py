@@ -19,6 +19,7 @@ class WebVitrinaContractMeta:
     generated_at: str
     refreshed_at: str
     row_count: int
+    incident_policy_badge: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

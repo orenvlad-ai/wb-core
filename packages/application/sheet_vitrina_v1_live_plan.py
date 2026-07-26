@@ -72,6 +72,15 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     resolve_onec_stocks_account_id,
     summarize_onec_stage_bucket_coverage,
 )
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    INCIDENT_STOCK_FIELDS,
+    INCIDENT_STOCK_METRIC_KEYS,
+    extend_metrics_with_incident_stock_metrics,
+    incident_stock_metric_key,
+    incident_stock_total_metric_key,
+    incident_stock_value,
+    is_incident_stock_metric_key,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_COST_OPENING_DATE,
@@ -127,6 +136,7 @@ from packages.application.warehouse_functional import _warehouse_balance_status_
 from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
+from packages.application.wb_incident_policy import build_incident_stock_projection
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE,
@@ -385,6 +395,8 @@ class SlotLookups:
     fin_storage_fee_total: float | None
     cost_price_lookup: dict[str, "ResolvedCostPrice"]
     promo_lookup: dict[int, dict[str, float]]
+    incident_stocks_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    incident_policy: dict[str, Any] = field(default_factory=dict)
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -1035,9 +1047,11 @@ class SheetVitrinaV1LivePlanBlock:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
         effective_metrics = extend_metrics_with_sku_action_metrics(
-            extend_metrics_with_own_product_capital_metrics(
-                extend_metrics_with_our_wb_cost_metrics(
-                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            extend_metrics_with_incident_stock_metrics(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                    )
                 )
             )
         )
@@ -1239,11 +1253,19 @@ class SheetVitrinaV1LivePlanBlock:
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
                 "refresh_diagnostics": diagnostics,
-                "server_cell_presentation": _own_product_capital_cell_presentation(
-                    enabled_config=enabled_config,
-                    displayed_metrics=displayed_metrics,
-                    temporal_slots=temporal_slots,
-                    live_sources=live_sources,
+                "server_cell_presentation": _merge_cell_presentations(
+                    _own_product_capital_cell_presentation(
+                        enabled_config=enabled_config,
+                        displayed_metrics=displayed_metrics,
+                        temporal_slots=temporal_slots,
+                        live_sources=live_sources,
+                    ),
+                    _incident_stock_cell_presentation(
+                        enabled_config=enabled_config,
+                        displayed_metrics=displayed_metrics,
+                        temporal_slots=temporal_slots,
+                        live_sources=live_sources,
+                    ),
                 ),
             },
         )
@@ -1319,6 +1341,8 @@ class SheetVitrinaV1LivePlanBlock:
                 spp_proxy_lookup={},
                 ads_bids_lookup={},
                 stocks_lookup={},
+                incident_stocks_lookup={},
+                incident_policy={},
                 onec_stocks_lookup={},
                 our_wb_cost_lookup={},
                 own_product_capital_lookup={},
@@ -1564,6 +1588,22 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "stocks":
                     current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
+                    stock_items = list(getattr(payload, "items", []) or [])
+                    if all(hasattr(item, "stock_total") for item in stock_items):
+                        projection = build_incident_stock_projection(
+                            self.runtime,
+                            items=stock_items,
+                            warehouse_rows=list(getattr(payload, "warehouse_rows", []) or []),
+                            snapshot_date=str(getattr(payload, "snapshot_date", "") or slot.column_date),
+                            fetched_at=str(getattr(payload, "fetched_at", "") or ""),
+                            pagination_complete=bool(getattr(payload, "pagination_complete", False)),
+                            raw_rows_digest=str(getattr(payload, "raw_rows_digest", "") or ""),
+                        )
+                        current_lookups.incident_stocks_lookup = {
+                            int(nm_id): dict(row)
+                            for nm_id, row in dict(projection.get("by_nm_id") or {}).items()
+                        }
+                        current_lookups.incident_policy = dict(projection.get("policy") or {})
                 elif source_key == ONEC_STOCKS_SOURCE_KEY:
                     current_lookups.onec_stocks_lookup = build_onec_stocks_lookup(
                         payload,
@@ -3293,6 +3333,13 @@ class _MetricEvaluator:
                 metric_key,
                 slot_lookups.onec_stocks_lookup.get(nm_id),
             )
+        if is_incident_stock_metric_key(metric_key):
+            if not slot_lookups.incident_policy.get("materialize_incident_metrics"):
+                return None
+            return incident_stock_value(
+                metric_key,
+                slot_lookups.incident_stocks_lookup.get(nm_id),
+            )
         for lookup_name, attribute, scale in [
             ("seller_funnel_lookup", "view_count", 1.0),
             ("seller_funnel_lookup", "open_card_count", 1.0),
@@ -4753,6 +4800,105 @@ def _own_product_capital_cell_presentation(
                     "reason": metric_reason,
                     "source": "WebCore",
                 }
+    return result
+
+
+def _merge_cell_presentations(
+    *presentations: Mapping[str, Mapping[str, Mapping[str, str]]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for presentation in presentations:
+        for row_id, by_date in presentation.items():
+            target = result.setdefault(str(row_id), {})
+            for column_date, value in by_date.items():
+                target[str(column_date)] = dict(value)
+    return result
+
+
+def _incident_stock_cell_presentation(
+    *,
+    enabled_config: Iterable[ConfigV2Item],
+    displayed_metrics: Iterable[MetricV2Item],
+    temporal_slots: Iterable[SheetVitrinaV1TemporalSlot],
+    live_sources: TemporalLiveSources,
+) -> dict[str, dict[str, dict[str, str]]]:
+    enabled_ids = [int(item.nm_id) for item in enabled_config]
+    available = {
+        item.metric_key for item in displayed_metrics if item.metric_key in set(INCIDENT_STOCK_METRIC_KEYS)
+    }
+    if not available:
+        return {}
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for slot in temporal_slots:
+        lookups = live_sources.slot_lookups.get(slot.slot_key)
+        if lookups is None or not lookups.incident_stocks_lookup:
+            continue
+        policy = lookups.incident_policy
+        if not policy.get("active"):
+            continue
+        names = [
+            str(item.get("warehouse_name") or f"warehouseId {item.get('warehouse_id')}")
+            for item in policy.get("warehouse_identities") or []
+        ]
+        policy_detail = (
+            f"Склады: {', '.join(names) or 'не указаны'}; "
+            f"начало: {policy.get('effective_from') or 'не указано'}; "
+            f"revision: {int(policy.get('revision') or 0)}"
+        )
+        for region, _source_field, _suffix in INCIDENT_STOCK_FIELDS:
+            fact_key = incident_stock_metric_key("fact", region)
+            incident_key = incident_stock_metric_key("incident", region)
+            effective_key = incident_stock_metric_key("effective", region)
+            affected_rows: list[tuple[int, float, float, float]] = []
+            for nm_id in enabled_ids:
+                projection_row = lookups.incident_stocks_lookup.get(nm_id)
+                fact = incident_stock_value(fact_key, projection_row)
+                incident = incident_stock_value(incident_key, projection_row)
+                effective = incident_stock_value(effective_key, projection_row)
+                if fact is None or incident is None or effective is None or incident <= 0:
+                    continue
+                affected_rows.append((nm_id, fact, incident, effective))
+                reason = (
+                    f"Факт: {fact:g} шт; на инцидентных складах: {incident:g} шт; "
+                    f"operational остаток: {effective:g} шт. {policy_detail}"
+                )
+                for metric_key in (incident_key, effective_key):
+                    if metric_key in available:
+                        result.setdefault(f"SKU:{nm_id}|{metric_key}", {})[slot.column_date] = {
+                            "state": "incident_adjusted",
+                            "tone": "blue_violet",
+                            "reason": reason,
+                            "source": "WebCore incident policy",
+                        }
+            if not affected_rows:
+                continue
+            all_values = [
+                (
+                    incident_stock_value(fact_key, lookups.incident_stocks_lookup.get(nm_id)),
+                    incident_stock_value(incident_key, lookups.incident_stocks_lookup.get(nm_id)),
+                    incident_stock_value(effective_key, lookups.incident_stocks_lookup.get(nm_id)),
+                )
+                for nm_id in enabled_ids
+            ]
+            fact_total = sum(float(item[0] or 0.0) for item in all_values)
+            incident_total = sum(float(item[1] or 0.0) for item in all_values)
+            effective_total = sum(float(item[2] or 0.0) for item in all_values)
+            total_reason = (
+                f"Факт: {fact_total:g} шт; на инцидентных складах: "
+                f"{incident_total:g} шт; operational остаток: "
+                f"{effective_total:g} шт. {policy_detail}"
+            )
+            for metric_key in (
+                incident_stock_total_metric_key("incident", region),
+                incident_stock_total_metric_key("effective", region),
+            ):
+                if metric_key in available:
+                    result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
+                        "state": "incident_adjusted",
+                        "tone": "blue_violet",
+                        "reason": total_reason,
+                        "source": "WebCore incident policy",
+                    }
     return result
 
 
