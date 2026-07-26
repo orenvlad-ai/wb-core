@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 import hashlib
 from io import StringIO
 import json
@@ -19,10 +19,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from apps.wb_autoanswers_activation import (
+    BACKUP_OPERATIONAL_HEADROOM_BYTES,
     _capacity_heartbeat,
     _compress_verified_backup,
     _compress_verified_current_schema_backup,
     _create_current_compressed_schema_backup,
+    _create_streamed_current_compressed_schema_backup,
     _integrity_check,
     _prepare_backup_capacity,
     _schema_preparation_lock,
@@ -209,16 +211,30 @@ class ActivationTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
     def test_capacity_compacts_verified_current_schema_raw_backup_before_retry(self) -> None:
         database = self.runtime_dir / "registry_upload_runtime.sqlite3"
-        with sqlite3.connect(database) as conn:
+        conn = sqlite3.connect(database)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
             conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
-            conn.execute("INSERT INTO live_marker VALUES('live')")
-        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
-        backup_dir.mkdir(parents=True)
-        raw = backup_dir / (
-            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__interrupted.sqlite3"
-        )
-        shutil.copy2(database, raw)
-        raw.with_name(raw.name + "-shm").write_bytes(b"sidecar")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("INSERT INTO live_marker VALUES('committed-in-wal')")
+            conn.commit()
+            self.assertGreater(database.with_name(database.name + "-wal").stat().st_size, 0)
+
+            backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+            backup_dir.mkdir(parents=True)
+            raw = backup_dir / (
+                f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__interrupted.sqlite3"
+            )
+            shutil.copy2(database, raw)
+            for suffix in ("-wal", "-shm"):
+                shutil.copy2(
+                    database.with_name(database.name + suffix),
+                    raw.with_name(raw.name + suffix),
+                )
+        finally:
+            conn.close()
 
         with patch(
             "apps.wb_autoanswers_activation.shutil.disk_usage",
@@ -236,6 +252,131 @@ class ActivationTest(unittest.TestCase):
         self.assertTrue(raw.with_suffix(raw.suffix + ".zst").is_file())
         self.assertTrue(raw.with_suffix(raw.suffix + ".zst.manifest.json").is_file())
         self.assertEqual(result["compaction"]["integrity_check"], "ok")
+        restored = self.runtime_dir / "restored-from-wal.sqlite3"
+        with restored.open("wb") as output:
+            subprocess.run(
+                [
+                    "zstd",
+                    "--decompress",
+                    "--stdout",
+                    "--quiet",
+                    str(raw.with_suffix(raw.suffix + ".zst")),
+                ],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        with closing(sqlite3.connect(f"file:{restored}?mode=ro", uri=True)) as restored_db:
+            self.assertEqual(
+                restored_db.execute("SELECT value FROM live_marker").fetchone()[0],
+                "committed-in-wal",
+            )
+            self.assertEqual(restored_db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for streamed backup")
+    def test_low_capacity_streams_verified_snapshot_without_raw_duplicate(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with closing(sqlite3.connect(database)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('streamed')")
+            conn.commit()
+
+        mib = 1024 * 1024
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            side_effect=[
+                SimpleNamespace(free=300 * mib),
+                SimpleNamespace(free=280 * mib),
+            ],
+        ):
+            result = _prepare_backup_capacity(self.runtime_dir)
+
+        self.assertEqual(
+            result["compaction"]["status"],
+            "streamed_current_schema_backup",
+        )
+        self.assertEqual(
+            result["compaction"]["snapshot_method"],
+            "exclusive_lock_checkpoint_stream",
+        )
+        self.assertFalse(result["compaction"]["raw_snapshot_required"])
+        self.assertEqual(result["compaction"]["integrity_check"], "ok")
+        self.assertFalse(
+            (self.runtime_dir / ".wb_autoanswers_capacity_recovery").exists()
+        )
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        self.assertEqual(list(backup_dir.glob("*.sqlite3")), [])
+        archive = backup_dir / str(result["compaction"]["latest_filename"])
+        manifest = backup_dir / str(result["compaction"]["manifest_filename"])
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
+        restored = self.runtime_dir / "restored.sqlite3"
+        with restored.open("wb") as output:
+            subprocess.run(
+                ["zstd", "--decompress", "--stdout", "--quiet", str(archive)],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        with closing(sqlite3.connect(f"file:{restored}?mode=ro", uri=True)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT value FROM live_marker").fetchone()[0],
+                "streamed",
+            )
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for streamed backup")
+    def test_streamed_backup_removes_only_its_outputs_after_failed_readback(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with closing(sqlite3.connect(database)) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('preserved')")
+            conn.commit()
+
+        with patch(
+            "apps.wb_autoanswers_activation._verified_compressed_schema_backup_status",
+            side_effect=[
+                {"count": 0},
+                {
+                    "count": 1,
+                    "integrity_check": "ok",
+                    "snapshot_sha256": "sha256:not-the-source",
+                },
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "readback is missing"):
+                _create_streamed_current_compressed_schema_backup(self.runtime_dir)
+
+        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        self.assertEqual(list(backup_dir.glob("*.zst")), [])
+        self.assertEqual(list(backup_dir.glob("*.manifest.json")), [])
+        with closing(sqlite3.connect(database)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT value FROM live_marker").fetchone()[0],
+                "preserved",
+            )
+
+    def test_streamed_backup_refuses_to_consume_operational_headroom(self) -> None:
+        database = self.runtime_dir / "registry_upload_runtime.sqlite3"
+        with closing(sqlite3.connect(database)) as conn:
+            conn.execute("CREATE TABLE live_marker(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO live_marker VALUES('preserved')")
+            conn.commit()
+
+        with patch(
+            "apps.wb_autoanswers_activation.shutil.disk_usage",
+            return_value=SimpleNamespace(free=BACKUP_OPERATIONAL_HEADROOM_BYTES - 1),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "operational headroom"):
+                _prepare_backup_capacity(self.runtime_dir)
+
+        self.assertEqual(list((self.runtime_dir / "backups").rglob("*.zst")), [])
+        with closing(sqlite3.connect(database)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT value FROM live_marker").fetchone()[0],
+                "preserved",
+            )
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is required for current-schema compaction")
     def test_current_schema_raw_backup_survives_failed_canonical_readback(self) -> None:
@@ -247,7 +388,7 @@ class ActivationTest(unittest.TestCase):
         with sqlite3.connect(raw) as conn:
             conn.execute("CREATE TABLE backup_marker(value TEXT NOT NULL)")
             conn.execute("INSERT INTO backup_marker VALUES('recoverable')")
-        sidecar = raw.with_name(raw.name + "-wal")
+        sidecar = raw.with_name(raw.name + "-shm")
         sidecar.write_bytes(b"recoverable-sidecar")
 
         with patch(

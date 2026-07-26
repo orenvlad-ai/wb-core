@@ -20,6 +20,12 @@ progress.
 Canonical `prepare-deploy` creates and verifies the current pre-v8 backup, then
 atomically adds
 `sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements`.
+If the live volume cannot hold a second raw database and no older recoverable
+Autoanswers backup exists, the deploy quiet window plus exclusive SQLite
+locking and a completed WAL checkpoint stabilize the main file. The backup is
+then streamed directly to zstd and accepted only after source integrity, frame,
+compressed hash and exact decompressed SHA-256 readback all succeed. The live
+source is never rewritten, and any failed attempt leaves migration blocked.
 Its primary identity is exact
 `sweep_id + feedback_id + content_version`; the row also binds the content
 hash, policy epoch, transition run, outcome/outcome class, candidate
