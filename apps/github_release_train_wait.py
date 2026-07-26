@@ -35,6 +35,7 @@ from apps.github_release_train import (  # noqa: E402
     LOOP_TASK_LABEL,
     NEEDS_RESUME_LABEL,
     PRODUCTION_LABEL,
+    PRODUCTION_MUTATION_LABEL,
     READY_LABEL,
     REPO_ONLY_LABEL,
     RUNNING_LABEL,
@@ -508,6 +509,34 @@ def goal_disposition(
             reason=GoalReasonCode.TERMINAL_PROOF_MISSING,
             next_action="run repo-owned exact-SHA terminal reconciliation",
             evidence=own_evidence,
+        )
+
+    if (
+        task_class == STANDARD_TASK_LABEL
+        and scope == PRODUCTION_MUTATION_LABEL
+        and own["merged"]
+        and own["release_state"] in {BLOCKED_LABEL, HALTED_LABEL}
+    ):
+        return _decision(
+            GoalDisposition.OWN_ACTION,
+            own_pr=own_pr,
+            action_pr=own_pr,
+            state=canonical,
+            reason=GoalReasonCode.PRODUCTION_MUTATION_TERMINALIZATION_AVAILABLE,
+            next_action=(
+                "validate exact human-gate, head/merge/deployed SHA and reconciliation "
+                "fingerprints, then submit the repo-owned "
+                "`/wb-core production-mutation complete ...` command"
+            ),
+            evidence=(
+                *own_evidence,
+                {
+                    "kind": "production-mutation-terminalization",
+                    "repo_owned_action_available": True,
+                    "actions_owned": True,
+                    "fail_closed_before_exact_evidence": True,
+                },
+            ),
         )
 
     evidence_decision = None

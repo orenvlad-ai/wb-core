@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import shlex
 import sys
@@ -20,6 +21,7 @@ from apps.github_release_train import (  # noqa: E402
     AWAITING_UI_LABEL,
     BLOCKED_LABEL,
     Candidate,
+    complete_production_mutation_release,
     DONE_LABEL,
     HALTED_LABEL,
     LIVE_RUNTIME_LABEL,
@@ -51,6 +53,9 @@ from apps.github_release_train import (  # noqa: E402
     mark_classification_blocked,
     merge_candidate,
     prepare_candidate,
+    parse_production_mutation_terminalization_command,
+    production_mutation_terminal_state_proven,
+    production_mutation_terminalization_preflight,
     request_loop_agent,
     resume_halted_release,
     resume_loop_owner,
@@ -97,6 +102,7 @@ from apps.github_release_train_spec import (  # noqa: E402
     TERMINAL_FORBIDDEN_INHERITANCE,
     TRANSITION_MATRIX,
     PRODUCTION_MUTATION_RUNNER_REQUIREMENTS,
+    PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
     TaskClass,
     TaskContinuity,
     TaskIntent,
@@ -132,6 +138,7 @@ class FakeApi:
         self.replaced_labels: list[tuple[int, set[str]]] = []
         self.comments: list[tuple[int, str]] = []
         self.comment_ids: list[int] = []
+        self.comment_metadata: dict[int, dict[str, Any]] = {}
         self.events: dict[int, list[dict[str, Any]]] = {}
         self.merges: list[tuple[int, str]] = []
         self.deleted: list[str] = []
@@ -151,7 +158,11 @@ class FakeApi:
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         return [
-            {"id": comment_id, "body": body}
+            {
+                "id": comment_id,
+                "body": body,
+                **self.comment_metadata.get(comment_id, {}),
+            }
             for comment_id, (comment_number, body) in zip(self.comment_ids, self.comments)
             if comment_number == number
         ]
@@ -160,7 +171,6 @@ class FakeApi:
         return self.pulls[number]
 
     def compare(self, base: str, head: str) -> dict[str, Any]:
-        assert base == "main"
         if len(self.comparisons) > 1:
             return self.comparisons.pop(0)
         return self.comparisons[0]
@@ -223,8 +233,33 @@ class FakeApi:
         _set_labels(self.pulls[number], current)
 
     def add_comment(self, number: int, body: str) -> None:
+        comment_id = max(self.comment_ids, default=0) + 1
         self.comments.append((number, body))
-        self.comment_ids.append(max(self.comment_ids, default=0) + 1)
+        self.comment_ids.append(comment_id)
+        self.comment_metadata[comment_id] = {
+            "user": {"login": "github-actions[bot]"},
+            "author_association": "CONTRIBUTOR",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def add_external_comment(
+        self,
+        number: int,
+        body: str,
+        *,
+        actor: str = "orenvlad-ai",
+        association: str = "OWNER",
+        created_at: str,
+    ) -> int:
+        comment_id = max(self.comment_ids, default=0) + 1
+        self.comments.append((number, body))
+        self.comment_ids.append(comment_id)
+        self.comment_metadata[comment_id] = {
+            "user": {"login": actor},
+            "author_association": association,
+            "created_at": created_at,
+        }
+        return comment_id
 
     def update_comment(self, comment_id: int, body: str) -> None:
         index = self.comment_ids.index(comment_id)
@@ -235,6 +270,7 @@ class FakeApi:
         index = self.comment_ids.index(comment_id)
         self.comment_ids.pop(index)
         self.comments.pop(index)
+        self.comment_metadata.pop(comment_id, None)
 
     def close_pull(self, number: int) -> None:
         self.pulls[number]["state"] = "closed"
@@ -252,6 +288,10 @@ def _labels(payload: dict[str, Any]) -> set[str]:
 
 def _set_labels(payload: dict[str, Any], labels: Iterable[str]) -> None:
     payload["labels"] = [{"name": label} for label in sorted(set(labels))]
+
+
+def _body_fingerprint(body: str) -> str:
+    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _pull(
@@ -801,6 +841,415 @@ def _assert_blocked_halted_and_production_mutation() -> None:
     ) == READY_LABEL
     assert READY_LABEL in _labels(fixed) and BLOCKED_LABEL not in _labels(fixed)
     assert api.replaced_labels[-1] == (22, _labels(fixed))
+
+
+def _production_mutation_terminal_fixture(
+    *,
+    number: int = 120,
+) -> tuple[FakeApi, str, dict[str, Any]]:
+    api = FakeApi()
+    pull = _pull(
+        number,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL],
+        created_at="2026-07-21T01:00:00Z",
+        sha=SHA_A,
+    )
+    api.pulls[number] = pull
+    api.checks = [
+        {
+            "id": number,
+            "name": "baseline",
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
+    try:
+        prepare_candidate(
+            api,
+            "orenvlad-ai/wb-core",
+            number,
+            check_name="baseline",
+            timeout_seconds=1,
+            poll_seconds=0,
+        )
+    except ReleaseBlocked as exc:
+        assert "human gate" in str(exc)
+    else:
+        raise AssertionError("production mutation fixture auto-released unexpectedly")
+    set_release_state(api, number, BLOCKED_LABEL)
+    gate_body = (
+        f"Exact human gate for PR #{number}: user authorizes exact head `{SHA_A}`; "
+        "the approval becomes stale on any head or semantic change."
+    )
+    gate_id = api.add_external_comment(
+        number,
+        gate_body,
+        created_at="2026-07-21T01:30:00Z",
+    )
+    pull.update(
+        state="closed",
+        merged=True,
+        merge_commit_sha=SHA_B,
+        merged_at="2026-07-21T02:00:00Z",
+    )
+    reconciliation_body = (
+        f"Bounded production reconciliation is complete at deployed SHA `{SHA_C}`. "
+        f"Machine-readable evidence fingerprint: `{EVIDENCE}`."
+    )
+    reconciliation_id = api.add_external_comment(
+        number,
+        reconciliation_body,
+        created_at="2026-07-21T03:00:00Z",
+    )
+    command = (
+        f"/wb-core production-mutation complete {number} "
+        f"head {SHA_A} merge {SHA_B} deployed {SHA_C} "
+        f"gate {gate_id} gate-digest {_body_fingerprint(gate_body)} "
+        f"reconciliation {reconciliation_id} "
+        f"reconciliation-digest {_body_fingerprint(reconciliation_body)} "
+        f"evidence {EVIDENCE}"
+    )
+    api.comparisons = [{"status": "ahead", "behind_by": 0}]
+    deploy_evidence = {
+        "status": "reconciled",
+        "healthy": True,
+        "pr": number,
+        "head": SHA_A,
+        "merge": SHA_C,
+        "expected_sha": SHA_C,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "read_only": True,
+        "repairs_applied": False,
+        "evidence": [{"operation": "readback", "runtime_sha": SHA_C}],
+    }
+    return api, command, deploy_evidence
+
+
+def _assert_production_mutation_terminalization() -> None:
+    completed: list[str] = []
+
+    api, command_text, deploy_evidence = _production_mutation_terminal_fixture()
+    command = parse_production_mutation_terminalization_command(command_text)
+    plan = production_mutation_terminalization_preflight(
+        api,
+        command.pr,
+        command,
+        actor="orenvlad-ai",
+        association="OWNER",
+    )
+    assert plan["status"] == "ready"
+    unrelated = _pull(
+        121,
+        labels=[READY_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL, loop_root_label(121)],
+        created_at="2026-07-21T03:10:00Z",
+        sha=SHA_C,
+    )
+    api.pulls[121] = unrelated
+    _add_new_root_proof(api, 121)
+    unrelated_snapshot = (
+        set(_labels(unrelated)),
+        list(api.list_comments(121)),
+        str(unrelated["state"]),
+    )
+    assert complete_production_mutation_release(
+        api,
+        command.pr,
+        command,
+        deploy_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == PRODUCTION_LABEL
+    terminal_pull = api.pulls[command.pr]
+    assert _labels(terminal_pull) == {
+        PRODUCTION_LABEL,
+        STANDARD_TASK_LABEL,
+        PRODUCTION_MUTATION_LABEL,
+    }
+    assert production_mutation_terminal_state_proven(api, terminal_pull)
+    assert goal_disposition(api, command.pr).disposition == GoalDisposition.TERMINAL_SUCCESS
+    assert (
+        set(_labels(unrelated)),
+        list(api.list_comments(121)),
+        str(unrelated["state"]),
+    ) == unrelated_snapshot
+    completed.append("01_full_human_gate_deploy_reconcile_terminal_flow")
+
+    comment_count = len(api.list_comments(command.pr))
+    dispatch_count = len(api.dispatched)
+    assert complete_production_mutation_release(
+        api,
+        command.pr,
+        command,
+        None,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "already-completed"
+    assert len(api.list_comments(command.pr)) == comment_count
+    assert len(api.dispatched) == dispatch_count + 1
+    completed.append("02_repeat_delivery_is_idempotent")
+
+    fail_closed_api = FakeApi()
+    fail_closed_api.pulls[122] = _pull(
+        122,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL],
+        created_at="2026-07-21T04:00:00Z",
+    )
+    try:
+        _prepare(fail_closed_api, 122)
+    except ReleaseBlocked as exc:
+        assert "human gate" in str(exc)
+    else:
+        raise AssertionError("production mutation must remain excluded from automatic release")
+    assert not fail_closed_api.merges
+    completed.append("03_ready_never_auto_merges_or_deploys")
+
+    unauthorized_api, unauthorized_text, unauthorized_evidence = (
+        _production_mutation_terminal_fixture(number=123)
+    )
+    unauthorized_command = parse_production_mutation_terminalization_command(
+        unauthorized_text
+    )
+    for association in ("CONTRIBUTOR", "NONE"):
+        try:
+            production_mutation_terminalization_preflight(
+                unauthorized_api,
+                123,
+                unauthorized_command,
+                actor="outside",
+                association=association,
+            )
+        except ReleaseBlocked as exc:
+            assert "OWNER or MEMBER" in str(exc)
+        else:
+            raise AssertionError("unauthorized association must fail closed")
+    try:
+        complete_production_mutation_release(
+            unauthorized_api,
+            123,
+            unauthorized_command,
+            unauthorized_evidence,
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=False,
+        )
+    except ReleaseBlocked as exc:
+        assert "GitHub Actions" in str(exc)
+    else:
+        raise AssertionError("local/agent terminalization must be refused")
+    completed.append("04_actor_association_and_actions_ownership_required")
+
+    stale_api, stale_text, _ = _production_mutation_terminal_fixture(number=124)
+    for stale_command_text, expected in (
+        (stale_text.replace(f"head {SHA_A}", f"head {SHA_C}"), "head SHA is stale"),
+        (stale_text.replace(f"merge {SHA_B}", f"merge {SHA_A}"), "merge SHA"),
+    ):
+        try:
+            production_mutation_terminalization_preflight(
+                stale_api,
+                124,
+                parse_production_mutation_terminalization_command(stale_command_text),
+                actor="orenvlad-ai",
+                association="OWNER",
+            )
+        except ReleaseBlocked as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("stale head/merge identity must fail closed")
+    completed.append("05_stale_head_and_wrong_merge_fail_closed")
+
+    missing_api, missing_text, missing_evidence = _production_mutation_terminal_fixture(
+        number=125
+    )
+    missing_command = parse_production_mutation_terminalization_command(missing_text)
+    missing_api.comment_metadata[missing_command.gate_comment_id][
+        "author_association"
+    ] = "CONTRIBUTOR"
+    try:
+        production_mutation_terminalization_preflight(
+            missing_api,
+            125,
+            missing_command,
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "human gate" in str(exc)
+    else:
+        raise AssertionError("missing admissible human gate must fail closed")
+    missing_api, missing_text, missing_evidence = _production_mutation_terminal_fixture(
+        number=126
+    )
+    missing_command = parse_production_mutation_terminalization_command(missing_text)
+    missing_api.update_comment(
+        missing_command.reconciliation_comment_id,
+        "reconciliation evidence was removed",
+    )
+    try:
+        production_mutation_terminalization_preflight(
+            missing_api,
+            126,
+            missing_command,
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "digest is stale" in str(exc)
+    else:
+        raise AssertionError("missing reconciliation/evidence must fail closed")
+    baseline_api, baseline_text, _ = _production_mutation_terminal_fixture(
+        number=131
+    )
+    baseline_api.checks = []
+    try:
+        production_mutation_terminalization_preflight(
+            baseline_api,
+            131,
+            parse_production_mutation_terminalization_command(baseline_text),
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "successful baseline" in str(exc)
+    else:
+        raise AssertionError("missing exact-head baseline must fail closed")
+    completed.append(
+        "06_missing_baseline_gate_or_reconciliation_fails_closed"
+    )
+
+    deploy_api, deploy_text, deploy_evidence = _production_mutation_terminal_fixture(
+        number=127
+    )
+    deploy_command = parse_production_mutation_terminalization_command(deploy_text)
+    deploy_evidence["expected_sha"] = SHA_B
+    try:
+        complete_production_mutation_release(
+            deploy_api,
+            127,
+            deploy_command,
+            deploy_evidence,
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+        )
+    except ReleaseBlocked as exc:
+        assert "deployment evidence" in str(exc)
+    else:
+        raise AssertionError("wrong deployed SHA evidence must fail closed")
+    ancestor_api, ancestor_text, _ = _production_mutation_terminal_fixture(
+        number=132
+    )
+    ancestor_api.comparisons = [{"status": "diverged", "behind_by": 1}]
+    try:
+        production_mutation_terminalization_preflight(
+            ancestor_api,
+            132,
+            parse_production_mutation_terminalization_command(ancestor_text),
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "verified descendant" in str(exc)
+    else:
+        raise AssertionError("non-ancestor deployed SHA must fail closed")
+    completed.append("07_wrong_deploy_evidence_fails_closed")
+
+    wrong_api, wrong_text, wrong_evidence = _production_mutation_terminal_fixture(
+        number=128
+    )
+    wrong_command = parse_production_mutation_terminalization_command(wrong_text)
+    for labels in (
+        {BLOCKED_LABEL, LOOP_TASK_LABEL, PRODUCTION_MUTATION_LABEL},
+        {BLOCKED_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL},
+    ):
+        _set_labels(wrong_api.pulls[128], labels)
+        try:
+            complete_production_mutation_release(
+                wrong_api,
+                128,
+                wrong_command,
+                wrong_evidence,
+                actor="orenvlad-ai",
+                association="OWNER",
+                actions_owned=True,
+            )
+        except ReleaseBlocked as exc:
+            assert "requires task:standard" in str(exc) or "requires scope:" in str(exc)
+        else:
+            raise AssertionError("wrong task/scope must fail closed")
+    _set_labels(
+        wrong_api.pulls[128],
+        {BLOCKED_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL},
+    )
+    try:
+        production_mutation_terminalization_preflight(
+            wrong_api,
+            128,
+            parse_production_mutation_terminalization_command(
+                wrong_text.replace(
+                    "production-mutation complete 128",
+                    "production-mutation complete 999",
+                )
+            ),
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "current PR" in str(exc)
+    else:
+        raise AssertionError("cross-PR terminalization must fail closed")
+    completed.append("08_wrong_task_or_scope_fails_closed")
+
+    forged_api, forged_text, _ = _production_mutation_terminal_fixture(number=129)
+    forged_command = parse_production_mutation_terminalization_command(forged_text)
+    forged_pull = forged_api.pulls[129]
+    _set_labels(
+        forged_pull,
+        {PRODUCTION_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL},
+    )
+    genuine_marker = next(
+        body
+        for comment_number, body in api.comments
+        if comment_number == command.pr
+        and PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER in body
+    ).replace("pr=120", "pr=129")
+    forged_api.add_external_comment(
+        129,
+        genuine_marker,
+        created_at="2026-07-21T04:00:00Z",
+    )
+    assert not production_mutation_terminal_state_proven(forged_api, forged_pull)
+    assert goal_disposition(forged_api, 129).disposition == GoalDisposition.OWN_ACTION
+    completed.append("09_agent_forged_marker_is_not_terminal_proof")
+
+    action_api, action_text, _ = _production_mutation_terminal_fixture(number=130)
+    fabricated_blocker = {
+        "own_pr": 130,
+        "action_pr": 130,
+        "head_sha": SHA_A,
+        "release_state": BLOCKED_LABEL,
+        "loop_root": 0,
+        "merge_sha": SHA_B,
+        "attempts": ["old unsupported complete-standard contour"],
+        "repo_owned_action_available": False,
+        "remediation_exhausted": True,
+        "terminal_failure": False,
+        "user_intervention_required": True,
+        "minimal_user_action": "manually edit labels",
+    }
+    action = goal_disposition(
+        action_api,
+        130,
+        blocker_evidence=fabricated_blocker,
+    )
+    assert action.disposition == GoalDisposition.OWN_ACTION
+    assert action.reason_code == "production-mutation-terminalization-available"
+    assert "/wb-core production-mutation complete" in action.allowed_next_action
+    completed.append("10_shepherd_prefers_repo_owned_terminalization")
+
+    assert len(completed) == 10, completed
+    print(f"production_mutation_terminalization: {len(completed)}/10 ok")
 
 
 def _assert_ack_invalidated_by_head_change() -> None:
@@ -1882,12 +2331,16 @@ def _assert_workflow_contract() -> None:
         "wb-core-loop-recovery-proof",
         "wb-core-loop-classification-blocker",
         "scope:production-mutation",
+        "preflight-production-mutation",
+        "/wb-core production-mutation complete",
+        "wb-core-production-mutation-completion-proof",
+        "--read-only",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",
     ):
         assert required in release or required in implementation
     assert release.count("group: wb-core-production-release") == 1
-    assert release.count("environment: production") == 2
+    assert release.count("environment: production") == 3
     assert "reconcile_halted:" in release
     assert "resume-halted" in release
 
@@ -2085,6 +2538,7 @@ def _assert_machine_classification_and_state_spec() -> None:
     assert {
         (AWAITING_AGENT_LABEL, READY_LABEL),
         (AWAITING_UI_LABEL, PRODUCTION_LABEL),
+        (BLOCKED_LABEL, PRODUCTION_LABEL),
         (HALTED_LABEL, PRODUCTION_LABEL),
     } <= CRITICAL_TRANSITIONS
     all_targets = set(PRIMARY_STATE_LABELS)
@@ -2915,6 +3369,7 @@ def main() -> int:
     _assert_lost_owner_resume_lifecycle()
     _assert_superseded_normalization_is_root_bounded()
     _assert_blocked_halted_and_production_mutation()
+    _assert_production_mutation_terminalization()
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
     _assert_goal_shepherd_regressions()
