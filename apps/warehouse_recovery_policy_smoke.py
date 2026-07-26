@@ -67,10 +67,11 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
                 INSERT INTO bounded_blobs VALUES('blob-target',X'000102FF');
                 CREATE TABLE sheet_vitrina_v1_warehouse_functional_versions(
                     version_id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    source_blob BLOB
                 );
                 INSERT INTO sheet_vitrina_v1_warehouse_functional_versions
-                VALUES('v1','2026-07-26T00:00:00Z');
+                VALUES('v1','2026-07-26T00:00:00Z',X'000102FF');
                 CREATE TABLE sheet_vitrina_v1_calculation_parameter_versions(
                     version_id TEXT PRIMARY KEY,
                     rates_json TEXT NOT NULL

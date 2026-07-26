@@ -2593,7 +2593,15 @@ class WarehouseRecoveryRegistry:
                     if not rows:
                         break
                     read_bytes += sum(
-                        len(_json_bytes(list(row))) for row in rows
+                        len(
+                            _json_bytes(
+                                [
+                                    _hashable_sqlite_value(value)
+                                    for value in row
+                                ]
+                            )
+                        )
+                        for row in rows
                     )
                     target.executemany(insert_sql, [tuple(row) for row in rows])
             for row in source.execute(
