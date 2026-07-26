@@ -39,6 +39,7 @@ from packages.application.warehouse_targeted_replay import (
     WarehouseTargetedReplayError,
     WarehouseTargetedSupplierReplay,
 )
+from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
 
 
 CORRECTION_SOURCE = "operator_factual_date_correction"
@@ -405,6 +406,43 @@ class SupplierShipmentFactualCorrectionBlock:
         lock_wait_ms: int = 0,
     ) -> dict[str, Any]:
         approved_fingerprint = _required_text(fingerprint, "fingerprint")
+        if historical_status_change is not None or financial_document_confirmation is not None:
+            raise ValueError(
+                "legacy chained factual-date mutation is disabled; use the dedicated "
+                "bounded status/document confirmation entrypoint"
+            )
+        if not self._targeted_replay_available():
+            raise ValueError(
+                "legacy monolithic factual-date mutation is disabled until the "
+                "functional targeted replay contour is active"
+            )
+        plan = self._targeted_dry_run(
+            shipment_id=shipment_id,
+            new_actual_shipment_date=new_actual_shipment_date,
+            expected_old_value=expected_old_value,
+        )
+        if str(plan["fingerprint"]) != approved_fingerprint:
+            raise ValueError(
+                "apply requires the exact current targeted dry-run fingerprint"
+            )
+        replay = WarehouseTargetedSupplierReplay(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+            failure_injector=self.failure_injector,
+        )
+        with warehouse_functional_write_lock(
+            self.runtime.runtime_dir,
+            timeout_seconds=300,
+        ) as nested_lock:
+            return replay.apply(
+                plan,
+                confirm_fingerprint=approved_fingerprint,
+                lock_wait_ms=max(lock_wait_ms, int(nested_lock["wait_ms"])),
+            )
+
+        # Migration evidence below is intentionally unreachable.  It remains
+        # readable for historical audit while every live mutation routes
+        # through the bounded targeted replay above.
         if (
             historical_status_change is None
             and financial_document_confirmation is None
@@ -818,13 +856,13 @@ class SupplierShipmentFactualCorrectionBlock:
         return _correction_row_to_dict(row) if row is not None else None
 
     def prepare_backup(self, backup_dir: Path) -> dict[str, Any]:
-        backup_root = Path(backup_dir)
-        source_db = self.runtime.db_path
-        backup_path = backup_root / (
-            f"{source_db.stem}.supplier-factual-date-preflight-backup-"
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
-        )
-        return _sqlite_backup(source_db, backup_path)
+        return {
+            "kind": "disabled_legacy_full_backup",
+            "tier": "T1",
+            "copy_bytes": 0,
+            "integrity_check": "not_applicable_target_scoped",
+            "next_action": "use_targeted_replay",
+        }
 
     @contextmanager
     def _candidate(
@@ -974,7 +1012,13 @@ class SupplierShipmentFactualCorrectionBlock:
         with tempfile.TemporaryDirectory(prefix="supplier-factual-date-candidate-") as temp_dir:
             candidate_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir) / "runtime")
             candidate_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-            _sqlite_backup(source_db, candidate_runtime.db_path)
+            WarehouseRecoveryRegistry(
+                runtime_dir=self.runtime.runtime_dir,
+                db_path=source_db,
+            ).write_disposable_domain_checkpoint(
+                candidate_runtime.db_path,
+                purpose="supplier_factual_date_candidate",
+            )
             with _connect(candidate_runtime.db_path) as conn:
                 conn.execute(
                     """

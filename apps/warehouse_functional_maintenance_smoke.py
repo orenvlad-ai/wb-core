@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -433,7 +434,12 @@ def _assert_finance_apply_holds_shared_lock() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         db_path = root / "state.sqlite3"
-        db_path.touch()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE sheet_vitrina_v1_warehouse_lock_smoke("
+                "id INTEGER PRIMARY KEY)"
+            )
+            conn.commit()
         block = FakeBlock(db_path)
 
         @contextmanager
@@ -446,14 +452,8 @@ def _assert_finance_apply_holds_shared_lock() -> None:
                 locked["value"] = False
                 events.append("lock-exit")
 
-        def fake_backup(*_: Any, **__: Any) -> dict[str, Any]:
-            assert locked["value"] is True
-            events.append("backup")
-            return {"integrity_check": "ok"}
-
         module.block_from_env = lambda _: block
         module.warehouse_functional_write_lock = fake_lock
-        module._create_sqlite_backup = fake_backup
         code = module.main(
             [
                 "canonical-cost-backfill",
@@ -475,7 +475,6 @@ def _assert_finance_apply_holds_shared_lock() -> None:
             "lock-enter",
             "plan",
             "applied-check",
-            "backup",
             "apply-readback",
             "lock-exit",
         ]

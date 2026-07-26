@@ -78,38 +78,23 @@ def main() -> int:
             plan["candidate"]["allocation"]["eligible_component_count"] == 9,
             "candidate binds exact 9/9 allocation",
         )
-        corrected_side_effects = {
-            **stale_side_effects,
-            "current_ff_cost_layer_capital_rub": "9102131.12",
-            "active_financial_capital_event_count": 1,
-            "archived_financial_capital_event_count": 0,
-        }
-        with (
-            patch(
-                "apps.supplier_26gn390_recovery._side_effects",
-                return_value=corrected_side_effects,
-            ),
-            patch(
-                "apps.supplier_26gn390_recovery._supplier_functional_fingerprint_projection",
-                return_value={
-                    "active_version_id": "whfv-corrected",
-                    "active_source_fingerprint": "sha256:new-source",
-                    "active_calculation_fingerprint": "sha256:new-calculation",
-                    "current_source_fingerprint": "sha256:new-source",
-                    "current_calculation_fingerprint": "sha256:new-calculation",
-                    "matches_active_version": True,
-                },
-            ),
-        ):
-            second = build_plan(runtime.db_path)
-            second_apply = apply_plan(
+        before = runtime.db_path.read_bytes()
+        try:
+            apply_plan(
                 runtime,
-                second,
+                plan,
                 backup_root=runtime.runtime_dir / "backups",
             )
-        _assert(not second["would_change"], "second dry-run is no-op")
-        _assert(not second_apply["applied"], "second apply is idempotent")
-    print("supplier_26gn390_recovery_smoke: ok")
+        except ValueError as exc:
+            _assert("disabled" in str(exc).lower(), "legacy apply is explicitly disabled")
+        else:
+            raise AssertionError("legacy apply entrypoint must fail closed")
+        _assert(runtime.db_path.read_bytes() == before, "disabled apply changes no data")
+        _assert(
+            not list((runtime.runtime_dir / "backups").glob("*")),
+            "disabled apply creates no recovery artifact",
+        )
+    print("supplier_26gn390_recovery_smoke: diagnostic-only apply disabled")
     return 0
 
 

@@ -1,6 +1,11 @@
 # Supplier reconciliation and vitrina publication chain
 
-This deploy adds the schema-only table `sheet_vitrina_v1_supplier_publication_chain_jobs`. No supplier header, historical signal, canonical row or ready snapshot is changed by schema initialization.
+Status: historical read-only design. Migration 123 supersedes this mutation
+recovery contract; the legacy chain apply is disabled before live
+backup/write, while the disposable-candidate dry-run remains migration
+evidence.
+
+The original deploy added the schema-only table `sheet_vitrina_v1_supplier_publication_chain_jobs`. No supplier header, historical signal, canonical row or ready snapshot is changed by schema initialization.
 
 The table persists the exact chain fingerprint, component supplier/publication fingerprints, actor, phase, status, timestamps, terminal report and sanitized error. It is execution audit/progress, not a second source of supplier or vitrina truth. Supplier truth remains in its header/audit rows, canonical truth remains in canonical tables, and published table truth remains in `sheet_vitrina_v1_ready_snapshots`.
 

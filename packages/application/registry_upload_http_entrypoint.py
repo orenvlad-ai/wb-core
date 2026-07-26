@@ -167,6 +167,7 @@ from packages.application.warehouse_functional import (
     enqueue_warehouse_targeted_recalculation,
 )
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
+from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
 from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
@@ -4986,6 +4987,14 @@ class RegistryUploadHttpEntrypoint:
         if functional.get("status") == "ready":
             return self.warehouse_functional_block.warehouse_detail(warehouse_key)
         return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
+
+    def handle_warehouse_recovery_status_request(self) -> dict[str, Any]:
+        """Return one durable operator view for every warehouse recovery tier."""
+
+        return WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
+        ).public_status()
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
         with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):

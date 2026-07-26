@@ -70,7 +70,16 @@ def main() -> None:
                 conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_documents").fetchone()[0] == 6,
                 "six stored documents",
             )
-        _assert(len(list((root / "backups").glob("*.sqlite3"))) == 1, "idempotent retry makes no backup")
+        _assert(
+            first_payload["recovery_policy"]["tier"] == "T2"
+            and first_payload["recovery_policy"]["lifecycle"] == "retained",
+            "opening apply retains a domain checkpoint",
+        )
+        _assert(
+            second_payload["recovery_policy"]["tier"] == "T0"
+            and second_payload["recovery_policy"]["actual_bytes"] == 0,
+            "idempotent retry is a zero-byte T0 no-op",
+        )
     print("warehouse opening snapshot runner smoke: ok")
 
 

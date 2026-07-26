@@ -79,8 +79,15 @@ def run_backfill(
         "database_written": False,
         "backup_path": None,
     }
-    if not apply:
-        return summary
+    if apply:
+        raise BackfillExecutionError(
+            "legacy Proxy margin 3 mutation entrypoint is disabled; "
+            "use the recovery-policy targeted economics publication"
+        )
+    return summary
+
+    # Historical apply implementation remains below as migration evidence only.
+    # The unconditional return above keeps every backup/write path unreachable.
     if preflight.blockers:
         return summary
     if not expected_fingerprint:

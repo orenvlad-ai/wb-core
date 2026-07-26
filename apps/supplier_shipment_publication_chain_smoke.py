@@ -87,16 +87,23 @@ def main() -> int:
         args.fingerprint = first["supplier_fingerprint"]
         args.publication_fingerprint = first["publication_fingerprint"]
         args.chain_fingerprint = first["chain_fingerprint"]
-        applied = apply_chain(args)
-        assert applied["applied"] is True
-        assert applied["supplier_apply"]["post_run"]["changed"] == 0
-        assert applied["publication_apply"]["post_run"]["changed_cells"] == 0
+        try:
+            apply_chain(args)
+        except ValueError as exc:
+            assert "chain apply is disabled" in str(exc)
+        else:
+            raise AssertionError("legacy supplier/publication chain unexpectedly applied")
         with _connect(runtime.db_path) as conn:
-            job = conn.execute(
-                "SELECT status,phase FROM sheet_vitrina_v1_supplier_publication_chain_jobs"
-            ).fetchone()
-        assert tuple(job) == ("success", "completed")
-    print("supplier_shipment_publication_chain_smoke: ok")
+            job_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM "
+                    "sheet_vitrina_v1_supplier_publication_chain_jobs"
+                ).fetchone()[0]
+            )
+        assert job_count == 0
+        assert not Path(args.backup_dir).exists()
+        assert not Path(args.publication_backup_dir).exists()
+    print("supplier_shipment_publication_chain_smoke: dry-run only; legacy apply disabled")
     return 0
 
 

@@ -13,7 +13,6 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import sqlite3
 from typing import Any, Iterable, Mapping
 
@@ -22,6 +21,10 @@ from packages.application.registry_upload_db_backed_runtime import (
 )
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,7 +45,6 @@ LEGACY_ESTIMATE_DAILY_QUALITIES = frozenset(
         "periodic_snapshot_wac_provisional",
     }
 )
-MIN_BACKUP_HEADROOM_BYTES = 512 * 1024 * 1024
 ZERO = Decimal("0")
 
 
@@ -687,12 +689,22 @@ def _apply_archival_estimate_plan_locked(
             raise WarehouseArchivalEstimateError(
                 "active archival estimate readback is blocked"
             )
+        recovery = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=runtime.db_path,
+        ).plan_noop(
+            mutation_kind="warehouse_archival_estimate",
+            closure_kind="sku_date",
+            plan_fingerprint=fingerprint,
+            scope={"nm_ids": normalized.get("target_nm_ids") or [], "action": "apply"},
+        )
         return {
             **readback,
             "status": "no_op_already_active",
             "idempotent": True,
             "database_written": False,
             "backup": None,
+            "recovery_policy": recovery,
         }
     if normalized.get("status") != "ready" or normalized.get("apply_allowed") is not True:
         raise WarehouseArchivalEstimateError("archival estimate plan is not applicable")
@@ -710,25 +722,69 @@ def _apply_archival_estimate_plan_locked(
                 raise WarehouseArchivalEstimateError(
                     "active archival estimate readback is blocked"
                 )
+            recovery = WarehouseRecoveryRegistry(
+                runtime_dir=runtime.runtime_dir,
+                db_path=runtime.db_path,
+            ).plan_noop(
+                mutation_kind="warehouse_archival_estimate",
+                closure_kind="sku_date",
+                plan_fingerprint=fingerprint,
+                scope={"nm_ids": normalized.get("target_nm_ids") or [], "action": "apply"},
+            )
             return {
                 **readback,
                 "status": "no_op_already_applied",
                 "idempotent": True,
                 "database_written": False,
                 "backup": None,
+                "recovery_policy": recovery,
             }
     fresh = build_archival_estimate_plan(runtime, manifest_path=manifest_path)
     if str(fresh["plan_fingerprint"]) != fingerprint:
         raise WarehouseArchivalEstimateError("archival estimate sources drifted after dry-run")
-    backup_root = Path(backup_dir)
-    if not backup_root.is_absolute():
-        raise WarehouseArchivalEstimateError("absolute backup_dir is required")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backup, free_before, database_size = _create_verified_backup(
-        runtime,
-        root=backup_root,
-        fingerprint=fingerprint,
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
     )
+    before_images = [
+        {
+            "table": "sheet_vitrina_v1_warehouse_wb_daily_cost",
+            "key": {
+                "cutover_id": str(row["cutover_id"]),
+                "as_of_date": str(row["as_of_date"]),
+                "nm_id": int(row["nm_id"]),
+            },
+            "before": dict(row),
+            "after": dict(after),
+        }
+        for row, after in zip(
+            normalized["target_daily_rows_before"],
+            normalized["target_daily_rows_after"],
+            strict=True,
+        )
+    ]
+    recovery = recovery_registry.prepare_t1(
+        mutation_kind="warehouse_archival_estimate",
+        closure_kind="sku_date",
+        plan_fingerprint=fingerprint,
+        scope={
+            "action": "apply",
+            "nm_ids": normalized["target_nm_ids"],
+            "date_from": normalized["effective_date"],
+        },
+        before_images=before_images,
+        expected_after_images=normalized["target_daily_rows_after"],
+        source_digest=str(normalized["source_digest"]),
+        non_target_digest=str(normalized["non_target_digest"]),
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = recovery_registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=str(normalized["source_digest"]),
+        )
+    backup = recovery
+    free_before = int(recovery_registry.capacity_status().get("free_bytes") or 0)
+    database_size = int(runtime.db_path.stat().st_size)
     committed = False
     try:
         with _connect(runtime.db_path) as conn:
@@ -880,13 +936,28 @@ def _apply_archival_estimate_plan_locked(
             except Exception:
                 conn.rollback()
                 raise
-    except Exception:
+    except Exception as exc:
         if not committed:
-            _discard_uncommitted_backup(backup)
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_rollback_archival_estimate",
+            )
         raise
     readback = readback_archival_estimate(runtime)
     if readback["target_count"] != 18 or not readback["invariants_ok"]:
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error="archival estimate post-apply readback failed",
+            next_action="rollback_archival_estimate",
+        )
         raise WarehouseArchivalEstimateError("archival estimate post-apply readback failed")
+    recovery = recovery_registry.retain(
+        str(recovery["operation_id"]),
+        after_digest=str(readback["target_daily_digest"]),
+        non_target_digest=str(readback["non_target_digest"]),
+    )
+    backup = recovery
     return {
         **readback,
         "status": "applied",
@@ -898,6 +969,7 @@ def _apply_archival_estimate_plan_locked(
         "database_size_bytes": database_size,
         "primary_source_digest_before": normalized["source_digest"],
         "primary_source_digest_after": readback["primary_source_digest"],
+        "recovery_policy": recovery,
     }
 
 
@@ -1099,15 +1171,53 @@ def _rollback_archival_estimate_locked(
             raise WarehouseArchivalEstimateError(
                 "target daily state drifted after apply; rollback requires a new recovery plan"
             )
-    backup_root = Path(backup_dir)
-    if not backup_root.is_absolute():
-        raise WarehouseArchivalEstimateError("absolute backup_dir is required")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backup, free_before, database_size = _create_verified_backup(
-        runtime,
-        root=backup_root,
-        fingerprint=selected,
+    rollback_fingerprint = "sha256:" + _hash(
+        {
+            "action": "warehouse_archival_estimate_rollback",
+            "plan_fingerprint": selected,
+            "reason": rollback_reason,
+            "source_digest": source_before,
+        }
     )
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    before_images = [
+        {
+            "table": "sheet_vitrina_v1_warehouse_wb_daily_cost",
+            "key": {
+                "cutover_id": str(row["cutover_id"]),
+                "as_of_date": str(row["as_of_date"]),
+                "nm_id": int(row["nm_id"]),
+            },
+            "before": dict(row),
+            "after": dict(before),
+        }
+        for row, before in zip(current_rows, before_rows, strict=True)
+    ]
+    recovery = recovery_registry.prepare_t1(
+        mutation_kind="warehouse_archival_estimate",
+        closure_kind="sku_date",
+        plan_fingerprint=rollback_fingerprint,
+        scope={
+            "action": "rollback",
+            "version_id": str(version["version_id"]),
+            "nm_ids": target_ids,
+        },
+        before_images=before_images,
+        expected_after_images=before_rows,
+        source_digest=source_before,
+        non_target_digest="",
+    )
+    if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+        recovery = recovery_registry.begin_mutation(
+            str(recovery["operation_id"]),
+            expected_source_digest=source_before,
+        )
+    backup = recovery
+    free_before = int(recovery_registry.capacity_status().get("free_bytes") or 0)
+    database_size = int(runtime.db_path.stat().st_size)
     placeholders = ",".join("?" for _ in target_ids)
     committed = False
     try:
@@ -1190,10 +1300,19 @@ def _rollback_archival_estimate_locked(
             except Exception:
                 conn.rollback()
                 raise
-    except Exception:
+    except Exception as exc:
         if not committed:
-            _discard_uncommitted_backup(backup)
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_archival_estimate_rollback",
+            )
         raise
+    recovery = recovery_registry.retain(
+        str(recovery["operation_id"]),
+        after_digest="sha256:" + _hash(before_rows),
+    )
+    backup = recovery
     return {
         "status": "rolled_back",
         "idempotent": False,
@@ -1205,6 +1324,7 @@ def _rollback_archival_estimate_locked(
         "database_size_bytes": database_size,
         "primary_source_digest_before": source_before,
         "primary_source_digest_after": source_before,
+        "recovery_policy": recovery,
     }
 
 
@@ -1393,44 +1513,6 @@ def _table_digest(conn: sqlite3.Connection, table: str, order_by: str) -> str:
         digest.update(_json(dict(row)).encode("utf-8"))
     digest.update(b"]")
     return "sha256:" + digest.hexdigest()
-
-
-def _create_verified_backup(
-    runtime: RegistryUploadDbBackedRuntime,
-    *,
-    root: Path,
-    fingerprint: str,
-) -> tuple[dict[str, Any], int, int]:
-    database_size = runtime.db_path.stat().st_size
-    free_before = shutil.disk_usage(root).free
-    if free_before < database_size + MIN_BACKUP_HEADROOM_BYTES:
-        raise WarehouseArchivalEstimateError(
-            "insufficient free space for coherent archival estimate backup"
-        )
-    digest = fingerprint.removeprefix("sha256:")
-    destination = root / f"warehouse-archival-estimate-{digest[:24]}.sqlite3"
-    if destination.exists():
-        destination = root / (
-            f"warehouse-archival-estimate-{digest[:24]}-"
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
-        )
-    backup = runtime.backup_database(destination)
-    destination.chmod(0o600)
-    if str(backup.get("integrity_check") or "").lower() != "ok":
-        _discard_uncommitted_backup(backup)
-        raise WarehouseArchivalEstimateError("archival estimate backup integrity_check failed")
-    return backup, free_before, database_size
-
-
-def _discard_uncommitted_backup(backup: Mapping[str, Any] | None) -> None:
-    path_value = str((backup or {}).get("path") or "")
-    if not path_value:
-        return
-    path = Path(path_value)
-    if not path.is_absolute():
-        return
-    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-        candidate.unlink(missing_ok=True)
 
 
 def _rows(

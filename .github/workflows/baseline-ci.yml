@@ -40,6 +40,13 @@ jobs:
           python3 apps/hosted_runtime_auth_preflight_smoke.py
           python3 apps/hosted_runtime_transport_reconcile_smoke.py
 
+      - name: Validate warehouse recovery policy
+        run: |
+          python3 apps/warehouse_recovery_policy_static_smoke.py
+          python3 apps/warehouse_recovery_policy_smoke.py
+          python3 apps/warehouse_recovery_policy_http_smoke.py
+          python3 apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py
+
       - name: Parse workflow YAML
         run: >-
           ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each {

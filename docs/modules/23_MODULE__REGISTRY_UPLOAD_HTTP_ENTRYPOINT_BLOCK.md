@@ -943,3 +943,13 @@ Every protected GET/POST request establishes a sanitized SQLite operation contex
 The `503` response means that the current transaction was rolled back and the same idempotent/revision-bound action may be retried; it is not a successful pending business mutation. Factory/WB calculation persistence, supplier preview/confirm, settings and document writes use the same contract. Durable supplier preview storage is physically independent of the main runtime DB, so parsing/staging can finish while a main writer is busy; only exact confirm needs the bounded main-DB commit.
 
 Bank-fee confirm atomically commits its parent, selected expenses, semantic assignments and CNY bank-fee documents. If only the post-commit ledger/warehouse projection is busy, the route returns `202` contract `sheet_vitrina_v1_supplier_bank_fee_confirm_pending_v1`, `operation_applied=true`, `readback_confirmed=true` and a Russian safe-resume message. The UI displays that pending state; repeating the same exact SHA/revision/operation selection resumes derived replay and remains a business no-op.
+
+# 22. Warehouse recovery status boundary
+
+Protected `GET /v1/sheet-vitrina-v1/warehouses/recovery` is the operator
+readback for `warehouse_recovery_policy_v1`. It exposes only server-owned
+registry metadata: tier/scope, planned/actual/read bytes, lifecycle/heartbeat,
+next action, capacity reservations/watermarks, writer/timer state,
+orphan/quarantine evidence, artifacts and rollback expiry. The warehouse update
+tab renders the same payload and keeps failures visible. No browser control can
+select a tier, migration identifier, cleanup target or rollback action.

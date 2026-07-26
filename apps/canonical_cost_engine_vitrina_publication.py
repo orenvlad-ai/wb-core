@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -32,6 +32,10 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
     _connect,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    RecoveryState,
+    WarehouseRecoveryRegistry,
 )
 
 
@@ -271,38 +275,6 @@ def build_publication_report(
     }
 
 
-def _backup(source: Path, destination: Path) -> dict[str, Any]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True)) as src, closing(sqlite3.connect(destination)) as dst:
-        src.backup(dst)
-        dst.commit()
-    destination.chmod(0o600)
-    with closing(sqlite3.connect(f"file:{destination.resolve()}?mode=ro", uri=True)) as conn:
-        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    digest_hash = hashlib.sha256()
-    with destination.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest_hash.update(chunk)
-    digest = digest_hash.hexdigest()
-    return {"path": str(destination), "mode": f"{destination.stat().st_mode & 0o777:04o}", "integrity": integrity, "sha256": digest, "size": destination.stat().st_size}
-
-
-def _restore_backup(backup: Path, destination: Path) -> dict[str, Any]:
-    inode = destination.stat().st_ino
-    with closing(sqlite3.connect(backup)) as source, closing(
-        sqlite3.connect(destination, timeout=60)
-    ) as target:
-        source.backup(target)
-        target.commit()
-    with closing(
-        sqlite3.connect(f"file:{destination.resolve()}?mode=ro", uri=True)
-    ) as conn:
-        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    if destination.stat().st_ino != inode or integrity.lower() != "ok":
-        raise ValueError("post-publication restore verification failed")
-    return {"inode_preserved": True, "integrity": "ok", "path": str(destination)}
-
-
 def apply_publication(
     db_path: Path,
     *,
@@ -316,66 +288,154 @@ def apply_publication(
     )
     if str(fingerprint) != str(before["fingerprint"]):
         raise ValueError("exact publication fingerprint mismatch")
-    backup_path = Path(backup_dir) / (
-        f"{db_path.stem}.vitrina-publication-"
-        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
+    registry = WarehouseRecoveryRegistry(
+        runtime_dir=db_path.resolve().parent,
+        db_path=db_path,
     )
-    backup = _backup(db_path, backup_path)
-    with _connect(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            current_rows = conn.execute(
-                "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
-                "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
+    if int(before["changed_cells"]) == 0:
+        recovery = registry.plan_noop(
+            mutation_kind="canonical_cost_bounded_publication",
+            closure_kind="sku_date",
+            plan_fingerprint=str(fingerprint),
+            scope={"date_from": date_from, "date_to": date_to},
+        )
+        return {
+            **{key: value for key, value in before.items() if key != "plans"},
+            "mode": "apply",
+            "applied": False,
+            "backup": None,
+            "recovery_policy": recovery,
+            "post_run": {
+                "changed_cells": 0,
+                "idempotent": True,
+                "fingerprint": before["fingerprint"],
+                "published_output_digest": before["published_output_digest"],
+            },
+        }
+    registry.ensure_schema()
+    with closing(
+        sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+    ) as source:
+        source.row_factory = sqlite3.Row
+        source.execute("PRAGMA query_only=ON")
+        before_rows = [
+            dict(row)
+            for row in source.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_ready_snapshots
+                WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date
+                """,
                 (date_from, date_to),
-            ).fetchall()
-            current_input = "sha256:" + _hash(
-                {
-                    str(row[0]): "sha256:"
-                    + hashlib.sha256(str(row[1]).encode()).hexdigest()
-                    for row in current_rows
-                }
             )
-            if current_input != before["snapshot_input_digest"]:
-                raise ValueError("publication snapshot input drift")
-            projection_dates = sorted(
-                {
-                    str(value)
-                    for row in current_rows
-                    for sheet in json.loads(row[1]).get("sheets", [])
-                    for value in sheet.get("header", [])
-                    if _publication_date_column(
-                        value, date_from=date_from, date_to=date_to
-                    )
-                }
-            )
-            _, semantic_lookups = _semantic_lookups_conn(conn, projection_dates)
-            current_canonical_input = "sha256:" + _hash(semantic_lookups)
-            if current_canonical_input != before["canonical_input_digest"]:
-                raise ValueError("publication canonical input drift")
-            for day, plan_json in before["plans"].items():
-                conn.execute(
-                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
-                    (plan_json, day),
+        ]
+    after_rows = [
+        {**row, "plan_json": before["plans"][str(row["as_of_date"])]}
+        for row in before_rows
+    ]
+    recovery = registry.prepare_t1(
+        mutation_kind="canonical_cost_bounded_publication",
+        closure_kind="sku_date",
+        plan_fingerprint=str(fingerprint),
+        scope={"date_from": date_from, "date_to": date_to},
+        before_images=[
+            {
+                "table": "sheet_vitrina_v1_ready_snapshots",
+                "key": {"as_of_date": str(old["as_of_date"])},
+                "before": old,
+                "after": new,
+            }
+            for old, new in zip(before_rows, after_rows, strict=True)
+        ],
+        expected_after_images=after_rows,
+        source_digest=str(before["canonical_input_digest"]),
+        non_target_digest=str(before["snapshot_input_digest"]),
+    )
+    if recovery["lifecycle"] == RecoveryState.VERIFIED.value:
+        recovery = registry.begin_mutation(
+            recovery["operation_id"],
+            expected_source_digest=str(before["canonical_input_digest"]),
+        )
+    try:
+        with _connect(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                current_rows = conn.execute(
+                    "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                    "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
+                    (date_from, date_to),
+                ).fetchall()
+                current_input = "sha256:" + _hash(
+                    {
+                        str(row[0]): "sha256:"
+                        + hashlib.sha256(str(row[1]).encode()).hexdigest()
+                        for row in current_rows
+                    }
                 )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+                if current_input != before["snapshot_input_digest"]:
+                    raise ValueError("publication snapshot input drift")
+                projection_dates = sorted(
+                    {
+                        str(value)
+                        for row in current_rows
+                        for sheet in json.loads(row[1]).get("sheets", [])
+                        for value in sheet.get("header", [])
+                        if _publication_date_column(
+                            value, date_from=date_from, date_to=date_to
+                        )
+                    }
+                )
+                _, semantic_lookups = _semantic_lookups_conn(conn, projection_dates)
+                current_canonical_input = "sha256:" + _hash(semantic_lookups)
+                if current_canonical_input != before["canonical_input_digest"]:
+                    raise ValueError("publication canonical input drift")
+                for day, plan_json in before["plans"].items():
+                    conn.execute(
+                        "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
+                        (plan_json, day),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except Exception as exc:
+        registry.fail_recoverable(
+            recovery["operation_id"],
+            error=str(exc),
+            next_action="resume_or_rollback_canonical_cost_publication",
+        )
+        raise
     try:
         after = build_publication_report(
             db_path, date_from=date_from, date_to=date_to
         )
         if int(after["changed_cells"]) != 0:
             raise ValueError("post-publication zero-change failed")
-    except Exception:
-        _restore_backup(backup_path, db_path)
+    except Exception as exc:
+        registry.fail_recoverable(
+            recovery["operation_id"],
+            error=str(exc),
+            next_action="rollback_canonical_cost_publication",
+        )
+        registry.rollback_t1(
+            recovery["operation_id"],
+            reason="post-publication readback failed",
+        )
         raise
+    recovery = registry.retain(
+        recovery["operation_id"],
+        after_digest=str(after["published_output_digest"]),
+    )
     return {
         **{key: value for key, value in before.items() if key != "plans"},
         "mode": "apply",
         "applied": True,
-        "backup": backup,
+        "backup": {
+            "kind": "target_scoped_before_image",
+            "operation_id": recovery["operation_id"],
+            "full_database_copy": False,
+            "copy_bytes": 0,
+        },
+        "recovery_policy": recovery,
         "post_run": {
             "changed_cells": 0,
             "idempotent": True,

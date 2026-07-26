@@ -11,6 +11,10 @@ from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 from packages.application.wb_supply_box_correction import (
     corrected_goods,
     load_active_box_correction,
@@ -331,26 +335,135 @@ class FfStockLedgerBlock:
         lines = [dict(item) for item in preview.get("parsed_lines") or []]
         if not lines:
             raise ValueError("Нельзя применить пустой документ ФФ")
-        operation_id = "ffso_" + uuid4().hex[:20]
+        operation_id = "ffso_" + hashlib.sha256(
+            (
+                f"{preview_id}:{preview.get('source_file_sha256') or ''}:"
+                f"{preview.get('operation_type') or ''}"
+            ).encode("utf-8")
+        ).hexdigest()[:20]
         source_key = f"manual_excel:{operation_id}"
-        operation = self.runtime.create_ff_stock_operation(
-            operation_id=operation_id,
-            operation_type=str(preview.get("operation_type") or ""),
-            source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
-            source_key=source_key,
-            source_object_id=operation_id,
-            source_object_label=str(preview.get("uploaded_filename") or ""),
-            created_at=self.timestamp_factory(),
-            created_by=created_by,
-            warnings=list(preview.get("warnings") or []),
-            diagnostics={"preview_id": preview_id, "summary": dict(preview.get("summary") or {})},
-            source_filename=str(preview.get("uploaded_filename") or ""),
-            source_content_type=str(preview.get("uploaded_content_type") or XLSX_CONTENT_TYPE),
-            source_file_sha256=str(preview.get("source_file_sha256") or ""),
-            source_file_bytes=bytes(preview.get("workbook_bytes") or b""),
-            lines=lines,
+        plan_fingerprint = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "preview_id": preview_id,
+                    "operation_id": operation_id,
+                    "source_file_sha256": preview.get("source_file_sha256"),
+                    "operation_type": preview.get("operation_type"),
+                    "lines": lines,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
         )
-        self.runtime.delete_ff_stock_operation_preview(preview_id)
+        recovery = recovery_registry.prepare_t1(
+            mutation_kind="ff_ledger_operation",
+            closure_kind="document",
+            plan_fingerprint=plan_fingerprint,
+            scope={
+                "preview_id": preview_id,
+                "operation_id": operation_id,
+                "nm_ids": sorted(
+                    {int(item.get("nm_id") or 0) for item in lines}
+                ),
+            },
+            before_images=[
+                {
+                    "table": "sheet_vitrina_v1_ff_stock_operations",
+                    "key": {"operation_id": operation_id},
+                    "before": None,
+                    "after": None,
+                },
+                {
+                    "table": "sheet_vitrina_v1_ff_stock_operation_previews",
+                    "key": {"preview_id": preview_id},
+                    "before": {
+                        "preview_id": preview_id,
+                        "operation_type": str(preview["operation_type"]),
+                        "created_at": str(preview["created_at"]),
+                        "uploaded_filename": str(preview["uploaded_filename"]),
+                        "uploaded_content_type": str(
+                            preview.get("uploaded_content_type") or ""
+                        ),
+                        "source_file_sha256": str(preview["source_file_sha256"]),
+                        "source_file_blob": bytes(
+                            preview.get("workbook_bytes") or b""
+                        ),
+                        "parsed_lines_json": json.dumps(
+                            list(preview.get("parsed_lines") or []),
+                            ensure_ascii=False,
+                        ),
+                        "summary_json": json.dumps(
+                            dict(preview.get("summary") or {}),
+                            ensure_ascii=False,
+                        ),
+                        "warnings_json": json.dumps(
+                            list(preview.get("warnings") or []),
+                            ensure_ascii=False,
+                        ),
+                        "errors_json": json.dumps(
+                            list(preview.get("errors") or []),
+                            ensure_ascii=False,
+                        ),
+                    },
+                    "after": None,
+                },
+            ],
+            expected_after_images=[
+                {
+                    "table": "sheet_vitrina_v1_ff_stock_operations",
+                    "key": {"operation_id": operation_id},
+                    "source_key": source_key,
+                    "operation_type": str(preview.get("operation_type") or ""),
+                    "lines": lines,
+                }
+            ],
+            source_digest=plan_fingerprint,
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=plan_fingerprint,
+            )
+        try:
+            operation = self.runtime.create_ff_stock_operation(
+                operation_id=operation_id,
+                operation_type=str(preview.get("operation_type") or ""),
+                source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+                source_key=source_key,
+                source_object_id=operation_id,
+                source_object_label=str(preview.get("uploaded_filename") or ""),
+                created_at=self.timestamp_factory(),
+                created_by=created_by,
+                warnings=list(preview.get("warnings") or []),
+                diagnostics={
+                    "preview_id": preview_id,
+                    "summary": dict(preview.get("summary") or {}),
+                },
+                source_filename=str(preview.get("uploaded_filename") or ""),
+                source_content_type=str(
+                    preview.get("uploaded_content_type") or XLSX_CONTENT_TYPE
+                ),
+                source_file_sha256=str(preview.get("source_file_sha256") or ""),
+                source_file_bytes=bytes(preview.get("workbook_bytes") or b""),
+                lines=lines,
+            )
+            self.runtime.delete_ff_stock_operation_preview(preview_id)
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="resume_or_rollback_ff_manual_operation",
+            )
+            raise
+        recovery = recovery_registry.retain(
+            str(recovery["operation_id"]),
+            after_digest=plan_fingerprint,
+        )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -359,6 +472,7 @@ class FfStockLedgerBlock:
             "registry": {
                 "rows": self.current_balance_rows(),
             },
+            "recovery_policy": recovery,
         }
 
     def download_operation_source_file(self, operation_id: str) -> tuple[bytes, str, str]:
@@ -1624,6 +1738,7 @@ class FfStockLedgerBlock:
         apply: bool,
         confirmation_fingerprint: str,
         created_by: str,
+        operation_id: str = "",
     ) -> dict[str, Any]:
         requested_supply_id = str(supply_id or "").strip()
         if not apply:
@@ -1669,7 +1784,10 @@ class FfStockLedgerBlock:
             )
         guards = dict(plan.get("apply_guards") or {})
         operation = self.runtime.create_ff_stock_operation_guarded(
-            operation_id="ffso_" + uuid4().hex[:20],
+            operation_id=(
+                str(operation_id).strip()
+                or "ffso_" + uuid4().hex[:20]
+            ),
             operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
             source_type=FF_STOCK_SOURCE_WB_SUPPLY,
             source_key=canonical_source_key,
@@ -1805,6 +1923,7 @@ class FfStockLedgerBlock:
         apply: bool,
         confirmation_fingerprint: str,
         created_by: str,
+        operation_id: str = "",
     ) -> dict[str, Any]:
         if not apply:
             raise TargetedWbSupplyReconciliationError(
@@ -1844,7 +1963,10 @@ class FfStockLedgerBlock:
             )
         guards = dict(plan.get("apply_guards") or {})
         operation = self.runtime.create_ff_stock_operation_guarded(
-            operation_id="ffso_" + uuid4().hex[:20],
+            operation_id=(
+                str(operation_id).strip()
+                or "ffso_" + uuid4().hex[:20]
+            ),
             operation_type=FF_STOCK_OPERATION_CORRECTION_RECEIPT,
             source_type=FF_STOCK_SOURCE_TARGETED_RECONCILIATION,
             source_key=reversal_source_key,

@@ -1,4 +1,4 @@
-"""Smoke-check the bounded CLI dry-run/apply/backup/reversal contract."""
+"""Smoke-check the bounded CLI dry-run/apply/T1/reversal contract."""
 
 from __future__ import annotations
 
@@ -47,9 +47,13 @@ def main() -> None:
             str(backup_dir),
         )
         _assert(applied["status"] == "applied" and applied["runtime_mutation_performed"], f"runner apply failed: {applied}")
-        backup = Path(applied["backup"]["path"])
-        _assert(backup.is_file() and applied["backup"]["sha256"], "runner apply must create verified SQLite backup")
-        _assert(applied["backup"]["integrity_check"] == "ok", "runner backup must pass SQLite integrity_check")
+        _assert(
+            applied["recovery_policy"]["tier"] == "T1"
+            and applied["recovery_policy"]["lifecycle"] == "retained"
+            and applied["backup"]["full_database_copy"] is False
+            and applied["backup"]["copy_bytes"] == 0,
+            "runner apply must retain exact bounded recovery",
+        )
         _assert(runtime.load_ff_stock_operation_by_source_key(SOURCE_KEY) is not None, "runner apply must create canonical debit")
 
         repeat = _run(
@@ -75,7 +79,11 @@ def main() -> None:
             str(backup_dir),
         )
         _assert(reversed_report["status"] == "reversed", f"runner reversal failed: {reversed_report}")
-        _assert(Path(reversed_report["backup"]["path"]).is_file(), "runner reversal must also create a backup")
+        _assert(
+            reversed_report["recovery_policy"]["tier"] == "T1"
+            and reversed_report["backup"]["copy_bytes"] == 0,
+            "runner reversal must also use bounded recovery",
+        )
         _assert(runtime.load_ff_stock_operation_by_source_key(SOURCE_KEY) is not None, "runner reversal must preserve original debit")
 
     print("ff_stock_targeted_reconciliation_runner_smoke: ok")

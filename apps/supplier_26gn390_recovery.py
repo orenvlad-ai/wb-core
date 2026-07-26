@@ -257,6 +257,12 @@ def apply_plan(
     *,
     backup_root: Path,
 ) -> dict[str, Any]:
+    raise ValueError(
+        "legacy supplier 26GN390 mutation is disabled; use the current "
+        "warehouse cost queue replay with an exact reviewed fingerprint"
+    )
+
+    # Historical implementation retained below as migration evidence only.
     if not plan.get("would_change"):
         return {
             **dict(plan),

@@ -616,3 +616,13 @@ Canonical FF replay resolves a WB writeoff date from authoritative persisted evi
 ## Canonical cutover boundary (2026-07-01)
 
 WB supplies already present in the coherent functional-cutover source snapshot are absorbed by exact source watermarks/digests and are not replayed into opening WB/FF→WB/discrepancy quantity or capital. Post-cutover corrections use stable supply/SKU identities and effective dates; raw persisted source evidence remains unchanged.
+
+## Unified recovery-policy boundary
+
+Ordinary official-source refresh remains idempotent and keeps its durable
+sync-run/cache revision evidence. Selected supply/SKU replay uses central T1;
+the hourly/manual publication that encompasses supply refresh, downstream
+layers, FF reconciliation and the six warehouse stages uses one central T2
+warehouse/cost domain checkpoint. Neither path may open Finance raw or regain a
+full-store checkpoint. Historical targeted supply runners either route through
+T1 or remain disabled as documented in module 51.

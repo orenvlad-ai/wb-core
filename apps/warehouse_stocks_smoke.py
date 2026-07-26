@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,6 +22,9 @@ from packages.application.warehouse_stocks import (  # noqa: E402
     OPENING_CUTOVER_ID,
     WarehouseOpeningSnapshotError,
     WarehouseStocksBlock,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
 )
 
 
@@ -250,27 +254,31 @@ def main() -> None:
         locked_drift_runtime = _seed_runtime(root / "runtime-source-changed-after-backup")
         locked_drift_block = _block(locked_drift_runtime)
         locked_drift_plan = locked_drift_block.build_opening_plan()
-        original_backup = locked_drift_block._backup_before_mutation
+        original_begin_mutation = WarehouseRecoveryRegistry.begin_mutation
 
-        def _backup_then_change(backup_dir: Path, *, purpose: str):
-            backup_result = original_backup(backup_dir, purpose=purpose)
+        def _begin_then_change(self, operation_id: str, **kwargs):
+            recovery = original_begin_mutation(self, operation_id, **kwargs)
             with sqlite3.connect(locked_drift_runtime.db_path) as conn:
                 conn.execute(
                     "UPDATE sheet_vitrina_v1_ff_stock_operation_lines SET quantity_delta=quantity_delta+1 WHERE operation_id='ff-op' AND line_no=1"
                 )
                 conn.commit()
-            return backup_result
+            return recovery
 
-        locked_drift_block._backup_before_mutation = _backup_then_change  # type: ignore[method-assign]
-        try:
-            locked_drift_block.apply_opening_plan(
-                locked_drift_plan,
-                confirm_fingerprint=locked_drift_plan["plan_fingerprint"],
-                backup_dir=root / "backups-source-changed-after-backup",
-            )
-            raise AssertionError("source change after backup did not fail under apply lock")
-        except WarehouseOpeningSnapshotError as exc:
-            _assert("acquiring the apply lock" in str(exc), "locked source drift diagnostic")
+        with mock.patch.object(
+            WarehouseRecoveryRegistry,
+            "begin_mutation",
+            new=_begin_then_change,
+        ):
+            try:
+                locked_drift_block.apply_opening_plan(
+                    locked_drift_plan,
+                    confirm_fingerprint=locked_drift_plan["plan_fingerprint"],
+                    backup_dir=root / "backups-source-changed-after-backup",
+                )
+                raise AssertionError("source change after checkpoint did not fail under apply lock")
+            except WarehouseOpeningSnapshotError as exc:
+                _assert("acquiring the apply lock" in str(exc), "locked source drift diagnostic")
         _assert(locked_drift_block.readback()["status"] == "not_initialized", "locked drift has no partial cutover")
 
         corrupt_runtime = _seed_runtime(root / "runtime-corrupt-readback")

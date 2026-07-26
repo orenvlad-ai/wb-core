@@ -120,7 +120,28 @@ Hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
-Apply requires a newly reviewed exact fingerprint, external plan file, approval reference and explicit bounded backup directory. The runner holds the canonical `.warehouse-functional-sync.lock` from its current-plan recheck through coherent backup, `BEGIN IMMEDIATE` apply and transactional readback, so hourly/manual warehouse sync, replay, downstream cost-layer materialization and economics publication cannot change the canonical cost inputs inside that interval. For a long production apply the separate repo-owned `warehouse-functional-maintenance status|hold|restore` lifecycle stops only the hourly timer, waits for an already-running service without killing it, persists the exact mode-`0600` timer/service baseline and later restores its enabled/active state; an explicitly authorized broader quiet window uses `business-data-maintenance hold`, whose durable warehouse sub-mode retains that restorable baseline while leaving the timer disabled and inactive. Neither path weakens or normalizes the reviewed fingerprint. The runner rejects drift/blockers, uses a coherent SQLite backup with free-space check, `integrity_check=ok`, SHA-256 and mode `0600`, writes only derived Finance/audit rows, verifies global and per-SKU target readback/non-target digest, and rolls back on any mismatch. It persists a separate post-apply fingerprint: an unchanged exact repeat returns an audited no-op without a second backup, while any later raw/ads/cost/target drift invalidates the old approval.
+Apply requires a newly reviewed exact fingerprint, external plan file, approval
+reference and the retained compatibility backup-directory argument. That
+argument cannot redirect recovery artifacts or regain a full-store backup. The
+runner holds the canonical `.warehouse-functional-sync.lock` from its
+current-plan recheck through central T2 warehouse/cost/derived-Finance
+checkpoint, `BEGIN IMMEDIATE` apply and transactional readback, so
+hourly/manual warehouse sync, replay, downstream cost-layer materialization and
+economics publication cannot change the canonical cost inputs inside that
+interval. Finance raw is read only as calculation input and is excluded from
+the checkpoint. For a long production apply the separate repo-owned
+`warehouse-functional-maintenance status|hold|restore` lifecycle stops only the
+hourly timer, waits for an already-running service without killing it, persists
+the exact mode-`0600` timer/service baseline and later restores its
+enabled/active state; an explicitly authorized broader quiet window uses
+`business-data-maintenance hold`, whose durable warehouse sub-mode retains that
+restorable baseline while leaving the timer disabled and inactive. Neither path
+weakens or normalizes the reviewed fingerprint. The runner rejects
+drift/blockers, writes only derived Finance/audit rows, verifies global and
+per-SKU target readback/non-target digest, and rolls back on any mismatch. It
+persists a separate post-apply fingerprint: an unchanged exact repeat returns
+an audited T0 no-op without a second checkpoint, while any later
+raw/ads/cost/target drift invalidates the old approval.
 
 Production apply is not implied by merge/deploy and remains forbidden until the new all-history dry-run receives explicit human approval.
 
@@ -142,3 +163,14 @@ Targeted checks:
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
 Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated Chromium context. It is calculation/read-only: it may POST preview/XLSX generation but never saves settings, finalizes a partner report or changes Finance/business data. Acceptance is fail-closed: `preview.attempted=true`, `preview.ready=true`, empty blockers, visible table, enabled download and an actually downloaded/opened semantic XLSX that reconciles nmId, selected weeks, source/formula digest and displayed Decimal amounts are all mandatory. A non-empty but wrong workbook, hidden sheet, external link, missing download or incomplete preview fails the flow.
+
+## Unified recovery-policy boundary
+
+The weekly Finance source table remains Finance raw and is never recoverable
+through T1/T2 warehouse artifacts. A bounded stale-cost correction uses T1
+exact derived-row before images; a wide canonical derived publication uses T2
+and checkpoints only the warehouse/cost/derived-Finance domain. The reviewed
+raw Finance input is read for calculation only and cannot enter the checkpoint.
+T0 repeats create no recovery bytes. Earlier full/coherent-backup wording for
+these publication paths is superseded by module 51; T3 remains available only
+to explicit allowlisted schema/store migrations.

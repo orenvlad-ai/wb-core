@@ -5357,6 +5357,31 @@
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Functional version</span><span class="warehouse-summary-value" data-warehouse-update-version>—</span></div>
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Business date</span><span class="warehouse-summary-value" data-warehouse-update-business-date>—</span></div>
         </div>
+        <section aria-labelledby="warehouse-recovery-title">
+          <div class="warehouse-head">
+            <div>
+              <h2 class="warehouse-section-title" id="warehouse-recovery-title">Recovery policy</h2>
+              <p class="warehouse-meta">Единый журнал T0/T1/T2/T3: объём, lifecycle, writer/timer, orphan и rollback.</p>
+            </div>
+            <span class="warehouse-status" data-tone="neutral" data-warehouse-recovery-status>Загрузка…</span>
+          </div>
+          <div class="warehouse-summary">
+            <div class="warehouse-summary-item"><span class="warehouse-summary-label">Capacity</span><span class="warehouse-summary-value" data-warehouse-recovery-capacity>—</span></div>
+            <div class="warehouse-summary-item"><span class="warehouse-summary-label">Writer / timer</span><span class="warehouse-summary-value" data-warehouse-recovery-writer>—</span></div>
+            <div class="warehouse-summary-item"><span class="warehouse-summary-label">Orphan / quarantine</span><span class="warehouse-summary-value" data-warehouse-recovery-orphans>—</span></div>
+            <div class="warehouse-summary-item"><span class="warehouse-summary-label">Следующее действие</span><span class="warehouse-summary-value" data-warehouse-recovery-next>—</span></div>
+          </div>
+          <div class="warehouse-table-wrap">
+            <table class="warehouse-table">
+              <thead><tr><th>Tier / операция</th><th>Scope</th><th>Planned / actual / read</th><th>Lifecycle</th><th>Next action</th><th>Rollback</th><th>Артефакты / ошибка</th></tr></thead>
+              <tbody data-warehouse-recovery-operations><tr><td colspan="7"><p class="warehouse-empty">Recovery operations ещё не загружены.</p></td></tr></tbody>
+            </table>
+          </div>
+          <details>
+            <summary>Полный recovery status</summary>
+            <pre data-warehouse-recovery-technical>{}</pre>
+          </details>
+        </section>
         <h2 class="warehouse-section-title">Короткий лог</h2>
         <ol data-warehouse-update-log><li>Запусков пока нет.</li></ol>
         <details>
@@ -6236,6 +6261,13 @@
     const warehouseUpdateBusinessDateNode = document.querySelector("[data-warehouse-update-business-date]");
     const warehouseUpdateLogNode = document.querySelector("[data-warehouse-update-log]");
     const warehouseUpdateTechnicalNode = document.querySelector("[data-warehouse-update-technical]");
+    const warehouseRecoveryStatusNode = document.querySelector("[data-warehouse-recovery-status]");
+    const warehouseRecoveryCapacityNode = document.querySelector("[data-warehouse-recovery-capacity]");
+    const warehouseRecoveryWriterNode = document.querySelector("[data-warehouse-recovery-writer]");
+    const warehouseRecoveryOrphansNode = document.querySelector("[data-warehouse-recovery-orphans]");
+    const warehouseRecoveryNextNode = document.querySelector("[data-warehouse-recovery-next]");
+    const warehouseRecoveryOperationsNode = document.querySelector("[data-warehouse-recovery-operations]");
+    const warehouseRecoveryTechnicalNode = document.querySelector("[data-warehouse-recovery-technical]");
     const warehouseCostsButton = document.querySelector("[data-open-warehouse-costs]");
     const warehouseStockReportButton = document.querySelector("[data-open-stock-report]");
     const warehouseCostView = document.querySelector("[data-warehouse-cost-view]");
@@ -8131,6 +8163,7 @@
       if (wbIncidentPolicyCard) wbIncidentPolicyCard.hidden = key !== "wb";
       if (updateSelected) {
         loadWarehouseCurrentSyncStatus();
+        loadWarehouseRecoveryStatus();
         return key;
       }
       stopWarehouseCurrentSyncPolling();
@@ -8520,6 +8553,91 @@
       }
     }
 
+    function warehouseRecoveryBytes(value) {
+      const bytes = Math.max(0, Number(value || 0));
+      if (bytes < 1024) return String(Math.round(bytes)) + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+      if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+      return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+    }
+
+    function renderWarehouseRecoveryStatus(payload) {
+      const operations = Array.isArray(payload && payload.operations) ? payload.operations : [];
+      const capacity = (payload && payload.capacity) || {};
+      const orphan = (payload && payload.orphan_scanner) || {};
+      const writer = (payload && payload.writer) || {};
+      const timer = (payload && payload.timer) || {};
+      const attention = String((payload && payload.status) || "") !== "ready";
+      const quarantined = operations.filter(function(item) { return String(item.lifecycle || "") === "quarantined"; }).length +
+        (Array.isArray(orphan.quarantine_candidates) ? orphan.quarantine_candidates.length : 0);
+      const expiredReservations = Array.isArray(orphan.expired_reservations) ? orphan.expired_reservations.length : 0;
+      const actionable = operations.find(function(item) {
+        return ["failed_recoverable", "quarantined", "mutation_running", "writing", "reserved", "planned"].includes(String(item.lifecycle || ""));
+      });
+      if (warehouseRecoveryStatusNode) {
+        warehouseRecoveryStatusNode.textContent = attention ? "Требуется внимание" : "Policy ready";
+        warehouseRecoveryStatusNode.setAttribute("data-tone", attention ? "error" : "success");
+      }
+      if (warehouseRecoveryCapacityNode) {
+        warehouseRecoveryCapacityNode.textContent =
+          warehouseRecoveryBytes(capacity.available_after_reservations_bytes) +
+          (capacity.hard_stop ? " · hard stop" : capacity.degraded ? " · degraded" : " · available");
+      }
+      if (warehouseRecoveryWriterNode) {
+        warehouseRecoveryWriterNode.textContent =
+          String(writer.state || "unknown") + " / " + String(timer.state || timer.status || "unknown");
+      }
+      if (warehouseRecoveryOrphansNode) {
+        warehouseRecoveryOrphansNode.textContent =
+          String(Number(orphan.orphan_count || 0)) + " / " + String(quarantined) +
+          (expiredReservations ? " · expired reservations " + String(expiredReservations) : "");
+      }
+      if (warehouseRecoveryNextNode) {
+        warehouseRecoveryNextNode.textContent = actionable
+          ? String(actionable.next_action || "inspect_operation")
+          : "none";
+      }
+      if (warehouseRecoveryOperationsNode) {
+        warehouseRecoveryOperationsNode.innerHTML = operations.length
+          ? operations.map(function(item) {
+              const artifacts = Array.isArray(item.artifacts) ? item.artifacts : [];
+              const scope = JSON.stringify(item.scope || {});
+              const rollback = item.rollback || {};
+              return "<tr>" +
+                "<td><strong>" + escapeHtml(item.tier || "—") + "</strong><br>" + escapeHtml(item.operation_kind || "—") + "<br><small>" + escapeHtml(item.operation_id || "") + "</small></td>" +
+                "<td><code>" + escapeHtml(scope) + "</code></td>" +
+                "<td>" + escapeHtml(warehouseRecoveryBytes(item.planned_bytes)) + " / " + escapeHtml(warehouseRecoveryBytes(item.actual_bytes)) + " / " + escapeHtml(warehouseRecoveryBytes(item.read_bytes)) + "</td>" +
+                "<td>" + escapeHtml(item.lifecycle || "—") + "<br><small>writer: " + escapeHtml(item.writer_state || "—") + "</small></td>" +
+                "<td>" + escapeHtml(item.next_action || "none") + "</td>" +
+                "<td>" + (rollback.available ? "до " + escapeHtml(warehouseDate(rollback.expires_at)) : "недоступен") + "</td>" +
+                "<td>" + escapeHtml(String(artifacts.length)) + (item.quarantine_reason ? "<br>" + escapeHtml(item.quarantine_reason) : "") + (item.last_error ? "<br>" + escapeHtml(item.last_error) : "") + "</td>" +
+              "</tr>";
+            }).join("")
+          : '<tr><td colspan="7"><p class="warehouse-empty">Терминальных recovery operations пока нет; T0 не создаёт registry rows.</p></td></tr>';
+      }
+      if (warehouseRecoveryTechnicalNode) {
+        warehouseRecoveryTechnicalNode.textContent = JSON.stringify(payload || {}, null, 2);
+      }
+    }
+
+    async function loadWarehouseRecoveryStatus() {
+      const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+      try {
+        const response = await fetch(basePath + "/recovery", {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        renderWarehouseRecoveryStatus(payload);
+      } catch (error) {
+        if (warehouseRecoveryStatusNode) {
+          warehouseRecoveryStatusNode.textContent = "Status недоступен";
+          warehouseRecoveryStatusNode.setAttribute("data-tone", "error");
+        }
+        if (warehouseRecoveryNextNode) {
+          warehouseRecoveryNextNode.textContent = String(error && error.message ? error.message : error);
+        }
+      }
+    }
+
     async function loadWarehouseCurrentSyncStatus(runId) {
       const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
       const query = runId ? "?run_id=" + encodeURIComponent(runId) : "";
@@ -8528,6 +8646,7 @@
         const payload = await response.json().catch(function() { return {}; });
         if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
         renderWarehouseCurrentSyncStatus(payload);
+        loadWarehouseRecoveryStatus();
       } catch (error) {
         if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent = "Не завершено: " + String(error && error.message ? error.message : error);
         setWarehouseActionState(warehouseUpdateStartButton, "error", "Повторить");

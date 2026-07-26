@@ -81,7 +81,11 @@ def main() -> None:
             applied["status"] != "applied"
             or applied["target_count"] != 18
             or not applied["invariants_ok"]
-            or applied["backup"]["integrity_check"] != "ok"
+            or applied["recovery_policy"]["tier"] != "T1"
+            or applied["recovery_policy"]["lifecycle"] != "retained"
+            or applied["recovery_policy"]["actual_bytes"] <= 0
+            or applied["recovery_policy"]["read_bytes"] < 0
+            or applied["recovery_policy"]["artifacts"][0]["artifact_kind"] != "undo"
         ):
             raise AssertionError(f"apply/readback mismatch: {applied}")
         readback = readback_archival_estimate(runtime)

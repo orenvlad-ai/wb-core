@@ -17,6 +17,10 @@ from uuid import uuid4
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
+from packages.application.warehouse_recovery_policy import (
+    RecoveryState,
+    WarehouseRecoveryRegistry,
+)
 from packages.business_time import current_business_date_iso
 
 
@@ -297,21 +301,92 @@ class CalculationParametersBlock:
         if preview["preview_fingerprint"] != str(preview_fingerprint or ""):
             raise ValueError("calculation parameters changed after preview")
         parameters = _parameters_from_payload(payload)
-        economics_backup = self.prepare_operator_settings_backup(
-            preview_fingerprint=str(preview["preview_fingerprint"]),
+        recovery_registry = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime.runtime_dir,
+            db_path=self.runtime.db_path,
         )
+        if not preview["diff"]:
+            return {
+                **self.get_payload(),
+                "created_version_id": "",
+                "diff": [],
+                "targeted_recalculation": {
+                    "status": "idle",
+                    "request_count": 0,
+                },
+                "recovery_policy": recovery_registry.plan_noop(
+                    mutation_kind="calculation_parameters_update",
+                    closure_kind="date",
+                    plan_fingerprint=str(preview["preview_fingerprint"]),
+                    scope={"effective_date": parameters.effective_date},
+                ),
+            }
+        with _connect(self.runtime.db_path) as conn:
+            revision = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(revision),0)+1 "
+                    "FROM sheet_vitrina_v1_calculation_parameter_versions "
+                    "WHERE block_key=?",
+                    (PROXY_BLOCK_KEY,),
+                ).fetchone()[0]
+            )
+        version_id = (
+            f"calculation_parameters_proxy_v{revision}_"
+            f"{parameters.effective_date.replace('-', '')}"
+        )
+        request_id = f"proxy_recalc:{version_id}"
+        recovery = recovery_registry.prepare_t1(
+            mutation_kind="calculation_parameters_update",
+            closure_kind="date",
+            plan_fingerprint=str(preview["preview_fingerprint"]),
+            scope={
+                "effective_date": parameters.effective_date,
+                "version_id": version_id,
+                "request_id": request_id,
+            },
+            before_images=[
+                {
+                    "table": "sheet_vitrina_v1_calculation_parameter_versions",
+                    "key": {"version_id": version_id},
+                    "before": None,
+                    "after": None,
+                },
+                {
+                    "table": "sheet_vitrina_v1_proxy_targeted_recalc_queue",
+                    "key": {"request_id": request_id},
+                    "before": None,
+                    "after": None,
+                },
+            ],
+            source_digest=str(preview["preview_fingerprint"]),
+        )
+        if recovery.get("lifecycle") == RecoveryState.VERIFIED.value:
+            recovery = recovery_registry.begin_mutation(
+                str(recovery["operation_id"]),
+                expected_source_digest=str(preview["preview_fingerprint"]),
+            )
+        economics_backup = {
+            "kind": "target_scoped_before_image",
+            "integrity_check": "ok",
+            "full_database_copy": False,
+            "copy_bytes": 0,
+            "recovery_operation_id": str(recovery["operation_id"]),
+        }
         now = _now()
         try:
             with _connect(self.runtime.db_path) as conn:
                 ensure_calculation_parameters_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
-                revision = int(
+                locked_revision = int(
                     conn.execute(
                         "SELECT COALESCE(MAX(revision),0)+1 FROM sheet_vitrina_v1_calculation_parameter_versions WHERE block_key=?",
                         (PROXY_BLOCK_KEY,),
                     ).fetchone()[0]
                 )
-                version_id = f"calculation_parameters_proxy_v{revision}_{parameters.effective_date.replace('-', '')}"
+                if locked_revision != revision:
+                    raise ValueError(
+                        "calculation parameter revision drifted after recovery plan"
+                    )
                 conn.execute(
                     """
                     INSERT INTO sheet_vitrina_v1_calculation_parameter_versions(
@@ -337,20 +412,36 @@ class CalculationParametersBlock:
                         request_id,effective_date,settings_version_id,status,created_at
                     ) VALUES(?,?,?,?,?)
                     """,
-                    (f"proxy_recalc:{version_id}", parameters.effective_date, version_id, "pending", now),
+                    (request_id, parameters.effective_date, version_id, "pending", now),
                 )
                 conn.commit()
-        except Exception:
-            self._archive_functional_economics_backup(economics_backup)
+        except Exception as exc:
+            recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(exc),
+                next_action="retry_or_rollback_calculation_parameter_update",
+            )
             raise
         recalculation = self.process_pending_targeted_recalculations(
             verified_backup=economics_backup,
         )
+        if str(recalculation.get("status") or "") == "failed":
+            recovery = recovery_registry.fail_recoverable(
+                str(recovery["operation_id"]),
+                error=str(recalculation.get("error") or "economics failed"),
+                next_action="retry_targeted_economics_or_rollback_settings",
+            ) or recovery
+        else:
+            recovery = recovery_registry.retain(
+                str(recovery["operation_id"]),
+                after_digest=str(preview["preview_fingerprint"]),
+            )
         return {
             **self.get_payload(),
             "created_version_id": version_id,
             "diff": preview["diff"],
             "targeted_recalculation": recalculation,
+            "recovery_policy": recovery,
         }
 
     def process_pending_targeted_recalculations(
@@ -368,20 +459,10 @@ class CalculationParametersBlock:
             return {"status": "idle", "request_count": 0}
         request_ids = [str(item["request_id"]) for item in pending]
         try:
-            effective_backup = verified_backup or self.prepare_functional_economics_backup()
             result = self.publish_current_functional_economics(
-                verified_backup=effective_backup,
+                verified_backup=verified_backup,
             )
         except Exception as exc:
-            backup_archive: dict[str, Any] | None = None
-            archive_error = ""
-            if "effective_backup" in locals():
-                try:
-                    backup_archive = self._archive_functional_economics_backup(
-                        effective_backup,
-                    )
-                except Exception as archive_exc:  # preserve the raw restore point fail-closed
-                    archive_error = str(archive_exc)
             with _connect(self.runtime.db_path) as conn:
                 placeholders = ",".join("?" for _ in request_ids)
                 conn.execute(
@@ -394,8 +475,8 @@ class CalculationParametersBlock:
                 "status": "failed",
                 "request_count": len(request_ids),
                 "error": str(exc),
-                "backup_archive": backup_archive,
-                "backup_archive_error": archive_error,
+                "backup_archive": None,
+                "backup_archive_error": "",
             }
         completed_at = _now()
         with _connect(self.runtime.db_path) as conn:
@@ -417,108 +498,16 @@ class CalculationParametersBlock:
         }
 
     def prepare_functional_economics_backup(self) -> dict[str, Any]:
-        """Prepare or reuse one coherent restore point per open business day.
+        """Compatibility descriptor; T1 recovery is prepared by the publisher."""
 
-        Hourly publications change only reconstructable derived cells.  A single
-        pre-first-mutation restore point is therefore retained for that business
-        day instead of writing a new full-database copy on every hourly refresh.
-        """
-
-        business_date = current_business_date_iso()
-        backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
-        backup_root.mkdir(parents=True, exist_ok=True)
-        source = backup_root / f"functional-economics-daily-{business_date.replace('-', '')}.sqlite3"
-        archive = Path(str(source) + ".zst")
-        manifest_path = archive.with_name(archive.name + ".manifest.json")
-        raw_manifest_path = source.with_name(source.name + ".manifest.json")
-        archive_pair_exists = archive.exists() or manifest_path.exists()
-        if archive_pair_exists and not (archive.is_file() and manifest_path.is_file()):
-            raise ValueError("daily functional economics backup archive is incomplete")
-        raw_pair_exists = source.exists() or raw_manifest_path.exists()
-        if raw_pair_exists and not (source.is_file() and raw_manifest_path.is_file()):
-            raise ValueError("daily functional economics raw backup manifest is incomplete")
-        raw_plan = (
-            _verify_daily_raw_backup_manifest(
-                source=source,
-                manifest_path=raw_manifest_path,
-                business_date=business_date,
-            )
-            if raw_pair_exists
-            else None
-        )
-        retention = self._prune_verified_functional_economics_archives(
-            backup_root,
-            reserve_pattern=(
-                None
-                if archive_pair_exists
-                else "functional-economics-daily-*.sqlite3.zst.manifest.json"
-            ),
-        )
-        if archive.is_file() and manifest_path.is_file():
-            from apps.sqlite_backup_archive import verify_archive_manifest
-
-            manifest = verify_archive_manifest(manifest_path)
-            if (
-                str(manifest.get("source_path") or "") != str(source)
-                or str(manifest.get("archive_path") or "") != str(archive)
-            ):
-                raise ValueError("daily functional economics backup archive failed provenance validation")
-            self._require_economics_backup_capacity(
-                backup_root,
-                source_size=int(manifest["source_size_bytes"]),
-                raw_backup_exists=False,
-                archive_exists=True,
-            )
-            return {
-                **manifest,
-                "integrity_check": "ok",
-                "backup_scope": "business_day",
-                "business_date": business_date,
-                "reused": True,
-                "retention": retention,
-            }
-        if raw_plan is not None:
-            self._require_economics_backup_capacity(
-                backup_root,
-                source_size=int(raw_plan["source_size_bytes"]),
-                raw_backup_exists=True,
-            )
-            return {
-                "path": str(source),
-                "size_bytes": int(raw_plan["source_size_bytes"]),
-                "sha256": str(raw_plan["source_sha256"]).removeprefix("sha256:"),
-                "integrity_check": str(raw_plan["source_integrity_check"]),
-                "backup_scope": "business_day",
-                "business_date": business_date,
-                "raw_manifest_path": str(raw_manifest_path),
-                "reused": True,
-                "retention": retention,
-            }
-        self._require_economics_backup_capacity(
-            backup_root,
-            source_size=self.runtime.coherent_backup_size_bytes(),
-            raw_backup_exists=False,
-        )
-        backup = self.runtime.backup_database(source)
-        source.chmod(0o600)
-        try:
-            _write_daily_raw_backup_manifest(
-                source=source,
-                manifest_path=raw_manifest_path,
-                business_date=business_date,
-                backup=backup,
-            )
-        except Exception:
-            source.unlink(missing_ok=True)
-            raw_manifest_path.unlink(missing_ok=True)
-            raise
         return {
-            **backup,
-            "backup_scope": "business_day",
-            "business_date": business_date,
-            "raw_manifest_path": str(raw_manifest_path),
+            "kind": "target_scoped_before_image",
+            "integrity_check": "ok",
+            "full_database_copy": False,
+            "copy_bytes": 0,
+            "backup_scope": "policy_managed_t1",
+            "business_date": current_business_date_iso(),
             "reused": False,
-            "retention": retention,
         }
 
     def prepare_operator_settings_backup(
@@ -526,44 +515,15 @@ class CalculationParametersBlock:
         *,
         preview_fingerprint: str,
     ) -> dict[str, Any]:
-        """Create a fresh recovery point before an operator-authored settings write."""
+        """Compatibility descriptor; the settings write owns an exact T1 journal."""
 
-        backup_root = (self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve()
-        backup_root.mkdir(parents=True, exist_ok=True)
-        self._prune_verified_functional_economics_archives(
-            backup_root,
-            reserve_pattern="operator-settings-*.sqlite3.zst.manifest.json",
-        )
-        coherent_size = self.runtime.coherent_backup_size_bytes()
-        self._require_economics_backup_capacity(
-            backup_root,
-            source_size=coherent_size,
-            raw_backup_exists=False,
-        )
-        timestamp = _now().replace(":", "").replace("-", "")
-        source = backup_root / (
-            f"operator-settings-{timestamp}-{uuid4().hex}.sqlite3"
-        )
-        backup = self.runtime.backup_database(source)
-        source.chmod(0o600)
-        raw_manifest_path = source.with_name(source.name + ".manifest.json")
-        try:
-            _write_operator_settings_raw_backup_manifest(
-                source=source,
-                manifest_path=raw_manifest_path,
-                preview_fingerprint=str(preview_fingerprint),
-                backup=backup,
-            )
-        except Exception:
-            source.unlink(missing_ok=True)
-            raw_manifest_path.unlink(missing_ok=True)
-            _fsync_directory(backup_root)
-            raise
         return {
-            **backup,
-            "backup_scope": "fresh_operator_settings",
+            "kind": "target_scoped_before_image",
+            "integrity_check": "ok",
+            "full_database_copy": False,
+            "copy_bytes": 0,
+            "backup_scope": "policy_managed_t1",
             "settings_preview_fingerprint": str(preview_fingerprint),
-            "raw_manifest_path": str(raw_manifest_path),
             "reused": False,
         }
 
@@ -622,20 +582,10 @@ class CalculationParametersBlock:
         }
 
     def preflight_fresh_economics_backup_capacity(self, backup_root: Path) -> dict[str, Any]:
-        backup_root = backup_root.resolve()
-        backup_root.mkdir(parents=True, exist_ok=True)
-        retention = self._prune_verified_functional_economics_archives(
-            backup_root,
-            reserve_pattern="warehouse-functional-pre-sync-*.sqlite3.zst.manifest.json",
+        raise RuntimeError(
+            "legacy full-store economics backup capacity preflight is disabled; "
+            "use WarehouseRecoveryRegistry T1/T2 capacity reservations"
         )
-        return {
-            **self._require_economics_backup_capacity(
-                backup_root,
-                source_size=self.runtime.coherent_backup_size_bytes(),
-                raw_backup_exists=False,
-            ),
-            "retention": retention,
-        }
 
     def publish_current_functional_economics(
         self,
@@ -649,19 +599,16 @@ class CalculationParametersBlock:
             build_functional_economics_backfill_plan,
         )
 
-        effective_backup = verified_backup or self.prepare_functional_economics_backup()
         plan = build_functional_economics_backfill_plan(self.runtime)
         result = apply_functional_economics_backfill_plan(
             self.runtime,
             plan,
             confirm_fingerprint=str(plan["plan_fingerprint"]),
             backup_dir=(self.runtime.runtime_dir / "backups" / "calculation-parameters").resolve(),
-            verified_backup=effective_backup,
+            verified_backup=verified_backup,
+            target_scoped_undo=True,
         )
-        backup = dict(result.get("backup") or effective_backup or {})
-        archive_evidence = self._archive_functional_economics_backup(backup)
-        result["backup_archive"] = archive_evidence
-        result["backup"] = archive_evidence
+        result["backup_archive"] = dict(result.get("backup") or {})
         return result
 
     def _archive_functional_economics_backup(

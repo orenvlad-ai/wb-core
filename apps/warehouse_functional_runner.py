@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,9 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
 )
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     apply_supplier_cost_state_replay_plan,
@@ -187,23 +191,10 @@ def _run(
             expected_kind="hourly_wb_sync",
         )
         with warehouse_functional_write_lock(runtime.runtime_dir):
-            block.calculation_parameters.preflight_fresh_economics_backup_capacity(
-                Path(str(args.backup_dir)),
-            )
-            backup_result = {
-                **_create_pre_sync_backup(
-                    runtime,
-                    backup_dir=Path(str(args.backup_dir)),
-                    timestamp=block.timestamp_factory(),
-                ),
-                "backup_scope": "reviewed_bounded_recovery",
-            }
-            if str(backup_result.get("integrity_check") or "").lower() != "ok":
-                _discard_uncommitted_backup(backup_result)
-                raise RuntimeError(
-                    "reviewed bounded recovery backup integrity_check is not ok"
-                )
             try:
+                economics_backup = (
+                    block.calculation_parameters.prepare_functional_economics_backup()
+                )
                 supply_refresh = _refresh_official_supply_state(
                     runtime,
                     record_ff_movements=False,
@@ -218,7 +209,7 @@ def _run(
                 )
                 proxy_recalculation = (
                     block.calculation_parameters.process_pending_targeted_recalculations(
-                        verified_backup=backup_result,
+                        verified_backup=economics_backup,
                     )
                 )
                 if str(proxy_recalculation.get("status") or "") == "failed":
@@ -230,9 +221,10 @@ def _run(
                     proxy_recalculation
                     if int(proxy_recalculation.get("request_count") or 0) > 0
                     else block.calculation_parameters.publish_current_functional_economics(
-                        verified_backup=backup_result,
+                        verified_backup=economics_backup,
                     )
                 )
+                backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
                     "mode": "reviewed_sync_apply",
@@ -265,41 +257,11 @@ def _run(
             phase_timings_ms["warehouse_lock_wait"] = float(
                 lock_evidence.get("wait_ms") or 0
             )
-            if args.command == "manual-sync":
-                _run_sync_phase(
-                    "backup_capacity_preflight",
-                    phase_timings_ms,
-                    lambda: (
-                        block.calculation_parameters.preflight_fresh_economics_backup_capacity(
-                            Path(str(args.backup_dir)),
-                        )
-                    ),
-                )
-            backup_result = (
-                {
-                    **_run_sync_phase(
-                        "create_manual_restore_point",
-                        phase_timings_ms,
-                        lambda: _create_pre_sync_backup(
-                            runtime,
-                            backup_dir=Path(str(args.backup_dir)),
-                            timestamp=block.timestamp_factory(),
-                        ),
-                    ),
-                    "backup_scope": "fresh_manual_sync",
-                }
-                if args.command == "manual-sync"
-                else None
-            )
             try:
                 economics_backup = _run_sync_phase(
                     "prepare_economics_restore_point",
                     phase_timings_ms,
-                    lambda: (
-                        backup_result
-                        if backup_result is not None
-                        else block.calculation_parameters.prepare_functional_economics_backup()
-                    ),
+                    block.calculation_parameters.prepare_functional_economics_backup,
                 )
                 supply_refresh = _run_sync_phase(
                     "refresh_official_supply_state",
@@ -332,6 +294,7 @@ def _run(
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
                     ),
                 )
+                backup_result = result.get("recovery_policy")
                 proxy_recalculation = _run_sync_phase(
                     "process_targeted_recalculations",
                     phase_timings_ms,
@@ -357,29 +320,14 @@ def _run(
                         )
                     ),
                 )
-                completed_backup = (
-                    economics_publication.get("backup_archive")
-                    if backup_result is not None
-                    else backup_result
-                )
+                completed_backup = backup_result
                 return {
                     "status": "success",
                     "mode": args.command,
                     "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
                     "phase_timings_ms": phase_timings_ms,
                     "backup": completed_backup,
-                    "raw_backup": (
-                        {
-                            **dict(backup_result),
-                            "source_removed": bool(
-                                (economics_publication.get("backup_archive") or {}).get(
-                                    "source_removed"
-                                )
-                            ),
-                        }
-                        if backup_result is not None
-                        else None
-                    ),
+                    "raw_backup": None,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "ff_state": ff_state,
@@ -475,7 +423,13 @@ def _build_cutover_plan_from_disposable_refresh(
     with tempfile.TemporaryDirectory(prefix="wb-core-functional-cutover-") as raw_dir:
         disposable_dir = Path(raw_dir) / "state"
         disposable_dir.mkdir(parents=True, exist_ok=True)
-        runtime.backup_database(disposable_dir / "registry_upload_runtime.sqlite3")
+        planning_checkpoint = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=runtime.db_path,
+        ).write_disposable_domain_checkpoint(
+            disposable_dir / "registry_upload_runtime.sqlite3",
+            purpose="functional_cutover_plan",
+        )
         disposable_runtime = RegistryUploadDbBackedRuntime(runtime_dir=disposable_dir)
         supply_refresh = _refresh_official_supply_state(
             disposable_runtime,
@@ -491,7 +445,8 @@ def _build_cutover_plan_from_disposable_refresh(
         **supply_refresh,
         "downstream_cost_layers_materialized": downstream_cost_layers,
         "production_source_mutation": False,
-        "capture_mode": "coherent_disposable_sqlite_copy",
+        "capture_mode": "warehouse_domain_only_disposable_checkpoint",
+        "planning_checkpoint": planning_checkpoint,
     }
 
 
@@ -503,7 +458,13 @@ def _build_sync_plan_from_disposable_refresh(
     with tempfile.TemporaryDirectory(prefix="wb-core-functional-sync-plan-") as raw_dir:
         disposable_dir = Path(raw_dir) / "state"
         disposable_dir.mkdir(parents=True, exist_ok=True)
-        runtime.backup_database(disposable_dir / "registry_upload_runtime.sqlite3")
+        planning_checkpoint = WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir,
+            db_path=runtime.db_path,
+        ).write_disposable_domain_checkpoint(
+            disposable_dir / "registry_upload_runtime.sqlite3",
+            purpose="functional_sync_plan",
+        )
         disposable_runtime = RegistryUploadDbBackedRuntime(runtime_dir=disposable_dir)
         supply_refresh = _refresh_official_supply_state(
             disposable_runtime,
@@ -521,7 +482,8 @@ def _build_sync_plan_from_disposable_refresh(
         "downstream_cost_layers_materialized": downstream_cost_layers,
         "ff_state": ff_state,
         "production_source_mutation": False,
-        "capture_mode": "coherent_disposable_sqlite_copy",
+        "capture_mode": "warehouse_domain_only_disposable_checkpoint",
+        "planning_checkpoint": planning_checkpoint,
     }
 
 
@@ -565,13 +527,30 @@ def _create_pre_sync_backup(
 ) -> dict[str, Any]:
     if not backup_dir.is_absolute():
         raise ValueError("warehouse functional backup requires an absolute backup directory")
-    resolved_dir = backup_dir.resolve()
-    resolved_dir.mkdir(parents=True, exist_ok=True)
-    normalized_timestamp = str(timestamp).replace(":", "").replace("-", "")
-    destination = resolved_dir / f"warehouse-functional-pre-sync-{normalized_timestamp}.sqlite3"
-    backup_result = runtime.backup_database(destination)
-    destination.chmod(0o600)
-    return backup_result
+    stat = runtime.db_path.stat()
+    source_digest = "stat:" + ":".join(
+        (str(stat.st_dev), str(stat.st_ino), str(stat.st_size), str(stat.st_mtime_ns))
+    )
+    fingerprint = "sha256:" + hashlib.sha256(
+        f"operator-domain-checkpoint:{timestamp}:{source_digest}".encode("utf-8")
+    ).hexdigest()
+    registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    operation = registry.prepare_t2(
+        mutation_kind="manual_warehouse_sync",
+        plan_fingerprint=fingerprint,
+        scope={"action": "operator_domain_checkpoint"},
+        source_digest=source_digest,
+        non_target_digest="",
+        source_watermarks={"created_at": str(timestamp)},
+        schema_revision="warehouse_functional_v2",
+    )
+    return registry.retain(
+        str(operation["operation_id"]),
+        after_digest=str(operation.get("checkpoint_digest") or fingerprint),
+    )
 
 
 def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) -> int:

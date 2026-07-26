@@ -2488,6 +2488,85 @@ def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_warehouse_recovery_canary_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.recovery_canary_apply)
+    action = (
+        "warehouse-recovery-canary-apply"
+        if apply
+        else "warehouse-recovery-canary-dry-run"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("warehouse recovery canary requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("warehouse recovery canary requires the canonical runtime dir")
+    runner_args = [
+        "python3",
+        "apps/warehouse_recovery_policy_canary.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+    ]
+    if apply:
+        runner_args.extend(["--apply", "--confirm", str(args.fingerprint)])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("warehouse recovery canary returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("warehouse recovery canary returned a non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_sqlite_backup_archive_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -4689,6 +4768,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         queue_replay_apply=True,
     )
 
+    recovery_canary_dry_run = subparsers.add_parser(
+        "warehouse-recovery-canary-dry-run",
+        help="Plan the business-safe T0/T1/T2 production recovery canary.",
+    )
+    recovery_canary_dry_run.add_argument("--deployed-sha", required=True)
+    recovery_canary_dry_run.set_defaults(
+        handler=run_warehouse_recovery_canary_command,
+        recovery_canary_apply=False,
+    )
+
+    recovery_canary_apply = subparsers.add_parser(
+        "warehouse-recovery-canary-apply",
+        help="Run the exact recovery canary against the deployed SHA.",
+    )
+    recovery_canary_apply.add_argument("--deployed-sha", required=True)
+    recovery_canary_apply.add_argument("--fingerprint", required=True)
+    recovery_canary_apply.set_defaults(
+        handler=run_warehouse_recovery_canary_command,
+        recovery_canary_apply=True,
+    )
+
     functional_failed_backup_cleanup_dry_run = subparsers.add_parser(
         "warehouse-functional-failed-backup-cleanup-dry-run",
         help="Fingerprint one proven-invalid partial functional-cutover backup.",
@@ -4919,6 +5019,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=(
             "warehouse_chain_recovery_20260719",
             "warehouse_cost_transparency_20260720",
+            "warehouse_recovery_policy_20260726",
         ),
         default=None,
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",

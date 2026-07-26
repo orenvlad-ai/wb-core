@@ -91,7 +91,10 @@ def main() -> int:
             backup_dir=Path(tmp) / "backups",
         )
         assert applied["post_run"]["changed_cells"] == 0
-        assert applied["backup"]["mode"] == "0600"
+        assert applied["recovery_policy"]["tier"] == "T1"
+        assert applied["recovery_policy"]["lifecycle"] == "retained"
+        assert applied["backup"]["full_database_copy"] is False
+        assert applied["backup"]["copy_bytes"] == 0
         no_op = build_publication_report(
             runtime.db_path, date_from="2026-07-01", date_to="2026-07-15"
         )

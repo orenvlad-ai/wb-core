@@ -149,9 +149,26 @@ def main() -> int:
             raise AssertionError("post-apply layer-level continuity failed")
         if runtime.db_path.stat().st_ino != inode:
             raise AssertionError("in-place apply must preserve SQLite inode")
-        backup_path = backup_dir / applied["backup"]["filename"]
-        if oct(backup_path.stat().st_mode & 0o777) != "0o600":
-            raise AssertionError("backup mode must be 0600")
+        if (
+            applied["recovery_policy"]["tier"] != "T2"
+            or applied["recovery_policy"]["lifecycle"] != "retained"
+            or applied["recovery_policy"]["actual_bytes"] <= 0
+        ):
+            raise AssertionError("wide backfill did not retain a domain checkpoint")
+        checkpoint = next(
+            Path(item["path"])
+            for item in applied["recovery_policy"]["artifacts"]
+            if item["artifact_kind"] == "domain_checkpoint"
+        )
+        with sqlite3.connect(f"file:{checkpoint}?mode=ro", uri=True) as conn:
+            checkpoint_tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        if "wb_finance_weekly_raw_rows" in checkpoint_tables:
+            raise AssertionError("wide domain checkpoint included Finance raw")
         with _connect(runtime.db_path) as conn:
             if conn.execute("SELECT value FROM non_target_fixture").fetchone()[0] != "preserve-me":
                 raise AssertionError("non-target table changed")
