@@ -1604,6 +1604,7 @@ def _settings_frame_locator(page: Page) -> FrameLocator:
     )
     surface = page.frame_locator("[data-settings-embed-frame]")
     surface.locator("body").wait_for(timeout=60_000)
+    surface.locator('html[data-settings-ready="true"]').wait_for(timeout=60_000)
     return surface
 
 
