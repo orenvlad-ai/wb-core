@@ -4067,6 +4067,34 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
         pass
     else:
         raise ValueError("warehouse UI evidence must be stored outside the repository")
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if str(args.acceptance_profile or "") == "warehouse_recovery_policy_20260726":
+        if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+            raise ValueError(
+                "warehouse recovery UI flow requires an exact deployed SHA"
+            )
+        runtime_sha_path = (
+            f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+        )
+        verify = subprocess.run(
+            _remote_shell_command(
+                target,
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(runtime_sha_path)
+                + ")\" = "
+                + shlex.quote(deployed_sha),
+            ),
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=float(args.timeout_seconds),
+            check=False,
+        )
+        if verify.returncode != 0:
+            raise RuntimeError(
+                "warehouse recovery UI flow deployed SHA does not match "
+                "the canonical runtime marker"
+            )
     readback = _run_remote_warehouse_functional_action(target, action="readback")
     from apps.warehouse_stocks_production_ui_flow import run_warehouse_ui_flow
 
@@ -4075,6 +4103,7 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
         auth_cookie=auth_cookie,
         expected_readback=readback,
         evidence_dir=evidence_dir,
+        deployed_sha=deployed_sha,
         headless=not bool(args.headed),
         acceptance_profile=str(args.acceptance_profile or "") or None,
     )
@@ -5012,6 +5041,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run the authorized read-only production Playwright flow for all six warehouses.",
     )
     warehouse_ui_flow.add_argument("--evidence-dir", required=True)
+    warehouse_ui_flow.add_argument(
+        "--deployed-sha",
+        default="",
+        help=(
+            "Exact deployed commit required by the warehouse recovery "
+            "acceptance profile."
+        ),
+    )
     warehouse_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
     warehouse_ui_flow.add_argument("--headed", action="store_true")
     warehouse_ui_flow.add_argument(

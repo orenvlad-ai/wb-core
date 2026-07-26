@@ -115,7 +115,7 @@ The canonical production sequence is:
 2. run hosted canary dry-run against the exact deployed SHA;
 3. apply the exact fingerprinted T0/T1/T2 canary;
 4. run the isolated Playwright warehouse UI Flow with
-   `warehouse_recovery_policy_20260726`;
+   `warehouse_recovery_policy_20260726` and the exact deployed SHA;
 5. accept only that deployed merge SHA with the evidence digest.
 
 The canary's only temporary row is in the recovery-owned canary table and is
@@ -123,7 +123,10 @@ removed by the exact T1 rollback. T2 performs no business mutation. Success
 requires identical warehouse-domain digests and zero unclassified raw,
 sidecar, temp or orphan evidence created after the durable policy activation
 boundary. The independently visible pre-policy baseline is not attributed to
-the canary. Before a new deployed-SHA attempt, the canary
+the canary. UI acceptance pins the runtime marker and requires T1/T2 canary
+operations carrying that same full deployed SHA to be terminal; historical
+iterations cannot overwrite or satisfy the check. Before a new deployed-SHA
+attempt, the canary
 releases only older canary-scoped failures proven to have stopped before
 `mutation_running`; their deterministic owned temp/checkpoint paths and
 reservations are released, while any failed business mutation remains

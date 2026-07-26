@@ -31,6 +31,31 @@ WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
 WAREHOUSE_RECOVERY_POLICY_PROFILE = "warehouse_recovery_policy_20260726"
 
 
+def _exact_canary_lifecycles(
+    operations: list[dict[str, Any]],
+    *,
+    deployed_sha: str,
+) -> dict[str, list[str]]:
+    normalized_sha = str(deployed_sha or "").strip().lower()
+    exact_canaries = [
+        item
+        for item in operations
+        if bool((item.get("scope") or {}).get("canary"))
+        and str(
+            (item.get("scope") or {}).get("deployed_sha") or ""
+        ).lower()
+        == normalized_sha
+    ]
+    return {
+        tier: [
+            str(item.get("lifecycle") or "")
+            for item in exact_canaries
+            if str(item.get("tier") or "") == tier
+        ]
+        for tier in ("T1", "T2")
+    }
+
+
 def _period_vitrina_url(base_url: str, *, date_to: str) -> str:
     """Open the canonical vitrina tab regardless of browser-local tab state."""
 
@@ -48,6 +73,7 @@ def run_warehouse_ui_flow(
     auth_cookie: str | None,
     expected_readback: Mapping[str, Any],
     evidence_dir: Path,
+    deployed_sha: str = "",
     headless: bool = True,
     strict_business_acceptance: bool = True,
     acceptance_profile: str | None = None,
@@ -62,6 +88,7 @@ def run_warehouse_ui_flow(
             auth_cookie=auth_cookie,
             expected_readback=expected_readback,
             evidence_dir=evidence_dir,
+            deployed_sha=deployed_sha,
             headless=headless,
             strict_business_acceptance=strict_business_acceptance,
             acceptance_profile=acceptance_profile,
@@ -78,6 +105,7 @@ def run_warehouse_ui_flow(
             "error": str(exc),
             "strict_business_acceptance": bool(strict_business_acceptance),
             "acceptance_profile": str(acceptance_profile or ""),
+            "deployed_sha": str(deployed_sha or ""),
         }
         (target / "warehouse_ui_flow_report.json").write_text(
             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -92,6 +120,7 @@ def _run_warehouse_ui_flow(
     auth_cookie: str | None,
     expected_readback: Mapping[str, Any],
     evidence_dir: Path,
+    deployed_sha: str = "",
     headless: bool = True,
     strict_business_acceptance: bool = True,
     acceptance_profile: str | None = None,
@@ -112,6 +141,14 @@ def _run_warehouse_ui_flow(
         WAREHOUSE_RECOVERY_POLICY_PROFILE,
     }:
         raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
+    normalized_deployed_sha = str(deployed_sha or "").strip().lower()
+    if (
+        normalized_acceptance_profile == WAREHOUSE_RECOVERY_POLICY_PROFILE
+        and not re.fullmatch(r"[0-9a-f]{40}", normalized_deployed_sha)
+    ):
+        raise ValueError(
+            "warehouse recovery UI acceptance requires an exact deployed SHA"
+        )
     documents = [
         dict(item)
         for item in expected_readback.get("documents") or []
@@ -325,15 +362,27 @@ def _run_warehouse_ui_flow(
             "recovery API exposes writer, timer and deterministic tier table",
         )
         if normalized_acceptance_profile == WAREHOUSE_RECOVERY_POLICY_PROFILE:
-            terminal_by_tier = {
-                str(item.get("tier") or ""): str(item.get("lifecycle") or "")
-                for item in recovery_operations
-                if bool((item.get("scope") or {}).get("canary"))
+            lifecycles_by_tier = _exact_canary_lifecycles(
+                recovery_operations,
+                deployed_sha=normalized_deployed_sha,
+            )
+            active_or_failed = {
+                "planned",
+                "reserved",
+                "writing",
+                "mutation_running",
+                "failed_recoverable",
+                "quarantined",
             }
             _assert(
-                terminal_by_tier.get("T1") == "rolled_back"
-                and terminal_by_tier.get("T2") == "retained",
-                "production bounded and wide canaries are terminal",
+                "rolled_back" in lifecycles_by_tier["T1"]
+                and "retained" in lifecycles_by_tier["T2"]
+                and not any(
+                    lifecycle in active_or_failed
+                    for lifecycles in lifecycles_by_tier.values()
+                    for lifecycle in lifecycles
+                ),
+                "exact deployed-SHA bounded and wide canaries are terminal",
             )
             _assert(
                 recovery_payload.get("status") == "ready"
@@ -375,6 +424,7 @@ def _run_warehouse_ui_flow(
         recovery_policy_evidence = {
             "contract_name": recovery_payload.get("contract_name"),
             "status": recovery_payload.get("status"),
+            "deployed_sha": normalized_deployed_sha,
             "visible_status": recovery_status_text,
             "visible_orphan_status": recovery_orphan_text,
             "operation_count": len(recovery_operations),
@@ -1438,6 +1488,7 @@ def _run_warehouse_ui_flow(
     _assert(not fatal_surface_matches, f"fatal UI surface: {fatal_surface_matches}")
     report = {
         "status": "ok",
+        "deployed_sha": normalized_deployed_sha,
         "requested_url": requested_url,
         "final_url": final_url,
         "initial_final_url": initial_final_url,

@@ -103,7 +103,11 @@ def run(
         mutation_kind="supplier_cost_queue_replay",
         closure_kind="shipment",
         plan_fingerprint=bounded_fingerprint,
-        scope={"canary": True, "marker_id": marker_id},
+        scope={
+            "canary": True,
+            "deployed_sha": deployed_sha,
+            "marker_id": marker_id,
+        },
         before_images=[
             {
                 "table": "sheet_vitrina_v1_recovery_canary",
@@ -155,6 +159,7 @@ def run(
         plan_fingerprint=wide_fingerprint,
         scope={
             "canary": True,
+            "deployed_sha": deployed_sha,
             "publication": "warehouse_domain_checkpoint",
             "business_mutation": False,
         },
