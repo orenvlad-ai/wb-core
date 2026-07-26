@@ -150,18 +150,19 @@ Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновре�
 
 ## Desktop Thread Heartbeat И Canonical Monitoring
 
-Если в текущей Codex/ChatGPT Desktop task фактически доступна recurring thread-heartbeat automation, task owner обеспечивает ровно один 10-минутный heartbeat exact task/thread identity по contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). Surface name не является capability proof; отсутствие callable automation не блокирует GitHub closure и не позволяет заявлять о созданном monitor.
+Если recurring thread-heartbeat capability фактически доступна, preferred 10-минутный monitor PR-backed задачи — external supervisor в инициирующем Chat/потоке с exact target thread identity в durable prompt. Он способен независимо читать target и GitHub status и давать пользователю отчёт, пока target turn active; active target он не будит. При idle/non-terminal supervisor отправляет target ровно один bounded follow-up, после которого target Codex запускает `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`. Self-heartbeat внутри target допустим только как mutually-exclusive idle-resume fallback, когда external supervisor недоступен, и не обещается как active-turn reporter.
 
-Thread heartbeat не создаёт второй state machine. Он только возобновляет исходную task и запускает `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`, после чего следует canonical disposition. Поэтому heartbeat:
+Monitor не создаёт второй state machine:
 
 - не хранит собственную копию `class/scope/state/head/queue/gate`, progress или ownership truth;
-- не меняет labels/transitions напрямую и не заменяет repo-owned status comment;
-- не выполняет ack-agent, accept-ui, resume/takeover или recovery без соответствующего canonical disposition и exact evidence;
-- при исполняющемся основном turn не создаёт конкурирующую работу;
-- при idle/non-terminal выполняет ближайшее безопасное действие, а при human-only boundary сообщает exact blocker;
-- останавливается/удаляется после доказанного terminal success, terminal failure (canonical `TERMINAL_SUCCESS`/`TERMINAL_FAILURE`) или explicit user stop.
+- внешний supervisor только read-only наблюдает GitHub и сам не меняет code, labels, comments, transitions или production;
+- target после resume следует canonical disposition и не выполняет ack-agent, accept-ui, resume/takeover или recovery без exact evidence;
+- внешний supervisor и self-heartbeat не работают одновременно для одной exact target identity;
+- cleanup после proven terminal success, terminal failure или explicit user stop выполняет supervisor.
 
-Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter по умолчанию обновляет waiting heartbeat каждые 300 секунд, а Desktop thread heartbeat будит task каждые 10 минут. 10-минутный wakeup не заменяет и не замедляет 5-минутное GitHub observation, не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого owner без canonical exact-head status heartbeat и не обходит `release:needs-resume`. Если Desktop capability недоступна или локальный компьютер/проект выключен, GitHub monitoring остаётся canonical; task продолжается обычным waiter/shepherd при следующем доступном turn.
+Create/update выполняется supported automation tool без hardcoded raw schedule syntax. Readback обязан доказать `ACTIVE`, cadence 10 минут, правильный destination/monitor thread и exact target identity в durable prompt; mismatch лечится update existing automation, не duplicate create.
+
+Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter по умолчанию обновляет waiting heartbeat каждые 300 секунд, а Desktop supervisor наблюдает target каждые 10 минут. 10-минутный observation не заменяет и не замедляет 5-минутный GitHub worker, не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого owner без canonical exact-head status heartbeat и не обходит `release:needs-resume`. Если Desktop capability недоступна или локальный компьютер/проект выключен, GitHub monitoring остаётся canonical; task продолжается обычным waiter/shepherd при следующем доступном turn.
 
 ## Exclusive Production UI Gate
 

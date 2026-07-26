@@ -1986,16 +1986,25 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         for required in (
             "ровно один",
             "10 минут",
-            "task/thread identity",
+            "exact target",
             "capability",
+            "external supervisor",
+            "self-heartbeat",
+            "mutually-exclusive",
             "не создаёт второй state machine",
             "terminal failure",
-            "останавливается/удаляется",
+            "durable prompt",
+            "automation tool",
+            "active",
         ):
             assert required.casefold() in folded
+        assert "FREQ=" not in source
     for source in (agents, execution):
         assert "Chat → Codex" in source
         assert "создаваемой либо получаемой" in source
+        assert "bounded follow-up" in source
+        assert "update" in source and "duplicate" in source
+        assert "`ACTIVE`" in source
         assert (
             "`Прогресс ≈<процент>% · ETA ≈<диапазон> · "
             "сделано: <одна короткая фраза>.`"
@@ -2008,6 +2017,8 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     assert "WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES" in release_train
     assert "если capability недоступна" in agents.casefold()
     assert "если automation capability недоступна" in execution.casefold()
+    assert "active target он не будит" in release_train
+    assert "read-only наблюдает GitHub" in release_train
 
     query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
     tokens = shlex.split(query)
