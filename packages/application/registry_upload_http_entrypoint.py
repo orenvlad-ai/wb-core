@@ -137,6 +137,9 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
     SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
     extend_metrics_with_sku_action_metrics,
 )
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    extend_metrics_with_incident_stock_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
     reduce_source_temporal_semantics,
@@ -1432,6 +1435,10 @@ class RegistryUploadHttpEntrypoint:
                 include_table_data=include_table_data,
             )
 
+        incident_metric_catalog = [
+            asdict(item)
+            for item in extend_metrics_with_incident_stock_metrics([])
+        ]
         source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
         source_status_snapshot_id = _web_vitrina_source_status_snapshot_id(
             self.runtime,
@@ -1508,6 +1515,7 @@ class RegistryUploadHttpEntrypoint:
                 adapter=adapter,
                 activity_surface=activity_surface,
                 include_table_data=include_table_data,
+                metric_catalog=incident_metric_catalog,
             ),
             started_perf=page_composition_started_perf,
             include_source_status=include_source_status,
