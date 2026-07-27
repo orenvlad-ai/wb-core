@@ -1325,14 +1325,18 @@ def _run_warehouse_ui_flow(
         )
         unconfirmed_style = page.evaluate(
             """() => {
-              const cells = Array.from(document.querySelectorAll("td.cell-server-unconfirmed"));
+              const cells = Array.from(document.querySelectorAll(
+                'td[data-presentation-state="unconfirmed"]'
+              ));
               const styles = cells.map(cell => {
                 const style = getComputedStyle(cell);
                 return {
                   backgroundColor: style.backgroundColor,
                   color: style.color,
                   boxShadow: style.boxShadow,
-                  title: cell.getAttribute("title") || ""
+                  title: cell.getAttribute("title") || "",
+                  ariaLabel: cell.getAttribute("aria-label") || "",
+                  legacyClass: cell.classList.contains("cell-server-unconfirmed")
                 };
               });
               const ruleText = Array.from(document.styleSheets).flatMap(sheet => {
@@ -1343,20 +1347,26 @@ def _run_warehouse_ui_flow(
             }"""
         )
         _assert(
-            "background: inherit" in str(unconfirmed_style.get("ruleText") or "").lower(),
-            "unconfirmed cells inherit the dark table background instead of a light-yellow fill",
+            not str(unconfirmed_style.get("ruleText") or "").strip(),
+            "legacy unconfirmed cell styling is absent from the stylesheet",
         )
         _assert(
             all(
                 not str(item.get("backgroundColor") or "").startswith("rgb(254, 243")
                 and not str(item.get("backgroundColor") or "").startswith("rgb(255, 251")
+                and str(item.get("boxShadow") or "") == "none"
+                and not item.get("legacyClass")
+                and bool(item.get("title"))
+                and bool(item.get("ariaLabel"))
                 for item in unconfirmed_style.get("styles") or []
             ),
-            "rendered unconfirmed cells have no light-yellow fill",
+            "rendered unconfirmed cells keep tooltip/ARIA semantics without amber styling",
         )
         incident_cell_evidence = page.evaluate(
             """() => {
-              const cells = Array.from(document.querySelectorAll("td.cell-incident-adjusted"));
+              const cells = Array.from(document.querySelectorAll(
+                'td[data-presentation-state="incident_adjusted"]'
+              ));
               return {
                 count: cells.length,
                 tooltipsComplete: cells.every(cell => {
@@ -1368,14 +1378,30 @@ def _run_warehouse_ui_flow(
                 }),
                 styles: cells.slice(0, 10).map(cell => {
                   const style = getComputedStyle(cell);
-                  return {color: style.color, boxShadow: style.boxShadow};
+                  return {
+                    color: style.color,
+                    boxShadow: style.boxShadow,
+                    textDecorationLine: style.textDecorationLine,
+                    legacyAdjustedClass: cell.classList.contains("cell-incident-adjusted"),
+                    legacyProvisionalClass: cell.classList.contains("cell-incident-provisional")
+                  };
                 })
               };
             }"""
         )
         _assert(
             not incident_cell_evidence["count"] or incident_cell_evidence["tooltipsComplete"],
-            "only incident-derived cells use the distinct marker with complete audit tooltip",
+            "incident-derived cells keep the complete audit tooltip",
+        )
+        _assert(
+            all(
+                str(item.get("boxShadow") or "") == "none"
+                and str(item.get("textDecorationLine") or "") == "none"
+                and not item.get("legacyAdjustedClass")
+                and not item.get("legacyProvisionalClass")
+                for item in incident_cell_evidence.get("styles") or []
+            ),
+            "incident-derived cells have no permanent violet or dotted marker",
         )
         vitrina_policy_badge = page.locator("[data-vitrina-incident-policy-badge]")
         policy_currently_active = str(incident_policy_evidence.get("badge") or "").startswith(
@@ -1722,20 +1748,26 @@ def _assert_vitrina_incident_provisional_profile(
                 title = str(cell.get_attribute("title") or "")
                 aria = str(cell.get_attribute("aria-label") or "")
                 _assert(
-                    "cell-incident-provisional" in classes
+                    "cell-incident-provisional" not in classes
+                    and cell.get_attribute("data-quality-state")
+                    == "provisional_received_rows"
                     and quality_phrase in title
                     and quality_phrase in aria,
-                    f"{row_id} {suffix or 'total'} exposes provisional quality accessibly",
+                    f"{row_id} {suffix or 'total'} exposes provisional quality accessibly without dotted styling",
                 )
                 provisional_filled_cells += 1
             if incident > 0:
-                incident_classes = str(
-                    incident_cells[row_id][1].get_attribute("class") or ""
-                )
                 _assert(
-                    "cell-incident-adjusted" in incident_classes,
+                    incident_cells[row_id][1].get_attribute(
+                        "data-presentation-state"
+                    )
+                    == "incident_adjusted"
+                    and "cell-incident-adjusted"
+                    not in str(
+                        incident_cells[row_id][1].get_attribute("class") or ""
+                    ),
                     f"{row_id} {suffix or 'total'} positive incident keeps "
-                    "the separate blue-violet marker",
+                    "server metadata without the blue-violet marker",
                 )
                 positive_incident_cells += 1
 

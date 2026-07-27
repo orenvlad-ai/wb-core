@@ -313,6 +313,7 @@ WEB_VITRINA_METRIC_DISPLAY_STATUSES = {"shown", "collapsed", "hidden"}
 WEB_VITRINA_SKU_METRIC_SELECTION_MODES = {"manual", "preset"}
 WEB_VITRINA_SKU_METRIC_PRESET_LIMIT = 40
 WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT = 500
+WEB_VITRINA_SKU_METRIC_HIGHLIGHT_LIMIT = 6
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -7633,6 +7634,23 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
         selection_mode = "manual"
         selection_preset_id = ""
 
+    sku_highlight_metric_keys: list[str] = []
+    seen_highlight_metric_keys: set[str] = set()
+    raw_highlight_metric_keys = source.get("sku_highlight_metric_keys")
+    for raw_metric_key in (
+        raw_highlight_metric_keys if isinstance(raw_highlight_metric_keys, list) else []
+    ):
+        if len(sku_highlight_metric_keys) >= WEB_VITRINA_SKU_METRIC_HIGHLIGHT_LIMIT:
+            break
+        metric_key = str(raw_metric_key or "").strip()
+        if (
+            metric_key
+            and len(metric_key) <= 160
+            and metric_key not in seen_highlight_metric_keys
+        ):
+            sku_highlight_metric_keys.append(metric_key)
+            seen_highlight_metric_keys.add(metric_key)
+
     migrations_source = source.get("migrations")
     migrations = migrations_source if isinstance(migrations_source, Mapping) else {}
     incident_effective_shown_v1 = bool(
@@ -7649,6 +7667,7 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
         "scopes": scopes,
         "expanded_anchors": expanded_anchors,
         "sku_presets": sku_presets,
+        "sku_highlight_metric_keys": sku_highlight_metric_keys,
         "sku_metric_selection": {
             "mode": selection_mode,
             "preset_id": selection_preset_id,

@@ -389,7 +389,7 @@ def run_browser_checks(
                 if unavailable_cell.locator('span[aria-label="Исторические данные отсутствуют"]').count() != 1:
                     raise AssertionError("unavailable presentation must keep one accessible shared explanation")
                 unconfirmed_cell = page.locator(
-                    'td.cell-server-unconfirmed[data-metric-key="our_wb_unit_cost_rub"]'
+                    'td[data-presentation-state="unconfirmed"][data-metric-key="our_wb_unit_cost_rub"]'
                     '[data-cell-date="2026-04-20"]'
                 )
                 if unconfirmed_cell.count() != 1:
@@ -397,13 +397,31 @@ def run_browser_checks(
                 unconfirmed_style = unconfirmed_cell.evaluate(
                     """node => {
                       const style = getComputedStyle(node);
-                      return {background: style.backgroundColor, color: style.color, shadow: style.boxShadow};
+                      return {
+                        background: style.backgroundColor,
+                        color: style.color,
+                        shadow: style.boxShadow,
+                        fontWeight: style.fontWeight,
+                        legacyClass: node.classList.contains('cell-server-unconfirmed')
+                      };
                     }"""
                 )
-                if unconfirmed_style["background"] in {"rgb(255, 247, 194)", "rgb(255, 239, 154)"}:
-                    raise AssertionError(f"unconfirmed cell must not use a bright yellow fill: {unconfirmed_style}")
-                if "inset" not in unconfirmed_style["shadow"]:
-                    raise AssertionError(f"unconfirmed cell must retain a restrained edge marker: {unconfirmed_style}")
+                if (
+                    unconfirmed_style["legacyClass"]
+                    or unconfirmed_style["shadow"] != "none"
+                    or unconfirmed_style["color"] != "rgb(244, 244, 245)"
+                ):
+                    raise AssertionError(
+                        "unconfirmed cell must keep neutral table styling while retaining metadata, got "
+                        f"{unconfirmed_style}"
+                    )
+                if (
+                    "Тест: предварительная себестоимость."
+                    not in (unconfirmed_cell.get_attribute("title") or "")
+                    or "Тест: предварительная себестоимость."
+                    not in (unconfirmed_cell.get_attribute("aria-label") or "")
+                ):
+                    raise AssertionError("unconfirmed capital tooltip metadata must remain accessible")
                 for _index in range(100):
                     collapsed_toggle = page.locator(
                         '[data-metric-anchor-toggle][aria-expanded="false"]'
@@ -416,7 +434,8 @@ def run_browser_checks(
                         "retired WB fact duplicate must not render in the public table"
                     )
                 provisional_cell = page.locator(
-                    'td.cell-incident-provisional[data-metric-key="wb_stock_incident_qty"]'
+                    'td[data-quality-state="provisional_received_rows"]'
+                    '[data-metric-key="wb_stock_incident_qty"]'
                     '[data-cell-date="2026-04-20"]'
                 )
                 if provisional_cell.count() != 1:
@@ -437,31 +456,38 @@ def run_browser_checks(
                         "provisional incident cell must expose one accessible quality explanation"
                     )
                 incident_cell = page.locator(
-                    'td.cell-incident-adjusted.cell-incident-provisional'
+                    'td[data-presentation-state="incident_adjusted"]'
+                    '[data-quality-state="provisional_received_rows"]'
                     '[data-metric-key="wb_stock_incident_qty"]'
                     '[data-cell-date="2026-04-20"]'
                 )
                 if incident_cell.count() != 1:
                     raise AssertionError(
-                        "positive provisional incident cell must retain the separate "
-                        "blue-violet incident marker"
+                        "positive provisional incident cell must retain its server metadata"
                     )
                 incident_style = incident_cell.evaluate(
                     """node => {
                       const style = getComputedStyle(node);
-                      return {background: style.backgroundColor, color: style.color, shadow: style.boxShadow};
+                      return {
+                        background: style.backgroundColor,
+                        color: style.color,
+                        shadow: style.boxShadow,
+                        textDecorationLine: style.textDecorationLine,
+                        legacyAdjustedClass: node.classList.contains('cell-incident-adjusted'),
+                        legacyProvisionalClass: node.classList.contains('cell-incident-provisional')
+                      };
                     }"""
                 )
-                if incident_style["background"] in {
-                    "rgb(255, 247, 194)",
-                    "rgb(255, 239, 154)",
-                }:
+                if (
+                    incident_style["legacyAdjustedClass"]
+                    or incident_style["legacyProvisionalClass"]
+                    or incident_style["shadow"] != "none"
+                    or incident_style["textDecorationLine"] != "none"
+                    or incident_style["color"] != "rgb(244, 244, 245)"
+                ):
                     raise AssertionError(
-                        "provisional incident cells must not restore the bright yellow fill"
-                    )
-                if "inset" not in incident_style["shadow"]:
-                    raise AssertionError(
-                        f"incident marker must remain restrained and separate: {incident_style}"
+                        "incident/provisional cells must use neutral table styling without dotted or "
+                        f"blue-violet markers: {incident_style}"
                     )
                 quality_badge = page.locator(
                     "[data-vitrina-incident-quality-badge]:not([hidden])"
@@ -1117,7 +1143,7 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
             .map((row) => row.getAttribute('data-metric-config-key') || '')
             .filter(Boolean);
           const targetMetric = skuMetricKeys.find((key) => optionValues.includes(key)) || optionValues[0] || '';
-          const firstOption = document.querySelector('[data-sku-metric-options] > *');
+          const firstOption = document.querySelector('[data-sku-metric-options] > .sku-metric-option');
           const toggle = document.querySelector('[data-sku-metric-toggle]');
           const panel = document.querySelector('[data-sku-metric-panel]');
           const separator = document.querySelector('[data-table-body] tr.sku-separator-row');

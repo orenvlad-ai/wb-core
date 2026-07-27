@@ -2261,6 +2261,23 @@
       padding-right: 2px;
     }
 
+    .sku-metric-options-header {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) 42px;
+      gap: 7px;
+      align-items: end;
+      padding: 0 5px 3px;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .sku-metric-options-header span:last-child {
+      text-align: center;
+    }
+
     .sku-metric-selection-modes {
       display: grid;
       gap: 3px;
@@ -2304,9 +2321,9 @@
 
     .sku-metric-option {
       display: grid;
-      grid-template-columns: 16px minmax(0, 1fr);
+      grid-template-columns: 42px minmax(0, 1fr) 42px;
       gap: 7px;
-      align-items: start;
+      align-items: center;
       min-height: 26px;
       padding: 4px 5px;
       border: 1px solid transparent;
@@ -2322,9 +2339,28 @@
       background: var(--control-bg-hover);
     }
 
+    .sku-metric-option-show,
+    .sku-metric-option-color {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 20px;
+      margin: 0;
+      cursor: pointer;
+    }
+
     .sku-metric-option input {
-      margin: 1px 0 0;
+      margin: 0;
       accent-color: var(--accent);
+    }
+
+    .sku-metric-option-color input {
+      accent-color: var(--sku-highlight-color, var(--accent));
+    }
+
+    .sku-metric-option-color input:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
     }
 
     .sku-metric-option-meta {
@@ -3440,45 +3476,6 @@
       text-shadow: 0 0 0 rgba(180, 83, 9, 0.18);
     }
 
-    .vitrina-table td.cell-server-unconfirmed {
-      background: inherit;
-      color: #d6a44a;
-      font-weight: 700;
-      box-shadow:
-        inset 3px 0 0 rgba(217, 145, 28, 0.72),
-        inset 0 0 0 1px rgba(217, 145, 28, 0.18);
-    }
-
-    .vitrina-table tbody tr:hover td.cell-server-unconfirmed {
-      color: #efbd63;
-      box-shadow:
-        inset 3px 0 0 rgba(239, 173, 55, 0.88),
-        inset 0 0 0 1px rgba(239, 173, 55, 0.25);
-    }
-
-    .vitrina-table td.cell-incident-adjusted {
-      color: #8b7cf6;
-      font-weight: 750;
-      box-shadow:
-        inset 3px 0 0 rgba(99, 102, 241, 0.78),
-        inset 0 0 0 1px rgba(139, 92, 246, 0.2);
-    }
-
-    .vitrina-table tbody tr:hover td.cell-incident-adjusted {
-      color: #a99cfb;
-      box-shadow:
-        inset 3px 0 0 rgba(124, 108, 245, 0.94),
-        inset 0 0 0 1px rgba(139, 92, 246, 0.3);
-    }
-
-    .vitrina-table td.cell-incident-provisional {
-      text-decoration-line: underline;
-      text-decoration-style: dotted;
-      text-decoration-color: rgba(148, 163, 184, 0.72);
-      text-underline-offset: 4px;
-      cursor: help;
-    }
-
     .vitrina-table td.cell-history-unavailable {
       color: var(--muted);
       background: color-mix(in srgb, var(--surface-2) 86%, transparent);
@@ -3900,6 +3897,44 @@
 
     .vitrina-table tbody tr:hover .table-cell-sticky {
       background: #181c23;
+    }
+
+    .vitrina-table td.cell-sku-metric-highlight {
+      background:
+        color-mix(in srgb, var(--sku-highlight-color) 18%, var(--control-bg));
+      box-shadow:
+        inset 3px 0 0 color-mix(in srgb, var(--sku-highlight-color) 88%, white 12%),
+        inset 0 0 0 1px color-mix(in srgb, var(--sku-highlight-color) 28%, transparent);
+    }
+
+    .vitrina-table tbody tr:hover td.cell-sku-metric-highlight,
+    .vitrina-table tbody tr:hover td.cell-sku-metric-highlight.table-cell-sticky {
+      background:
+        color-mix(in srgb, var(--sku-highlight-color) 26%, #181c23);
+    }
+
+    .cell-sku-metric-highlight-1 {
+      --sku-highlight-color: #3b82f6;
+    }
+
+    .cell-sku-metric-highlight-2 {
+      --sku-highlight-color: #facc15;
+    }
+
+    .cell-sku-metric-highlight-3 {
+      --sku-highlight-color: #22c55e;
+    }
+
+    .cell-sku-metric-highlight-4 {
+      --sku-highlight-color: #f97316;
+    }
+
+    .cell-sku-metric-highlight-5 {
+      --sku-highlight-color: #06b6d4;
+    }
+
+    .cell-sku-metric-highlight-6 {
+      --sku-highlight-color: #ec4899;
     }
 
     .vitrina-table tbody tr.metric-child-row td {
@@ -6767,6 +6802,14 @@
     const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
     const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
     const DEFAULT_SKU_METRIC_PRESET_ID = "analysis";
+    const SKU_METRIC_HIGHLIGHT_PALETTE = [
+      {name: "синий", color: "#3b82f6"},
+      {name: "жёлтый", color: "#facc15"},
+      {name: "зелёный", color: "#22c55e"},
+      {name: "оранжевый", color: "#f97316"},
+      {name: "голубой", color: "#06b6d4"},
+      {name: "розовый", color: "#ec4899"}
+    ];
     const TABLE_FORCED_HIDDEN_COLUMN_IDS = new Set([
       "row_order",
       "scope_kind",
@@ -7034,6 +7077,7 @@
         selectedMetricKeys: new Set(),
         draftMetricAll: true,
         draftMetricKeys: new Set(),
+        draftHighlightMetricKeys: [],
         activeMetricSelectionMode: "manual",
         activeMetricPresetId: "",
         draftMetricSelectionMode: "manual",
@@ -7060,6 +7104,7 @@
         selectionModeByScope: {},
         selectionByScope: {},
         skuPresets: [],
+        highlightMetricKeys: [],
         skuMetricSelection: {
           mode: "manual",
           presetId: "",
@@ -8183,11 +8228,13 @@
       if (state.filters.draftMetricSelectionMode === "preset") {
         state.filters.draftMetricAll = false;
         state.filters.draftMetricKeys = new Set(selected);
+        syncDraftMetricHighlightsFromApplied();
         return;
       }
       if (!metricKeys.length || selected.size >= metricKeys.length) {
         state.filters.draftMetricAll = true;
         state.filters.draftMetricKeys = new Set();
+        syncDraftMetricHighlightsFromApplied();
         return;
       }
       const allowed = new Set(metricKeys);
@@ -8200,6 +8247,7 @@
       if (!state.filters.draftMetricKeys.size) {
         state.filters.draftMetricAll = true;
       }
+      syncDraftMetricHighlightsFromApplied();
     }
 
     function setSkuMetricPickerOpen(open) {
@@ -9509,6 +9557,57 @@
       // The compact SKU metric filter is page-local only; stale toolbar storage is ignored.
     }
 
+    function sameMetricKeyList(left, right) {
+      const leftKeys = Array.isArray(left) ? left : [];
+      const rightKeys = Array.isArray(right) ? right : [];
+      return leftKeys.length === rightKeys.length && leftKeys.every(function(metricKey, index) {
+        return metricKey === rightKeys[index];
+      });
+    }
+
+    function sanitizeSkuMetricHighlightKeys(candidate, options) {
+      const normalizedOptions = options || {};
+      const metricKeys = state.filters.metricKeys || [];
+      const allowed = new Set(metricKeys);
+      const selected = normalizedOptions.draft
+        ? (
+            state.filters.draftMetricAll
+              ? allowed
+              : new Set(state.filters.draftMetricKeys || [])
+          )
+        : new Set(state.filters.selectedMetricKeys || metricKeys);
+      return uniqueMetricKeys(candidate, SKU_METRIC_HIGHLIGHT_PALETTE.length).filter(function(metricKey) {
+        return allowed.has(metricKey) && selected.has(metricKey);
+      });
+    }
+
+    function reconcileSkuMetricHighlightKeys() {
+      const previous = uniqueMetricKeys(
+        state.metricPresentation.highlightMetricKeys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
+      const next = sanitizeSkuMetricHighlightKeys(previous);
+      state.metricPresentation.highlightMetricKeys = next;
+      return !sameMetricKeyList(previous, next);
+    }
+
+    function reconcileDraftSkuMetricHighlightKeys() {
+      const previous = uniqueMetricKeys(
+        state.filters.draftHighlightMetricKeys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
+      const next = sanitizeSkuMetricHighlightKeys(previous, {draft: true});
+      state.filters.draftHighlightMetricKeys = next;
+      return !sameMetricKeyList(previous, next);
+    }
+
+    function syncDraftMetricHighlightsFromApplied() {
+      state.filters.draftHighlightMetricKeys = sanitizeSkuMetricHighlightKeys(
+        state.metricPresentation.highlightMetricKeys
+      );
+      reconcileDraftSkuMetricHighlightKeys();
+    }
+
     function initializeMetricSelection(payload) {
       const metricKeys = metricFilterKeys(payload);
       const allowed = new Set(metricKeys);
@@ -9555,6 +9654,14 @@
         all: selectedKeys.length >= metricKeys.length,
         metricKeys: selectionMode === "manual" ? selectedKeys.slice() : []
       };
+      state.filters.draftHighlightMetricKeys = uniqueMetricKeys(
+        state.metricPresentation.highlightMetricKeys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
+      if (reconcileSkuMetricHighlightKeys()) {
+        persistMetricPresentation();
+      }
+      syncDraftMetricHighlightsFromApplied();
     }
 
     function resetMetricSelectionToAll(payload) {
@@ -9567,7 +9674,9 @@
       state.filters.draftMetricPresetId = "";
       state.filters.draftMetricAll = true;
       state.filters.draftMetricKeys = new Set();
+      state.filters.draftHighlightMetricKeys = [];
       state.filters.metric = ALL_VALUE;
+      state.metricPresentation.highlightMetricKeys = [];
       state.metricPresentation.skuMetricSelection = {
         mode: "manual",
         presetId: "",
@@ -9627,8 +9736,13 @@
         );
         state.filters.draftMetricAll = !state.filters.draftMetricKeys.size;
       }
+      const highlightChanged = reconcileSkuMetricHighlightKeys();
+      reconcileDraftSkuMetricHighlightKeys();
       state.filters.metric = ALL_VALUE;
       renderSkuMetricOptions(payload);
+      if (highlightChanged) {
+        persistMetricPresentation();
+      }
     }
 
     function buildMetricPresentationStorageKey(payload) {
@@ -9846,6 +9960,10 @@
         scopes: scopes,
         expanded_anchors: expandedAnchors,
         sku_presets: skuPresets,
+        sku_highlight_metric_keys: uniqueMetricKeys(
+          candidate.sku_highlight_metric_keys || candidate.skuHighlightMetricKeys,
+          SKU_METRIC_HIGHLIGHT_PALETTE.length
+        ),
         sku_metric_selection: {
           mode: skuSelectionMode,
           presetId: skuSelectionPresetId,
@@ -10126,6 +10244,10 @@
           metricKeys: uniqueMetricKeys(preset.metricKeys, 500)
         };
       });
+      state.metricPresentation.highlightMetricKeys = uniqueMetricKeys(
+        persisted && persisted.sku_highlight_metric_keys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
       state.metricPresentation.skuMetricSelection = normalizeSkuMetricSelectionState(
         preservedSkuMetricSelection || (persisted && persisted.sku_metric_selection)
       );
@@ -10194,6 +10316,10 @@
             metric_keys: uniqueMetricKeys(preset.metricKeys, 500)
           };
         }),
+        sku_highlight_metric_keys: uniqueMetricKeys(
+          state.metricPresentation.highlightMetricKeys,
+          SKU_METRIC_HIGHLIGHT_PALETTE.length
+        ),
         sku_metric_selection: {
           mode: String((state.metricPresentation.skuMetricSelection || {}).mode || "manual"),
           preset_id: String((state.metricPresentation.skuMetricSelection || {}).presetId || ""),
@@ -12733,10 +12859,12 @@
       renderSkuMetricSelectionModes();
       const options = skuMetricFilterOptions(payload);
       const parts = [
-        '<label class="sku-metric-option sku-metric-option-all">',
-        '<input type="checkbox" data-sku-metric-all value="' + escapeHtml(ALL_VALUE) + '">',
+        '<div class="sku-metric-options-header" aria-hidden="true"><span>Показ</span><span>Метрика</span><span>Цвет</span></div>',
+        '<div class="sku-metric-option sku-metric-option-all">',
+        '<label class="sku-metric-option-show"><input type="checkbox" data-sku-metric-all value="' + escapeHtml(ALL_VALUE) + '" aria-label="Показывать все SKU-метрики"></label>',
         '<span>Все метрики</span>',
-        '</label>'
+        '<span aria-hidden="true">—</span>',
+        '</div>'
       ];
       if (!options.length) {
         parts.push('<p class="filter-summary">SKU-метрики недоступны</p>');
@@ -12746,13 +12874,18 @@
           const label = String(option.label || metricKey);
           const meta = skuMetricOptionMeta(option);
           parts.push([
-            '<label class="sku-metric-option">',
-            '<input type="checkbox" data-sku-metric-option="' + escapeHtml(metricKey) + '" value="' + escapeHtml(metricKey) + '">',
+            '<div class="sku-metric-option" data-sku-metric-option-row="' + escapeHtml(metricKey) + '">',
+            '<label class="sku-metric-option-show" title="Показывать метрику">',
+            '<input type="checkbox" data-sku-metric-option="' + escapeHtml(metricKey) + '" value="' + escapeHtml(metricKey) + '" aria-label="Показывать: ' + escapeHtml(label) + '">',
+            '</label>',
             '<span>',
             escapeHtml(label),
             meta ? '<span class="sku-metric-option-meta">' + escapeHtml(meta) + '</span>' : '',
             '</span>',
-            '</label>'
+            '<label class="sku-metric-option-color" title="Выделять метрику цветом">',
+            '<input type="checkbox" data-sku-metric-color="' + escapeHtml(metricKey) + '" aria-label="Цвет: ' + escapeHtml(label) + '">',
+            '</label>',
+            '</div>'
           ].join(""));
         });
       }
@@ -12812,6 +12945,7 @@
         state.filters.draftMetricSelectionMode = "manual";
         state.filters.draftMetricPresetId = "";
       }
+      reconcileDraftSkuMetricHighlightKeys();
       renderSkuMetricOptions(state.composition);
     }
 
@@ -12832,6 +12966,14 @@
           );
         });
       });
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-color]").forEach(function(node) {
+        node.addEventListener("change", function(event) {
+          updateMetricHighlight(
+            String(event.currentTarget.getAttribute("data-sku-metric-color") || ""),
+            !!event.currentTarget.checked
+          );
+        });
+      });
     }
 
     function updateAllMetricSelection(checked) {
@@ -12840,6 +12982,7 @@
       state.filters.draftMetricAll = true;
       state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
+      reconcileDraftSkuMetricHighlightKeys();
       syncMetricControlValues();
     }
 
@@ -12858,6 +13001,29 @@
       state.filters.draftMetricKeys = selected;
       state.filters.draftMetricAll = selected.size === 0;
       state.filters.metric = ALL_VALUE;
+      reconcileDraftSkuMetricHighlightKeys();
+      syncMetricControlValues();
+    }
+
+    function updateMetricHighlight(metricKey, highlighted) {
+      const normalizedMetricKey = String(metricKey || "");
+      if (!normalizedMetricKey || (state.filters.metricKeys || []).indexOf(normalizedMetricKey) === -1) {
+        return;
+      }
+      const visible = state.filters.draftMetricAll
+        || (state.filters.draftMetricKeys || new Set()).has(normalizedMetricKey);
+      const next = uniqueMetricKeys(
+        state.filters.draftHighlightMetricKeys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
+      const currentIndex = next.indexOf(normalizedMetricKey);
+      if (highlighted && visible && currentIndex === -1 && next.length < SKU_METRIC_HIGHLIGHT_PALETTE.length) {
+        next.push(normalizedMetricKey);
+      } else if (!highlighted && currentIndex !== -1) {
+        next.splice(currentIndex, 1);
+      }
+      state.filters.draftHighlightMetricKeys = next;
+      reconcileDraftSkuMetricHighlightKeys();
       syncMetricControlValues();
     }
 
@@ -12901,6 +13067,9 @@
           ? Array.from(state.filters.selectedMetricKeys || [])
           : []
       };
+      state.metricPresentation.highlightMetricKeys = sanitizeSkuMetricHighlightKeys(
+        state.filters.draftHighlightMetricKeys
+      );
       persistMetricPresentation();
       state.filters.metric = ALL_VALUE;
       setSkuMetricPickerOpen(false);
@@ -12963,6 +13132,10 @@
         return;
       }
       const draftKeys = state.filters.draftMetricKeys || new Set();
+      const draftHighlightMetricKeys = uniqueMetricKeys(
+        state.filters.draftHighlightMetricKeys,
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
       renderSkuMetricSelectionModes();
       skuMetricOptionsNode.querySelectorAll("[data-sku-metric-all]").forEach(function(node) {
         node.checked = !!state.filters.draftMetricAll || draftKeys.size === 0;
@@ -12970,6 +13143,27 @@
       skuMetricOptionsNode.querySelectorAll("[data-sku-metric-option]").forEach(function(node) {
         const metricKey = String(node.getAttribute("data-sku-metric-option") || node.value || "");
         node.checked = !state.filters.draftMetricAll && draftKeys.has(metricKey);
+      });
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-color]").forEach(function(node) {
+        const metricKey = String(node.getAttribute("data-sku-metric-color") || "");
+        const highlightedIndex = draftHighlightMetricKeys.indexOf(metricKey);
+        const metricVisible = !!state.filters.draftMetricAll || draftKeys.has(metricKey);
+        const paletteIndex = highlightedIndex >= 0
+          ? highlightedIndex
+          : Math.min(draftHighlightMetricKeys.length, SKU_METRIC_HIGHLIGHT_PALETTE.length - 1);
+        const palette = SKU_METRIC_HIGHLIGHT_PALETTE[paletteIndex] || SKU_METRIC_HIGHLIGHT_PALETTE[0];
+        node.checked = highlightedIndex >= 0;
+        node.disabled = !metricVisible || (
+          highlightedIndex < 0
+          && draftHighlightMetricKeys.length >= SKU_METRIC_HIGHLIGHT_PALETTE.length
+        );
+        node.style.setProperty("--sku-highlight-color", palette.color);
+        node.setAttribute("data-sku-highlight-palette-index", String(paletteIndex + 1));
+        node.title = !metricVisible
+          ? "Сначала включите показ метрики"
+          : node.disabled
+          ? "Доступно не больше " + SKU_METRIC_HIGHLIGHT_PALETTE.length + " разных цветов"
+          : "Цвет: " + palette.name;
       });
     }
 
@@ -13368,15 +13562,15 @@
       } else if (highlightStatus === "latest_confirmed") {
         classes.push("cell-session-highlight-latest-confirmed");
       }
-      if (String(cell.presentation_state || "") === "unconfirmed") {
-        classes.push("cell-server-unconfirmed");
-      } else if (String(cell.presentation_state || "") === "incident_adjusted") {
-        classes.push("cell-incident-adjusted");
-      } else if (String(cell.presentation_state || "") === "unavailable") {
+      if (String(cell.presentation_state || "") === "unavailable") {
         classes.push("cell-history-unavailable");
       }
-      if (String(cell.quality_state || "") === "provisional_received_rows") {
-        classes.push("cell-incident-provisional");
+      const skuHighlightIndex = skuMetricHighlightIndexForCell(column, row, cell);
+      if (skuHighlightIndex >= 0) {
+        classes.push(
+          "cell-sku-metric-highlight",
+          "cell-sku-metric-highlight-" + String(skuHighlightIndex + 1)
+        );
       }
       const title = formatCellTitle(column, row, cell);
       const ariaLabel = title || formatCellValue(cell);
@@ -13391,8 +13585,12 @@
         escapeHtml(cellValue(row, "metric_key") || "") +
         '" data-cell-date="' +
         escapeHtml(cellDate || "") +
+        '" data-presentation-state="' +
+        escapeHtml(String(cell.presentation_state || "")) +
         '" data-quality-state="' +
         escapeHtml(String(cell.quality_state || "")) +
+        '" data-sku-metric-highlight-index="' +
+        escapeHtml(skuHighlightIndex >= 0 ? String(skuHighlightIndex + 1) : "") +
         '" style="' +
         columnStyle(column, stickyLeft) +
         '" title="' +
@@ -13403,6 +13601,33 @@
         formatCellContent(column, row, cell) +
         "</td>"
       );
+    }
+
+    function skuMetricHighlightIndexForCell(column, row, cell) {
+      if (String((row && row.row_kind) || "").toLowerCase() !== "sku") {
+        return -1;
+      }
+      const metricKey = String(cellValue(row, "metric_key") || "");
+      const highlightIndex = (state.metricPresentation.highlightMetricKeys || []).indexOf(metricKey);
+      if (highlightIndex < 0 || highlightIndex >= SKU_METRIC_HIGHLIGHT_PALETTE.length) {
+        return -1;
+      }
+      if (String((column && column.id) || "") === "metric_label") {
+        return highlightIndex;
+      }
+      if (
+        !dateFromColumnId(column && column.id)
+        || String((cell && cell.presentation_state) || "") === "unavailable"
+        || !cell
+        || cell.cell_kind === "unknown"
+        || cell.cell_kind === "empty"
+        || cell.value === null
+        || typeof cell.value === "undefined"
+        || cell.value === ""
+      ) {
+        return -1;
+      }
+      return highlightIndex;
     }
 
     function dateFromColumnId(columnId) {
