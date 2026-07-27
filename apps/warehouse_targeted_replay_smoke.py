@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sqlite3
 import sys
 import tempfile
@@ -17,6 +18,11 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.own_product_capital import OwnProductCapitalBlock  # noqa: E402
+from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa: E402
+    OWN_TOTAL_QTY_METRIC_KEY,
+    own_stage_metric_key,
+)
 from packages.application.supplier_shipment_factual_correction import (  # noqa: E402
     SupplierShipmentFactualCorrectionBlock,
 )
@@ -28,6 +34,10 @@ from packages.application.warehouse_functional_lock import (  # noqa: E402
     WarehouseFunctionalBusyError,
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_business_projection import (  # noqa: E402
+    CURRENT_ROW_TABLE,
+    ensure_functional_version_business_time_schema,
+)
 from packages.application.warehouse_targeted_replay import (  # noqa: E402
     WarehouseTargetedSupplierReplay,
 )
@@ -35,6 +45,7 @@ from packages.application.warehouse_targeted_replay import (  # noqa: E402
 
 SHIPMENT_ID = "targeted-shipment"
 NOW = "2026-07-25T10:00:00Z"
+CUTOVER_AT = "2026-07-19T00:00:00Z"
 
 
 def _allocation(date_value: str = "2026-07-21") -> dict:
@@ -89,6 +100,14 @@ def main() -> None:
             ],
         )
         _seed_functional(runtime)
+        before_business_time = OwnProductCapitalBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: NOW,
+        ).load_daily_metric_lookup("2026-07-21")
+        assert (
+            before_business_time[101][own_stage_metric_key("PRODUCTION", "qty")]
+            == 12.0
+        ), before_business_time
         block = SupplierShipmentFactualCorrectionBlock(
             runtime=runtime,
             timestamp_factory=lambda: NOW,
@@ -124,6 +143,22 @@ def main() -> None:
             assert dry["performance"]["copy_bytes"] == 0
             assert not dry["performance"]["full_database_copy"]
             assert dry["performance"]["finance_raw_rows_read"] == 0
+            try:
+                block.apply(
+                    shipment_id=SHIPMENT_ID,
+                    new_actual_shipment_date="2026-07-21",
+                    actor="smoke",
+                    fingerprint="sha256:stale-plan",
+                    backup_dir=Path(temp) / "unused",
+                    expected_old_value="",
+                )
+            except ValueError as exc:
+                assert "exact current targeted dry-run fingerprint" in str(exc)
+            else:
+                raise AssertionError("stale targeted plan did not fail closed")
+            assert not runtime.load_supplier_shipment(SHIPMENT_ID)["header"].get(
+                "actual_shipment_date"
+            )
             applied = block.apply(
                 shipment_id=SHIPMENT_ID,
                 new_actual_shipment_date="2026-07-21",
@@ -133,6 +168,7 @@ def main() -> None:
                 expected_old_value="",
             )
         assert applied["applied"] is True
+        _assert_business_time_projection(runtime, applied)
         finance_access = [
             sql
             for sql in trace
@@ -249,6 +285,7 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
     with sqlite3.connect(runtime.db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_warehouse_functional_schema(conn)
+        ensure_functional_version_business_time_schema(conn)
         conn.execute(
             """
             INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers(
@@ -259,7 +296,7 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
             """,
             (
                 FUNCTIONAL_CUTOVER_ID,
-                NOW,
+                CUTOVER_AT,
                 "posted",
                 "sha256:cutover",
                 "{}",
@@ -272,11 +309,15 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
         conn.execute(
             """
             INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
-                version_id,cutover_id,version_kind,effective_at,status,
+                version_id,cutover_id,version_kind,effective_at,
+                business_effective_date,published_at,status,
                 plan_fingerprint,local_source_digest,source_watermarks_json,created_at
-            ) VALUES('base',?,'hourly_wb_sync',?,'good','sha256:base','sha256:local','{}',?)
+            ) VALUES(
+                'base',?,'hourly_wb_sync',?,'2026-07-25',?,'good',
+                'sha256:base','sha256:local','{}',?
+            )
             """,
-            (FUNCTIONAL_CUTOVER_ID, NOW, NOW),
+            (FUNCTIONAL_CUTOVER_ID, NOW, NOW, NOW),
         )
         source = {
             "source_records": [
@@ -341,6 +382,72 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
             """,
             (NOW, NOW),
         )
+        for historical_date in (
+            "2026-07-20",
+            "2026-07-21",
+            "2026-07-22",
+            "2026-07-23",
+            "2026-07-24",
+        ):
+            version_id = "daily-" + historical_date
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                    version_id,cutover_id,version_kind,effective_at,
+                    business_effective_date,published_at,status,
+                    plan_fingerprint,local_source_digest,
+                    source_watermarks_json,created_at
+                ) VALUES(?,?,'hourly_wb_sync',?,?,?,?,?,?,'{}',?)
+                """,
+                (
+                    version_id,
+                    FUNCTIONAL_CUTOVER_ID,
+                    # All technical timestamps deliberately point to 25 July.
+                    NOW,
+                    historical_date,
+                    NOW,
+                    "good",
+                    "sha256:" + version_id,
+                    "sha256:local-" + historical_date,
+                    NOW,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                    version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                    cost_covered_quantity,quality,certified,wb_quantity,
+                    wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                )
+                SELECT ?,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                FROM sheet_vitrina_v1_warehouse_functional_balances
+                WHERE version_id='base'
+                """,
+                (version_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                    snapshot_id,version_id,fetched_at,snapshot_date,
+                    requested_nm_ids_json,pagination_complete,page_count,
+                    page_offsets_json,raw_row_count,raw_rows_digest,
+                    raw_rows_json,items_json,created_at
+                ) VALUES(
+                    ?,?,?,?,'[101]',1,1,'[0]',1,?,
+                    '[{"nmID":101}]','[{"nm_id":101}]',?
+                )
+                """,
+                (
+                    "snapshot-" + historical_date,
+                    version_id,
+                    NOW,
+                    historical_date,
+                    "sha256:wb-" + historical_date,
+                    NOW,
+                ),
+            )
         conn.execute(
             "INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,'base',?)",
             (NOW,),
@@ -354,6 +461,61 @@ def _seed_functional(runtime: RegistryUploadDbBackedRuntime) -> None:
             (NOW, NOW, NOW),
         )
         conn.commit()
+
+
+def _assert_business_time_projection(
+    runtime: RegistryUploadDbBackedRuntime,
+    applied: dict,
+) -> None:
+    publication = dict(applied.get("business_projection") or {})
+    assert publication["business_effective_date"] == "2026-07-21", publication
+    assert publication["affected_dates"] == [
+        "2026-07-21",
+        "2026-07-22",
+        "2026-07-23",
+        "2026-07-24",
+        "2026-07-25",
+    ], publication
+    diagnostics = dict(publication.get("diagnostics") or {})
+    assert diagnostics["missing_exact_functional_dates"] == [], diagnostics
+    assert diagnostics["external_source_refresh_count"] == 0, diagnostics
+    assert diagnostics["full_vitrina_refresh_count"] == 0, diagnostics
+    assert diagnostics["all_history_rebuild"] is False, diagnostics
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute(
+            f"SELECT 1 FROM {CURRENT_ROW_TABLE} WHERE as_of_date='2026-07-20'"
+        ).fetchone() is None
+        non_target = conn.execute(
+            f"SELECT COUNT(*) FROM {CURRENT_ROW_TABLE} WHERE nm_id=202"
+        ).fetchone()[0]
+        assert non_target == 0
+        rows = conn.execute(
+            f"""
+            SELECT as_of_date,metrics_json
+            FROM {CURRENT_ROW_TABLE}
+            WHERE nm_id=101
+            ORDER BY as_of_date
+            """
+        ).fetchall()
+    assert [row["as_of_date"] for row in rows] == publication["affected_dates"]
+    for row in rows:
+        metrics = json.loads(row["metrics_json"])
+        assert (
+            metrics[own_stage_metric_key("PRODUCTION", "qty")] == 2.0
+        ), (row["as_of_date"], metrics)
+        assert (
+            metrics[own_stage_metric_key("PRODUCTION_TO_FF", "qty")] == 10.0
+        ), (row["as_of_date"], metrics)
+        assert metrics[OWN_TOTAL_QTY_METRIC_KEY] == 12.0
+    absorbed = OwnProductCapitalBlock(
+        runtime=runtime,
+        timestamp_factory=lambda: NOW,
+    ).load_daily_metric_lookup("2026-07-21")
+    assert (
+        absorbed[101][own_stage_metric_key("PRODUCTION_TO_FF", "qty")]
+        == 10.0
+    ), absorbed
 
 
 def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
@@ -434,6 +596,48 @@ def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
             """
         ).fetchall()
         assert queue_after == queue_before
+    retrying = SupplierShipmentFactualCorrectionBlock(
+        runtime=runtime,
+        timestamp_factory=lambda: "2026-07-25T10:03:00Z",
+    )
+    with patch(
+        "packages.application.warehouse_targeted_replay.load_supplier_line_cost_breakdown",
+        side_effect=lambda **kwargs: _allocation(
+            str(kwargs.get("actual_shipment_date_override") or "")
+        ),
+    ):
+        retry = retrying.apply(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-07-21",
+            actor="smoke",
+            fingerprint=plan["fingerprint"],
+            backup_dir=runtime.runtime_dir / "unused",
+            expected_old_value="",
+        )
+    assert retry["applied"] is True
+    assert (
+        runtime.load_supplier_shipment(SHIPMENT_ID)["header"][
+            "actual_shipment_date"
+        ]
+        == "2026-07-21"
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        statuses = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT status
+                FROM sheet_vitrina_v1_warehouse_business_projection_revisions
+                WHERE stable_source_id=?
+                  AND source_revision=?
+                """,
+                (
+                    f"supplier_shipment:{SHIPMENT_ID}",
+                    plan["source_revision"],
+                ),
+            ).fetchall()
+        }
+    assert statuses == {"active", "failed"}, statuses
 
 
 def _lock_is_shared(runtime: RegistryUploadDbBackedRuntime) -> None:

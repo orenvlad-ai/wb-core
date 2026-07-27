@@ -491,3 +491,20 @@ Non-TOTAL SKU separator labels open the same SKU Management flow through the nar
 All operator dialogs in this shell use one visual contract: a fully opaque dark modal card, opaque modal sections, readable contrast and a translucent dimming backdrop above sticky headers. This applies to Ads, Prices and SKU price/bid preview, warning, success and controlled-error states; drawers, dropdowns and selectors are not converted into modals.
 
 Supplier shipment factual-date, financial/CNY upload, exclusion and relink confirmations use the same opaque modal contract. The modal lists exact shipment/invoice, old/new dates or document identity/amount, linked operations and calculated consequences; combined date changes share one dialog. Focus is trapped, Escape and `Отменить` are side-effect free, and the confirm control is disabled after the first activation. Upload success is rendered only from the committed server outcome plus target-shipment readback; `conflict_other_shipment` offers cancel or explicit relink instead of a generic success toast.
+
+## Automatic warehouse/product-capital table reread
+
+Web Vitrina consumes `warehouse_business_projection` only through its read
+contract. While the tab is visible it performs a lightweight revision check
+every 12 seconds; a same-origin operation may additionally send a
+`BroadcastChannel` hint. A changed revision rereads only
+`surface=page_composition&include_table_data=1` and replaces the table payload,
+preserving selected period, filter rail/values, metric presentation and preset,
+expanded metric anchors and both scroll axes. It never calls the full refresh
+route and never reloads the page.
+
+Replay uses neutral `Обновляется`. Successful changed cells receive a
+short-lived violet site-accent class. Yellow/warning remains reserved for
+provisional, incomplete or error state. A status/read failure leaves the
+last-good table rendered and exposes the exact retry warning instead of
+clearing data.

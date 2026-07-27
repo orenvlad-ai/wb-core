@@ -3576,8 +3576,30 @@
         return new Promise((resolve) => window.setTimeout(resolve, 500));
       }
 
+      function notifyWarehouseBusinessProjection(type, projection) {
+        const payload = {
+          type,
+          projection: projection || {},
+          sent_at: new Date().toISOString()
+        };
+        if (typeof window.BroadcastChannel === "function") {
+          const channel = new BroadcastChannel(
+            "wb-core:warehouse-business-projection:v1"
+          );
+          channel.postMessage(payload);
+          channel.close();
+        }
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(payload, window.location.origin);
+        }
+      }
+
       async function pollFactualDateCorrection(shipmentId, initial) {
         setFactualCorrectionBlocking(true);
+        notifyWarehouseBusinessProjection(
+          "warehouse_business_projection_updating",
+          {}
+        );
         let correction = initial || {};
         for (let attempt = 0; attempt < 2400; attempt += 1) {
           if (correction.progress_text) {
@@ -3601,6 +3623,10 @@
               changed_field: "actual_shipment_date",
               order_status: currentShipment.order_status
             });
+            notifyWarehouseBusinessProjection(
+              "warehouse_business_projection_changed",
+              (correction.report && correction.report.business_projection) || {}
+            );
             return currentShipment;
           }
           if (correction.status === "error" || correction.status === "needs_review") {

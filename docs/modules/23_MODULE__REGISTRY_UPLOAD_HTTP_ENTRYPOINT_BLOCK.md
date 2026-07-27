@@ -957,3 +957,14 @@ backup baseline fixed by the first durable recovery operation; a new or
 subsequently touched unregistered recovery-family file remains actionable.
 No browser control can select a tier, migration identifier, cleanup target or
 rollback action.
+
+## Warehouse business projection status
+
+Authenticated GET
+`/v1/sheet-vitrina-v1/web-vitrina/business-projection/status` is the narrow
+read seam for the current warehouse/product-capital projection revision,
+durable outbox state and latest bounded failure. It does not start a full
+Vitrina refresh or an external producer fetch. Source mutation handlers keep
+their existing business response and may additionally return the terminal
+`business_projection` result; supplier factual-date Apply still owns its
+durable background job and exact terminal readback.

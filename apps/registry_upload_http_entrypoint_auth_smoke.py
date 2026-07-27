@@ -36,6 +36,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SKU_MANAGEMENT_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
@@ -49,6 +50,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _required_section_for_path,
     WEB_AUTH_SECTION_REPORTS,
     WEB_AUTH_SECTION_SKU_MANAGEMENT,
+    WEB_AUTH_SECTION_VITRINA,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
@@ -59,6 +61,16 @@ def main() -> None:
         raise AssertionError("SKU management API must use its own section authorization boundary")
     if _required_section_for_path(DEFAULT_PARTNER_REPORT_OPTIONS_PATH) != WEB_AUTH_SECTION_REPORTS:
         raise AssertionError("Partner Report API must use the reports authorization boundary")
+    if (
+        _required_section_for_path(
+            DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
+        )
+        != WEB_AUTH_SECTION_VITRINA
+    ):
+        raise AssertionError(
+            "warehouse business projection status must use the Vitrina "
+            "authorization boundary"
+        )
     username = "owner"
     password = "test-password-not-secret"
     with TemporaryDirectory(prefix="webcore-auth-smoke-") as tmp:
