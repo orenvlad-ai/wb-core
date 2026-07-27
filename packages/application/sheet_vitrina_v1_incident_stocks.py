@@ -17,10 +17,19 @@ INCIDENT_STOCK_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("ural", "stock_ru_ural", " — Урал"),
     ("far_siberia", "stock_ru_far_siberia", " — Сибирь и Дальний Восток"),
 )
+INCIDENT_STOCK_SHORT_REGION_LABELS: dict[str, str] = {
+    "total": "всего",
+    "central": "Центр",
+    "northwest": "СЗ",
+    "volga": "Поволжье",
+    "south_caucasus": "Юг+СКФО",
+    "ural": "Урал",
+    "far_siberia": "ДВ+Сибирь",
+}
 INCIDENT_STOCK_VARIANTS: tuple[tuple[str, str], ...] = (
     ("fact", "Остаток WB — факт, шт"),
-    ("incident", "На инцидентных складах, шт"),
-    ("effective", "Остаток WB без инцидентных складов, шт"),
+    ("incident", "Остаток инц.:"),
+    ("effective", "Остаток без инц.:"),
 )
 
 
@@ -82,7 +91,11 @@ def extend_metrics_with_incident_stock_metrics(
                         metric_key=metric_key,
                         enabled=True,
                         scope=scope,
-                        label_ru=f"{label}{suffix}",
+                        label_ru=(
+                            f"{label} {INCIDENT_STOCK_SHORT_REGION_LABELS[region]}"
+                            if variant in {"incident", "effective"}
+                            else f"{label}{suffix}"
+                        ),
                         calc_type="metric",
                         calc_ref=sku_key,
                         show_in_data=True,

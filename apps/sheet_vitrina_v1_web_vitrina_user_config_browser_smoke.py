@@ -34,7 +34,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _render_sheet_vitrina_web_vitrina_ui,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
-from packages.application.registry_upload_http_entrypoint import _active_incident_metric_catalog  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _active_incident_metric_catalog,
+    _sanitize_web_vitrina_metric_presentation_config,
+)
 from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
     LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
 )
@@ -55,6 +58,7 @@ RETIRED_METRIC_KEYS = frozenset(
 
 
 def main() -> None:
+    _check_server_config_sanitizer()
     with TemporaryDirectory(prefix="web-vitrina-user-config-browser-") as tmp:
         composition = _build_composition(Path(tmp) / "runtime")
         with FixtureServer(composition) as server:
@@ -68,14 +72,83 @@ def main() -> None:
         {
             "status": "ok",
             "checks": [
+                "v3_sanitizer",
                 "local_migration",
                 "server_priority",
                 "retired_metric_sanitation",
                 "reload",
+                "preset_crud",
+                "manual_selection_isolation",
+                "hidden_stale_member",
+                "modal_search_and_layout",
                 "cleared_local_storage",
             ],
         }
     )
+
+
+def _check_server_config_sanitizer() -> None:
+    sanitized = _sanitize_web_vitrina_metric_presentation_config(
+        {
+            "version": 3,
+            "scopes": {
+                "sku": {
+                    "order": ["wb_stock_incident_qty", "wb_stock_effective_qty"],
+                    "display": {
+                        "wb_stock_incident_qty": "shown",
+                        "wb_stock_effective_qty": "collapsed",
+                    },
+                    "manual": True,
+                }
+            },
+            "sku_presets": [
+                {
+                    "preset_id": "focus",
+                    "name": "Фокус",
+                    "metric_keys": ["wb_stock_incident_qty", "stale_metric"],
+                }
+            ],
+            "sku_metric_selection": {
+                "mode": "preset",
+                "preset_id": "focus",
+                "all": False,
+                "metric_keys": [],
+            },
+            "migrations": {
+                "incident_effective_shown_v1": True,
+                "sku_presets_seeded_v1": True,
+            },
+        }
+    )
+    if (
+        sanitized.get("version") != 3
+        or sanitized["scopes"]["sku"]["display"].get("wb_stock_incident_qty") != "shown"
+        or sanitized.get("sku_presets", [{}])[0].get("metric_keys")
+        != ["wb_stock_incident_qty", "stale_metric"]
+        or (sanitized.get("sku_metric_selection") or {}).get("preset_id") != "focus"
+        or not sanitized.get("migrations", {}).get("incident_effective_shown_v1")
+    ):
+        raise AssertionError(f"server sanitizer must preserve v3 statuses/presets/selection, got {sanitized}")
+
+    legacy = _sanitize_web_vitrina_metric_presentation_config(
+        {
+            "version": 2,
+            "scopes": {
+                "sku": {
+                    "order": ["wb_stock_incident_qty"],
+                    "display": {"wb_stock_incident_qty": "collapsed"},
+                    "manual": True,
+                }
+            },
+        }
+    )
+    if (
+        legacy.get("version") != 3
+        or legacy.get("migrations", {}).get("incident_effective_shown_v1")
+        or legacy.get("migrations", {}).get("sku_presets_seeded_v1")
+        or legacy["scopes"]["sku"]["display"].get("wb_stock_incident_qty") != "collapsed"
+    ):
+        raise AssertionError(f"legacy config must retain narrow client migration evidence, got {legacy}")
 
 
 def _run_checks(browser, server: "FixtureServer") -> None:
@@ -120,7 +193,12 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     page.wait_for_selector(TOTAL_ORDER_SUM_SELECTOR)
     _wait_for_server_save_count(server, 1)
     migrated = server.user_config["config"]
-    if migrated["scopes"]["total"]["display"].get("total_orderSum") != "hidden":
+    if (
+        migrated.get("version") != 3
+        or migrated["scopes"]["total"]["display"].get("total_orderSum") != "hidden"
+        or not migrated.get("migrations", {}).get("incident_effective_shown_v1")
+        or [preset.get("name") for preset in migrated.get("sku_presets", [])] != ["Анализ"]
+    ):
         raise AssertionError(f"valid localStorage must migrate once when server config is missing, got {migrated}")
     _assert_retired_metrics_absent(page, migrated)
     context.close()
@@ -165,15 +243,16 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     stale_page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
     _open_metrics(stale_page)
     stale_page.wait_for_selector(TOTAL_ORDER_SUM_SELECTOR)
+    _wait_for_server_save_count(server, 1)
     if stale_page.locator(TOTAL_ORDER_SUM_SELECTOR).input_value() != "shown":
         raise AssertionError("stale localStorage must not hide total_orderSum when server config exists")
-    if server.save_count != 0:
-        raise AssertionError("initial render from server config must not resave stale localStorage")
-    _assert_retired_metrics_absent(stale_page)
+    if server.user_config["config"].get("version") != 3:
+        raise AssertionError("server v2 metric config must migrate in place to v3")
+    _assert_retired_metrics_absent(stale_page, server.user_config["config"])
 
     stale_page.select_option(TOTAL_ORDER_SUM_SELECTOR, "hidden")
-    _wait_for_server_save_count(server, 1)
-    if server.user_config["revision"] != 5:
+    _wait_for_server_save_count(server, 2)
+    if server.user_config["revision"] != 6:
         raise AssertionError(f"user change must persist to next server revision, got {server.user_config}")
     _assert_retired_metrics_absent(stale_page, server.user_config["config"])
     stale_context.close()
@@ -186,6 +265,7 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     if clear_page.locator(TOTAL_ORDER_SUM_SELECTOR).input_value() != "hidden":
         raise AssertionError("cleared localStorage/new browser context must restore server-side metric config")
     _assert_retired_metrics_absent(clear_page, server.user_config["config"])
+    _check_sku_metric_presets(clear_page, server)
     clear_context.close()
 
 
@@ -215,6 +295,180 @@ def _wait_for_server_save_count(server: "FixtureServer", expected: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"user config save was not observed, expected {expected}, got {server.save_count}")
+
+
+def _open_sku_metric_picker(page) -> None:
+    if page.locator("[data-filters-rail]").get_attribute("hidden") is not None:
+        page.locator("[data-filters-toggle]").click()
+    if page.locator("[data-sku-metric-panel]").get_attribute("hidden") is not None:
+        page.locator("[data-sku-metric-toggle]").click()
+    page.wait_for_selector("[data-sku-metric-panel]:not([hidden])", timeout=5000)
+
+
+def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
+    _open_sku_metric_picker(page)
+    mode_labels = page.locator("[data-sku-metric-mode]").all_inner_texts()
+    if not any(label.startswith("Ручной выбор") for label in mode_labels) or not any(
+        label.startswith("Анализ") for label in mode_labels
+    ):
+        raise AssertionError(f"picker must expose manual mode and the initial Анализ preset, got {mode_labels}")
+
+    page.locator("[data-sku-preset-configure]").click()
+    page.wait_for_selector("[data-sku-preset-modal]:not([hidden])", timeout=5000)
+    modal_layout = page.evaluate(
+        """() => {
+          const backdrop = document.querySelector('[data-sku-preset-modal]');
+          const card = backdrop && backdrop.querySelector('.sku-preset-modal');
+          const members = backdrop && backdrop.querySelector('[data-sku-preset-members]');
+          const rect = card ? card.getBoundingClientRect() : null;
+          const styles = card ? getComputedStyle(card) : null;
+          const memberStyles = members ? getComputedStyle(members) : null;
+          return {
+            cardVisible: !!(rect && rect.width > 300 && rect.height > 300),
+            insideViewport: !!(
+              rect
+              && rect.left >= 0
+              && rect.top >= 0
+              && rect.right <= window.innerWidth
+              && rect.bottom <= window.innerHeight
+            ),
+            darkBackground: !!(
+              styles
+              && /^rgb\\((\\d+), (\\d+), (\\d+)\\)$/.test(styles.backgroundColor)
+              && styles.backgroundColor !== 'rgb(255, 255, 255)'
+            ),
+            memberViewportHeight: members ? members.clientHeight : 0,
+            memberScrollHeight: members ? members.scrollHeight : 0,
+            memberOverflowY: memberStyles ? memberStyles.overflowY : '',
+            groupCount: backdrop ? backdrop.querySelectorAll('.sku-preset-group').length : 0
+          };
+        }"""
+    )
+    if (
+        not modal_layout["cardVisible"]
+        or not modal_layout["insideViewport"]
+        or not modal_layout["darkBackground"]
+        or int(modal_layout["memberViewportHeight"]) < 180
+        or int(modal_layout["memberScrollHeight"]) < int(modal_layout["memberViewportHeight"])
+        or modal_layout["memberOverflowY"] not in {"auto", "scroll"}
+        or int(modal_layout["groupCount"]) < 2
+    ):
+        raise AssertionError(f"preset modal and long grouped list must remain usable in dark UI, got {modal_layout}")
+    original_member_count = page.locator("[data-sku-preset-member]").count()
+    page.locator("[data-sku-preset-search]").fill("__metric_not_found__")
+    if "Метрики не найдены" not in page.locator("[data-sku-preset-members]").inner_text():
+        raise AssertionError("preset metric search must show a truthful no-match state")
+    page.locator("[data-sku-preset-search]").fill("")
+    if page.locator("[data-sku-preset-member]").count() != original_member_count:
+        raise AssertionError("clearing preset metric search must restore the full non-hidden list")
+    members = page.locator("[data-sku-preset-member]")
+    if members.count() < 2:
+        raise AssertionError("preset editor requires at least two non-hidden SKU metrics")
+    for index in range(1, members.count()):
+        members.nth(index).uncheck()
+    page.locator("[data-sku-preset-name]").fill("Фокус")
+    save_before = server.save_count
+    page.locator("[data-sku-preset-save]").click()
+    page.wait_for_function(
+        "() => !!document.querySelector('[data-sku-preset-modal]').hidden",
+        timeout=5000,
+    )
+    _wait_for_server_save_count(server, save_before + 1)
+    preset_payload = server.user_config["config"]
+    focus_presets = [
+        preset for preset in preset_payload.get("sku_presets", []) if preset.get("name") == "Фокус"
+    ]
+    if len(focus_presets) != 1 or len(focus_presets[0].get("metric_keys", [])) != 1:
+        raise AssertionError(f"renamed preset must persist its explicit metric set, got {preset_payload}")
+    focus_preset = focus_presets[0]
+    focus_preset_id = str(focus_preset["preset_id"])
+    focus_metric_key = str(focus_preset["metric_keys"][0])
+    if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Фокус":
+        raise AssertionError("saved preset must apply immediately")
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Фокус":
+        raise AssertionError("last selected preset must survive reload")
+
+    _open_sku_metric_picker(page)
+    manual_target = page.locator(
+        f'[data-sku-metric-option]:not([data-sku-metric-option="{focus_metric_key}"])'
+    ).first
+    manual_target.click()
+    save_before = server.save_count
+    page.locator("[data-sku-metric-apply]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    after_manual = server.user_config["config"]
+    persisted_focus = next(
+        preset for preset in after_manual.get("sku_presets", []) if preset.get("preset_id") == focus_preset_id
+    )
+    if persisted_focus.get("metric_keys") != [focus_metric_key]:
+        raise AssertionError("manual picker correction must not overwrite a saved preset")
+    if (after_manual.get("sku_metric_selection") or {}).get("mode") != "manual":
+        raise AssertionError("manual correction must persist as the last manual selection")
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator("[data-sku-metric-summary]").inner_text().strip() == "SKU-метрики: Фокус":
+        raise AssertionError("manual last selection must remain distinct from the saved preset")
+
+    _open_sku_metric_picker(page)
+    page.locator("[data-sku-preset-configure]").click()
+    page.wait_for_selector("[data-sku-preset-modal]:not([hidden])", timeout=5000)
+    page.locator("[data-sku-preset-new]").click()
+    page.locator("[data-sku-preset-name]").fill("Временный")
+    save_before = server.save_count
+    page.locator("[data-sku-preset-save]").click()
+    page.wait_for_function(
+        "() => !!document.querySelector('[data-sku-preset-modal]').hidden",
+        timeout=5000,
+    )
+    _wait_for_server_save_count(server, save_before + 1)
+    if not any(
+        preset.get("name") == "Временный"
+        for preset in server.user_config["config"].get("sku_presets", [])
+    ):
+        raise AssertionError("new preset must persist")
+
+    _open_sku_metric_picker(page)
+    page.locator("[data-sku-preset-configure]").click()
+    page.wait_for_selector("[data-sku-preset-modal]:not([hidden])", timeout=5000)
+    save_before = server.save_count
+    page.locator("[data-sku-preset-delete]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    if any(
+        preset.get("name") == "Временный"
+        for preset in server.user_config["config"].get("sku_presets", [])
+    ):
+        raise AssertionError("deleted preset must be removed from the registry")
+    page.locator("[data-sku-preset-close]").first.click()
+
+    _open_metrics(page)
+    sku_display_selector = (
+        '[data-metric-display-select][data-metric-config-scope="sku"]'
+        f'[data-metric-config-key="{focus_metric_key}"]'
+    )
+    save_before = server.save_count
+    page.select_option(sku_display_selector, "hidden")
+    _wait_for_server_save_count(server, save_before + 1)
+    _open_sku_metric_picker(page)
+    if page.locator(f'[data-sku-metric-option="{focus_metric_key}"]').count() != 0:
+        raise AssertionError("a hidden metric must be excluded from the picker")
+    page.locator(f'[data-sku-metric-mode="preset"][data-sku-metric-preset-id="{focus_preset_id}"]').click()
+    save_before = server.save_count
+    page.locator("[data-sku-metric-apply]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    stale_safe = server.user_config["config"]
+    stale_focus = next(
+        preset for preset in stale_safe.get("sku_presets", []) if preset.get("preset_id") == focus_preset_id
+    )
+    if stale_focus.get("metric_keys") != [focus_metric_key]:
+        raise AssertionError("hiding a metric must not rewrite saved preset membership")
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Фокус":
+        raise AssertionError("preset identity must survive reload when a stale member becomes hidden")
 
 
 def _build_composition(runtime_dir: Path) -> dict[str, object]:

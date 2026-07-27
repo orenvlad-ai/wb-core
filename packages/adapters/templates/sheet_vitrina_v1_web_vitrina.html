@@ -2261,6 +2261,47 @@
       padding-right: 2px;
     }
 
+    .sku-metric-selection-modes {
+      display: grid;
+      gap: 3px;
+      margin-bottom: 7px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sku-metric-mode {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 27px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      padding: 5px 7px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .sku-metric-mode:hover,
+    .sku-metric-mode.is-active {
+      border-color: var(--border);
+      background: var(--control-bg-hover);
+    }
+
+    .sku-metric-mode.is-active {
+      border-color: var(--accent-border);
+      color: #ede9fe;
+    }
+
+    .sku-metric-mode-count {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
     .sku-metric-option {
       display: grid;
       grid-template-columns: 16px minmax(0, 1fr);
@@ -2299,6 +2340,10 @@
       justify-content: flex-end;
       gap: 6px;
       margin-top: 8px;
+    }
+
+    .sku-metric-actions [data-sku-preset-configure] {
+      margin-right: auto;
     }
 
     .sku-metric-actions .button {
@@ -4622,7 +4667,117 @@
     .sku-quick-history table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 760px; }
     .sku-quick-history th, .sku-quick-history td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
     .sku-management-modal.operator-modal-card { width: min(960px, calc(100vw - 40px)); }
+    .sku-preset-modal.operator-modal-card { width: min(920px, calc(100vw - 40px)); }
+    .sku-preset-editor {
+      display: grid;
+      grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+      min-height: min(560px, calc(100vh - 190px));
+      background: #17191f;
+    }
+    .sku-preset-list-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 14px;
+      border-right: 1px solid var(--border);
+      background: #13151a;
+    }
+    .sku-preset-list {
+      display: grid;
+      gap: 4px;
+      overflow: auto;
+    }
+    .sku-preset-list-item {
+      width: 100%;
+      min-height: 32px;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      padding: 6px 8px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .sku-preset-list-item:hover,
+    .sku-preset-list-item.is-active {
+      border-color: var(--border);
+      background: var(--control-bg-hover);
+    }
+    .sku-preset-list-item.is-active {
+      border-color: var(--accent-border);
+    }
+    .sku-preset-form {
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      gap: 10px;
+      min-width: 0;
+      padding: 14px;
+      background: #17191f;
+    }
+    .sku-preset-field {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .sku-preset-field .input {
+      width: 100%;
+    }
+    .sku-preset-members {
+      min-height: 220px;
+      max-height: min(410px, calc(100vh - 330px));
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+    }
+    .sku-preset-group {
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sku-preset-group:last-child {
+      border-bottom: 0;
+    }
+    .sku-preset-group-title {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      margin: -8px -8px 5px;
+      padding: 6px 8px;
+      background: #1b1e25;
+      color: #cbd5e1;
+      font-size: 10px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .sku-preset-member {
+      display: grid;
+      grid-template-columns: 16px minmax(0, 1fr);
+      gap: 7px;
+      align-items: start;
+      padding: 5px 3px;
+      color: var(--text);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .sku-preset-member input {
+      margin: 1px 0 0;
+      accent-color: var(--accent);
+    }
+    .sku-preset-error {
+      min-height: 16px;
+      margin: 0;
+      color: var(--error-text);
+      font-size: 11px;
+    }
     @media (max-width: 720px) { .sku-quick-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 720px) {
+      .sku-preset-editor { grid-template-columns: 1fr; }
+      .sku-preset-list-panel { border-right: 0; border-bottom: 1px solid var(--border); }
+      .sku-preset-list { max-height: 140px; }
+    }
 
     .prices-preview-table {
       width: 100%;
@@ -5128,8 +5283,10 @@
                   <span data-sku-metric-summary>SKU-метрики: все</span>
                 </button>
                 <div class="sku-metric-panel" id="sku-metric-panel" data-sku-metric-panel hidden>
+                  <div class="sku-metric-selection-modes" data-sku-metric-selection-modes></div>
                   <div class="sku-metric-options" data-sku-metric-options></div>
                   <div class="sku-metric-actions">
+                    <button class="button secondary" type="button" data-sku-preset-configure>Настроить пресеты</button>
                     <button class="button secondary" type="button" data-sku-metric-reset>Сбросить</button>
                     <button class="button primary" type="button" data-sku-metric-apply>Показать</button>
                   </div>
@@ -6208,6 +6365,38 @@
     </section>
   </div>
 
+  <div class="sku-preset-modal-backdrop operator-modal-backdrop" data-sku-preset-modal hidden>
+    <section class="sku-preset-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="sku-preset-modal-title">
+      <div class="ads-modal-head">
+        <h3 class="ads-modal-title" id="sku-preset-modal-title">Пресеты SKU-метрик</h3>
+        <button class="button ghost" type="button" data-sku-preset-close>Закрыть</button>
+      </div>
+      <div class="sku-preset-editor">
+        <aside class="sku-preset-list-panel">
+          <button class="button secondary" type="button" data-sku-preset-new>Новый пресет</button>
+          <div class="sku-preset-list" data-sku-preset-list></div>
+        </aside>
+        <div class="sku-preset-form">
+          <label class="sku-preset-field">
+            <span>Название</span>
+            <input class="input" type="text" maxlength="80" autocomplete="off" data-sku-preset-name>
+          </label>
+          <label class="sku-preset-field">
+            <span>Поиск метрик</span>
+            <input class="input" type="search" placeholder="Название или группа" autocomplete="off" data-sku-preset-search>
+          </label>
+          <div class="sku-preset-members" data-sku-preset-members></div>
+          <p class="sku-preset-error" data-sku-preset-error></p>
+        </div>
+      </div>
+      <div class="ads-modal-actions">
+        <button class="button danger" type="button" data-sku-preset-delete>Удалить</button>
+        <button class="button secondary" type="button" data-sku-preset-close>Отмена</button>
+        <button class="button primary" type="button" data-sku-preset-save>Сохранить</button>
+      </div>
+    </section>
+  </div>
+
   <div class="autoanswers-limits-modal-backdrop operator-modal-backdrop" data-autoanswers-limits-modal hidden>
     <section class="autoanswers-limits-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="autoanswers-limits-modal-title">
       <div class="ads-modal-head">
@@ -6338,10 +6527,20 @@
     const skuMetricPickerNode = document.querySelector("[data-sku-metric-picker]");
     const skuMetricToggleButton = document.querySelector("[data-sku-metric-toggle]");
     const skuMetricPanelNode = document.querySelector("[data-sku-metric-panel]");
+    const skuMetricSelectionModesNode = document.querySelector("[data-sku-metric-selection-modes]");
     const skuMetricOptionsNode = document.querySelector("[data-sku-metric-options]");
     const skuMetricSummaryNode = document.querySelector("[data-sku-metric-summary]");
     const skuMetricApplyButton = document.querySelector("[data-sku-metric-apply]");
     const skuMetricResetButton = document.querySelector("[data-sku-metric-reset]");
+    const skuPresetConfigureButton = document.querySelector("[data-sku-preset-configure]");
+    const skuPresetModalNode = document.querySelector("[data-sku-preset-modal]");
+    const skuPresetListNode = document.querySelector("[data-sku-preset-list]");
+    const skuPresetNameNode = document.querySelector("[data-sku-preset-name]");
+    const skuPresetSearchNode = document.querySelector("[data-sku-preset-search]");
+    const skuPresetMembersNode = document.querySelector("[data-sku-preset-members]");
+    const skuPresetErrorNode = document.querySelector("[data-sku-preset-error]");
+    const skuPresetDeleteButton = document.querySelector("[data-sku-preset-delete]");
+    const skuPresetSaveButton = document.querySelector("[data-sku-preset-save]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
     const tableMetaNode = document.querySelector("[data-table-meta]");
@@ -6564,6 +6763,10 @@
 
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
+    const METRIC_PRESENTATION_VERSION = 3;
+    const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
+    const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
+    const DEFAULT_SKU_METRIC_PRESET_ID = "analysis";
     const TABLE_FORCED_HIDDEN_COLUMN_IDS = new Set([
       "row_order",
       "scope_kind",
@@ -6831,6 +7034,10 @@
         selectedMetricKeys: new Set(),
         draftMetricAll: true,
         draftMetricKeys: new Set(),
+        activeMetricSelectionMode: "manual",
+        activeMetricPresetId: "",
+        draftMetricSelectionMode: "manual",
+        draftMetricPresetId: "",
         filtersRailOpen: false,
         skuMetricPickerOpen: false,
         sort: ""
@@ -6852,6 +7059,27 @@
         expandedAnchors: new Set(),
         selectionModeByScope: {},
         selectionByScope: {},
+        skuPresets: [],
+        skuMetricSelection: {
+          mode: "manual",
+          presetId: "",
+          all: true,
+          metricKeys: []
+        },
+        migrations: {
+          incidentEffectiveShownV1: false,
+          skuPresetsSeededV1: false
+        },
+        presetEditor: {
+          open: false,
+          presetId: "",
+          isNew: false,
+          name: "",
+          search: "",
+          metricKeys: new Set(),
+          error: "",
+          opener: null
+        },
         serverConfig: {
           loaded: false,
           loading: false,
@@ -7585,6 +7813,36 @@
       });
     }
 
+    if (skuMetricSelectionModesNode) {
+      skuMetricSelectionModesNode.addEventListener("click", handleSkuMetricSelectionModeClick);
+    }
+
+    if (skuPresetConfigureButton) {
+      skuPresetConfigureButton.addEventListener("click", function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        openSkuPresetModal();
+      });
+    }
+
+    if (skuPresetModalNode) {
+      skuPresetModalNode.addEventListener("click", handleSkuPresetModalClick);
+      skuPresetModalNode.addEventListener("change", handleSkuPresetModalChange);
+    }
+    if (skuPresetNameNode) {
+      skuPresetNameNode.addEventListener("input", function(event) {
+        state.metricPresentation.presetEditor.name = String(event.currentTarget.value || "");
+        state.metricPresentation.presetEditor.error = "";
+        renderSkuPresetEditor();
+      });
+    }
+    if (skuPresetSearchNode) {
+      skuPresetSearchNode.addEventListener("input", function(event) {
+        state.metricPresentation.presetEditor.search = String(event.currentTarget.value || "");
+        renderSkuPresetMembers();
+      });
+    }
+
     resetFiltersButton.addEventListener("click", function() {
       resetFilterState(state.composition);
       resetMetricPresentationToDefault(state.composition);
@@ -7845,6 +8103,31 @@
         }
       }, true);
       document.addEventListener("keydown", function(event) {
+        if (skuPresetModalNode && !skuPresetModalNode.hidden) {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            closeSkuPresetModal();
+            return;
+          }
+          if (event.key === "Tab") {
+            const focusable = Array.from(skuPresetModalNode.querySelectorAll(
+              'button:not([disabled]):not([hidden]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            )).filter(function(node) { return node.offsetParent !== null; });
+            if (focusable.length) {
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }
+            return;
+          }
+        }
         if (skuManagementModalNode && !skuManagementModalNode.hidden) {
           if (event.key === "Escape") {
             event.preventDefault();
@@ -7895,6 +8178,13 @@
     function syncDraftMetricSelectionFromApplied() {
       const metricKeys = state.filters.metricKeys || [];
       const selected = state.filters.selectedMetricKeys || new Set(metricKeys);
+      state.filters.draftMetricSelectionMode = String(state.filters.activeMetricSelectionMode || "manual");
+      state.filters.draftMetricPresetId = String(state.filters.activeMetricPresetId || "");
+      if (state.filters.draftMetricSelectionMode === "preset") {
+        state.filters.draftMetricAll = false;
+        state.filters.draftMetricKeys = new Set(selected);
+        return;
+      }
       if (!metricKeys.length || selected.size >= metricKeys.length) {
         state.filters.draftMetricAll = true;
         state.filters.draftMetricKeys = new Set();
@@ -9067,6 +9357,7 @@
 
     function skuMetricFilterOptions(payload) {
       const optionByKey = skuMetricBaseOptionByKey(payload);
+      const fallbackByKey = new Map();
       const ordered = [];
       const seen = new Set();
       function addMetric(metricKey, fallback) {
@@ -9090,11 +9381,15 @@
         });
       }
 
-      applyMetricPresentationToRows(((payload && payload.table_surface && payload.table_surface.rows) || [])).forEach(function(row) {
+      ((payload && payload.table_surface && payload.table_surface.rows) || []).forEach(function(row) {
         if (String((row && row.row_kind) || "").toLowerCase() !== "sku") {
           return;
         }
-        addMetric(String(cellValue(row, "metric_key") || ""), {
+        const metricKey = String(cellValue(row, "metric_key") || "");
+        if (!metricKey || fallbackByKey.has(metricKey)) {
+          return;
+        }
+        fallbackByKey.set(metricKey, {
           label: String(cellDisplay(row, "metric_label") || cellValue(row, "metric_key") || ""),
           sectionId: String(row.section_id || "section:unsectioned"),
           sectionLabel: String(cellDisplay(row, "section") || "Без секции"),
@@ -9102,12 +9397,22 @@
         });
       });
 
+      metricPresentationScopeOrder("sku").forEach(function(metricKey) {
+        if (metricDisplayStatusForScope("sku", metricKey) !== "hidden") {
+          addMetric(metricKey, fallbackByKey.get(metricKey));
+        }
+      });
+
       if (!ordered.length) {
-        metricPresentationScopeOrder("sku").forEach(function(metricKey) {
-          addMetric(metricKey);
+        fallbackByKey.forEach(function(fallback, metricKey) {
+          if (metricDisplayStatusForScope("sku", metricKey) !== "hidden") {
+            addMetric(metricKey, fallback);
+          }
         });
         optionByKey.forEach(function(_option, metricKey) {
-          addMetric(metricKey);
+          if (metricDisplayStatusForScope("sku", metricKey) !== "hidden") {
+            addMetric(metricKey);
+          }
         });
       }
       return ordered;
@@ -9206,21 +9511,69 @@
 
     function initializeMetricSelection(payload) {
       const metricKeys = metricFilterKeys(payload);
+      const allowed = new Set(metricKeys);
+      const savedSelection = normalizeSkuMetricSelectionState(state.metricPresentation.skuMetricSelection);
+      let selectionMode = savedSelection.mode;
+      let presetId = savedSelection.presetId;
+      let selectedKeys = [];
+      if (selectionMode === "preset") {
+        const preset = skuMetricPresetById(presetId);
+        if (preset) {
+          selectedKeys = (preset.metricKeys || []).filter(function(metricKey) {
+            return allowed.has(metricKey);
+          });
+        } else {
+          selectionMode = "manual";
+          presetId = "";
+        }
+      }
+      if (selectionMode === "manual") {
+        selectedKeys = savedSelection.all
+          ? metricKeys.slice()
+          : savedSelection.metricKeys.filter(function(metricKey) {
+              return allowed.has(metricKey);
+            });
+        if (!selectedKeys.length) {
+          selectedKeys = metricKeys.slice();
+        }
+      }
       state.filters.metricStorageKey = buildMetricSelectionStorageKey(payload);
       state.filters.metricKeys = metricKeys;
-      state.filters.selectedMetricKeys = new Set(metricKeys);
-      state.filters.draftMetricAll = true;
-      state.filters.draftMetricKeys = new Set();
+      state.filters.selectedMetricKeys = new Set(selectedKeys);
+      state.filters.activeMetricSelectionMode = selectionMode;
+      state.filters.activeMetricPresetId = presetId;
+      state.filters.draftMetricSelectionMode = selectionMode;
+      state.filters.draftMetricPresetId = presetId;
+      state.filters.draftMetricAll = selectedKeys.length >= metricKeys.length;
+      state.filters.draftMetricKeys = state.filters.draftMetricAll
+        ? new Set()
+        : new Set(selectedKeys);
       state.filters.metric = ALL_VALUE;
+      state.metricPresentation.skuMetricSelection = {
+        mode: selectionMode,
+        presetId: presetId,
+        all: selectedKeys.length >= metricKeys.length,
+        metricKeys: selectionMode === "manual" ? selectedKeys.slice() : []
+      };
     }
 
     function resetMetricSelectionToAll(payload) {
       const metricKeys = metricFilterKeys(payload);
       state.filters.metricKeys = metricKeys;
       state.filters.selectedMetricKeys = new Set(metricKeys);
+      state.filters.activeMetricSelectionMode = "manual";
+      state.filters.activeMetricPresetId = "";
+      state.filters.draftMetricSelectionMode = "manual";
+      state.filters.draftMetricPresetId = "";
       state.filters.draftMetricAll = true;
       state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
+      state.metricPresentation.skuMetricSelection = {
+        mode: "manual",
+        presetId: "",
+        all: true,
+        metricKeys: []
+      };
     }
 
     function refreshSkuMetricFilterState(payload) {
@@ -9232,7 +9585,16 @@
       const draftWasAll = !!state.filters.draftMetricAll || !previousDraft.size;
       const allowed = new Set(nextMetricKeys);
       state.filters.metricKeys = nextMetricKeys;
-      if (selectedWasAll) {
+      const activePreset = state.filters.activeMetricSelectionMode === "preset"
+        ? skuMetricPresetById(state.filters.activeMetricPresetId)
+        : null;
+      if (activePreset) {
+        state.filters.selectedMetricKeys = new Set(
+          (activePreset.metricKeys || []).filter(function(metricKey) {
+            return allowed.has(metricKey);
+          })
+        );
+      } else if (selectedWasAll) {
         state.filters.selectedMetricKeys = new Set(nextMetricKeys);
       } else {
         state.filters.selectedMetricKeys = new Set(
@@ -9244,7 +9606,17 @@
           state.filters.selectedMetricKeys = new Set(nextMetricKeys);
         }
       }
-      if (draftWasAll) {
+      const draftPreset = state.filters.draftMetricSelectionMode === "preset"
+        ? skuMetricPresetById(state.filters.draftMetricPresetId)
+        : null;
+      if (draftPreset) {
+        state.filters.draftMetricAll = false;
+        state.filters.draftMetricKeys = new Set(
+          (draftPreset.metricKeys || []).filter(function(metricKey) {
+            return allowed.has(metricKey);
+          })
+        );
+      } else if (draftWasAll) {
         state.filters.draftMetricAll = true;
         state.filters.draftMetricKeys = new Set();
       } else {
@@ -9393,7 +9765,13 @@
     }
 
     function normalizePersistedMetricPresentation(candidate) {
-      if (!candidate || Number(candidate.version) !== 2 || !candidate.scopes || typeof candidate.scopes !== "object") {
+      const candidateVersion = Number(candidate && candidate.version);
+      if (
+        !candidate
+        || (candidateVersion !== 2 && candidateVersion !== METRIC_PRESENTATION_VERSION)
+        || !candidate.scopes
+        || typeof candidate.scopes !== "object"
+      ) {
         return null;
       }
       const scopes = {};
@@ -9417,7 +9795,7 @@
         Object.keys(rawDisplay).forEach(function(metricKey) {
           const normalizedMetricKey = String(metricKey || "").trim();
           const status = normalizeMetricDisplayStatus(rawDisplay[metricKey]);
-          if (normalizedMetricKey && status !== "shown") {
+          if (normalizedMetricKey) {
             display[normalizedMetricKey] = status;
           }
         });
@@ -9427,6 +9805,33 @@
           manual: !!savedScope.manual
         };
       });
+      const skuPresets = [];
+      const seenPresetIds = new Set();
+      (Array.isArray(candidate.sku_presets) ? candidate.sku_presets : []).slice(0, 40).forEach(function(rawPreset) {
+        if (!rawPreset || typeof rawPreset !== "object") {
+          return;
+        }
+        const presetId = String(rawPreset.preset_id || rawPreset.presetId || "").trim().slice(0, 80);
+        const name = String(rawPreset.name || "").trim().slice(0, 80);
+        if (!presetId || !name || seenPresetIds.has(presetId)) {
+          return;
+        }
+        const metricKeys = uniqueMetricKeys(rawPreset.metric_keys || rawPreset.metricKeys, 500);
+        skuPresets.push({presetId: presetId, name: name, metricKeys: metricKeys});
+        seenPresetIds.add(presetId);
+      });
+      const rawSkuSelection = candidate.sku_metric_selection && typeof candidate.sku_metric_selection === "object"
+        ? candidate.sku_metric_selection
+        : {};
+      let skuSelectionMode = String(rawSkuSelection.mode || "manual") === "preset" ? "preset" : "manual";
+      let skuSelectionPresetId = String(rawSkuSelection.preset_id || rawSkuSelection.presetId || "").trim().slice(0, 80);
+      if (
+        skuSelectionMode === "preset"
+        && !skuPresets.some(function(preset) { return preset.presetId === skuSelectionPresetId; })
+      ) {
+        skuSelectionMode = "manual";
+        skuSelectionPresetId = "";
+      }
       const expandedAnchors = [];
       const seenAnchors = new Set();
       (Array.isArray(candidate.expanded_anchors) ? candidate.expanded_anchors : []).forEach(function(token) {
@@ -9437,10 +9842,52 @@
         }
       });
       return {
-        version: 2,
+        version: candidateVersion,
         scopes: scopes,
-        expanded_anchors: expandedAnchors
+        expanded_anchors: expandedAnchors,
+        sku_presets: skuPresets,
+        sku_metric_selection: {
+          mode: skuSelectionMode,
+          presetId: skuSelectionPresetId,
+          all: rawSkuSelection.all !== false,
+          metricKeys: uniqueMetricKeys(rawSkuSelection.metric_keys || rawSkuSelection.metricKeys, 500)
+        },
+        migrations: {
+          incidentEffectiveShownV1: !!(
+            candidateVersion >= METRIC_PRESENTATION_VERSION
+            && candidate.migrations
+            && (
+              candidate.migrations[INCIDENT_EFFECTIVE_SHOWN_MIGRATION]
+              || candidate.migrations.incidentEffectiveShownV1
+            )
+          ),
+          skuPresetsSeededV1: !!(
+            candidateVersion >= METRIC_PRESENTATION_VERSION
+            && candidate.migrations
+            && (
+              candidate.migrations[SKU_PRESETS_SEEDED_MIGRATION]
+              || candidate.migrations.skuPresetsSeededV1
+            )
+          )
+        }
       };
+    }
+
+    function uniqueMetricKeys(candidate, limit) {
+      const result = [];
+      const seen = new Set();
+      (Array.isArray(candidate) ? candidate : []).some(function(metricKey) {
+        if (result.length >= Number(limit || 500)) {
+          return true;
+        }
+        const normalized = String(metricKey || "").trim().slice(0, 160);
+        if (normalized && !seen.has(normalized)) {
+          result.push(normalized);
+          seen.add(normalized);
+        }
+        return false;
+      });
+      return result;
     }
 
     function metricPresentationUserConfigPath() {
@@ -9544,6 +9991,9 @@
 
     function defaultMetricDisplayStatus(metricKey) {
       const normalized = String(metricKey || "");
+      if (isIncidentEffectiveStockMetricKey(normalized)) {
+        return "shown";
+      }
       return (
         new Set(["seller_price_change_rub", "advertising_bid_change_rub"]).has(normalized)
         || normalized.startsWith("wb_stock_")
@@ -9551,6 +10001,16 @@
       )
         ? "collapsed"
         : "shown";
+    }
+
+    function isIncidentEffectiveStockMetricKey(metricKey) {
+      const normalized = String(metricKey || "").replace(/^total_/, "");
+      return (
+        normalized === "wb_stock_incident_qty"
+        || normalized.indexOf("wb_stock_incident_qty_") === 0
+        || normalized === "wb_stock_effective_qty"
+        || normalized.indexOf("wb_stock_effective_qty_") === 0
+      );
     }
 
     function metricDisplayStatusForScope(scopeId, metricKey) {
@@ -9600,6 +10060,18 @@
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persistedCandidate = resolveMetricPresentationPersistedCandidate(storageKey, forceDefault);
       const persisted = persistedCandidate.payload;
+      const preservedSkuPresets = options && Array.isArray(options.preservedSkuPresets)
+        ? options.preservedSkuPresets
+        : null;
+      const preservedSkuMetricSelection = options && options.preservedSkuMetricSelection
+        ? options.preservedSkuMetricSelection
+        : null;
+      const requiresIncidentEffectiveMigration = !!(
+        persisted && (!persisted.migrations || !persisted.migrations.incidentEffectiveShownV1)
+      );
+      const requiresSkuPresetSeedMigration = !!(
+        persisted && (!persisted.migrations || !persisted.migrations.skuPresetsSeededV1)
+      );
       const previousSelectionModeByScope = state.metricPresentation.selectionModeByScope || {};
       const previousSelectionByScope = state.metricPresentation.selectionByScope || {};
       const scopeByKey = {};
@@ -9622,7 +10094,9 @@
         state.metricPresentation.manualByScope[scopeId] = !!(savedScope && savedScope.manual);
         defaultOrder.forEach(function(metricKey) {
           scopeByKey[metricKey] = scopeId;
-          const savedDisplay = savedScope.display && Object.prototype.hasOwnProperty.call(savedScope.display, metricKey)
+          const savedDisplay = requiresIncidentEffectiveMigration && isIncidentEffectiveStockMetricKey(metricKey)
+            ? "shown"
+            : savedScope.display && Object.prototype.hasOwnProperty.call(savedScope.display, metricKey)
             ? savedScope.display[metricKey]
             : defaultMetricDisplayStatus(metricKey);
           setMetricDisplayStatusForScope(scopeId, metricKey, savedDisplay);
@@ -9641,6 +10115,28 @@
         }
       });
       state.metricPresentation.scopeByKey = scopeByKey;
+      state.metricPresentation.skuPresets = (
+        preservedSkuPresets
+        || (persisted && persisted.sku_presets)
+        || []
+      ).map(function(preset) {
+        return {
+          presetId: String(preset.presetId || ""),
+          name: String(preset.name || ""),
+          metricKeys: uniqueMetricKeys(preset.metricKeys, 500)
+        };
+      });
+      state.metricPresentation.skuMetricSelection = normalizeSkuMetricSelectionState(
+        preservedSkuMetricSelection || (persisted && persisted.sku_metric_selection)
+      );
+      state.metricPresentation.migrations = {
+        incidentEffectiveShownV1: true,
+        skuPresetsSeededV1: !!(
+          preservedSkuPresets
+          || (persisted && persisted.migrations && persisted.migrations.skuPresetsSeededV1)
+        )
+      };
+      ensureDefaultSkuMetricPreset();
       if (!forceDefault && shouldAutoSyncSkuPresentationFromTotal(persisted)) {
         applySkuMetricPresentationFromTotal({manual: false, render: false, persist: false});
       }
@@ -9659,8 +10155,17 @@
       });
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation({skipServer: true});
-      if (persistedCandidate.source === "local_migration") {
-        persistMetricPresentation({serverBaseRevision: 0});
+      if (
+        persistedCandidate.source === "local_migration"
+        || requiresIncidentEffectiveMigration
+        || requiresSkuPresetSeedMigration
+        || (persisted && Number(persisted.version) < METRIC_PRESENTATION_VERSION)
+      ) {
+        persistMetricPresentation({
+          serverBaseRevision: persistedCandidate.source === "local_migration"
+            ? 0
+            : Number(state.metricPresentation.serverConfig.revision || 0)
+        });
       }
       renderMetricPresentationPanel(payload);
     }
@@ -9670,10 +10175,7 @@
       (state.metricPresentation.scopes || []).forEach(function(scope) {
         const display = {};
         (scope.metricKeys || []).forEach(function(metricKey) {
-          const status = metricDisplayStatusForScope(scope.scopeId, metricKey);
-          if (status !== "shown") {
-            display[metricKey] = status;
-          }
+          display[metricKey] = metricDisplayStatusForScope(scope.scopeId, metricKey);
         });
         scopes[scope.scopeId] = {
           order: (state.metricPresentation.orderByScope[scope.scopeId] || scope.metricKeys || []).slice(),
@@ -9682,10 +10184,66 @@
         };
       });
       return {
-        version: 2,
+        version: METRIC_PRESENTATION_VERSION,
         scopes: scopes,
-        expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || [])
+        expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || []),
+        sku_presets: (state.metricPresentation.skuPresets || []).map(function(preset) {
+          return {
+            preset_id: String(preset.presetId || ""),
+            name: String(preset.name || ""),
+            metric_keys: uniqueMetricKeys(preset.metricKeys, 500)
+          };
+        }),
+        sku_metric_selection: {
+          mode: String((state.metricPresentation.skuMetricSelection || {}).mode || "manual"),
+          preset_id: String((state.metricPresentation.skuMetricSelection || {}).presetId || ""),
+          all: !!(state.metricPresentation.skuMetricSelection || {}).all,
+          metric_keys: uniqueMetricKeys((state.metricPresentation.skuMetricSelection || {}).metricKeys, 500)
+        },
+        migrations: {
+          incident_effective_shown_v1: true,
+          sku_presets_seeded_v1: true
+        }
       };
+    }
+
+    function normalizeSkuMetricSelectionState(candidate) {
+      const source = candidate && typeof candidate === "object" ? candidate : {};
+      let mode = String(source.mode || "manual") === "preset" ? "preset" : "manual";
+      let presetId = String(source.presetId || source.preset_id || "").trim().slice(0, 80);
+      if (
+        mode === "preset"
+        && !(state.metricPresentation.skuPresets || []).some(function(preset) {
+          return preset.presetId === presetId;
+        })
+      ) {
+        mode = "manual";
+        presetId = "";
+      }
+      return {
+        mode: mode,
+        presetId: presetId,
+        all: source.all !== false,
+        metricKeys: uniqueMetricKeys(source.metricKeys || source.metric_keys, 500)
+      };
+    }
+
+    function ensureDefaultSkuMetricPreset() {
+      if (
+        (state.metricPresentation.skuPresets || []).length
+        || (state.metricPresentation.migrations || {}).skuPresetsSeededV1
+      ) {
+        return;
+      }
+      const metricKeys = metricPresentationScopeOrder("sku").filter(function(metricKey) {
+        return metricDisplayStatusForScope("sku", metricKey) !== "hidden";
+      });
+      state.metricPresentation.skuPresets = [{
+        presetId: DEFAULT_SKU_METRIC_PRESET_ID,
+        name: "Анализ",
+        metricKeys: metricKeys
+      }];
+      state.metricPresentation.migrations.skuPresetsSeededV1 = true;
     }
 
     function writeMetricPresentationLocalCache(storageKey, payload) {
@@ -9796,7 +10354,21 @@
     }
 
     function resetMetricPresentationToDefault(payload) {
-      initializeMetricPresentation(payload, {forceDefault: true});
+      const preservedSkuPresets = (state.metricPresentation.skuPresets || []).map(function(preset) {
+        return {
+          presetId: preset.presetId,
+          name: preset.name,
+          metricKeys: (preset.metricKeys || []).slice()
+        };
+      });
+      const preservedSkuMetricSelection = Object.assign({}, state.metricPresentation.skuMetricSelection || {}, {
+        metricKeys: ((state.metricPresentation.skuMetricSelection || {}).metricKeys || []).slice()
+      });
+      initializeMetricPresentation(payload, {
+        forceDefault: true,
+        preservedSkuPresets: preservedSkuPresets,
+        preservedSkuMetricSelection: preservedSkuMetricSelection
+      });
       persistMetricPresentation();
     }
 
@@ -9847,7 +10419,7 @@
       }
       const scopes = persisted && persisted.scopes && typeof persisted.scopes === "object" ? persisted.scopes : {};
       const totalIsCustom = persistedScopeHasCustomPresentation(scopes.total, totalDefaultOrder);
-      const skuIsCustom = persistedScopeHasCustomPresentation(scopes.sku, skuDefaultOrder);
+      const skuIsCustom = !!(scopes.sku && scopes.sku.manual);
       return totalIsCustom && !skuIsCustom;
     }
 
@@ -9973,6 +10545,9 @@
         markMetricPresentationScopeManual("sku");
       }
       pruneExpandedMetricPresentationAnchors();
+      if (state.composition) {
+        refreshSkuMetricFilterState(state.composition);
+      }
       if (normalizedOptions.persist !== false) {
         persistMetricPresentation();
       }
@@ -10337,6 +10912,9 @@
       });
       markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
+      if (String(scopeId || "") === "sku" && state.composition) {
+        refreshSkuMetricFilterState(state.composition);
+      }
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
       renderTable();
@@ -10353,6 +10931,9 @@
       setMetricDisplayStatusForScope(scopeId, metricKey, status);
       markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
+      if (String(scopeId || "") === "sku" && state.composition) {
+        refreshSkuMetricFilterState(state.composition);
+      }
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
       renderTable();
@@ -10392,6 +10973,9 @@
       state.metricPresentation.orderByScope[scopeId] = remaining;
       markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
+      if (String(scopeId || "") === "sku" && state.composition) {
+        refreshSkuMetricFilterState(state.composition);
+      }
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
       renderTable();
@@ -11878,10 +12462,275 @@
       return parts.join(" · ");
     }
 
+    function skuMetricPresetById(presetId) {
+      const normalizedPresetId = String(presetId || "");
+      return (state.metricPresentation.skuPresets || []).find(function(preset) {
+        return String(preset.presetId || "") === normalizedPresetId;
+      }) || null;
+    }
+
+    function eligibleSkuMetricKeys(candidate) {
+      const allowed = new Set(state.filters.metricKeys || metricFilterKeys(state.composition));
+      return uniqueMetricKeys(candidate, 500).filter(function(metricKey) {
+        return allowed.has(metricKey);
+      });
+    }
+
+    function generateSkuMetricPresetId() {
+      let suffix = "";
+      if (window.crypto && window.crypto.getRandomValues) {
+        const values = new Uint32Array(2);
+        window.crypto.getRandomValues(values);
+        suffix = Array.from(values).map(function(value) {
+          return value.toString(36);
+        }).join("-");
+      } else {
+        suffix = Math.random().toString(36).slice(2, 12);
+      }
+      return "preset-" + Date.now().toString(36) + "-" + suffix;
+    }
+
+    function loadSkuPresetEditor(presetId, options) {
+      const preset = skuMetricPresetById(presetId);
+      const isNew = !!(options && options.isNew) || !preset;
+      const initialMetricKeys = isNew
+        ? Array.from(state.filters.selectedMetricKeys || metricFilterKeys(state.composition))
+        : (preset.metricKeys || []).slice();
+      state.metricPresentation.presetEditor.presetId = isNew ? "" : preset.presetId;
+      state.metricPresentation.presetEditor.isNew = isNew;
+      state.metricPresentation.presetEditor.name = isNew ? "" : preset.name;
+      state.metricPresentation.presetEditor.search = "";
+      state.metricPresentation.presetEditor.metricKeys = new Set(eligibleSkuMetricKeys(initialMetricKeys));
+      state.metricPresentation.presetEditor.error = "";
+      renderSkuPresetEditor();
+    }
+
+    function openSkuPresetModal() {
+      if (!skuPresetModalNode) {
+        return;
+      }
+      setSkuMetricPickerOpen(false);
+      state.metricPresentation.presetEditor.open = true;
+      state.metricPresentation.presetEditor.opener = document.activeElement;
+      const activePreset = skuMetricPresetById(state.filters.activeMetricPresetId);
+      const firstPreset = activePreset || (state.metricPresentation.skuPresets || [])[0] || null;
+      loadSkuPresetEditor(firstPreset ? firstPreset.presetId : "", {isNew: !firstPreset});
+      skuPresetModalNode.hidden = false;
+      window.setTimeout(function() {
+        if (skuPresetNameNode) {
+          skuPresetNameNode.focus();
+          skuPresetNameNode.select();
+        }
+      }, 0);
+    }
+
+    function closeSkuPresetModal() {
+      if (!skuPresetModalNode) {
+        return;
+      }
+      const opener = state.metricPresentation.presetEditor.opener;
+      state.metricPresentation.presetEditor.open = false;
+      state.metricPresentation.presetEditor.error = "";
+      state.metricPresentation.presetEditor.opener = null;
+      skuPresetModalNode.hidden = true;
+      if (opener && typeof opener.focus === "function") {
+        opener.focus();
+      }
+    }
+
+    function renderSkuPresetEditor() {
+      if (!skuPresetModalNode || skuPresetModalNode.hidden && !state.metricPresentation.presetEditor.open) {
+        return;
+      }
+      const editor = state.metricPresentation.presetEditor;
+      if (skuPresetListNode) {
+        const parts = (state.metricPresentation.skuPresets || []).map(function(preset) {
+          return [
+            '<button class="sku-preset-list-item' + (!editor.isNew && editor.presetId === preset.presetId ? " is-active" : "") + '" type="button" data-sku-preset-edit="' + escapeHtml(preset.presetId) + '">',
+            escapeHtml(preset.name),
+            "</button>"
+          ].join("");
+        });
+        skuPresetListNode.innerHTML = parts.join("") || '<p class="filter-summary">Сохранённых пресетов пока нет.</p>';
+      }
+      if (skuPresetNameNode && document.activeElement !== skuPresetNameNode) {
+        skuPresetNameNode.value = editor.name;
+      }
+      if (skuPresetSearchNode && document.activeElement !== skuPresetSearchNode) {
+        skuPresetSearchNode.value = editor.search;
+      }
+      if (skuPresetDeleteButton) {
+        skuPresetDeleteButton.disabled = editor.isNew || !editor.presetId;
+      }
+      if (skuPresetSaveButton) {
+        skuPresetSaveButton.disabled = false;
+      }
+      if (skuPresetErrorNode) {
+        skuPresetErrorNode.textContent = editor.error || "";
+      }
+      renderSkuPresetMembers();
+    }
+
+    function renderSkuPresetMembers() {
+      if (!skuPresetMembersNode) {
+        return;
+      }
+      const editor = state.metricPresentation.presetEditor;
+      const searchNeedle = String(editor.search || "").trim().toLowerCase();
+      const grouped = new Map();
+      skuMetricFilterOptions(state.composition).forEach(function(option) {
+        const label = String(option.label || option.value || "");
+        const groupLabel = String(option.section_label || "Без группы");
+        const haystack = (label + " " + groupLabel + " " + String(option.value || "")).toLowerCase();
+        if (searchNeedle && haystack.indexOf(searchNeedle) === -1) {
+          return;
+        }
+        if (!grouped.has(groupLabel)) {
+          grouped.set(groupLabel, []);
+        }
+        grouped.get(groupLabel).push(option);
+      });
+      const parts = [];
+      grouped.forEach(function(options, groupLabel) {
+        parts.push(
+          '<section class="sku-preset-group"><h4 class="sku-preset-group-title">'
+          + escapeHtml(groupLabel)
+          + "</h4>"
+          + options.map(function(option) {
+              const metricKey = String(option.value || "");
+              return [
+                '<label class="sku-preset-member">',
+                '<input type="checkbox" data-sku-preset-member="' + escapeHtml(metricKey) + '"' + (editor.metricKeys.has(metricKey) ? " checked" : "") + ">",
+                "<span>" + escapeHtml(String(option.label || metricKey)) + "</span>",
+                "</label>"
+              ].join("");
+            }).join("")
+          + "</section>"
+        );
+      });
+      skuPresetMembersNode.innerHTML = parts.join("") || '<p class="filter-summary">Метрики не найдены.</p>';
+    }
+
+    function handleSkuPresetModalClick(event) {
+      if (event.target === skuPresetModalNode || event.target.closest("[data-sku-preset-close]")) {
+        event.preventDefault();
+        closeSkuPresetModal();
+        return;
+      }
+      const editButton = event.target.closest("[data-sku-preset-edit]");
+      if (editButton) {
+        event.preventDefault();
+        loadSkuPresetEditor(String(editButton.getAttribute("data-sku-preset-edit") || ""));
+        return;
+      }
+      if (event.target.closest("[data-sku-preset-new]")) {
+        event.preventDefault();
+        loadSkuPresetEditor("", {isNew: true});
+        if (skuPresetNameNode) {
+          skuPresetNameNode.focus();
+        }
+        return;
+      }
+      if (event.target.closest("[data-sku-preset-save]")) {
+        event.preventDefault();
+        saveSkuMetricPreset();
+        return;
+      }
+      if (event.target.closest("[data-sku-preset-delete]")) {
+        event.preventDefault();
+        deleteSkuMetricPreset();
+      }
+    }
+
+    function handleSkuPresetModalChange(event) {
+      const checkbox = event.target.closest("[data-sku-preset-member]");
+      if (!checkbox) {
+        return;
+      }
+      const metricKey = String(checkbox.getAttribute("data-sku-preset-member") || "");
+      if (checkbox.checked) {
+        state.metricPresentation.presetEditor.metricKeys.add(metricKey);
+      } else {
+        state.metricPresentation.presetEditor.metricKeys.delete(metricKey);
+      }
+      state.metricPresentation.presetEditor.error = "";
+      if (skuPresetErrorNode) {
+        skuPresetErrorNode.textContent = "";
+      }
+    }
+
+    function saveSkuMetricPreset() {
+      const editor = state.metricPresentation.presetEditor;
+      const name = String(skuPresetNameNode ? skuPresetNameNode.value : editor.name || "").trim().slice(0, 80);
+      editor.name = name;
+      const metricKeys = eligibleSkuMetricKeys(Array.from(editor.metricKeys || []));
+      if (!name) {
+        editor.error = "Введите название пресета.";
+        renderSkuPresetEditor();
+        return;
+      }
+      const duplicate = (state.metricPresentation.skuPresets || []).find(function(preset) {
+        return preset.presetId !== editor.presetId
+          && String(preset.name || "").trim().toLowerCase() === name.toLowerCase();
+      });
+      if (duplicate) {
+        editor.error = "Пресет с таким названием уже существует.";
+        renderSkuPresetEditor();
+        return;
+      }
+      if (!metricKeys.length) {
+        editor.error = "Выберите хотя бы одну доступную метрику.";
+        renderSkuPresetEditor();
+        return;
+      }
+      const presetId = editor.isNew ? generateSkuMetricPresetId() : editor.presetId;
+      const nextPreset = {presetId: presetId, name: name, metricKeys: metricKeys};
+      const presets = (state.metricPresentation.skuPresets || []).slice();
+      const index = presets.findIndex(function(preset) { return preset.presetId === presetId; });
+      if (index === -1) {
+        presets.push(nextPreset);
+      } else {
+        presets[index] = nextPreset;
+      }
+      state.metricPresentation.skuPresets = presets;
+      state.metricPresentation.migrations.skuPresetsSeededV1 = true;
+      state.filters.draftMetricSelectionMode = "preset";
+      state.filters.draftMetricPresetId = presetId;
+      state.filters.draftMetricAll = false;
+      state.filters.draftMetricKeys = new Set(metricKeys);
+      applySkuMetricSelection();
+      renderSkuMetricOptions(state.composition);
+      closeSkuPresetModal();
+    }
+
+    function deleteSkuMetricPreset() {
+      const editor = state.metricPresentation.presetEditor;
+      if (editor.isNew || !editor.presetId) {
+        return;
+      }
+      const deletedPresetId = editor.presetId;
+      state.metricPresentation.skuPresets = (state.metricPresentation.skuPresets || []).filter(function(preset) {
+        return preset.presetId !== deletedPresetId;
+      });
+      if (
+        state.filters.activeMetricSelectionMode === "preset"
+        && state.filters.activeMetricPresetId === deletedPresetId
+      ) {
+        resetMetricSelectionToAll(state.composition);
+      }
+      state.metricPresentation.migrations.skuPresetsSeededV1 = true;
+      persistMetricPresentation();
+      renderSkuMetricOptions(state.composition);
+      const nextPreset = (state.metricPresentation.skuPresets || [])[0] || null;
+      loadSkuPresetEditor(nextPreset ? nextPreset.presetId : "", {isNew: !nextPreset});
+      renderTable();
+    }
+
     function renderSkuMetricOptions(payload) {
       if (!skuMetricOptionsNode) {
         return;
       }
+      renderSkuMetricSelectionModes();
       const options = skuMetricFilterOptions(payload);
       const parts = [
         '<label class="sku-metric-option sku-metric-option-all">',
@@ -11912,6 +12761,60 @@
       syncMetricControlValues();
     }
 
+    function renderSkuMetricSelectionModes() {
+      if (!skuMetricSelectionModesNode) {
+        return;
+      }
+      const draftMode = String(state.filters.draftMetricSelectionMode || "manual");
+      const draftPresetId = String(state.filters.draftMetricPresetId || "");
+      const parts = [
+        '<button class="sku-metric-mode' + (draftMode === "manual" ? " is-active" : "") + '" type="button" data-sku-metric-mode="manual">',
+        "<span>Ручной выбор</span>",
+        '<span class="sku-metric-mode-count">' + escapeHtml(
+          state.filters.draftMetricAll
+            ? "все"
+            : String((state.filters.draftMetricKeys || new Set()).size)
+        ) + "</span>",
+        "</button>"
+      ];
+      (state.metricPresentation.skuPresets || []).forEach(function(preset) {
+        const eligibleCount = eligibleSkuMetricKeys(preset.metricKeys).length;
+        parts.push([
+          '<button class="sku-metric-mode' + (draftMode === "preset" && draftPresetId === preset.presetId ? " is-active" : "") + '" type="button" data-sku-metric-mode="preset" data-sku-metric-preset-id="' + escapeHtml(preset.presetId) + '">',
+          "<span>" + escapeHtml(preset.name) + "</span>",
+          '<span class="sku-metric-mode-count">' + escapeHtml(String(eligibleCount)) + "</span>",
+          "</button>"
+        ].join(""));
+      });
+      skuMetricSelectionModesNode.innerHTML = parts.join("");
+    }
+
+    function handleSkuMetricSelectionModeClick(event) {
+      const button = event.target.closest("[data-sku-metric-mode]");
+      if (!button) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const mode = String(button.getAttribute("data-sku-metric-mode") || "manual");
+      if (mode === "preset") {
+        const presetId = String(button.getAttribute("data-sku-metric-preset-id") || "");
+        const preset = skuMetricPresetById(presetId);
+        if (!preset) {
+          return;
+        }
+        const selected = eligibleSkuMetricKeys(preset.metricKeys);
+        state.filters.draftMetricSelectionMode = "preset";
+        state.filters.draftMetricPresetId = presetId;
+        state.filters.draftMetricAll = false;
+        state.filters.draftMetricKeys = new Set(selected);
+      } else {
+        state.filters.draftMetricSelectionMode = "manual";
+        state.filters.draftMetricPresetId = "";
+      }
+      renderSkuMetricOptions(state.composition);
+    }
+
     function attachMetricFilterListeners() {
       if (!skuMetricOptionsNode) {
         return;
@@ -11932,6 +12835,8 @@
     }
 
     function updateAllMetricSelection(checked) {
+      state.filters.draftMetricSelectionMode = "manual";
+      state.filters.draftMetricPresetId = "";
       state.filters.draftMetricAll = true;
       state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
@@ -11943,6 +12848,8 @@
         return;
       }
       const selected = new Set(state.filters.draftMetricKeys || []);
+      state.filters.draftMetricSelectionMode = "manual";
+      state.filters.draftMetricPresetId = "";
       if (checked) {
         selected.add(metricKey);
       } else {
@@ -11956,7 +12863,15 @@
 
     function applySkuMetricSelection() {
       const metricKeys = state.filters.metricKeys || [];
-      if (state.filters.draftMetricAll || !(state.filters.draftMetricKeys || new Set()).size) {
+      if (state.filters.draftMetricSelectionMode === "preset") {
+        const allowed = new Set(metricKeys);
+        state.filters.selectedMetricKeys = new Set(
+          Array.from(state.filters.draftMetricKeys || []).filter(function(metricKey) {
+            return allowed.has(metricKey);
+          })
+        );
+        state.filters.draftMetricAll = false;
+      } else if (state.filters.draftMetricAll || !(state.filters.draftMetricKeys || new Set()).size) {
         state.filters.selectedMetricKeys = new Set(metricKeys);
         state.filters.draftMetricAll = true;
         state.filters.draftMetricKeys = new Set();
@@ -11973,6 +12888,20 @@
           state.filters.draftMetricKeys = new Set();
         }
       }
+      state.filters.activeMetricSelectionMode = String(state.filters.draftMetricSelectionMode || "manual");
+      state.filters.activeMetricPresetId = state.filters.activeMetricSelectionMode === "preset"
+        ? String(state.filters.draftMetricPresetId || "")
+        : "";
+      state.metricPresentation.skuMetricSelection = {
+        mode: state.filters.activeMetricSelectionMode,
+        presetId: state.filters.activeMetricPresetId,
+        all: state.filters.activeMetricSelectionMode === "manual"
+          && state.filters.selectedMetricKeys.size >= metricKeys.length,
+        metricKeys: state.filters.activeMetricSelectionMode === "manual"
+          ? Array.from(state.filters.selectedMetricKeys || [])
+          : []
+      };
+      persistMetricPresentation();
       state.filters.metric = ALL_VALUE;
       setSkuMetricPickerOpen(false);
       syncMetricControlValues();
@@ -11981,11 +12910,19 @@
 
     function resetSkuMetricSelection() {
       resetMetricSelectionToAll(state.composition);
+      persistMetricPresentation();
+      renderSkuMetricOptions(state.composition);
       syncMetricControlValues();
       renderTable();
     }
 
     function metricSummaryLabel() {
+      if (state.filters.activeMetricSelectionMode === "preset") {
+        const preset = skuMetricPresetById(state.filters.activeMetricPresetId);
+        if (preset) {
+          return "SKU-метрики: " + preset.name;
+        }
+      }
       const totalCount = (state.filters.metricKeys || []).length;
       const selectedCount = (state.filters.selectedMetricKeys || new Set()).size;
       if (selectedCount === totalCount) {
@@ -11995,6 +12932,12 @@
     }
 
     function draftMetricSummaryLabel() {
+      if (state.filters.draftMetricSelectionMode === "preset") {
+        const preset = skuMetricPresetById(state.filters.draftMetricPresetId);
+        if (preset) {
+          return "SKU-метрики: " + preset.name;
+        }
+      }
       if (state.filters.draftMetricAll || !(state.filters.draftMetricKeys || new Set()).size) {
         return "SKU-метрики: все";
       }
@@ -12020,6 +12963,7 @@
         return;
       }
       const draftKeys = state.filters.draftMetricKeys || new Set();
+      renderSkuMetricSelectionModes();
       skuMetricOptionsNode.querySelectorAll("[data-sku-metric-all]").forEach(function(node) {
         node.checked = !!state.filters.draftMetricAll || draftKeys.size === 0;
       });
