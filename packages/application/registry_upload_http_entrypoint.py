@@ -3228,6 +3228,33 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_regional_recommendations_zip_request(self) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_all_recommendations_archive()
 
+    def handle_supply_calculation_registry_list_request(
+        self,
+        query: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.runtime.list_supply_calculation_registry(
+            calculation_type=str(query.get("calculation_type") or query.get("type") or "") or None,
+            report_date_from=str(query.get("report_date_from") or query.get("date_from") or "") or None,
+            report_date_to=str(query.get("report_date_to") or query.get("date_to") or "") or None,
+            limit=int(query.get("limit") or 25),
+            offset=int(query.get("offset") or 0),
+        )
+
+    def handle_supply_calculation_registry_detail_request(
+        self,
+        record_id: str,
+    ) -> dict[str, Any]:
+        record = self.runtime.load_supply_calculation_registry_record(record_id)
+        if record is None:
+            raise KeyError(str(record_id or "").strip())
+        return record
+
+    def handle_supply_calculation_registry_download_request(
+        self,
+        record_id: str,
+    ) -> tuple[bytes, str, str]:
+        return self.runtime.load_supply_calculation_registry_export(record_id)
+
     def handle_wb_regional_planning_options_request(
         self,
         payload: Mapping[str, Any],

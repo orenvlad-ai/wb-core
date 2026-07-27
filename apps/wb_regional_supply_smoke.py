@@ -138,6 +138,7 @@ def main() -> None:
         active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
         _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
         _seed_runtime_stock_history(runtime, active_nm_ids=active_nm_ids)
+        _seed_export_nomenclature(runtime, active_nm_ids=active_nm_ids)
 
         factory_block = FactoryOrderSupplyBlock(
             runtime=runtime,
@@ -333,6 +334,7 @@ def main() -> None:
         )
 
         legacy_saved_payload = asdict(result)
+        legacy_saved_payload["calculation_id"] = "legacy-saved-regional-smoke"
         legacy_saved_payload["settings"].pop("lead_time_to_region_days_by_district", None)
         legacy_saved_payload["diagnostics"].pop("lead_time_to_region_days_by_district", None)
         for district_payload in legacy_saved_payload.get("districts", []):
@@ -715,7 +717,6 @@ def main() -> None:
         else:
             raise AssertionError("excluded district direct download must be blocked")
 
-        _seed_export_nomenclature(runtime, active_nm_ids=active_nm_ids)
         archive_bytes, archive_filename = regional_block.download_all_recommendations_archive()
         if (
             not archive_filename.startswith("Рекомендации_поставок_2026-04-18_14-00_")
@@ -802,6 +803,59 @@ def main() -> None:
         south_allocated_sum = sum(int(row[2]) for row in south_rows[3:] if len(row) >= 3 and str(row[2]).strip())
         if south_allocated_sum != seed_districts["south_caucasus"].total_qty:
             raise AssertionError("district XLSX total must include seed-floor qty")
+
+        latest_before_export_failure = runtime.load_wb_regional_supply_result_state()
+        registry_total_before_export_failure = runtime.list_supply_calculation_registry(
+            calculation_type="wb_regional",
+            limit=1,
+        )["pagination"]["total"]
+        broken_nomenclature = runtime.list_nomenclature_items(active_only=True)
+        for item in broken_nomenclature:
+            if int(item.get("nm_id") or 0) == MAIN_NM_ID:
+                item["barcode"] = ""
+                item["barcodes"] = []
+                item["barcode_status"] = "missing"
+        runtime.save_nomenclature_items_atomic(broken_nomenclature)
+        try:
+            regional_block.calculate(
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [
+                        PLANNING_ZONE_CENTRAL_NORTH,
+                        DISTRICT_NORTHWEST,
+                        "south_caucasus",
+                    ],
+                }
+            )
+        except ValueError as exc:
+            if (
+                "отсутствует баркод" not in str(exc)
+                and "баркод имеет неподтверждённый статус" not in str(exc)
+            ):
+                raise AssertionError(
+                    f"historical ZIP build failure must stay explicit: {exc}"
+                ) from exc
+        else:
+            raise AssertionError(
+                "regional calculate must fail before persistence when exact ZIP cannot be built"
+            )
+        if (
+            runtime.load_wb_regional_supply_result_state()
+            != latest_before_export_failure
+            or runtime.list_supply_calculation_registry(
+                calculation_type="wb_regional",
+                limit=1,
+            )["pagination"]["total"]
+            != registry_total_before_export_failure
+        ):
+            raise AssertionError(
+                "regional export-build failure must leave latest and immutable history unchanged"
+            )
 
         print(f"shared_stock_ff_reuse: ok -> {regional_status.shared_datasets['stock_ff'].uploaded_filename}")
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")

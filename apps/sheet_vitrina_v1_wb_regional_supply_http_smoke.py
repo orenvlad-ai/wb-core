@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -28,6 +29,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SUPPLY_CALCULATIONS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
@@ -92,7 +94,17 @@ class FakeStocksBlock:
                     stock_ru_central_south=500.0 if nm_id == MAIN_NM_ID else 0.0,
                 )
             )
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                items=items,
+                warehouse_rows=[],
+                snapshot_date="2026-04-18",
+                fetched_at="2026-04-18T09:00:00Z",
+                pagination_complete=True,
+                raw_rows_digest="sha256:wb-regional-http-smoke",
+            )
+        )
 
 
 class NoopSalesHistoryBlock:
@@ -166,6 +178,7 @@ def main() -> None:
             active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
             _seed_runtime_stock_history(runtime, active_nm_ids=active_nm_ids)
+            _seed_planning_nomenclature(runtime, active_nm_ids=active_nm_ids)
             entrypoint.wb_regional_supply_block.stocks_block = FakeStocksBlock(active_nm_ids)
             entrypoint.wb_regional_supply_block.sales_funnel_history_block = NoopSalesHistoryBlock()
             entrypoint.wb_regional_supply_block.sales_history.sales_funnel_history_block = NoopSalesHistoryBlock()
@@ -303,7 +316,6 @@ def main() -> None:
             if int(central_main_row.get("lead_time_to_region_days", 0)) != 2:
                 raise AssertionError("legacy scalar lead time must be exposed on HTTP district rows")
 
-            _seed_planning_nomenclature(runtime, active_nm_ids=active_nm_ids)
             planning_status, planning_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH}",
                 {
@@ -570,6 +582,87 @@ def main() -> None:
                                 raise AssertionError(f"ZIP WB workbook {name} must contain positive recommendation rows")
                         finally:
                             workbook.close()
+
+            registry_status, registry_payload = _get_json(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}"
+                "?calculation_type=wb_regional&report_date_from=2026-04-18"
+                "&report_date_to=2026-04-18&limit=100"
+            )
+            selected_calculation_id = str(
+                selected_payload.get("calculation_id") or ""
+            )
+            registry_row = next(
+                (
+                    item
+                    for item in registry_payload.get("records", [])
+                    if item.get("calculation_id") == selected_calculation_id
+                ),
+                None,
+            )
+            if (
+                registry_status != 200
+                or not registry_row
+                or not registry_row.get("is_reproducible")
+                or not registry_row.get("download_available")
+            ):
+                raise AssertionError(
+                    f"regional calculation registry list must expose the immutable result: "
+                    f"{registry_status} {registry_payload}"
+                )
+            registry_detail_status, registry_detail = _get_json(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}/{selected_calculation_id}"
+            )
+            historical_payload = registry_detail.get("payload") or {}
+            selected_payload_for_registry_compare = json.loads(
+                json.dumps(selected_payload)
+            )
+            for district in selected_payload_for_registry_compare.get(
+                "districts", []
+            ):
+                district.pop("download_path", None)
+            mismatched_payload_fields = [
+                key
+                for key in (
+                    "settings",
+                    "summary",
+                    "districts",
+                    "wb_supply_overlay",
+                )
+                if historical_payload.get(key)
+                != selected_payload_for_registry_compare.get(key)
+            ]
+            if (
+                registry_detail_status != 200
+                or historical_payload.get("calculation_id")
+                != selected_calculation_id
+                or mismatched_payload_fields
+                or not (registry_detail.get("evidence") or {}).get("sources")
+                or not (
+                    (registry_detail.get("evidence") or {})
+                    .get("calculation_inputs", {})
+                    .get("regional_demand_by_nm_fingerprint")
+                )
+            ):
+                raise AssertionError(
+                    "regional registry detail must round-trip exact settings, summary, "
+                    f"districts, overlay and evidence: {registry_detail_status}; "
+                    f"mismatched={mismatched_payload_fields}"
+                )
+            historical_status, historical_bytes, historical_headers = _get_bytes(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}/"
+                f"{selected_calculation_id}/download"
+            )
+            if (
+                historical_status != 200
+                or historical_bytes != zip_bytes
+                or "sha256:" + hashlib.sha256(historical_bytes).hexdigest()
+                != registry_detail.get("export_sha256")
+                or str(historical_headers.get("Content-Type", "")).split(";")[0]
+                != "application/zip"
+            ):
+                raise AssertionError(
+                    "regional current and historical downloads must return the same saved ZIP snapshot"
+                )
 
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
             _seed_runtime_stock_history(

@@ -28,6 +28,9 @@ from packages.application.stocks_block import (
     build_wb_warehouse_exclusion,
     parse_excluded_wb_warehouse_ids,
 )
+from packages.application.supply_calculation_registry import (
+    build_factory_order_calculation_evidence,
+)
 from packages.application.wb_incident_policy import build_incident_stock_projection
 from packages.application.stock_ff_onec_source import (
     ONEC_FF_STOCK_QTY_METRIC_KEY,
@@ -633,9 +636,30 @@ class FactoryOrderSupplyBlock:
             wb_warehouse_exclusion=wb_warehouse_exclusion,
             warnings=result_warnings,
         )
+        recommendation_bytes, recommendation_filename = self._build_recommendation_workbook(result)
+        calculation_evidence = build_factory_order_calculation_evidence(
+            runtime=self.runtime,
+            active_skus=active_skus,
+            report_date=report_date_obj,
+            sales_lookup_days=sales_lookup_days,
+            order_count_samples_by_nm=order_counts_by_nm,
+            stock_response=stock_response,
+            incident_projection=wb_warehouse_exclusion,
+            stock_ff_source=stock_ff_source,
+            stock_ff_rows=stock_ff_rows,
+            factory_inbound_source=factory_inbound_source,
+            effective_inbound_factory_rows=effective_inbound_factory_rows,
+            selected_wb_supply_ids=selected_wb_supply_ids,
+            wb_supply_overlay=wb_supply_overlay_payload,
+            dataset_types=_DATASET_LABELS,
+        )
         self.runtime.save_factory_order_result_state(
             calculated_at=result.calculated_at,
             payload=asdict(result),
+            evidence=calculation_evidence,
+            export_bytes=recommendation_bytes,
+            export_filename=recommendation_filename,
+            export_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         return result
 
@@ -643,6 +667,25 @@ class FactoryOrderSupplyBlock:
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта ещё не подготовлен")
+        registry_record = self.runtime.load_supply_calculation_registry_record(
+            result.calculation_id
+        )
+        if (
+            isinstance(registry_record, Mapping)
+            and registry_record.get("download_available")
+        ):
+            export_bytes, export_filename, _ = (
+                self.runtime.load_supply_calculation_registry_export(
+                    result.calculation_id
+                )
+            )
+            return export_bytes, export_filename
+        return self._build_recommendation_workbook(result)
+
+    def _build_recommendation_workbook(
+        self,
+        result: FactoryOrderCalculationResult,
+    ) -> tuple[bytes, str]:
         workbook_rows: list[list[Any]] = [_RESULT_HEADERS]
         workbook_rows.extend(
             [[item.nm_id, item.sku_comment, item.recommended_order_qty] for item in result.rows]

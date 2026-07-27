@@ -158,6 +158,7 @@ def _run_parallel_wait_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
                 "status": "success",
                 "calculation_id": "factory-contention",
                 "calculated_at": STAMP,
+                "report_date": "2026-07-26",
             },
         ),
         "supplier-financial/confirm": lambda: _bank_confirm_write(runtime),
@@ -241,6 +242,7 @@ def _run_parallel_wait_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
             "status": "success",
             "calculation_id": "factory-during-autoanswers-writer",
             "calculated_at": STAMP,
+            "report_date": "2026-07-26",
         },
     )
     if time.monotonic() - main_write_started >= 2:

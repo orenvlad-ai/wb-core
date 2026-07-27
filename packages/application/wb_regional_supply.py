@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 from io import BytesIO
 import math
 from typing import Any, Mapping
@@ -21,6 +22,9 @@ from packages.application.stocks_block import (
     StocksBlock,
     build_wb_warehouse_exclusion,
     parse_excluded_wb_warehouse_ids,
+)
+from packages.application.supply_calculation_registry import (
+    build_wb_regional_calculation_evidence,
 )
 from packages.application.wb_incident_policy import build_incident_stock_projection
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
@@ -682,9 +686,45 @@ class WbRegionalSupplyBlock:
         self._validate_result_consistency(result)
         for district in result.districts:
             self._build_district_workbook_bytes(district)
+        raw_result = asdict(result)
+        export_nomenclature_items = self.runtime.list_nomenclature_items(active_only=True)
+        archive_name = archive_filename(
+            report_date=result.report_date,
+            calculated_at=result.calculated_at,
+            calculation_id=result.calculation_id,
+        )
+        archive_bytes, archive_name = self._build_all_recommendations_archive(
+            raw_result=raw_result,
+            result=result,
+            nomenclature_items=export_nomenclature_items,
+        )
+        calculation_evidence = build_wb_regional_calculation_evidence(
+            runtime=self.runtime,
+            active_skus=active_skus,
+            report_date=report_date_obj,
+            requested_valid_day_count=settings.sales_avg_period_days,
+            regional_demand_by_nm=regional_demand_by_nm,
+            stock_response=stock_response,
+            incident_projection=wb_warehouse_exclusion,
+            stock_ff_source=stock_ff_source,
+            stock_ff_rows=stock_ff_rows,
+            selected_wb_supply_ids=selected_wb_supply_ids,
+            wb_supply_overlay=wb_supply_overlay_payload,
+            dataset_types=(DATASET_STOCK_FF,),
+            export_nomenclature_items=export_nomenclature_items,
+        )
+        calculation_evidence["historical_export"] = {
+            "status": "ready",
+            "filename": archive_name,
+            "sha256": "sha256:" + hashlib.sha256(archive_bytes).hexdigest(),
+        }
         self.runtime.save_wb_regional_supply_result_state(
             calculated_at=result.calculated_at,
-            payload=asdict(result),
+            payload=raw_result,
+            evidence=calculation_evidence,
+            export_bytes=archive_bytes,
+            export_filename=archive_name,
+            export_content_type="application/zip",
         )
         return result
 
@@ -710,6 +750,30 @@ class WbRegionalSupplyBlock:
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
+        registry_record = self.runtime.load_supply_calculation_registry_record(
+            result.calculation_id
+        )
+        if (
+            isinstance(registry_record, Mapping)
+            and registry_record.get("download_available")
+        ):
+            export_bytes, export_filename, _ = self.runtime.load_supply_calculation_registry_export(
+                result.calculation_id
+            )
+            return export_bytes, export_filename
+        return self._build_all_recommendations_archive(
+            raw_result=raw_result,
+            result=result,
+            nomenclature_items=self.runtime.list_nomenclature_items(active_only=True),
+        )
+
+    def _build_all_recommendations_archive(
+        self,
+        *,
+        raw_result: Mapping[str, Any],
+        result: WbRegionalSupplyCalculationResult,
+        nomenclature_items: list[Mapping[str, Any]],
+    ) -> tuple[bytes, str]:
         included_keys = tuple(result.settings.included_district_keys or SUPPLY_PLANNING_ZONE_KEYS)
         districts_by_key = {item.district_key: item for item in result.districts}
         included_districts = [
@@ -726,7 +790,6 @@ class WbRegionalSupplyBlock:
                 continue
             raw_key = str(item.get("district_key") or "").strip().lower()
             raw_districts_by_key.setdefault(raw_key, []).append(item)
-        nomenclature_items = self.runtime.list_nomenclature_items(active_only=True)
         archive_members: list[tuple[str, bytes]] = []
         archive_member_names: set[str] = set()
         export_errors: list[str] = []

@@ -36,9 +36,12 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
+    DEFAULT_SUPPLY_CALCULATIONS_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
+    DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
+    DEFAULT_WB_SUPPLIES_SYNC_PATH,
     _render_sheet_vitrina_operator_ui,
 )
 
@@ -310,6 +313,14 @@ class LocalOperatorFixtureServer:
                 ).encode("utf-8"),
                 HTTPStatus.OK,
             ),
+            DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH: (
+                "application/json; charset=utf-8",
+                json.dumps(
+                    _wb_supply_overlay_options_payload(),
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                HTTPStatus.OK,
+            ),
             DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH: (
                 "application/json; charset=utf-8",
                 json.dumps(
@@ -524,6 +535,68 @@ def _factory_status_payload(*, refreshed: bool) -> dict[str, object]:
     }
 
 
+def _wb_supply_overlay_options_payload() -> dict[str, object]:
+    common = {
+        "status_label": "Отгрузка разрешена",
+        "selected_date": "2026-04-22",
+        "warehouse_name": "Коледино",
+        "district_key": "central_north",
+        "usable_sku_count": 1,
+        "date_evidence": "supply_date",
+        "district_mapping_source": "warehouse_id",
+        "disabled_reasons": [],
+    }
+    return {
+        "contract_name": "sheet_vitrina_v1_wb_supply_overlay_options",
+        "contract_version": 1,
+        "eligible_status_ids": [3, 4, 6],
+        "summary": {
+            "total": 4,
+            "eligible": 2,
+            "disabled": 1,
+            "excluded_by_status": 1,
+        },
+        "warnings": [],
+        "warning_details": {},
+        "options": [
+            {
+                **common,
+                "supply_id": "supply-A",
+                "number_label": "WB-A",
+                "eligible_for_overlay": True,
+                "disabled": False,
+                "usable_total_qty": 12,
+            },
+            {
+                **common,
+                "supply_id": "supply-B",
+                "number_label": "WB-B",
+                "eligible_for_overlay": True,
+                "disabled": False,
+                "usable_total_qty": 7,
+            },
+            {
+                **common,
+                "supply_id": "supply-disabled",
+                "number_label": "WB-disabled",
+                "eligible_for_overlay": True,
+                "disabled": True,
+                "usable_total_qty": 4,
+                "disabled_reasons": ["нет usable active SKU quantity"],
+            },
+            {
+                **common,
+                "supply_id": "supply-ineligible",
+                "number_label": "WB-ineligible",
+                "status_label": "Принято",
+                "eligible_for_overlay": False,
+                "disabled": False,
+                "usable_total_qty": 20,
+            },
+        ],
+    }
+
+
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -552,6 +625,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "sku_persistence": persistence_result["sku_persistence"],
         "plan_input_defaults": persistence_result["plan_input_defaults"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
+        "wb_supply_auto_default": persistence_result[
+            "wb_supply_auto_default"
+        ],
+        "calculation_registry": persistence_result["calculation_registry"],
         "zero_selection_guard": persistence_result["zero_selection_guard"],
         "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
         "obsolete_sku_fallback": fallback_result["obsolete_sku_fallback"],
@@ -561,6 +638,25 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
 def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page = context.new_page()
+    page_errors: list[str] = []
+    target_http_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+
+    def _capture_target_response(response) -> None:
+        path = urllib_parse.urlparse(response.url).path
+        if (
+            response.status >= 400
+            and (
+                path == DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH
+                or path == DEFAULT_SUPPLY_CALCULATIONS_PATH
+                or path.startswith(DEFAULT_SUPPLY_CALCULATIONS_PATH + "/")
+                or path == DEFAULT_FACTORY_ORDER_CALCULATE_PATH
+                or path == DEFAULT_WB_REGIONAL_CALCULATE_PATH
+            )
+        ):
+            target_http_errors.append(f"{response.status} {path}")
+
+    page.on("response", _capture_target_response)
     operator_url = base_url + DEFAULT_SHEET_OPERATOR_UI_PATH
     page.goto(operator_url, wait_until="domcontentloaded")
     ff_stock_negative_row_style = _assert_ff_stock_negative_row_dark_style(page)
@@ -602,6 +698,72 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("session-check action must refresh the seller recovery summary without starting recovery")
 
     page.click('[data-tab-button="factory-order"]')
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-wb-supply-overlay-checkbox]').length === 4"
+    )
+    eligible_a = page.locator(
+        '[data-wb-supply-overlay-checkbox][value="supply-A"]'
+    )
+    eligible_b = page.locator(
+        '[data-wb-supply-overlay-checkbox][value="supply-B"]'
+    )
+    disabled_option = page.locator(
+        '[data-wb-supply-overlay-checkbox][value="supply-disabled"]'
+    )
+    ineligible_option = page.locator(
+        '[data-wb-supply-overlay-checkbox][value="supply-ineligible"]'
+    )
+    if (
+        not eligible_a.is_checked()
+        or not eligible_b.is_checked()
+        or not disabled_option.is_disabled()
+        or disabled_option.is_checked()
+        or not ineligible_option.is_disabled()
+        or ineligible_option.is_checked()
+    ):
+        raise AssertionError(
+            "first open must auto-select only backend-eligible, enabled WB supplies"
+        )
+    if "Автоматически выбрано eligible: 2" not in page.locator(
+        "#wbSupplyOverlayMessage"
+    ).inner_text():
+        raise AssertionError(
+            "operator UI must visibly explain the initial eligible auto-selection"
+        )
+    eligible_a.uncheck()
+    page.route(
+        "**" + DEFAULT_WB_SUPPLIES_SYNC_PATH,
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(
+                {
+                    "sync": {
+                        "new_rows": 0,
+                        "changed_rows": 0,
+                        "unchanged_rows": 4,
+                        "enriched": 0,
+                    }
+                }
+            ),
+        ),
+    )
+    page.click("#wbSupplyOverlayRefreshButton")
+    page.wait_for_function(
+        "() => document.getElementById('wbSupplyOverlayMessage')"
+        " && document.getElementById('wbSupplyOverlayMessage').textContent"
+        ".includes('WB-поставки обновлены')"
+    )
+    if eligible_a.is_checked() or not eligible_b.is_checked():
+        raise AssertionError(
+            "options refresh must not silently undo the operator's manual WB selection"
+        )
+    page.click('[data-supply-section-button="regional"]')
+    if eligible_a.is_checked() or not eligible_b.is_checked():
+        raise AssertionError(
+            "switching between calculation forms must preserve the manual WB selection"
+        )
+    page.click('[data-supply-section-button="factory"]')
     page.wait_for_function(
         "() => document.getElementById('supplierRegistryInboundSummaryState') && document.getElementById('supplierRegistryInboundSummaryState').textContent.includes('Доступных к factory inbound заказов: 1')"
     )
@@ -653,39 +815,213 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "() => document.getElementById('stockFfOnecDiagnostics') && document.getElementById('stockFfOnecDiagnostics').textContent.includes('готов')"
     )
     calculate_requests: list[dict[str, object]] = []
+    factory_result_payload: dict[str, object] = {}
 
     def _capture_factory_calculate(route) -> None:
+        nonlocal factory_result_payload
         body = route.request.post_data or "{}"
-        calculate_requests.append(json.loads(body))
+        request_payload = json.loads(body)
+        calculate_requests.append(request_payload)
+        factory_result_payload = {
+            "status": "success",
+            "calculation_id": "calc-browser-factory-registry",
+            "calculated_at": "2026-04-20T09:30:00Z",
+            "report_date": "2026-04-20",
+            "horizon_days": 45,
+            "target_window_days": 74,
+            "inbound_window_end": "2026-07-03",
+            "factory_inbound_source": "supplier_registry",
+            "stock_ff_source": "onec_ff_stock",
+            "settings": {
+                "factory_inbound_source": "supplier_registry",
+                "stock_ff_source": "onec_ff_stock",
+                "sales_avg_period_days": request_payload.get(
+                    "sales_avg_period_days"
+                ),
+                "cycle_order_days": request_payload.get("cycle_order_days"),
+                "selected_wb_supply_ids": request_payload.get(
+                    "selected_wb_supply_ids"
+                )
+                or [],
+            },
+            "summary": {
+                "total_qty": 12,
+                "estimated_weight": 1.03,
+                "estimated_volume": 0.01,
+            },
+            "rows": [
+                {
+                    "nm_id": 1001,
+                    "sku_comment": "SKU Alpha",
+                    "recommended_order_qty": 12,
+                    "coverage_qty": 9,
+                    "shortage_qty": 12,
+                }
+            ],
+            "wb_supply_overlay": {
+                "selected_supply_count": 1,
+                "stock_ff": {"total_selected_qty": 7},
+            },
+            "warnings": [],
+            "recommendation_download_path": (
+                "/v1/sheet-vitrina-v1/supply/factory-order/"
+                "recommendation.xlsx"
+            ),
+        }
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(factory_result_payload, ensure_ascii=False),
+        )
+
+    def _capture_supply_registry(route) -> None:
+        parsed = urllib_parse.urlparse(route.request.url)
+        selected_ids = (
+            factory_result_payload.get("settings", {}).get(
+                "selected_wb_supply_ids", []
+            )
+            if isinstance(factory_result_payload.get("settings"), dict)
+            else []
+        )
+        list_item = {
+            "record_id": "calc-browser-factory-registry",
+            "calculation_id": "calc-browser-factory-registry",
+            "calculation_type": "factory_order",
+            "completeness": "complete",
+            "is_reproducible": True,
+            "calculated_at": "2026-04-20T09:30:00Z",
+            "report_date": "2026-04-20",
+            "status": "success",
+            "summary": factory_result_payload.get("summary") or {},
+            "key_settings": factory_result_payload.get("settings") or {},
+            "selected_wb_supply_count": len(selected_ids),
+            "selected_wb_supply_qty": 7,
+            "incident_policy": {
+                "revision": 4,
+                "status": "active",
+                "quality_state": "complete",
+            },
+            "warning_count": 0,
+            "download_available": True,
+            "export": {
+                "available": True,
+                "filename": "factory-registry.xlsx",
+                "content_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "sha256": "sha256:browser-registry",
+            },
+            "legacy_note": "",
+        }
+        if parsed.path.endswith("/download"):
+            route.fulfill(
+                status=200,
+                content_type=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                body=b"historical-browser-xlsx",
+            )
+            return
+        if parsed.path == DEFAULT_SUPPLY_CALCULATIONS_PATH:
+            route.fulfill(
+                status=200,
+                content_type="application/json; charset=utf-8",
+                body=json.dumps(
+                    {
+                        "contract_name": (
+                            "sheet_vitrina_v1_supply_calculation_registry"
+                        ),
+                        "contract_version": 1,
+                        "pagination": {"limit": 25, "offset": 0, "total": 1},
+                        "records": [list_item],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return
         route.fulfill(
             status=200,
             content_type="application/json; charset=utf-8",
             body=json.dumps(
                 {
-                    "status": "success",
-                    "report_date": "2026-04-20",
-                    "horizon_days": 45,
-                    "target_window_days": 74,
-                    "inbound_window_end": "2026-07-03",
-                    "factory_inbound_source": "supplier_registry",
-                    "stock_ff_source": "onec_ff_stock",
-                    "settings": {
-                        "factory_inbound_source": "supplier_registry",
-                        "stock_ff_source": "onec_ff_stock",
+                    **list_item,
+                    "payload": factory_result_payload,
+                    "payload_sha256": "sha256:browser-payload",
+                    "metadata": {
+                        "selected_wb_supply_ids": selected_ids,
+                        "key_settings": factory_result_payload.get(
+                            "settings"
+                        )
+                        or {},
                     },
-                    "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
-                    "warnings": [],
-                    "recommendation_download_path": "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx",
+                    "evidence": {
+                        "sources": {
+                            "sales_history": {
+                                "fingerprint": "sha256:browser-source"
+                            }
+                        }
+                    },
+                    "export_sha256": "sha256:browser-registry",
                 },
                 ensure_ascii=False,
             ),
         )
 
     page.route("**" + DEFAULT_FACTORY_ORDER_CALCULATE_PATH, _capture_factory_calculate)
+    page.route(
+        "**" + DEFAULT_SUPPLY_CALCULATIONS_PATH + "**",
+        _capture_supply_registry,
+    )
     page.click("#calculateFactoryOrderButton")
     page.wait_for_function("() => document.getElementById('factoryMessage') && document.getElementById('factoryMessage').textContent.includes('Расчёт завершён')")
-    if not calculate_requests or calculate_requests[-1].get("stock_ff_source") != "onec_ff_stock":
+    if (
+        not calculate_requests
+        or calculate_requests[-1].get("stock_ff_source") != "onec_ff_stock"
+        or calculate_requests[-1].get("selected_wb_supply_ids")
+        != ["supply-B"]
+    ):
         raise AssertionError(f"factory calculate payload must include selected stock_ff_source, got {calculate_requests}")
+    page.click('[data-supply-section-button="registry"]')
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-supply-calculation-open]').length === 1"
+    )
+    registry_table_text = page.locator(
+        "#supplyCalculationRegistryBody"
+    ).inner_text()
+    if (
+        "Заказ на фабрике" not in registry_table_text
+        or "12 шт." not in registry_table_text
+        or "1 шт. поставок" not in registry_table_text
+        or "Полная · immutable" not in registry_table_text
+    ):
+        raise AssertionError(
+            f"registry list must expose truthful calculation metadata: {registry_table_text}"
+        )
+    page.click(
+        '[data-supply-calculation-open="calc-browser-factory-registry"]'
+    )
+    page.wait_for_function(
+        "() => document.getElementById('supplyCalculationRegistryDetail')"
+        " && !document.getElementById('supplyCalculationRegistryDetail').hidden"
+    )
+    if (
+        "supply-B"
+        not in page.locator(
+            "#supplyCalculationRegistrySelectedSupplies"
+        ).inner_text()
+        or "SKU Alpha"
+        not in page.locator("#supplyCalculationRegistryDetailBody").inner_text()
+        or not (
+            page.locator("#supplyCalculationRegistryDownload")
+            .get_attribute("href")
+            or ""
+        ).endswith("/calc-browser-factory-registry/download")
+    ):
+        raise AssertionError(
+            "registry detail must show the exact saved WB IDs, result row and historical download"
+        )
     page.click('[data-supply-section-button="regional"]')
     page.reload(wait_until="domcontentloaded")
     factory_state = {
@@ -698,6 +1034,20 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     }
     if factory_state != {"top_tab": "factory-order", "supply_section": "regional"}:
         raise AssertionError(f"top tab + supply subsection must survive reload, got {factory_state}")
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-wb-supply-overlay-checkbox]').length === 4"
+    )
+    if (
+        not page.locator(
+            '[data-wb-supply-overlay-checkbox][value="supply-A"]'
+        ).is_checked()
+        or not page.locator(
+            '[data-wb-supply-overlay-checkbox][value="supply-B"]'
+        ).is_checked()
+    ):
+        raise AssertionError(
+            "a genuinely new page opening must apply the current eligible defaults again"
+        )
     if page.locator('input[name="regionalIncludedDistrict"]').count() != 8:
         raise AssertionError("regional selector must render eight planning-zone checkboxes")
     if page.locator('input[name="regionalIncludedDistrict"]:checked').count() != 8:
@@ -1133,6 +1483,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('Расчёт выполнен')")
     if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus"]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
+    if regional_requests[-1].get("selected_wb_supply_ids") != [
+        "supply-A",
+        "supply-B",
+    ]:
+        raise AssertionError(
+            "regional calculate payload must include the exact visible auto-default WB IDs"
+        )
     lead_time_payload = regional_requests[-1].get("lead_time_to_region_days_by_district")
     expected_lead_times = {
         "central_north": 2,
@@ -1690,6 +2047,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     )
     if not isinstance(persisted_state, dict):
         raise AssertionError("browser smoke must leave a structured persisted UI state in localStorage")
+    if page_errors:
+        raise AssertionError(f"operator UI emitted pageerror events: {page_errors}")
+    if target_http_errors:
+        raise AssertionError(
+            "new WB-selection/registry UI requests failed: "
+            f"{target_http_errors}"
+        )
 
     context.close()
     return {
@@ -1709,6 +2073,22 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "zero_selection_guard": validation_text.strip(),
         "plan_input_defaults": default_plan_inputs,
         "plan_input_persistence": restored_plan_inputs,
+        "wb_supply_auto_default": {
+            "initial": ["supply-A", "supply-B"],
+            "after_manual_refresh": ["supply-B"],
+            "fresh_page": ["supply-A", "supply-B"],
+            "factory_request": calculate_requests[-1].get(
+                "selected_wb_supply_ids"
+            ),
+            "regional_request": regional_requests[-1].get(
+                "selected_wb_supply_ids"
+            ),
+        },
+        "calculation_registry": {
+            "record_id": "calc-browser-factory-registry",
+            "selected_wb_supply_ids": ["supply-B"],
+            "detail_visible": True,
+        },
     }
 
 

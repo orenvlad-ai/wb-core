@@ -326,6 +326,8 @@ DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/ca
 DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/planning-options"
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
 DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
+DEFAULT_SUPPLY_CALCULATIONS_PATH = "/v1/sheet-vitrina-v1/supply/calculations"
+DEFAULT_SUPPLY_CALCULATIONS_PREFIX = DEFAULT_SUPPLY_CALCULATIONS_PATH + "/"
 DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
 DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_WB_SUPPLIES_BACKFILL_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
@@ -4552,6 +4554,71 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_SUPPLY_CALCULATIONS_PATH:
+                try:
+                    payload = entrypoint.handle_supply_calculation_registry_list_request(
+                        _flatten_query_params(parsed.query)
+                    )
+                except (TypeError, ValueError) as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supply calculation registry list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supply_calculation_registry_path(parsed.path):
+                try:
+                    record_id, action = _resolve_supply_calculation_registry_path(
+                        parsed.path
+                    )
+                    if action == "download":
+                        export_bytes, filename, content_type = (
+                            entrypoint.handle_supply_calculation_registry_download_request(
+                                record_id
+                            )
+                        )
+                        _write_binary_response(
+                            self,
+                            HTTPStatus.OK,
+                            export_bytes,
+                            content_type=content_type,
+                            filename=filename,
+                            as_attachment=True,
+                        )
+                        return
+                    payload = entrypoint.handle_supply_calculation_registry_detail_request(
+                        record_id
+                    )
+                except KeyError:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "calculation registry record not found"},
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supply calculation registry detail failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FACTORY_ORDER_STATUS_PATH:
                 try:
                     payload = entrypoint.handle_factory_order_status_request()
@@ -6232,6 +6299,28 @@ def _resolve_wb_regional_district_from_download_path(path: str) -> str:
     if not district_key:
         raise ValueError(f"unsupported wb-regional district path: {path}")
     return district_key
+
+
+def _is_supply_calculation_registry_path(path: str) -> bool:
+    return str(path or "").startswith(DEFAULT_SUPPLY_CALCULATIONS_PREFIX)
+
+
+def _resolve_supply_calculation_registry_path(path: str) -> tuple[str, str]:
+    if not _is_supply_calculation_registry_path(path):
+        raise ValueError(f"unsupported supply calculation registry path: {path}")
+    suffix = str(path)[len(DEFAULT_SUPPLY_CALCULATIONS_PREFIX):].strip("/")
+    parts = suffix.split("/") if suffix else []
+    if not parts or len(parts) > 2:
+        raise ValueError(f"unsupported supply calculation registry path: {path}")
+    record_id = urllib_parse.unquote(parts[0]).strip()
+    if not record_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", record_id):
+        raise ValueError("invalid supply calculation registry record_id")
+    action = "detail"
+    if len(parts) == 2:
+        if parts[1] != "download":
+            raise ValueError(f"unsupported supply calculation registry path: {path}")
+        action = "download"
+    return record_id, action
 
 
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
@@ -8267,6 +8356,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
         "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
         "wb_regional_recommendations_zip_path": DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
+        "supply_calculations_path": DEFAULT_SUPPLY_CALCULATIONS_PATH,
         "wb_regional_district_options": [
             {
                 "district_key": key,

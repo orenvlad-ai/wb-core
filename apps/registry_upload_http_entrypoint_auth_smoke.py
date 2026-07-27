@@ -37,6 +37,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SKU_MANAGEMENT_PATH,
+    DEFAULT_SUPPLY_CALCULATIONS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -51,6 +52,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _required_section_for_path,
     WEB_AUTH_SECTION_REPORTS,
     WEB_AUTH_SECTION_SKU_MANAGEMENT,
+    WEB_AUTH_SECTION_SUPPLY,
     WEB_AUTH_SECTION_VITRINA,
 )
 from packages.application.business_data_write_barrier import (  # noqa: E402
@@ -68,6 +70,10 @@ def main() -> None:
         raise AssertionError("SKU management API must use its own section authorization boundary")
     if _required_section_for_path(DEFAULT_PARTNER_REPORT_OPTIONS_PATH) != WEB_AUTH_SECTION_REPORTS:
         raise AssertionError("Partner Report API must use the reports authorization boundary")
+    if _required_section_for_path(DEFAULT_SUPPLY_CALCULATIONS_PATH) != WEB_AUTH_SECTION_SUPPLY:
+        raise AssertionError(
+            "supply calculation registry must use the supply authorization boundary"
+        )
     if (
         _required_section_for_path(
             DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
@@ -115,6 +121,16 @@ def main() -> None:
                 json_code, json_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH}")
                 if json_code != 401 or json_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated JSON route must return 401 JSON: {json_code} {json_payload}")
+                registry_code, registry_payload = _get_json(
+                    f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}"
+                )
+                if (
+                    registry_code != 401
+                    or registry_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError(
+                        "unauthenticated supply calculation registry must return 401 JSON"
+                    )
                 sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
                 if sku_code != 401 or sku_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")
@@ -217,6 +233,21 @@ def main() -> None:
                     payload = json.loads(response.read().decode("utf-8"))
                     if response.status != 200 or payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_complaints":
                         raise AssertionError(f"authenticated JSON route must work: {response.status} {payload}")
+                registry_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(registry_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if (
+                        response.status != 200
+                        or payload.get("contract_name")
+                        != "sheet_vitrina_v1_supply_calculation_registry"
+                    ):
+                        raise AssertionError(
+                            "authenticated operator must read the supply calculation registry"
+                        )
                 settings_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_SETTINGS_UI_PATH}",
                     headers={"Accept": "text/html"},

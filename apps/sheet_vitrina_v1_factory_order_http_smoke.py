@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import socket
@@ -38,6 +39,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SUPPLY_CALCULATIONS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     build_registry_upload_http_server,
@@ -101,7 +103,17 @@ class FakeStocksBlock:
             elif nm_id == 210184534:
                 stock_total = 20.0
             items.append(SimpleNamespace(nm_id=nm_id, stock_total=stock_total))
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                items=items,
+                warehouse_rows=[],
+                snapshot_date="2026-04-18",
+                fetched_at="2026-04-18T09:00:00Z",
+                pagination_complete=True,
+                raw_rows_digest="sha256:factory-order-http-smoke",
+            )
+        )
 
 
 class FakeSalesHistoryBlock:
@@ -566,6 +578,82 @@ def main() -> None:
             recommendation_rows = read_first_sheet_rows(recommendation_bytes)
             if recommendation_rows[-3][0] != "Общее количество":
                 raise AssertionError("recommendation workbook summary must stay aligned with UI summary")
+            registry_status, registry_payload = _get_json(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}"
+                "?calculation_type=factory_order&report_date_from=2026-04-18"
+                "&report_date_to=2026-04-18&limit=100"
+            )
+            calculation_id = str(calc_with_inbound_payload.get("calculation_id") or "")
+            registry_row = next(
+                (
+                    item
+                    for item in registry_payload.get("records", [])
+                    if item.get("calculation_id") == calculation_id
+                ),
+                None,
+            )
+            if (
+                registry_status != 200
+                or not registry_row
+                or not registry_row.get("is_reproducible")
+                or not registry_row.get("download_available")
+            ):
+                raise AssertionError(
+                    f"factory calculation registry list must expose the immutable result: "
+                    f"{registry_status} {registry_payload}"
+                )
+            registry_detail_status, registry_detail = _get_json(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}/{calculation_id}"
+            )
+            historical_payload = registry_detail.get("payload") or {}
+            if (
+                registry_detail_status != 200
+                or historical_payload.get("calculation_id") != calculation_id
+                or historical_payload.get("settings")
+                != calc_with_inbound_payload.get("settings")
+                or historical_payload.get("summary")
+                != calc_with_inbound_payload.get("summary")
+                or historical_payload.get("rows")
+                != calc_with_inbound_payload.get("rows")
+                or not (registry_detail.get("evidence") or {}).get("sources")
+                or not (
+                    (registry_detail.get("evidence") or {})
+                    .get("calculation_inputs", {})
+                    .get("order_count_samples_by_nm_fingerprint")
+                )
+            ):
+                raise AssertionError(
+                    "factory registry detail must round-trip exact settings, summary, "
+                    f"rows and evidence: {registry_detail_status}"
+                )
+            historical_status, historical_bytes, historical_headers = _get_bytes(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}/{calculation_id}/download"
+            )
+            if (
+                historical_status != 200
+                or historical_bytes != recommendation_bytes
+                or "sha256:" + hashlib.sha256(historical_bytes).hexdigest()
+                != registry_detail.get("export_sha256")
+                or "spreadsheetml.sheet"
+                not in str(historical_headers.get("Content-Type", ""))
+            ):
+                raise AssertionError(
+                    "factory current and historical downloads must return the same saved XLSX snapshot"
+                )
+            overlay_calculation_id = str(overlay_payload.get("calculation_id") or "")
+            overlay_detail_status, overlay_detail = _get_json(
+                f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}/{overlay_calculation_id}"
+            )
+            if (
+                overlay_detail_status != 200
+                or (overlay_detail.get("payload") or {})
+                .get("settings", {})
+                .get("selected_wb_supply_ids")
+                != ["wb-http-overlay"]
+            ):
+                raise AssertionError(
+                    "registry payload must preserve exact selected WB supply IDs"
+                )
 
             # Scenario 4: delete inbound files and recalculate with zero coverage terms again.
             delete_factory_status, delete_factory_payload = _delete_json(
@@ -668,9 +756,17 @@ def main() -> None:
             if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
                 raise AssertionError(f"supplier registry source must expose effective rows used, got {effective_supplier_rows}")
 
-            patch_status, patch_payload = _patch_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window",
+            preview_status, preview_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-04-18"},
+            )
+            if preview_status != 200 or not preview_payload.get("confirmation_token"):
+                raise AssertionError(
+                    "actual_ff_acceptance_date preview must issue a confirmation token"
+                )
+            patch_status, patch_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window/factual-dates/confirm",
+                {"confirmation_token": preview_payload["confirmation_token"]},
             )
             if patch_status != 200 or patch_payload.get("order_status") != ORDER_STATUS_ACCEPTED_FF:
                 raise AssertionError(f"actual_ff_acceptance_date PATCH must trigger accepted_ff, got {patch_status} {patch_payload}")
