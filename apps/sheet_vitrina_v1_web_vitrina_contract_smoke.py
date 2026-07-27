@@ -26,6 +26,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
 )
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    incident_stock_metric_key,
+)
 from packages.application.sheet_vitrina_v1_sku_actions import (
     ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
     BUYER_PRICE_RUB_METRIC_KEY,
@@ -185,11 +188,11 @@ def main() -> None:
             timestamp="2026-04-20T09:11:00Z",
         )
 
-        if payload.status_summary.refresh_status != "warning":
+        if payload.status_summary.refresh_status != "success":
             raise AssertionError(f"status_summary.refresh_status mismatch, got {payload.status_summary}")
-        if payload.status_summary.refresh_status_label != "Внимание":
+        if payload.status_summary.refresh_status_label != "Успешно":
             raise AssertionError(f"status_summary.refresh_status_label mismatch, got {payload.status_summary}")
-        if payload.status_summary.refresh_status_tone != "warning":
+        if payload.status_summary.refresh_status_tone != "success":
             raise AssertionError(f"status_summary.refresh_status_tone mismatch, got {payload.status_summary}")
         if "активных источников" not in payload.status_summary.refresh_status_reason:
             raise AssertionError(f"status_summary.refresh_status_reason mismatch, got {payload.status_summary}")
@@ -202,7 +205,7 @@ def main() -> None:
             raise AssertionError(f"status_summary.source_policy_counts mismatch, got {payload.status_summary}")
         if payload.status_summary.refresh_outcome_counts != {
             "success": 2,
-            "warning": 1,
+            "warning": 0,
             "error": 0,
         }:
             raise AssertionError(f"status_summary.refresh_outcome_counts mismatch, got {payload.status_summary}")
@@ -256,6 +259,12 @@ def main() -> None:
         for archived_row_id in (
             f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
             f"SKU:{enabled[0].nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
+            f"SKU:{enabled[0].nm_id}|{incident_stock_metric_key('fact')}",
+            f"SKU:{enabled[0].nm_id}|cost_price_rub",
+            f"SKU:{enabled[0].nm_id}|proxy_profit_rub",
+            "TOTAL|avg_cost_price_rub",
+            "TOTAL|total_proxy_profit_rub",
+            "TOTAL|proxy_margin_pct_total",
         ):
             if archived_row_id in rows_by_id:
                 raise AssertionError(f"archived metric leaked into active web contract: {archived_row_id}")
@@ -589,7 +598,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D15",
+                write_rect="A1:D21",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -665,8 +674,19 @@ def _build_plan(
                         777.25,
                         778.0,
                     ],
+                    [
+                        "SKU A: Остаток WB — факт, шт",
+                        f"SKU:{first_nm_id}|{incident_stock_metric_key('fact')}",
+                        42,
+                        41,
+                    ],
+                    ["SKU A: Себестоимость", f"SKU:{first_nm_id}|cost_price_rub", 20, 40],
+                    ["SKU A: Прибыль Proxy1", f"SKU:{first_nm_id}|proxy_profit_rub", 10, 20],
+                    ["Итого: Себестоимость средняя", "TOTAL|avg_cost_price_rub", 30, 40],
+                    ["Итого: Прибыль Proxy1", "TOTAL|total_proxy_profit_rub", 50, 60],
+                    ["Итого: Маржа Proxy1", "TOTAL|proxy_margin_pct_total", 0.05, 0.06],
                 ],
-                row_count=15,
+                row_count=21,
                 column_count=4,
             ),
             SheetVitrinaWriteTarget(

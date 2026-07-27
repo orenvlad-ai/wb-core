@@ -34,6 +34,11 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _render_sheet_vitrina_web_vitrina_ui,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import _active_incident_metric_catalog  # noqa: E402
+from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
+    LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
+)
+from packages.application.sheet_vitrina_v1_incident_stocks import INCIDENT_STOCK_FACT_METRIC_KEYS  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
 from packages.application.web_vitrina_gravity_table_adapter import build_web_vitrina_gravity_table_adapter  # noqa: E402
 from packages.application.web_vitrina_page_composition import build_web_vitrina_page_composition  # noqa: E402
@@ -44,6 +49,11 @@ TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-display-select][data-metric-config-scope="total"]'
     '[data-metric-config-key="total_orderSum"]'
 )
+RETIRED_METRIC_KEYS = frozenset(
+    (*INCIDENT_STOCK_FACT_METRIC_KEYS, *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS)
+)
+
+
 def main() -> None:
     with TemporaryDirectory(prefix="web-vitrina-user-config-browser-") as tmp:
         composition = _build_composition(Path(tmp) / "runtime")
@@ -54,14 +64,49 @@ def main() -> None:
                     _run_checks(browser, server)
                 finally:
                     browser.close()
-    print({"status": "ok", "checks": ["local_migration", "server_priority", "reload", "cleared_local_storage"]})
+    print(
+        {
+            "status": "ok",
+            "checks": [
+                "local_migration",
+                "server_priority",
+                "retired_metric_sanitation",
+                "reload",
+                "cleared_local_storage",
+            ],
+        }
+    )
 
 
 def _run_checks(browser, server: "FixtureServer") -> None:
     local_candidate = {
         "version": 2,
-        "scopes": {"total": {"order": ["total_orderSum", "avg_ctr_current"], "display": {"total_orderSum": "hidden"}, "manual": True}},
-        "expanded_anchors": [],
+        "scopes": {
+            "total": {
+                "order": [
+                    "total_orderSum",
+                    "total_wb_stock_fact_qty",
+                    "avg_cost_price_rub",
+                    "total_proxy_profit_rub",
+                    "avg_ctr_current",
+                ],
+                "display": {
+                    "total_orderSum": "hidden",
+                    "total_wb_stock_fact_qty": "collapsed",
+                    "avg_cost_price_rub": "hidden",
+                },
+                "manual": True,
+            },
+            "sku": {
+                "order": ["wb_stock_fact_qty", "cost_price_rub", "proxy_profit_rub"],
+                "display": {
+                    "wb_stock_fact_qty": "collapsed",
+                    "cost_price_rub": "hidden",
+                },
+                "manual": True,
+            },
+        },
+        "expanded_anchors": ["sku::wb_stock_fact_qty", "total::avg_cost_price_rub"],
     }
     context = browser.new_context()
     page = context.new_page()
@@ -75,8 +120,9 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     page.wait_for_selector(TOTAL_ORDER_SUM_SELECTOR)
     _wait_for_server_save_count(server, 1)
     migrated = server.user_config["config"]
-    if migrated["scopes"]["total"]["display"] != {"total_orderSum": "hidden"}:
+    if migrated["scopes"]["total"]["display"].get("total_orderSum") != "hidden":
         raise AssertionError(f"valid localStorage must migrate once when server config is missing, got {migrated}")
+    _assert_retired_metrics_absent(page, migrated)
     context.close()
 
     server.user_config = {
@@ -87,12 +133,25 @@ def _run_checks(browser, server: "FixtureServer") -> None:
             "version": 2,
             "scopes": {
                 "total": {
-                    "order": ["total_orderSum", "total_orderCount"],
-                    "display": {},
+                    "order": [
+                        "total_orderSum",
+                        "total_wb_stock_fact_qty",
+                        "avg_cost_price_rub",
+                        "total_orderCount",
+                    ],
+                    "display": {
+                        "total_wb_stock_fact_qty": "collapsed",
+                        "avg_cost_price_rub": "hidden",
+                    },
                     "manual": True,
-                }
+                },
+                "sku": {
+                    "order": ["wb_stock_fact_qty", "cost_price_rub"],
+                    "display": {"cost_price_rub": "hidden"},
+                    "manual": True,
+                },
             },
-            "expanded_anchors": [],
+            "expanded_anchors": ["sku::wb_stock_fact_qty"],
         },
     }
     server.save_count = 0
@@ -110,11 +169,13 @@ def _run_checks(browser, server: "FixtureServer") -> None:
         raise AssertionError("stale localStorage must not hide total_orderSum when server config exists")
     if server.save_count != 0:
         raise AssertionError("initial render from server config must not resave stale localStorage")
+    _assert_retired_metrics_absent(stale_page)
 
     stale_page.select_option(TOTAL_ORDER_SUM_SELECTOR, "hidden")
     _wait_for_server_save_count(server, 1)
     if server.user_config["revision"] != 5:
         raise AssertionError(f"user change must persist to next server revision, got {server.user_config}")
+    _assert_retired_metrics_absent(stale_page, server.user_config["config"])
     stale_context.close()
 
     clear_context = browser.new_context()
@@ -124,7 +185,21 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     clear_page.wait_for_selector(TOTAL_ORDER_SUM_SELECTOR)
     if clear_page.locator(TOTAL_ORDER_SUM_SELECTOR).input_value() != "hidden":
         raise AssertionError("cleared localStorage/new browser context must restore server-side metric config")
+    _assert_retired_metrics_absent(clear_page, server.user_config["config"])
     clear_context.close()
+
+
+def _assert_retired_metrics_absent(page, config: object | None = None) -> None:
+    for metric_key in RETIRED_METRIC_KEYS:
+        selector = f'[data-metric-config-key="{metric_key}"]'
+        if page.locator(selector).count():
+            raise AssertionError(f"retired metric leaked into settings/picker: {metric_key}")
+    if config is None:
+        return
+    serialized = json.dumps(config, ensure_ascii=False, sort_keys=True)
+    leaked = sorted(metric_key for metric_key in RETIRED_METRIC_KEYS if metric_key in serialized)
+    if leaked:
+        raise AssertionError(f"retired metric keys survived saved-state sanitation: {leaked}")
 
 
 def _open_metrics(page) -> None:
@@ -182,6 +257,7 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
         selected_date_from=None,
         selected_date_to=None,
         activity_surface=_build_activity_surface_fixture(),
+        metric_catalog=_active_incident_metric_catalog(),
     )
 
 
