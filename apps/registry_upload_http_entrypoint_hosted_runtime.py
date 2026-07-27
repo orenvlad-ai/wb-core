@@ -2570,6 +2570,255 @@ def run_warehouse_recovery_canary_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_warehouse_recovery_retention_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.recovery_retention_apply)
+    action = (
+        "warehouse-recovery-retention-apply"
+        if apply
+        else "warehouse-recovery-retention-dry-run"
+    )
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("warehouse recovery retention requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "warehouse recovery retention requires the canonical runtime dir"
+        )
+    runner_args = [
+        "python3",
+        "apps/warehouse_recovery_retention.py",
+        "apply" if apply else "dry-run",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+    ]
+    if apply:
+        runner_args.extend(["--fingerprint", str(args.fingerprint)])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("warehouse recovery retention returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("warehouse recovery retention returned a non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def run_storage_recovery_sanitation_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    sanitation_action = str(args.storage_sanitation_action)
+    action = f"storage-recovery-sanitation-{sanitation_action}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if sanitation_action == "apply":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("storage sanitation requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("storage sanitation requires the canonical runtime dir")
+    runner_args = [
+        "python3",
+        "apps/storage_recovery_sanitation.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--root-backups",
+        "/opt/wb-core-runtime/backups",
+        "--deployed-sha",
+        deployed_sha,
+        "--deployed-sha-file",
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+        sanitation_action,
+    ]
+    if sanitation_action in {"plan", "apply"}:
+        runner_args.extend(
+            [
+                "--root",
+                str(args.sanitation_root),
+                "--family",
+                str(args.family),
+                "--reserved-free-bytes",
+                str(int(args.reserved_free_bytes)),
+            ]
+        )
+    if sanitation_action == "apply":
+        runner_args.extend(["--fingerprint", str(args.fingerprint)])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("storage sanitation returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("storage sanitation returned a non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def run_promo_archive_gc_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    apply = bool(args.promo_gc_apply)
+    action = "promo-archive-gc-apply" if apply else "promo-archive-gc-dry-run"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if apply:
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("promo archive GC requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("promo archive GC requires the canonical runtime dir")
+    runner_args = [
+        "python3",
+        "apps/promo_campaign_archive_gc.py",
+        "apply" if apply else "dry-run",
+        "--runtime-dir",
+        runtime_dir,
+    ]
+    if apply:
+        runner_args.extend(
+            [
+                "--confirm",
+                "--fingerprint",
+                str(args.fingerprint),
+                "--deployed-sha",
+                deployed_sha,
+                "--deployed-sha-file",
+                f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("promo archive GC returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("promo archive GC returned a non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_sqlite_backup_archive_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -5250,6 +5499,93 @@ def build_arg_parser() -> argparse.ArgumentParser:
     recovery_canary_apply.set_defaults(
         handler=run_warehouse_recovery_canary_command,
         recovery_canary_apply=True,
+    )
+
+    recovery_retention_dry_run = subparsers.add_parser(
+        "warehouse-recovery-retention-dry-run",
+        help="Build an exact bounded age/count/byte retention plan.",
+    )
+    recovery_retention_dry_run.add_argument("--deployed-sha", required=True)
+    recovery_retention_dry_run.set_defaults(
+        handler=run_warehouse_recovery_retention_command,
+        recovery_retention_apply=False,
+    )
+
+    recovery_retention_apply = subparsers.add_parser(
+        "warehouse-recovery-retention-apply",
+        help="Apply one exact audited recovery retention plan.",
+    )
+    recovery_retention_apply.add_argument("--deployed-sha", required=True)
+    recovery_retention_apply.add_argument("--fingerprint", required=True)
+    recovery_retention_apply.set_defaults(
+        handler=run_warehouse_recovery_retention_command,
+        recovery_retention_apply=True,
+    )
+
+    sanitation_inventory = subparsers.add_parser(
+        "storage-recovery-sanitation-inventory",
+        help="Inventory both canonical backup roots without mutation.",
+    )
+    sanitation_inventory.add_argument("--deployed-sha", required=True)
+    sanitation_inventory.set_defaults(
+        handler=run_storage_recovery_sanitation_command,
+        storage_sanitation_action="inventory",
+    )
+
+    sanitation_plan = subparsers.add_parser(
+        "storage-recovery-sanitation-plan",
+        help="Build the next exact action for one allowlisted backup family.",
+    )
+    sanitation_plan.add_argument("--deployed-sha", required=True)
+    sanitation_plan.add_argument(
+        "--root", dest="sanitation_root", choices=("root", "backup"), required=True
+    )
+    sanitation_plan.add_argument("--family", required=True)
+    sanitation_plan.add_argument(
+        "--reserved-free-bytes", type=int, default=256 * 1024 * 1024
+    )
+    sanitation_plan.set_defaults(
+        handler=run_storage_recovery_sanitation_command,
+        storage_sanitation_action="plan",
+    )
+
+    sanitation_apply = subparsers.add_parser(
+        "storage-recovery-sanitation-apply",
+        help="Apply/resume one exact audited family sanitation action.",
+    )
+    sanitation_apply.add_argument("--deployed-sha", required=True)
+    sanitation_apply.add_argument(
+        "--root", dest="sanitation_root", choices=("root", "backup"), required=True
+    )
+    sanitation_apply.add_argument("--family", required=True)
+    sanitation_apply.add_argument("--fingerprint", required=True)
+    sanitation_apply.add_argument(
+        "--reserved-free-bytes", type=int, default=256 * 1024 * 1024
+    )
+    sanitation_apply.set_defaults(
+        handler=run_storage_recovery_sanitation_command,
+        storage_sanitation_action="apply",
+    )
+
+    promo_gc_dry_run = subparsers.add_parser(
+        "promo-archive-gc-dry-run",
+        help="Build the штатный exact Promo artifact GC plan.",
+    )
+    promo_gc_dry_run.add_argument("--deployed-sha", required=True)
+    promo_gc_dry_run.set_defaults(
+        handler=run_promo_archive_gc_command,
+        promo_gc_apply=False,
+    )
+
+    promo_gc_apply = subparsers.add_parser(
+        "promo-archive-gc-apply",
+        help="Apply/resume the exact audited Promo artifact GC plan.",
+    )
+    promo_gc_apply.add_argument("--deployed-sha", required=True)
+    promo_gc_apply.add_argument("--fingerprint", required=True)
+    promo_gc_apply.set_defaults(
+        handler=run_promo_archive_gc_command,
+        promo_gc_apply=True,
     )
 
     functional_failed_backup_cleanup_dry_run = subparsers.add_parser(

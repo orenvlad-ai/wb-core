@@ -30,6 +30,8 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
 
 PROMO_RUNS_DIRNAME = "promo_xlsx_collector_runs"
 REPORT_SCHEMA_VERSION = "promo_campaign_archive_gc_report_v1"
+EXACT_GC_CONTRACT_NAME = "promo_campaign_archive_exact_gc_v1"
+EXACT_GC_AUDIT_DIRNAME = "promo-campaign-archive-gc"
 LIGHT_GC_POLICY_NAME = "promo_refresh_light_gc_v1"
 LIGHT_GC_SUCCESS_DEBUG_TTL_DAYS = 3.0
 LIGHT_GC_FAILED_DEBUG_TTL_DAYS = 14.0
@@ -63,6 +65,12 @@ def main() -> None:
     parser.add_argument("--report-path", default="")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--apply", dest="apply_flag", action="store_true")
+    parser.add_argument("--fingerprint", default="")
+    parser.add_argument("--deployed-sha", default="")
+    parser.add_argument(
+        "--deployed-sha-file",
+        default=str(ROOT / ".wb-core-runtime-sha"),
+    )
     args = parser.parse_args()
 
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
@@ -79,7 +87,13 @@ def main() -> None:
             report["apply_error"] = "apply mode requires explicit --confirm or --apply"
             _emit_report(report, args.report_path)
             raise SystemExit(2)
-        report["apply_result"] = apply_gc_plan(runtime_dir=runtime_dir, plan=report["deletion_plan"])
+        report["apply_result"] = apply_exact_gc_plan(
+            runtime_dir=runtime_dir,
+            report=report,
+            fingerprint=args.fingerprint,
+            deployed_sha=args.deployed_sha,
+            deployed_sha_file=Path(args.deployed_sha_file),
+        )
 
     _emit_report(report, args.report_path)
 
@@ -126,6 +140,23 @@ def build_gc_report(
                 skipped=skipped,
             )
         )
+        deletion_plan = _enrich_exact_identities(deletion_plan)
+
+    plan_material = {
+        "contract_name": EXACT_GC_CONTRACT_NAME,
+        "runtime_dir": str(runtime_dir),
+        "archive_root": str(archive_root),
+        "runs_root": str(runs_root),
+        "success_debug_ttl_days": float(success_debug_ttl_days),
+        "failed_debug_ttl_days": float(failed_debug_ttl_days),
+        "deletion_plan": deletion_plan,
+        "non_target_digest": _candidate_run_non_target_digest(
+            runs_root=runs_root,
+            deletion_plan=deletion_plan,
+        )
+        if include_plan
+        else "",
+    }
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -148,6 +179,9 @@ def build_gc_report(
         },
         "deletion_plan": deletion_plan,
         "deletion_plan_summary": _plan_summary(deletion_plan),
+        "plan_material": plan_material if include_plan else {},
+        "fingerprint": _stable_hash(plan_material) if include_plan else "",
+        "non_target_digest": plan_material["non_target_digest"],
         "skipped": skipped[:200],
     }
 
@@ -267,7 +301,13 @@ def build_light_gc_report(
     }
 
 
-def apply_gc_plan(*, runtime_dir: Path, plan: list[dict[str, Any]]) -> dict[str, Any]:
+def apply_gc_plan(
+    *,
+    runtime_dir: Path,
+    plan: list[dict[str, Any]],
+    allow_missing: bool = False,
+    fail_fast: bool = False,
+) -> dict[str, Any]:
     deleted_count = 0
     deleted_size = 0
     errors: list[dict[str, Any]] = []
@@ -286,18 +326,127 @@ def apply_gc_plan(*, runtime_dir: Path, plan: list[dict[str, Any]]) -> dict[str,
             if not _is_allowed_delete_candidate(resolved, allow_workbook=allow_workbook):
                 raise ValueError("candidate is protected by filename guard")
             if not resolved.is_file():
+                if allow_missing and not resolved.exists():
+                    deleted_count += 1
+                    deleted_size += int(item.get("size") or 0)
+                    continue
                 raise ValueError("candidate is not a regular file")
-            size = resolved.stat().st_size
+            file_stat = resolved.stat()
+            size = file_stat.st_size
+            if int(item.get("size") or -1) != int(size):
+                raise ValueError("candidate size drifted from exact plan")
+            if item.get("inode") is not None and int(item["inode"]) != int(
+                file_stat.st_ino
+            ):
+                raise ValueError("candidate inode drifted from exact plan")
+            if item.get("mtime_ns") is not None and int(
+                item["mtime_ns"]
+            ) != int(file_stat.st_mtime_ns):
+                raise ValueError("candidate mtime drifted from exact plan")
+            if item.get("sha256") and str(item["sha256"]) != _sha256_path(
+                resolved
+            ):
+                raise ValueError("candidate SHA-256 drifted from exact plan")
             resolved.unlink()
+            _fsync_directory(resolved.parent)
             deleted_count += 1
             deleted_size += size
         except Exception as exc:
             errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
+            if fail_fast:
+                break
     return {
         "deleted_count": deleted_count,
         "deleted_size": deleted_size,
         "errors": errors,
     }
+
+
+def apply_exact_gc_plan(
+    *,
+    runtime_dir: Path,
+    report: dict[str, Any],
+    fingerprint: str,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+) -> dict[str, Any]:
+    approved = str(fingerprint or "").strip()
+    if not approved:
+        raise ValueError("promo GC apply requires the exact dry-run fingerprint")
+    _verify_deployed_sha(
+        deployed_sha=deployed_sha,
+        deployed_sha_file=deployed_sha_file,
+    )
+    audit_path = _exact_gc_audit_path(
+        runtime_dir=runtime_dir,
+        fingerprint=approved,
+    )
+    resumed = audit_path.is_file()
+    if resumed:
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        if str(audit.get("fingerprint") or "") != approved:
+            raise ValueError("promo GC audit fingerprint mismatch")
+        if str(audit.get("status") or "") == "applied":
+            return {
+                **dict(audit["result"]),
+                "status": "applied",
+                "applied": False,
+                "idempotent": True,
+                "audit_path": str(audit_path),
+            }
+        plan_material = dict(audit["plan_material"])
+    else:
+        if approved != str(report.get("fingerprint") or ""):
+            raise ValueError(
+                "promo GC apply requires the exact current dry-run fingerprint"
+            )
+        plan_material = dict(report.get("plan_material") or {})
+        _write_private_json(
+            audit_path,
+            {
+                "contract_name": EXACT_GC_CONTRACT_NAME,
+                "fingerprint": approved,
+                "status": "applying",
+                "deployed_sha": deployed_sha,
+                "started_at": _now(),
+                "plan_material": plan_material,
+            },
+        )
+    result = apply_gc_plan(
+        runtime_dir=runtime_dir,
+        plan=list(plan_material.get("deletion_plan") or []),
+        allow_missing=resumed,
+        fail_fast=True,
+    )
+    non_target_after = _candidate_run_non_target_digest(
+        runs_root=Path(str(plan_material["runs_root"])),
+        deletion_plan=list(plan_material.get("deletion_plan") or []),
+    )
+    if non_target_after != str(plan_material.get("non_target_digest") or ""):
+        raise ValueError("promo GC non-target digest changed during apply")
+    result = {
+        **result,
+        "status": "applied" if not result["errors"] else "partial_failure",
+        "applied": not bool(result["errors"]),
+        "idempotent": False,
+        "fingerprint": approved,
+        "non_target_digest_before": plan_material["non_target_digest"],
+        "non_target_digest_after": non_target_after,
+        "audit_path": str(audit_path),
+    }
+    _write_private_json(
+        audit_path,
+        {
+            "contract_name": EXACT_GC_CONTRACT_NAME,
+            "fingerprint": approved,
+            "status": result["status"],
+            "deployed_sha": deployed_sha,
+            "completed_at": _now(),
+            "plan_material": plan_material,
+            "result": result,
+        },
+    )
+    return result
 
 
 def _scan_runtime(runtime_dir: Path) -> dict[str, Any]:
@@ -547,6 +696,158 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _enrich_exact_identities(
+    plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    exact = []
+    for item in plan:
+        path = Path(str(item["path"]))
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("promo GC exact candidate is not a regular file")
+        file_stat = path.stat()
+        exact.append(
+            {
+                **item,
+                "size": int(file_stat.st_size),
+                "inode": int(file_stat.st_ino),
+                "mtime_ns": int(file_stat.st_mtime_ns),
+                "mode": oct(file_stat.st_mode & 0o777),
+                "sha256": _sha256_path(path),
+            }
+        )
+    return exact
+
+
+def _candidate_run_non_target_digest(
+    *,
+    runs_root: Path,
+    deletion_plan: list[dict[str, Any]],
+) -> str:
+    runs_root = runs_root.resolve()
+    excluded = {
+        Path(str(item["path"])).resolve() for item in deletion_plan
+    }
+    run_dirs: set[Path] = set()
+    for path in excluded:
+        try:
+            relative = path.relative_to(runs_root)
+        except ValueError as exc:
+            raise ValueError("promo GC target escaped runs root") from exc
+        if not relative.parts:
+            raise ValueError("promo GC target cannot be the runs root")
+        run_dirs.add(runs_root / relative.parts[0])
+    rows = []
+    for run_dir in sorted(run_dirs, key=str):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            raise ValueError("promo GC candidate run directory drifted")
+        for path in sorted(_iter_files(run_dir), key=str):
+            resolved = path.resolve()
+            if resolved in excluded:
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("promo GC non-target is not a regular file")
+            file_stat = path.stat()
+            rows.append(
+                {
+                    "path": str(path.relative_to(runs_root)),
+                    "size": int(file_stat.st_size),
+                    "inode": int(file_stat.st_ino),
+                    "mtime_ns": int(file_stat.st_mtime_ns),
+                    "sha256": _sha256_path(path),
+                }
+            )
+    return _stable_hash(rows)
+
+
+def _verify_deployed_sha(
+    *,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+) -> None:
+    approved = str(deployed_sha or "").strip().lower()
+    if len(approved) != 40 or any(
+        character not in "0123456789abcdef" for character in approved
+    ):
+        raise ValueError("promo GC apply requires an exact deployed SHA")
+    marker_input = deployed_sha_file.expanduser()
+    if marker_input.is_symlink():
+        raise ValueError("promo GC deployed SHA marker must not be a symlink")
+    marker = marker_input.resolve()
+    if not marker.is_file():
+        raise ValueError("promo GC deployed SHA marker is unavailable")
+    actual = marker.read_text(encoding="utf-8").strip().lower()
+    if actual != approved:
+        raise ValueError(
+            f"promo GC deployed SHA mismatch: expected={approved}, actual={actual}"
+        )
+
+
+def _exact_gc_audit_path(*, runtime_dir: Path, fingerprint: str) -> Path:
+    digest = fingerprint.removeprefix("sha256:")
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest.lower()
+    ):
+        raise ValueError("promo GC fingerprint is invalid")
+    path = (
+        runtime_dir.resolve()
+        / EXACT_GC_AUDIT_DIRNAME
+        / f"{digest}.json"
+    )
+    if path.parent.is_symlink():
+        raise ValueError("promo GC audit directory must not be a symlink")
+    return path
+
+
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    if path.parent.is_symlink():
+        raise ValueError("private JSON directory must not be a symlink")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        with temp.open("xb") as handle:
+            os.chmod(temp, 0o600)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        _fsync_directory(path.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _stable_hash(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

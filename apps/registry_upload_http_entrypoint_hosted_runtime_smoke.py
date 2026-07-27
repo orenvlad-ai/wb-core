@@ -1065,6 +1065,46 @@ def main() -> None:
         or not recovery_canary_apply_args.recovery_canary_apply
     ):
         raise AssertionError("hosted runner must expose exact dry/apply recovery canary")
+    retention_apply_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "warehouse-recovery-retention-apply",
+            "--deployed-sha",
+            "a" * 40,
+            "--fingerprint",
+            "sha256:" + "b" * 64,
+        ]
+    )
+    sanitation_plan_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "storage-recovery-sanitation-plan",
+            "--deployed-sha",
+            "a" * 40,
+            "--root",
+            "backup",
+            "--family",
+            "supplier-26gn390-recovery",
+        ]
+    )
+    promo_gc_apply_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "promo-archive-gc-apply",
+            "--deployed-sha",
+            "a" * 40,
+            "--fingerprint",
+            "sha256:" + "c" * 64,
+        ]
+    )
+    if (
+        retention_apply_args.handler
+        is not hosted_runtime.run_warehouse_recovery_retention_command
+        or sanitation_plan_args.handler
+        is not hosted_runtime.run_storage_recovery_sanitation_command
+        or promo_gc_apply_args.handler
+        is not hosted_runtime.run_promo_archive_gc_command
+    ):
+        raise AssertionError(
+            "hosted runner must expose exact retention, sanitation and Promo GC"
+        )
     finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]
     )

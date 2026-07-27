@@ -172,14 +172,19 @@ def _run(
         return block.readback()
     if args.command == "backup":
         with warehouse_functional_write_lock(runtime.runtime_dir):
+            retention_before = _run_bounded_recovery_retention(runtime)
+            backup_result = _create_pre_sync_backup(
+                runtime,
+                backup_dir=Path(str(args.backup_dir)),
+                timestamp=block.timestamp_factory(),
+            )
+            retention_after = _run_bounded_recovery_retention(runtime)
             return {
                 "status": "success",
                 "mode": "backup",
-                "backup": _create_pre_sync_backup(
-                    runtime,
-                    backup_dir=Path(str(args.backup_dir)),
-                    timestamp=block.timestamp_factory(),
-                ),
+                "backup": backup_result,
+                "recovery_retention_before": retention_before,
+                "recovery_retention_after": retention_after,
             }
     if args.command == "sync-dry-run":
         plan, preflight = _build_sync_plan_from_disposable_refresh(runtime)
@@ -192,6 +197,7 @@ def _run(
         )
         with warehouse_functional_write_lock(runtime.runtime_dir):
             try:
+                retention_before = _run_bounded_recovery_retention(runtime)
                 economics_backup = (
                     block.calculation_parameters.prepare_functional_economics_backup()
                 )
@@ -224,12 +230,15 @@ def _run(
                         verified_backup=economics_backup,
                     )
                 )
+                retention_after = _run_bounded_recovery_retention(runtime)
                 backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
                     "mode": "reviewed_sync_apply",
                     "reviewed_plan_fingerprint": args.fingerprint,
                     "backup": backup_result,
+                    "recovery_retention_before": retention_before,
+                    "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "ff_state": ff_state,
@@ -258,6 +267,11 @@ def _run(
                 lock_evidence.get("wait_ms") or 0
             )
             try:
+                retention_before = _run_sync_phase(
+                    "recovery_retention_before",
+                    phase_timings_ms,
+                    lambda: _run_bounded_recovery_retention(runtime),
+                )
                 economics_backup = _run_sync_phase(
                     "prepare_economics_restore_point",
                     phase_timings_ms,
@@ -320,6 +334,11 @@ def _run(
                         )
                     ),
                 )
+                retention_after = _run_sync_phase(
+                    "recovery_retention_after",
+                    phase_timings_ms,
+                    lambda: _run_bounded_recovery_retention(runtime),
+                )
                 completed_backup = backup_result
                 return {
                     "status": "success",
@@ -328,6 +347,8 @@ def _run(
                     "phase_timings_ms": phase_timings_ms,
                     "backup": completed_backup,
                     "raw_backup": None,
+                    "recovery_retention_before": retention_before,
+                    "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "ff_state": ff_state,
@@ -551,6 +572,52 @@ def _create_pre_sync_backup(
         str(operation["operation_id"]),
         after_digest=str(operation.get("checkpoint_digest") or fingerprint),
     )
+
+
+def _run_bounded_recovery_retention(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> dict[str, Any]:
+    registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    blocking = [
+        operation
+        for operation in registry.list_operations(limit=1000)
+        if operation.get("tier") == "T2"
+        and operation.get("lifecycle")
+        in {"failed_recoverable", "quarantined"}
+    ]
+    if blocking:
+        raise RuntimeError(
+            "warehouse recovery contains unresolved protected T2 evidence; "
+            "another domain checkpoint is blocked: "
+            + ",".join(
+                str(operation.get("operation_id") or "")
+                for operation in blocking[:10]
+            )
+        )
+    plan = registry.plan_retention()
+    if not bool(plan.get("would_change")):
+        return {
+            **plan,
+            "status": "no_change",
+            "applied": False,
+        }
+    result = registry.apply_retention(
+        plan_fingerprint=str(plan["fingerprint"]),
+    )
+    if str(result.get("status") or "") == "partial_failure":
+        capacity = registry.capacity_status()
+        raise RuntimeError(
+            "warehouse recovery retention could not prove a bounded exact "
+            "lifecycle; inspect quarantined artifacts before another T2 write "
+            f"(t2_hard_stop={bool(capacity.get('t2_hard_stop'))})"
+        )
+    return {
+        **result,
+        "applied": str(result.get("status") or "") == "applied",
+    }
 
 
 def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) -> int:

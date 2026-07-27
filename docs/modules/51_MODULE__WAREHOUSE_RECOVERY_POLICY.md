@@ -14,7 +14,9 @@ Implementation:
 - `GET /v1/sheet-vitrina-v1/warehouses/recovery`
 
 The authoritative design and acceptance matrix are
-`migration/123_warehouse_recovery_policy_design.md`.
+`migration/123_warehouse_recovery_policy_design.md`. Stage 4 routing,
+retention and legacy storage sanitation are authoritative in
+`migration/125_storage_recovery_sanitation.md`.
 
 ## Tier contract
 
@@ -54,6 +56,15 @@ reserve, expiry and owning operation. Pre-write and post-write watermarks are
 both fail closed. Public status reports planned, actual and read bytes rather
 than inferring work from filenames.
 
+New T2 checkpoints are routed through the authoritative runtime root to
+`state/backups/warehouse-recovery/domain-checkpoints`. Production mounts
+`state/backups` on the dedicated backup filesystem; status reports both mount
+identities so a missing/misdirected mount is visible. The two newest verified
+rollback points are protected, while successful T2 retention is bounded by
+three generations, 2 GiB and 24 hours. The plan also reports observed cadence,
+24-hour/14-day no-GC projections, bounded 30-day growth and 8 GiB degraded /
+4 GiB hard-stop watermarks.
+
 The read-only orphan scanner classifies registered and unregistered raw SQLite,
 WAL, SHM, journal, zstd, manifest, temp and undo families, registry-without-byte
 and undo-without-registry states, stuck operations, corrupt registered
@@ -62,6 +73,11 @@ evidence; retention removes only lifecycle-authorized exact artifacts. Expired
 `retained` evidence advances to `released`; expired `rolled_back` evidence
 keeps its terminal audit state while its files and undo rows are released.
 Failed and quarantined evidence is never removed by ordinary retention.
+Retention planning has a stable exact fingerprint and apply owns a durable
+registry audit. It runs before and after hourly/manual publication under the
+same writer lock, and can also be invoked through deployed-SHA-pinned hosted
+`warehouse-recovery-retention-dry-run|apply`. Restart resumes the same audit;
+operation state-version, path/stat/SHA or non-target drift fails closed.
 Files already present in the legacy `backups/` tree before the first durable
 policy operation are reported separately as the pre-policy baseline. They do
 not make a later canary look as though it created an orphan, but they remain
@@ -95,6 +111,18 @@ evidence only; its apply mode fails closed before any backup or mutation.
 `apps/warehouse_recovery_policy_static_smoke.py` walks current executable
 bounded entrypoints and fails CI if one regains a full backup, coherent-size
 probe, full-store integrity/SHA scan or a second T3 backup call.
+`apps/storage_recovery_writer_inventory_static_smoke.py` separately classifies
+every production SQLite backup primitive/caller and fails if a new
+unclassified writer appears or a scheduled full-monolith writer is introduced.
+
+Legacy bytes are not adopted by ordinary retention. The separate
+`apps/storage_recovery_sanitation.py` runner inventories both canonical backup
+roots, accepts only explicit family names, losslessly compresses raw immutable
+SQLite evidence through the standard archive primitive, verifies decompressed
+size/SHA, and only then removes raw bytes or superseded verified generations.
+Every action is exact-fingerprint/deployed-SHA gated, audited, fsynced,
+restart-safe and non-target-digest checked. Custom-manifest, foreign,
+incomplete and corrupt families remain untouched.
 
 ## Operator and production acceptance
 
