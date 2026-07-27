@@ -69,6 +69,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- `GET /v1/sheet-vitrina-v1/web-vitrina/business-projection/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check`
@@ -658,6 +659,11 @@ Public probe validates:
   - `Лог` must render below that table as the secondary block and keep the existing job/log download contour
   - the former sibling block `Обновление данных` is no longer rendered or exposed as an active page-composition activity block; persisted STATUS/read-side fields remain internal truth for other status contracts
   - top summary must be compact (`Обновлено`, `Статус`, `Период`); the old bulky `Свежесть данных`/`Строки` cards are not separate page blocks. Automatic freshness is monitored in Settings.
+- `GET /v1/sheet-vitrina-v1/web-vitrina/business-projection/status` is a
+  repo-owned exact public route and a mandatory deploy probe. It returns only
+  the bounded projection revision/outbox/failure status used by visible-tab
+  revision checks; proxy/fallback `404` is a failed deployment, not an
+  acceptable empty projection.
 - `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` returns/persists runtime-managed web-vitrina refresh schedules. Business cadence remains in the existing runtime JSON and is edited only by the Vitrina card in `Настройки → Автообновления`; response exposes timezone, mutability, `next_auto_run_at`, `last_auto_run_at`, `last_auto_success_at`, `last_auto_error_summary` and per-schedule next/last/status fields.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now` launches the existing async full-refresh job with auto-schedule trigger metadata and is exposed only in Settings. The route must return a job payload quickly and must not call archived Google Sheets/GAS load.
 - `GET /v1/sheet-vitrina-v1/prices/spp-test/history`, bounded by `limit<=50` and an opaque cursor, reads existing and new `sheet_vitrina_v1_prices/spp_tests/jobs/*.json` newest-first; `GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}` accepts only a safe job id and returns sanitized lifecycle detail without headers, credentials or internal paths. Legacy jobs keep `trigger_source=null`; new jobs record `manual` or `schedule`.
