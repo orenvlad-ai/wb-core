@@ -4821,6 +4821,10 @@ class WarehouseFunctionalBlock:
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "ready",
+            "probe_shape": {
+                "warehouse_key": warehouse_key,
+                "required_collections": ["balances", "documents"],
+            },
             "cutover": readback["cutover"],
             "active_version": readback["active_version"],
             "sync": readback["sync"],
