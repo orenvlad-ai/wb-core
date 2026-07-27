@@ -94,6 +94,18 @@ def main() -> None:
                         }
                     },
                     "expanded_anchors": ["sku::ctr_current", "sku::ctr_current"],
+                    "sku_highlight_metric_keys": [
+                        "ctr_current",
+                        "ctr_current",
+                        "",
+                        "x" * 161,
+                        "views_current",
+                        "orders_current",
+                        "add_to_cart_current",
+                        "price_current",
+                        "stock_current",
+                        "seventh_metric",
+                    ],
                 },
             },
         )
@@ -108,11 +120,34 @@ def main() -> None:
             )
         if sanitized["config"]["expanded_anchors"] != ["sku::ctr_current"]:
             raise AssertionError(f"expanded anchors must be deduplicated, got {sanitized}")
+        if sanitized["config"]["sku_highlight_metric_keys"] != [
+            "ctr_current",
+            "views_current",
+            "orders_current",
+            "add_to_cart_current",
+            "price_current",
+            "stock_current",
+        ]:
+            raise AssertionError(f"ordered SKU highlight keys must be bounded and sanitized, got {sanitized}")
         sanitized_raw = str(sanitized["config"])
         if "2026-04-20" in sanitized_raw or "2026-04-24" in sanitized_raw or "legacy" in sanitized_raw:
             raise AssertionError(f"legacy period fields must not survive server user-config sanitization, got {sanitized}")
 
-    print({"status": "ok", "checks": ["missing", "save", "reload", "multi_user", "conflict", "sanitize", "legacy_period_drop"]})
+    print(
+        {
+            "status": "ok",
+            "checks": [
+                "missing",
+                "save",
+                "reload",
+                "multi_user",
+                "conflict",
+                "sanitize",
+                "sku_highlight_sanitize",
+                "legacy_period_drop",
+            ],
+        }
+    )
 
 
 if __name__ == "__main__":

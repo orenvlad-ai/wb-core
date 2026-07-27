@@ -157,7 +157,7 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
 
 # 9. Server-derived capital presentation
 
-The view model carries optional per-date `presentation_state`, `presentation_tone` and `presentation_reason` supplied by the server. `Товарный капитал — наши данные` uses these fields for yellow/unconfirmed cells and concise expense/date/matching/invariant diagnostics. The browser does not derive confirmation from localStorage or mutable current status.
+The view model carries optional per-date `presentation_state`, `presentation_tone` and `presentation_reason` supplied by the server. `Товарный капитал — наши данные` preserves these fields and concise expense/date/matching/invariant diagnostics as tooltip/ARIA evidence, but `unconfirmed` does not impose a permanent yellow/amber cell style. The browser does not derive confirmation from localStorage or mutable current status, and user-owned metric highlighting does not change this server semantic state.
 
 The same section exposes canonical six-stage quantity/capital/coverage fields. Open `packed - accepted` belongs to stage `FF → WB` until final acceptance; positive final difference belongs to the separate `Расхождения приёмки WB` warehouse. Legacy paid-equivalent/underaccepted rows are audit compatibility only and are not active quantity or capital sources.
 

@@ -80,6 +80,9 @@ def main() -> None:
                 "preset_crud",
                 "manual_selection_isolation",
                 "hidden_stale_member",
+                "sku_highlight_blue_yellow",
+                "sku_highlight_reload_reset",
+                "sku_highlight_stale_sanitation",
                 "modal_search_and_layout",
                 "cleared_local_storage",
             ],
@@ -114,6 +117,13 @@ def _check_server_config_sanitizer() -> None:
                 "all": False,
                 "metric_keys": [],
             },
+            "sku_highlight_metric_keys": [
+                "wb_stock_incident_qty",
+                "wb_stock_incident_qty",
+                "",
+                "wb_stock_effective_qty",
+                "x" * 161,
+            ],
             "migrations": {
                 "incident_effective_shown_v1": True,
                 "sku_presets_seeded_v1": True,
@@ -126,6 +136,8 @@ def _check_server_config_sanitizer() -> None:
         or sanitized.get("sku_presets", [{}])[0].get("metric_keys")
         != ["wb_stock_incident_qty", "stale_metric"]
         or (sanitized.get("sku_metric_selection") or {}).get("preset_id") != "focus"
+        or sanitized.get("sku_highlight_metric_keys")
+        != ["wb_stock_incident_qty", "wb_stock_effective_qty"]
         or not sanitized.get("migrations", {}).get("incident_effective_shown_v1")
     ):
         raise AssertionError(f"server sanitizer must preserve v3 statuses/presets/selection, got {sanitized}")
@@ -312,6 +324,7 @@ def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
         label.startswith("Анализ") for label in mode_labels
     ):
         raise AssertionError(f"picker must expose manual mode and the initial Анализ preset, got {mode_labels}")
+    _check_sku_metric_highlights(page, server)
 
     page.locator("[data-sku-preset-configure]").click()
     page.wait_for_selector("[data-sku-preset-modal]:not([hidden])", timeout=5000)
@@ -444,6 +457,17 @@ def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
         raise AssertionError("deleted preset must be removed from the registry")
     page.locator("[data-sku-preset-close]").first.click()
 
+    _open_sku_metric_picker(page)
+    focus_color = page.locator(f'[data-sku-metric-color="{focus_metric_key}"]')
+    if focus_color.count() != 1 or focus_color.is_disabled():
+        raise AssertionError("visible focus metric must expose an enabled color checkbox before hiding")
+    focus_color.check()
+    save_before = server.save_count
+    page.locator("[data-sku-metric-apply]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    if server.user_config["config"].get("sku_highlight_metric_keys") != [focus_metric_key]:
+        raise AssertionError("focus metric highlight must persist before stale sanitation")
+
     _open_metrics(page)
     sku_display_selector = (
         '[data-metric-display-select][data-metric-config-scope="sku"]'
@@ -452,6 +476,8 @@ def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
     save_before = server.save_count
     page.select_option(sku_display_selector, "hidden")
     _wait_for_server_save_count(server, save_before + 1)
+    if focus_metric_key in server.user_config["config"].get("sku_highlight_metric_keys", []):
+        raise AssertionError("hiding a metric must immediately remove its active invisible highlight")
     _open_sku_metric_picker(page)
     if page.locator(f'[data-sku-metric-option="{focus_metric_key}"]').count() != 0:
         raise AssertionError("a hidden metric must be excluded from the picker")
@@ -465,10 +491,143 @@ def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
     )
     if stale_focus.get("metric_keys") != [focus_metric_key]:
         raise AssertionError("hiding a metric must not rewrite saved preset membership")
+    server.user_config["config"]["sku_highlight_metric_keys"] = [focus_metric_key, "stale_metric"]
+    save_before = server.save_count
     page.reload(wait_until="domcontentloaded")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    _wait_for_server_save_count(server, save_before + 1)
+    if server.user_config["config"].get("sku_highlight_metric_keys"):
+        raise AssertionError(
+            "reload sanitation must remove hidden and unavailable highlight keys from server config"
+        )
     if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Фокус":
         raise AssertionError("preset identity must survive reload when a stale member becomes hidden")
+
+
+def _check_sku_metric_highlights(page, server: "FixtureServer") -> None:
+    metric_keys = page.evaluate(
+        """() => {
+          const optionKeys = new Set(Array.from(document.querySelectorAll('[data-sku-metric-option]'))
+            .map((node) => node.getAttribute('data-sku-metric-option') || '')
+            .filter(Boolean));
+          return Array.from(new Set(Array.from(document.querySelectorAll(
+            '[data-table-body] tr[data-row-kind="sku"] td[data-metric-key]'
+          )).map((node) => node.getAttribute('data-metric-key') || '').filter((key) => optionKeys.has(key)))).slice(0, 2);
+        }"""
+    )
+    if len(metric_keys) != 2:
+        raise AssertionError(f"highlight smoke requires two rendered SKU metrics, got {metric_keys}")
+    for metric_key in metric_keys:
+        color_control = page.locator(f'[data-sku-metric-color="{metric_key}"]')
+        if color_control.count() != 1 or color_control.is_disabled():
+            raise AssertionError(f"shown metric must expose one enabled color checkbox: {metric_key}")
+        color_control.check()
+    palette_indexes = [
+        page.locator(f'[data-sku-metric-color="{metric_key}"]').get_attribute(
+            "data-sku-highlight-palette-index"
+        )
+        for metric_key in metric_keys
+    ]
+    if palette_indexes != ["1", "2"]:
+        raise AssertionError(f"first two highlights must deterministically use blue/yellow, got {palette_indexes}")
+
+    save_before = server.save_count
+    page.locator("[data-sku-metric-apply]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    if server.user_config["config"].get("sku_highlight_metric_keys") != metric_keys:
+        raise AssertionError(
+            f"ordered highlight metric keys must persist server-side, got {server.user_config}"
+        )
+    _assert_sku_metric_highlight_render(page, metric_keys)
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    _assert_sku_metric_highlight_render(page, metric_keys)
+    _open_sku_metric_picker(page)
+    reloaded_indexes = [
+        page.locator(f'[data-sku-metric-color="{metric_key}"]').get_attribute(
+            "data-sku-highlight-palette-index"
+        )
+        for metric_key in metric_keys
+    ]
+    if reloaded_indexes != ["1", "2"] or any(
+        not page.locator(f'[data-sku-metric-color="{metric_key}"]').is_checked()
+        for metric_key in metric_keys
+    ):
+        raise AssertionError(
+            f"highlight order/colors must survive reload, got indexes={reloaded_indexes}"
+        )
+
+    save_before = server.save_count
+    page.locator("[data-sku-metric-reset]").click()
+    _wait_for_server_save_count(server, save_before + 1)
+    if server.user_config["config"].get("sku_highlight_metric_keys") != []:
+        raise AssertionError("SKU metric reset must clear the color selection")
+    if page.locator('[data-sku-metric-highlight-index]:not([data-sku-metric-highlight-index=""])').count():
+        raise AssertionError("SKU metric reset must remove all rendered user highlights")
+
+
+def _assert_sku_metric_highlight_render(page, metric_keys: list[str]) -> None:
+    result = page.evaluate(
+        """(metricKeys) => {
+          const metrics = metricKeys.map((metricKey, index) => {
+            const temporal = Array.from(document.querySelectorAll(
+              'tr[data-row-kind="sku"] td[data-metric-key="' + CSS.escape(metricKey) + '"][data-cell-date]:not([data-cell-date=""])'
+            )).filter((node) => (
+              (node.getAttribute('data-presentation-state') || '') !== 'unavailable'
+              && (node.textContent || '').trim() !== '—'
+            ));
+            const labels = Array.from(document.querySelectorAll(
+              'tr[data-row-kind="sku"] td[data-col-id="metric_label"][data-metric-key="' + CSS.escape(metricKey) + '"]'
+            ));
+            const expectedIndex = String(index + 1);
+            const sample = temporal[0] || labels[0] || null;
+            return {
+              metricKey,
+              temporalCount: temporal.length,
+              labelCount: labels.length,
+              allTemporalHighlighted: temporal.every((node) => (
+                node.getAttribute('data-sku-metric-highlight-index') === expectedIndex
+              )),
+              allLabelsHighlighted: labels.every((node) => (
+                node.getAttribute('data-sku-metric-highlight-index') === expectedIndex
+              )),
+              background: sample ? getComputedStyle(sample).backgroundColor : '',
+              foreground: sample ? getComputedStyle(sample).color : '',
+              paletteColor: sample
+                ? getComputedStyle(sample).getPropertyValue('--sku-highlight-color').trim()
+                : ''
+            };
+          });
+          return {
+            metrics,
+            totalHighlightCount: document.querySelectorAll(
+              'tr[data-row-kind="total"] [data-sku-metric-highlight-index]:not([data-sku-metric-highlight-index=""])'
+            ).length,
+            unavailableHighlightCount: document.querySelectorAll(
+              '[data-presentation-state="unavailable"][data-sku-metric-highlight-index]:not([data-sku-metric-highlight-index=""])'
+            ).length
+          };
+        }""",
+        metric_keys,
+    )
+    if result["totalHighlightCount"] != 0 or result["unavailableHighlightCount"] != 0:
+        raise AssertionError(f"highlight must exclude TOTAL and unavailable cells, got {result}")
+    if any(
+        not metric["temporalCount"]
+        or not metric["labelCount"]
+        or not metric["allTemporalHighlighted"]
+        or not metric["allLabelsHighlighted"]
+        for metric in result["metrics"]
+    ):
+        raise AssertionError(f"highlight must cover every rendered SKU/date value and label, got {result}")
+    backgrounds = [metric["background"] for metric in result["metrics"]]
+    if not all(backgrounds) or len(set(backgrounds)) != 2:
+        raise AssertionError(f"first two highlights must render as distinct blue/yellow backgrounds, got {result}")
+    if [metric["paletteColor"] for metric in result["metrics"]] != ["#3b82f6", "#facc15"]:
+        raise AssertionError(f"first two rendered palette colors must be blue/yellow, got {result}")
+    if any(metric["foreground"] != "rgb(244, 244, 245)" for metric in result["metrics"]):
+        raise AssertionError(f"highlighted values must remain readable in the dark table, got {result}")
 
 
 def _build_composition(runtime_dir: Path) -> dict[str, object]:
