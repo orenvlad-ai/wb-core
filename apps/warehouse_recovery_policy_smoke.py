@@ -973,6 +973,155 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
         report = policy.scan_orphans()
         self.assertIn(str(legacy.resolve()), report["unclassified_paths"])
 
+    def test_scanner_trusts_only_terminal_sanitation_archive_audit(self) -> None:
+        activation = datetime(2026, 7, 26, 18, 43, 50, tzinfo=timezone.utc)
+        backups = self.runtime_dir / "backups"
+        backups.mkdir()
+        policy = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            clock=lambda: activation,
+        )
+        policy.prepare_t1(
+            mutation_kind="supplier_cost_queue_replay",
+            closure_kind="shipment",
+            plan_fingerprint="sha256:sanitation-activation",
+            scope={"shipment_id": "sanitation"},
+            before_images=[
+                {
+                    "table": "bounded_rows",
+                    "key": {"row_id": "target"},
+                    "before": {
+                        "row_id": "target",
+                        "value": "before",
+                        "untouched": "stable",
+                    },
+                    "after": {
+                        "row_id": "target",
+                        "value": "after",
+                        "untouched": "stable",
+                    },
+                }
+            ],
+        )
+
+        family = backups / "supplier-26gn390-recovery"
+        family.mkdir()
+        archive = family / "verified.sqlite3.zst"
+        archive.write_bytes(b"verified-archive")
+        manifest = archive.with_name(archive.name + ".manifest.json")
+        manifest_payload = {
+            "contract_name": "sqlite_backup_lossless_archive_v1",
+            "lifecycle_state": "retained",
+            "source_removed": True,
+            "archive_path": str(archive.resolve()),
+            "archive_size_bytes": archive.stat().st_size,
+            "archive_sha256": "sha256:" + "1" * 64,
+            "source_sha256": "sha256:" + "2" * 64,
+            "actual_decompressed_sha256": "sha256:" + "2" * 64,
+            "actual_decompressed_size_bytes": 4096,
+        }
+        manifest.write_text(
+            json.dumps(manifest_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+        after_activation = (activation + timedelta(seconds=1)).timestamp()
+        os.utime(archive, (after_activation, after_activation))
+        os.utime(manifest, (after_activation, after_activation))
+
+        fingerprint = "sha256:" + "a" * 64
+        audit_dir = self.runtime_dir / "storage-recovery-sanitation"
+        audit_dir.mkdir()
+        audit_path = audit_dir / (fingerprint.removeprefix("sha256:") + ".json")
+        audit_payload = {
+            "contract_name": "storage_recovery_sanitation_v1",
+            "fingerprint": fingerprint,
+            "status": "applied",
+            "deployed_sha": "b" * 40,
+            "plan": {
+                "action": "archive_raw_sqlite",
+                "root": "backup",
+                "family": family.name,
+                "family_path": str(family.resolve()),
+            },
+            "result": {
+                "status": "archived",
+                "archive": {
+                    "archive_path": str(archive.resolve()),
+                    "manifest_path": str(manifest.resolve()),
+                    "archive_size_bytes": archive.stat().st_size,
+                    "archive_sha256": manifest_payload["archive_sha256"],
+                    "source_sha256": manifest_payload["source_sha256"],
+                    "decompressed_sha256": manifest_payload[
+                        "actual_decompressed_sha256"
+                    ],
+                    "decompressed_size_bytes": manifest_payload[
+                        "actual_decompressed_size_bytes"
+                    ],
+                    "restore_probe": "verified",
+                },
+            },
+        }
+        audit_path.write_text(
+            json.dumps(audit_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        report = policy.scan_orphans()
+        self.assertEqual(report["status"], "clean")
+        self.assertEqual(report["sanitation_verified_count"], 2)
+        self.assertEqual(
+            set(report["sanitation_verified_paths"]),
+            {str(archive.resolve()), str(manifest.resolve())},
+        )
+        classifications = {
+            item["path"]: item["classification"] for item in report["files"]
+        }
+        self.assertEqual(
+            classifications[str(archive.resolve())],
+            "sanitation_verified",
+        )
+
+        audit_payload["status"] = "applying"
+        audit_path.write_text(
+            json.dumps(audit_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+        report = policy.scan_orphans()
+        self.assertEqual(report["status"], "attention_required")
+        self.assertEqual(report["sanitation_verified_count"], 0)
+        self.assertEqual(
+            set(report["unclassified_paths"]),
+            {str(archive.resolve()), str(manifest.resolve())},
+        )
+
+        rogue_archive = family / "rogue.sqlite3.zst"
+        rogue_archive.write_bytes(b"rogue")
+        rogue_manifest = rogue_archive.with_name(
+            rogue_archive.name + ".manifest.json"
+        )
+        rogue_payload = {
+            **manifest_payload,
+            "archive_path": str(rogue_archive.resolve()),
+            "archive_size_bytes": rogue_archive.stat().st_size,
+        }
+        rogue_manifest.write_text(
+            json.dumps(rogue_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.utime(rogue_archive, (after_activation, after_activation))
+        os.utime(rogue_manifest, (after_activation, after_activation))
+        audit_payload["status"] = "applied"
+        audit_path.write_text(
+            json.dumps(audit_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+        report = policy.scan_orphans()
+        self.assertEqual(report["sanitation_verified_count"], 2)
+        self.assertIn(str(rogue_archive.resolve()), report["unclassified_paths"])
+        self.assertIn(str(rogue_manifest.resolve()), report["unclassified_paths"])
+
     def test_scanner_detects_registered_corruption(self) -> None:
         operation = self.registry.prepare_t2(
             mutation_kind="manual_warehouse_sync",

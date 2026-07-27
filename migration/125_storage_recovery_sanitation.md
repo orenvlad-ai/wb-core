@@ -130,6 +130,33 @@ directory change, preserves a digest of all non-target family entries and can
 resume the same fingerprint after a crash. One corrupt family stops only that
 family; independent families remain eligible.
 
+Long family planning/apply is submitted through the fixed repo-owned detached
+transport:
+
+- the caller chooses and retains an exact 64-hex job id before SSH;
+- hosted `storage-recovery-sanitation-submit` atomically binds that id to the
+  deployed SHA, operation, root, family, reserve and optional apply
+  fingerprint, then starts only
+  `wb-core-storage-recovery-sanitation@.service`;
+- the systemd template executes the fixed repository worker with canonical
+  roots and a global single-worker lock; it accepts no free-form command;
+- request, state and result are mode-`0600`, fsynced and digest-bound below
+  `state/storage-recovery-sanitation-jobs/<job-id>/`;
+- hosted `storage-recovery-sanitation-status` is read-only and returns the
+  durable plan/apply result plus unit readback. SSH disconnect therefore
+  cannot lose a generated fingerprint or start a second job;
+- resubmitting the same id is allowed only for the byte-identical request.
+  Terminal jobs never restart; a worker crash re-enters the same request, and
+  sanitation apply resumes its existing exact-fingerprint audit.
+
+The recovery orphan scanner does not broadly trust post-policy `.zst` files.
+It classifies a post-policy lossless archive as `sanitation_verified` only when
+an `applied` sanitation audit whose filename matches its fingerprint identifies
+the exact backup-family archive/manifest pair, the standard retained manifest
+and current size identities agree, and source/decompressed SHA evidence is
+identical to the terminal restore proof. Missing, non-terminal or mismatching
+audit evidence leaves the files unclassified and fail-closed.
+
 The large Stage 4 allowlist is:
 
 - root: `ads-historical`, `wb-finance-canonical`,
@@ -204,6 +231,7 @@ by this migration.
 - `python3 apps/warehouse_recovery_retention_smoke.py`
 - `python3 apps/storage_recovery_writer_inventory_static_smoke.py`
 - `python3 apps/storage_recovery_sanitation_smoke.py`
+- `python3 apps/storage_recovery_sanitation_job_smoke.py`
 - `python3 apps/promo_campaign_archive_gc_smoke.py`
 - `python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py`
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`

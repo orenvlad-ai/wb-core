@@ -2735,6 +2735,130 @@ def run_storage_recovery_sanitation_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_storage_recovery_sanitation_job_command(
+    args: argparse.Namespace,
+) -> int:
+    """Submit or read one durable detached sanitation job."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    job_action = str(args.sanitation_job_action)
+    action = f"storage-recovery-sanitation-{job_action}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if job_action == "submit":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    if "wb-core-storage-recovery-sanitation@.service" not in {
+        unit.name for unit in target.managed_systemd_units
+    }:
+        raise ValueError(
+            "detached sanitation requires the repo-owned managed systemd template"
+        )
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("detached sanitation requires an exact deployed SHA")
+    job_id = str(args.job_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", job_id):
+        raise ValueError(
+            "detached sanitation requires an exact 64-hex caller-known job id"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("detached sanitation requires the canonical runtime dir")
+    runner_args = [
+        "python3",
+        "apps/storage_recovery_sanitation_job.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--root-backups",
+        "/opt/wb-core-runtime/backups",
+        "--deployed-sha-file",
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+        job_action,
+        "--job-id",
+        job_id,
+        "--deployed-sha",
+        deployed_sha,
+    ]
+    if job_action == "submit":
+        operation = str(args.operation)
+        fingerprint = str(args.fingerprint or "").strip()
+        if operation == "apply" and not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            fingerprint,
+        ):
+            raise ValueError(
+                "detached sanitation apply requires an exact fingerprint"
+            )
+        if operation == "plan" and fingerprint:
+            raise ValueError(
+                "detached sanitation plan must not carry an apply fingerprint"
+            )
+        runner_args.extend(
+            [
+                "--operation",
+                operation,
+                "--root",
+                str(args.sanitation_root),
+                "--family",
+                str(args.family),
+                "--reserved-free-bytes",
+                str(int(args.reserved_free_bytes)),
+            ]
+        )
+        if fingerprint:
+            runner_args.extend(["--fingerprint", fingerprint])
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=60.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("detached sanitation returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("detached sanitation returned a non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "job_id": job_id,
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_promo_archive_gc_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -5565,6 +5689,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sanitation_apply.set_defaults(
         handler=run_storage_recovery_sanitation_command,
         storage_sanitation_action="apply",
+    )
+
+    sanitation_submit = subparsers.add_parser(
+        "storage-recovery-sanitation-submit",
+        help=(
+            "Persist one exact plan/apply request and start the fixed detached "
+            "sanitation worker."
+        ),
+    )
+    sanitation_submit.add_argument("--deployed-sha", required=True)
+    sanitation_submit.add_argument("--job-id", required=True)
+    sanitation_submit.add_argument(
+        "--operation",
+        choices=("plan", "apply"),
+        required=True,
+    )
+    sanitation_submit.add_argument(
+        "--root",
+        dest="sanitation_root",
+        choices=("root", "backup"),
+        required=True,
+    )
+    sanitation_submit.add_argument("--family", required=True)
+    sanitation_submit.add_argument("--fingerprint", default="")
+    sanitation_submit.add_argument(
+        "--reserved-free-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+    )
+    sanitation_submit.set_defaults(
+        handler=run_storage_recovery_sanitation_job_command,
+        sanitation_job_action="submit",
+    )
+
+    sanitation_status = subparsers.add_parser(
+        "storage-recovery-sanitation-status",
+        help="Read one durable detached sanitation job result without mutation.",
+    )
+    sanitation_status.add_argument("--deployed-sha", required=True)
+    sanitation_status.add_argument("--job-id", required=True)
+    sanitation_status.set_defaults(
+        handler=run_storage_recovery_sanitation_job_command,
+        sanitation_job_action="status",
     )
 
     promo_gc_dry_run = subparsers.add_parser(

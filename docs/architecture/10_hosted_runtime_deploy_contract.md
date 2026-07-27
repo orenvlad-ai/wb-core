@@ -754,6 +754,15 @@ Public probe validates:
   custom/unmatched manifests, corruption and foreign/unlisted families fail
   closed. The detailed family allowlist and production acceptance contract are
   `migration/125_storage_recovery_sanitation.md`;
+- Long legacy-family work uses hosted
+  `storage-recovery-sanitation-submit|status`, not an SSH-owned foreground
+  process. Submit requires a caller-known 64-hex job id and exact deployed SHA,
+  persists one digest-bound request and starts only the installed
+  `wb-core-storage-recovery-sanitation@.service` template. The template fixes
+  the repository worker and both canonical roots; no shell payload is
+  accepted. Status is read-only and returns durable request/state/result and
+  systemd readback. Exact request drift, concurrent worker, symlink/job-path
+  drift and non-terminal/mismatching sanitation audit fail closed;
 - Hosted `promo-archive-gc-dry-run|apply` is the only Stage 4 full Promo
   artifact cleanup path. It keeps the existing normalized-persistence/hash and
   TTL/state guards, adds SHA/stat/inode/mtime identities, a stable fingerprint,
