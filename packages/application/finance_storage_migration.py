@@ -19,12 +19,16 @@ import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from packages.application.finance_raw_storage import (
+    FinanceRawLiveTailBridge,
     OPERATIONAL_SCHEMA_TABLES,
     RAW_SCHEMA_TABLES,
     bind_generation_identity,
     ensure_operational_schema,
     ensure_raw_schema,
+    shadow_compare_week,
+    storage_health,
 )
+from packages.application.business_data_write_barrier import barrier_status
 from packages.application.storage_registry import (
     MANIFEST_FILENAME,
     MONOLITH_FILENAME,
@@ -33,15 +37,21 @@ from packages.application.storage_registry import (
     build_manifest,
     explain_query_plan,
     manifest_payload,
+    parse_manifest,
 )
-from packages.application.warehouse_functional_lock import (
-    WarehouseFunctionalBusyError,
-    warehouse_functional_write_lock,
-)
-
-
 PLAN_CONTRACT = "wb_core_finance_storage_split_plan_v1"
 MIGRATION_CONTRACT = "wb_core_finance_storage_split_candidate_v1"
+SNAPSHOT_PLAN_CONTRACT = "wb_core_finance_storage_snapshot_plan_v1"
+SNAPSHOT_CONTRACT = "wb_core_finance_storage_coherent_snapshot_v1"
+SHADOW_STATE_CONTRACT = "wb_core_finance_shadow_ingest_state_v1"
+SHADOW_STATE_FILENAME = ".finance-storage-shadow-ingest.json"
+SHADOW_VERIFICATION_CONTRACT = "wb_core_finance_shadow_verification_v1"
+SHADOW_VERIFICATION_FILENAME = "shadow_verification.json"
+CUTOVER_PLAN_CONTRACT = "wb_core_finance_storage_cutover_plan_v1"
+CUTOVER_RESULT_CONTRACT = "wb_core_finance_storage_cutover_result_v1"
+ROLLBACK_PLAN_CONTRACT = "wb_core_finance_storage_rollback_plan_v1"
+ROLLBACK_CANDIDATE_CONTRACT = "wb_core_finance_storage_rollback_candidate_v1"
+ROLLBACK_RESULT_CONTRACT = "wb_core_finance_storage_rollback_result_v1"
 LEGACY_RAW_TABLE = "wb_finance_weekly_raw_rows"
 RAW_LEGACY_OBJECTS = frozenset(
     {
@@ -519,7 +529,7 @@ def _process_openers(source: Path) -> list[dict[str, Any]]:
                 or target_stat.st_ino != source_stat.st_ino
             ):
                 continue
-            flags = 0
+            flags: int | None = None
             try:
                 for line in (pid_dir / "fdinfo" / fd_path.name).read_text().splitlines():
                     if line.startswith("flags:"):
@@ -535,8 +545,13 @@ def _process_openers(source: Path) -> list[dict[str, Any]]:
                 {
                     "pid": int(pid_dir.name),
                     "fd": int(fd_path.name),
-                    "access_mode": {0: "read_only", 1: "write_only", 2: "read_write"}.get(
-                        flags & os.O_ACCMODE, "unknown"
+                    "access_mode": (
+                        {0: "read_only", 1: "write_only", 2: "read_write"}.get(
+                            flags & os.O_ACCMODE,
+                            "unknown",
+                        )
+                        if flags is not None
+                        else "unknown"
                     ),
                     "comm": comm,
                 }
@@ -582,6 +597,44 @@ def _systemd_inventory() -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _unknown_snapshot_writers(
+    openers: Sequence[Mapping[str, Any]],
+    systemd_units: Sequence[Mapping[str, Any]],
+    *,
+    hold_confirmed: bool,
+) -> list[dict[str, Any]]:
+    """Classify writable monolith openers against exact systemd ownership."""
+
+    known_unit_by_pid = {
+        int(item.get("main_pid") or 0): str(item.get("unit") or "")
+        for item in systemd_units
+        if int(item.get("main_pid") or 0) > 0
+    }
+    current_pid = os.getpid()
+    unknown: list[dict[str, Any]] = []
+    for raw in openers:
+        item = dict(raw)
+        access_mode = str(item.get("access_mode") or "")
+        if access_mode == "read_only":
+            continue
+        pid = int(item.get("pid") or 0)
+        owning_unit = known_unit_by_pid.get(pid, "")
+        item["owning_unit"] = owning_unit
+        if pid == current_pid and access_mode == "read_only":
+            continue
+        if not hold_confirmed and owning_unit:
+            continue
+        if (
+            hold_confirmed
+            and owning_unit == "wb-core-registry-http.service"
+            and access_mode == "read_write"
+        ):
+            item["write_guard"] = "active_http_write_barrier"
+            continue
+        unknown.append(item)
+    return unknown
 
 
 def _source_identity(path: Path, conn: sqlite3.Connection) -> dict[str, Any]:
@@ -690,6 +743,539 @@ def _direct_open_inventory(repo_root: Path | None) -> dict[str, Any]:
         return {
             "status": "unavailable",
             "reason": f"{type(exc).__name__}: {str(exc)[:300]}",
+    }
+
+
+def _snapshot_plan_fingerprint(plan: Mapping[str, Any]) -> str:
+    stable = json.loads(_canonical_json(plan))
+    stable.pop("fingerprint", None)
+    stable.pop("created_at", None)
+    capacity = stable.get("capacity", {})
+    for key in (
+        "available_bytes",
+        "shortfall_bytes",
+        "remaining_bytes_after_snapshot",
+        "sufficient",
+    ):
+        capacity.pop(key, None)
+    writers = stable.get("writers_and_timers", {})
+    writers["database_openers"] = sorted(
+        [
+            {
+                "access_mode": str(item.get("access_mode") or ""),
+                "comm": str(item.get("comm") or ""),
+            }
+            for item in writers.get("database_openers", [])
+        ],
+        key=lambda item: (item["comm"], item["access_mode"]),
+    )
+    for item in writers.get("systemd_units", []):
+        for key in ("main_pid", "last_trigger", "next_trigger"):
+            item.pop(key, None)
+    return _digest(stable)
+
+
+def _load_private_json(path: Path, *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise FinanceStorageMigrationError(f"{label} is missing: {path}")
+    if path.stat().st_mode & 0o077:
+        raise FinanceStorageMigrationError(f"{label} must be private mode 0600")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FinanceStorageMigrationError(f"{label} is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise FinanceStorageMigrationError(f"{label} is not a JSON object")
+    return payload
+
+
+class FinanceStorageCoherentSnapshot:
+    """Create and verify one immutable migration source under a short hold."""
+
+    def __init__(
+        self,
+        runtime_dir: Path,
+        *,
+        deployed_sha: str,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.runtime_dir = Path(runtime_dir).expanduser().resolve()
+        self.registry = StoreRegistry(self.runtime_dir)
+        self.deployed_sha = str(deployed_sha or "").strip()
+        self.repo_root = Path(repo_root).resolve() if repo_root else None
+
+    def build_plan(self) -> dict[str, Any]:
+        manifest = self.registry.load()
+        if manifest.state != "monolith" or manifest.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "coherent snapshot requires the canonical monolith generation"
+            )
+        source = self.registry.resolve("operational", manifest=manifest)
+        with self.registry.session(
+            "operational",
+            mode="ro",
+            operation="finance_storage_snapshot_plan",
+            timeout_ms=30_000,
+            isolation_level=None,
+        ) as conn:
+            conn.execute("BEGIN")
+            source_identity = _source_identity(source, conn)
+            conn.rollback()
+        source_bytes = max(
+            int(source_identity["size_bytes"]),
+            int(source_identity["allocated_page_bytes"]),
+        )
+        vfs = os.statvfs(self.runtime_dir)
+        free_bytes = int(vfs.f_bavail * vfs.f_frsize)
+        reserve_bytes = max(2 * _GIB, math.ceil(source_bytes * 0.10))
+        required_bytes = source_bytes + reserve_bytes
+        identity_fingerprint = _digest(
+            {
+                "deployed_sha": self.deployed_sha,
+                "source_identity": source_identity,
+            }
+        )
+        epoch = identity_fingerprint.removeprefix("sha256:")[:20]
+        snapshot_id = f"finance-split-{epoch}"
+        snapshot_root = (
+            self.runtime_dir / "finance-storage-split-snapshots" / snapshot_id
+        ).resolve()
+        database_path = snapshot_root / "monolith.sqlite3"
+        manifest_path = snapshot_root / "snapshot_manifest.json"
+        openers = _process_openers(source)
+        systemd_units = _systemd_inventory()
+        unknown_openers = [
+            item
+            for item in openers
+            if str(item.get("access_mode") or "") == "unknown"
+        ]
+        unknown_writers = _unknown_snapshot_writers(
+            openers,
+            systemd_units,
+            hold_confirmed=False,
+        )
+        blockers: list[dict[str, Any]] = []
+        if re.fullmatch(r"[0-9a-f]{40}", self.deployed_sha) is None:
+            blockers.append(
+                {
+                    "code": "deployed_sha_unavailable",
+                    "detail": "exact 40-hex deployed SHA is required",
+                }
+            )
+        if not bool(free_bytes >= required_bytes):
+            blockers.append(
+                {
+                    "code": "snapshot_capacity_shortfall",
+                    "required_bytes": required_bytes,
+                    "available_bytes": free_bytes,
+                }
+            )
+        if unknown_openers:
+            blockers.append(
+                {
+                    "code": "unknown_database_opener",
+                    "openers": unknown_openers,
+                }
+            )
+        if unknown_writers:
+            blockers.append(
+                {
+                    "code": "unknown_database_writer",
+                    "openers": unknown_writers,
+                }
+            )
+        direct_inventory = _direct_open_inventory(self.repo_root)
+        if direct_inventory.get("status") != "ok":
+            blockers.append(
+                {
+                    "code": "direct_sqlite_open_inventory_blocked",
+                    "detail": str(
+                        direct_inventory.get("reason")
+                        or direct_inventory.get("violations")
+                        or direct_inventory.get("parse_errors")
+                        or "inventory unavailable"
+                    )[:1000],
+                }
+            )
+        if snapshot_root.exists() and not manifest_path.is_file():
+            blockers.append(
+                {
+                    "code": "snapshot_path_collision",
+                    "path": str(snapshot_root),
+                }
+            )
+        low_seconds = max(
+            15,
+            math.ceil(source_bytes / (200 * 1024 * 1024)) + 15,
+        )
+        high_seconds = max(
+            60,
+            math.ceil(source_bytes / (60 * 1024 * 1024)) + 60,
+        )
+        plan: dict[str, Any] = {
+            "contract_version": SNAPSHOT_PLAN_CONTRACT,
+            "mode": "snapshot_dry_run",
+            "deployed_sha": self.deployed_sha,
+            "source": {
+                "logical_store": "monolith",
+                "identity": source_identity,
+                "sidecars": _destination_path_identity(source)["sidecars"],
+                "identity_fingerprint": identity_fingerprint,
+            },
+            "target_snapshot": {
+                "snapshot_id": snapshot_id,
+                "window_id": f"snapshot-{epoch}",
+                "snapshot_root": str(snapshot_root),
+                "database_path": str(database_path),
+                "manifest_path": str(manifest_path),
+                "exists": snapshot_root.exists(),
+            },
+            "capacity": {
+                "available_bytes": free_bytes,
+                "snapshot_bytes": source_bytes,
+                "post_snapshot_reserve_bytes": reserve_bytes,
+                "required_bytes": required_bytes,
+                "shortfall_bytes": max(0, required_bytes - free_bytes),
+                "remaining_bytes_after_snapshot": max(
+                    0,
+                    free_bytes - source_bytes,
+                ),
+                "sufficient": free_bytes >= required_bytes,
+            },
+            "writers_and_timers": {
+                "database_openers": openers,
+                "systemd_units": systemd_units,
+                "unknown_database_openers": unknown_openers,
+                "unknown_database_writers": unknown_writers,
+                "hold_contract": [
+                    "manual HTTP/API write barrier active before drain",
+                    "business-data maintenance exact hold confirmed",
+                    "warehouse and Finance writers quiescent",
+                    "unrelated services remain available for reads",
+                ],
+            },
+            "direct_sqlite_open_inventory": direct_inventory,
+            "integrity_gate": {
+                "live_full_scan_allowed": False,
+                "coherent_copy_required": True,
+                "snapshot_full_integrity_check_required": True,
+                "candidate_build_allowed_before_integrity": False,
+                "incident_window_utc": (
+                    "2026-07-27T14:29:50Z/2026-07-27T14:31:18Z"
+                ),
+            },
+            "critical_window": {
+                "estimated_seconds_low": low_seconds,
+                "estimated_seconds_high": high_seconds,
+                "reads_available": True,
+                "manual_business_writes_blocked": True,
+                "automatic_writers_drained": True,
+                "full_integrity_runs_after_restore": True,
+            },
+            "blockers": blockers,
+            "snapshot_allowed_by_machine_preflight": not blockers,
+            "production_business_mutation_count": 0,
+            "human_candidate_backfill_approval_required_after_integrity": True,
+        }
+        plan["fingerprint"] = _snapshot_plan_fingerprint(plan)
+        plan["created_at"] = _utc_now()
+        return plan
+
+    def _hold_evidence(
+        self,
+        *,
+        plan: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        barrier = barrier_status(self.runtime_dir)
+        maintenance = _load_private_json(
+            self.runtime_dir / ".business-data-maintenance.json",
+            label="business-data maintenance state",
+        )
+        if (
+            barrier.get("active") is not True
+            or str(barrier.get("phase") or "") != "held"
+            or barrier.get("hold_confirmed") is not True
+            or str(barrier.get("window_id") or "")
+            != str(plan["target_snapshot"]["window_id"])
+        ):
+            raise FinanceStorageMigrationError(
+                "exact confirmed HTTP write barrier is required for snapshot"
+            )
+        if (
+            str(maintenance.get("schema_version") or "")
+            != "business_data_maintenance_v1"
+            or str(maintenance.get("phase") or "") != "held"
+            or not bool((maintenance.get("hold_readback") or {}).get("quiet"))
+        ):
+            raise FinanceStorageMigrationError(
+                "exact quiet writer/timer hold is required for snapshot"
+            )
+        return {
+            "barrier": barrier,
+            "maintenance_state_fingerprint": _digest(maintenance),
+            "maintenance_held_at": str(maintenance.get("held_at") or ""),
+        }
+
+    def create(
+        self,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+        approval_reference: str,
+    ) -> dict[str, Any]:
+        if (
+            str(reviewed_plan.get("contract_version") or "")
+            != SNAPSHOT_PLAN_CONTRACT
+            or str(reviewed_plan.get("mode") or "") != "snapshot_dry_run"
+            or str(reviewed_plan.get("fingerprint") or "")
+            != str(expected_fingerprint or "")
+            or not bool(
+                reviewed_plan.get("snapshot_allowed_by_machine_preflight")
+            )
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed coherent snapshot plan is invalid or blocked"
+            )
+        if not str(approval_reference or "").strip():
+            raise FinanceStorageMigrationError(
+                "audited snapshot authorization reference is required"
+            )
+        current_plan = dict(reviewed_plan)
+        hold_evidence = self._hold_evidence(plan=current_plan)
+        target = current_plan["target_snapshot"]
+        snapshot_root = Path(str(target["snapshot_root"])).resolve()
+        database_path = Path(str(target["database_path"])).resolve()
+        manifest_path = Path(str(target["manifest_path"])).resolve()
+        if manifest_path.is_file():
+            existing = _load_private_json(
+                manifest_path,
+                label="coherent snapshot manifest",
+            )
+            if (
+                str(existing.get("snapshot_plan_fingerprint") or "")
+                == str(expected_fingerprint)
+                and Path(str(existing.get("database_path") or "")).is_file()
+            ):
+                return {
+                    "contract_version": SNAPSHOT_CONTRACT,
+                    "status": str(existing.get("status") or "captured_unverified"),
+                    "idempotent": True,
+                    "snapshot_manifest_path": str(manifest_path),
+                    "snapshot": existing,
+                }
+            raise FinanceStorageMigrationError(
+                "existing snapshot manifest does not match reviewed plan"
+            )
+        fresh_vfs = os.statvfs(self.runtime_dir)
+        fresh_free = int(fresh_vfs.f_bavail * fresh_vfs.f_frsize)
+        if fresh_free < int(current_plan["capacity"]["required_bytes"]):
+            raise FinanceStorageMigrationError(
+                "snapshot capacity raced and is now insufficient"
+            )
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+        source_path = Path(
+            str(current_plan["source"]["identity"]["path"])
+        ).resolve()
+        temporary = snapshot_root / ".monolith.sqlite3.partial"
+        if temporary.exists() or database_path.exists():
+            raise FinanceStorageMigrationError(
+                "snapshot destination already exists without matching manifest"
+            )
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        destination = sqlite3.connect(
+            temporary,
+            timeout=60,
+            isolation_level=None,
+        )
+        started = time.monotonic()
+        try:
+            source.row_factory = sqlite3.Row
+            destination.row_factory = sqlite3.Row
+            source.execute("PRAGMA query_only=ON")
+            source_before = _source_identity(source_path, source)
+            if source_before != current_plan["source"]["identity"]:
+                raise FinanceStorageMigrationError(
+                    "source identity drifted before coherent snapshot"
+                )
+            fresh_openers = _process_openers(source_path)
+            fresh_systemd = _systemd_inventory()
+            unknown_writers = _unknown_snapshot_writers(
+                fresh_openers,
+                fresh_systemd,
+                hold_confirmed=True,
+            )
+            if unknown_writers:
+                raise FinanceStorageMigrationError(
+                    "unknown or undrained database writer appeared before "
+                    f"coherent snapshot: {unknown_writers}"
+                )
+            source.backup(destination, pages=16_384, sleep=0.01)
+            destination.commit()
+            destination_identity = _source_identity(temporary, destination)
+            source_after = _source_identity(source_path, source)
+            if source_after != source_before:
+                raise FinanceStorageMigrationError(
+                    "source identity changed during coherent snapshot hold"
+                )
+            if (
+                int(destination_identity["page_count"])
+                != int(source_before["page_count"])
+                or int(destination_identity["page_size"])
+                != int(source_before["page_size"])
+                or str(destination_identity["schema_digest"])
+                != str(source_before["schema_digest"])
+            ):
+                raise FinanceStorageMigrationError(
+                    "coherent snapshot structural readback mismatch"
+                )
+        finally:
+            destination.close()
+            source.close()
+        descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, database_path)
+        snapshot_manifest: dict[str, Any] = {
+            "contract_version": SNAPSHOT_CONTRACT,
+            "status": "captured_unverified",
+            "snapshot_id": str(target["snapshot_id"]),
+            "snapshot_plan_fingerprint": str(expected_fingerprint),
+            "approval_reference": str(approval_reference).strip(),
+            "deployed_sha": self.deployed_sha,
+            "database_path": str(database_path),
+            "source_identity": current_plan["source"]["identity"],
+            "snapshot_identity": _destination_path_identity(database_path),
+            "hold_evidence": hold_evidence,
+            "captured_at": _utc_now(),
+            "capture_duration_seconds": round(time.monotonic() - started, 3),
+            "full_integrity_check": {
+                "status": "pending",
+                "runs_outside_maintenance_hold": True,
+            },
+            "candidate_build_allowed": False,
+        }
+        snapshot_manifest["evidence_fingerprint"] = _digest(snapshot_manifest)
+        _atomic_write_json(manifest_path, snapshot_manifest)
+        return {
+            "contract_version": SNAPSHOT_CONTRACT,
+            "status": "captured_unverified",
+            "idempotent": False,
+            "snapshot_manifest_path": str(manifest_path),
+            "snapshot": snapshot_manifest,
+        }
+
+    def verify_integrity(self, manifest_path: Path) -> dict[str, Any]:
+        path = Path(manifest_path).expanduser().resolve()
+        manifest = _load_private_json(
+            path,
+            label="coherent snapshot manifest",
+        )
+        if (
+            str(manifest.get("contract_version") or "") != SNAPSHOT_CONTRACT
+            or str(manifest.get("deployed_sha") or "") != self.deployed_sha
+        ):
+            raise FinanceStorageMigrationError(
+                "coherent snapshot manifest identity is invalid"
+            )
+        database_path = Path(str(manifest.get("database_path") or "")).resolve()
+        database_path.relative_to(self.runtime_dir)
+        if (
+            manifest.get("status") == "integrity_verified"
+            and manifest.get("candidate_build_allowed") is True
+            and manifest.get("snapshot_identity")
+            == _destination_path_identity(database_path)
+        ):
+            return {
+                "contract_version": SNAPSHOT_CONTRACT,
+                "status": "integrity_verified",
+                "idempotent": True,
+                "snapshot_manifest_path": str(path),
+                "snapshot": manifest,
+            }
+        if not database_path.is_file():
+            raise FinanceStorageMigrationError(
+                "coherent snapshot database is missing"
+            )
+        if (
+            manifest.get("snapshot_identity")
+            != _destination_path_identity(database_path)
+        ):
+            raise FinanceStorageMigrationError(
+                "coherent snapshot identity drifted before integrity check"
+            )
+        started = time.monotonic()
+        conn = sqlite3.connect(
+            f"file:{database_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            integrity_rows = [
+                str(row[0])
+                for row in conn.execute("PRAGMA integrity_check").fetchall()
+            ]
+            foreign_key_rows = [
+                tuple(row)
+                for row in conn.execute("PRAGMA foreign_key_check").fetchmany(101)
+            ]
+            identity = _source_identity(database_path, conn)
+        finally:
+            conn.close()
+        if integrity_rows != ["ok"]:
+            raise FinanceStorageMigrationError(
+                "coherent snapshot full integrity_check failed: "
+                + "; ".join(integrity_rows[:20])
+            )
+        if foreign_key_rows:
+            raise FinanceStorageMigrationError(
+                "coherent snapshot foreign_key_check found violations"
+            )
+        updated = dict(manifest)
+        updated.update(
+            {
+                "status": "integrity_verified",
+                "snapshot_identity": _destination_path_identity(database_path),
+                "sqlite_identity": identity,
+                "full_integrity_check": {
+                    "status": "ok",
+                    "pragma": "integrity_check",
+                    "result_rows": integrity_rows,
+                    "foreign_key_check_rows": 0,
+                    "query_only": True,
+                    "completed_at": _utc_now(),
+                    "duration_seconds": round(
+                        time.monotonic() - started,
+                        3,
+                    ),
+                    "runs_outside_maintenance_hold": True,
+                },
+                "candidate_build_allowed": True,
+            }
+        )
+        updated["evidence_fingerprint"] = _digest(
+            {
+                key: value
+                for key, value in updated.items()
+                if key != "evidence_fingerprint"
+            }
+        )
+        _atomic_write_json(path, updated)
+        return {
+            "contract_version": SNAPSHOT_CONTRACT,
+            "status": "integrity_verified",
+            "idempotent": False,
+            "snapshot_manifest_path": str(path),
+            "snapshot": updated,
         }
 
 
@@ -702,6 +1288,7 @@ class FinanceStorageMigrationPlanner:
         deployed_sha: str = "",
         repo_root: Path | None = None,
         require_exact_allocations: bool = True,
+        source_snapshot_manifest: Path | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
@@ -709,22 +1296,83 @@ class FinanceStorageMigrationPlanner:
         self.deployed_sha = str(deployed_sha or "").strip()
         self.repo_root = Path(repo_root).resolve() if repo_root else None
         self.require_exact_allocations = bool(require_exact_allocations)
+        self.source_snapshot_manifest = (
+            Path(source_snapshot_manifest).expanduser().resolve()
+            if source_snapshot_manifest is not None
+            else None
+        )
         if self.chunk_size <= 0 or self.chunk_size > 500_000:
             raise FinanceStorageMigrationError("chunk_size must be within 1..500000")
+
+    @contextmanager
+    def _source_session(
+        self,
+        source: Path,
+        *,
+        use_registry: bool,
+    ) -> Iterator[sqlite3.Connection]:
+        if use_registry:
+            with self.registry.session(
+                "operational",
+                mode="ro",
+                operation="finance_storage_split_dry_run",
+                timeout_ms=60_000,
+                isolation_level=None,
+            ) as conn:
+                yield conn
+            return
+        conn = sqlite3.connect(
+            f"file:{Path(source).resolve()}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise FinanceStorageMigrationError(
+                    "coherent snapshot query_only could not be enabled"
+                )
+            yield conn
+        finally:
+            conn.close()
 
     def build_plan(self) -> dict[str, Any]:
         plan_started = time.monotonic()
         manifest = self.registry.load()
         if manifest.state != "monolith" or manifest.canonical_source != "monolith":
             raise FinanceStorageMigrationError("dry-run requires the canonical monolith generation")
-        source = self.registry.resolve("operational", manifest=manifest)
+        live_source = self.registry.resolve("operational", manifest=manifest)
+        snapshot_evidence: dict[str, Any] | None = None
+        if self.source_snapshot_manifest is not None:
+            snapshot_evidence = _load_private_json(
+                self.source_snapshot_manifest,
+                label="coherent snapshot manifest",
+            )
+            source = Path(
+                str(snapshot_evidence.get("database_path") or "")
+            ).resolve()
+            source.relative_to(self.runtime_dir)
+            if (
+                str(snapshot_evidence.get("contract_version") or "")
+                != SNAPSHOT_CONTRACT
+                or str(snapshot_evidence.get("status") or "")
+                != "integrity_verified"
+                or snapshot_evidence.get("candidate_build_allowed") is not True
+                or not source.is_file()
+                or snapshot_evidence.get("snapshot_identity")
+                != _destination_path_identity(source)
+            ):
+                raise FinanceStorageMigrationError(
+                    "verified immutable coherent snapshot is required"
+                )
+        else:
+            source = live_source
         before_stat = source.stat()
-        with self.registry.session(
-            "operational",
-            mode="ro",
-            operation="finance_storage_split_dry_run",
-            timeout_ms=60_000,
-            isolation_level=None,
+        with self._source_session(
+            source,
+            use_registry=snapshot_evidence is None,
         ) as conn:
             conn.execute("BEGIN")
             source_identity = _source_identity(source, conn)
@@ -967,9 +1615,28 @@ class FinanceStorageMigrationPlanner:
                 "source_schema_digest": source_identity["schema_digest"],
             },
             "source": {
-                "logical_store": "monolith",
+                "logical_store": (
+                    "coherent_snapshot"
+                    if snapshot_evidence is not None
+                    else "monolith"
+                ),
                 "identity": source_identity,
                 "fingerprint": source_fingerprint,
+                "snapshot_manifest_path": (
+                    str(self.source_snapshot_manifest)
+                    if self.source_snapshot_manifest is not None
+                    else ""
+                ),
+                "snapshot_evidence_fingerprint": (
+                    str(snapshot_evidence.get("evidence_fingerprint") or "")
+                    if snapshot_evidence is not None
+                    else ""
+                ),
+                "full_integrity_check": (
+                    dict(snapshot_evidence.get("full_integrity_check") or {})
+                    if snapshot_evidence is not None
+                    else {"status": "not_run_on_live_source"}
+                ),
             },
             "raw": {
                 "source_table": LEGACY_RAW_TABLE,
@@ -1019,7 +1686,17 @@ class FinanceStorageMigrationPlanner:
             "non_target_invariants": {
                 "runner_did_not_mutate_old_monolith": True,
                 "old_monolith_identity_unchanged_during_snapshot": (
-                    not source_file_drift_observed
+                    (
+                        str(
+                            (
+                                snapshot_evidence.get("source_identity") or {}
+                            ).get("schema_digest")
+                            or ""
+                        )
+                        == str(source_identity["schema_digest"])
+                    )
+                    if snapshot_evidence is not None
+                    else not source_file_drift_observed
                 ),
                 "old_monolith_retained_as_rollback": True,
                 "tables": [
@@ -1157,38 +1834,40 @@ class FinanceStorageCandidateBuilder:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
-    def _maintenance_hold_evidence(self) -> dict[str, Any]:
-        state_path = self.planner.runtime_dir / ".business-data-maintenance.json"
-        if not state_path.is_file():
+    def _snapshot_evidence(self) -> dict[str, Any]:
+        manifest_path = self.planner.source_snapshot_manifest
+        if manifest_path is None:
             raise FinanceStorageMigrationError(
-                "canonical business-data maintenance hold is required before candidate apply"
+                "candidate apply requires a verified immutable coherent snapshot"
             )
-        if state_path.stat().st_mode & 0o077:
-            raise FinanceStorageMigrationError(
-                "business-data maintenance state must be private mode 0600"
-            )
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise FinanceStorageMigrationError(
-                "business-data maintenance state is unreadable"
-            ) from exc
+        state = _load_private_json(
+            manifest_path,
+            label="coherent snapshot manifest",
+        )
+        database_path = Path(str(state.get("database_path") or "")).resolve()
+        database_path.relative_to(self.planner.runtime_dir)
         if (
-            not isinstance(state, dict)
-            or str(state.get("schema_version") or "")
-            != "business_data_maintenance_v1"
-            or str(state.get("phase") or "") != "held"
-            or not bool((state.get("hold_readback") or {}).get("quiet"))
+            str(state.get("contract_version") or "") != SNAPSHOT_CONTRACT
+            or str(state.get("status") or "") != "integrity_verified"
+            or state.get("candidate_build_allowed") is not True
+            or state.get("snapshot_identity")
+            != _destination_path_identity(database_path)
         ):
             raise FinanceStorageMigrationError(
-                "business-data maintenance state does not prove an active quiet hold"
+                "coherent snapshot full integrity evidence is missing or stale"
             )
         return {
-            "schema_version": state["schema_version"],
-            "phase": state["phase"],
-            "held_at": str(state.get("held_at") or ""),
-            "quiet": True,
-            "state_path": str(state_path),
+            "contract_version": state["contract_version"],
+            "status": state["status"],
+            "snapshot_id": str(state.get("snapshot_id") or ""),
+            "database_path": str(database_path),
+            "manifest_path": str(manifest_path),
+            "evidence_fingerprint": str(
+                state.get("evidence_fingerprint") or ""
+            ),
+            "full_integrity_check": dict(
+                state.get("full_integrity_check") or {}
+            ),
         }
 
     def apply(self) -> dict[str, Any]:
@@ -1210,31 +1889,20 @@ class FinanceStorageCandidateBuilder:
         operational_path = self.planner.runtime_dir / str(
             candidate["operational"]["relative_path"]
         )
-        source_path = self.planner.registry.resolve("operational")
-        maintenance_evidence = self._maintenance_hold_evidence()
-        try:
-            warehouse_lock = warehouse_functional_write_lock(
-                self.planner.runtime_dir,
-                blocking=False,
-            )
-            warehouse_lock.__enter__()
-        except WarehouseFunctionalBusyError as exc:
-            raise FinanceStorageMigrationError(
-                "warehouse functional writer lock is busy"
-            ) from exc
-        try:
-            return self._apply_under_locks(
-                current_plan=current_plan,
-                generation=generation,
-                candidate=candidate,
-                candidate_root=candidate_root,
-                raw_path=raw_path,
-                operational_path=operational_path,
-                source_path=source_path,
-                maintenance_evidence=maintenance_evidence,
-            )
-        finally:
-            warehouse_lock.__exit__(None, None, None)
+        source_path = Path(
+            str(current_plan["source"]["identity"]["path"])
+        ).resolve()
+        snapshot_evidence = self._snapshot_evidence()
+        return self._apply_under_locks(
+            current_plan=current_plan,
+            generation=generation,
+            candidate=candidate,
+            candidate_root=candidate_root,
+            raw_path=raw_path,
+            operational_path=operational_path,
+            source_path=source_path,
+            snapshot_evidence=snapshot_evidence,
+        )
 
     def _apply_under_locks(
         self,
@@ -1246,7 +1914,7 @@ class FinanceStorageCandidateBuilder:
         raw_path: Path,
         operational_path: Path,
         source_path: Path,
-        maintenance_evidence: dict[str, Any],
+        snapshot_evidence: dict[str, Any],
     ) -> dict[str, Any]:
         with self._lock():
             saved_plan_path = candidate_root / "migration_plan.json"
@@ -1345,9 +2013,10 @@ class FinanceStorageCandidateBuilder:
                 raw.execute("BEGIN IMMEDIATE")
                 raw.execute(
                     """INSERT OR IGNORE INTO finance_raw_ingest_batches(
-                       batch_id,source_identity,source_sha256,report_period,row_count,
-                       rows_digest,status,created_at,committed_at
-                       ) VALUES(?,?,?,?,?,?,'loading',?,NULL)""",
+                       batch_id,source_identity,source_sha256,report_period,
+                       seller_id,week_start,week_end,row_count,rows_digest,
+                       status,created_at,committed_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,'loading',?,NULL)""",
                     (
                         batch_id,
                         plan["source"]["fingerprint"],
@@ -1356,6 +2025,19 @@ class FinanceStorageCandidateBuilder:
                             str(plan["raw"]["watermarks"].get("min_week_start") or "")
                             + "/"
                             + str(plan["raw"]["watermarks"].get("max_week_end") or "")
+                        ),
+                        "*",
+                        str(
+                            plan["raw"]["watermarks"].get(
+                                "min_week_start"
+                            )
+                            or ""
+                        ),
+                        str(
+                            plan["raw"]["watermarks"].get(
+                                "max_week_end"
+                            )
+                            or ""
                         ),
                         int(plan["raw"]["row_count"]),
                         plan["raw"]["logical_digest"],
@@ -1458,6 +2140,16 @@ class FinanceStorageCandidateBuilder:
                                 row["row_hash"],
                                 row["raw_json"],
                                 row["first_seen_at"],
+                            ),
+                        )
+                        raw.execute(
+                            """INSERT OR IGNORE INTO finance_raw_batch_rows(
+                               batch_id,batch_sequence_no,raw_row_id
+                               ) VALUES(?,?,?)""",
+                            (
+                                batch_id,
+                                int(chunk["first_rowid"]) + offset - 1,
+                                raw_row_id,
                             ),
                         )
                     destination_digest = "sha256:" + digest.hexdigest()
@@ -1701,17 +2393,17 @@ class FinanceStorageCandidateBuilder:
                     "status": "candidate_ready",
                     "plan_fingerprint": plan["fingerprint"],
                     "approval_reference": self.approval_reference,
-                    "business_data_maintenance": maintenance_evidence,
-                    "warehouse_functional_lock_held": True,
+                    "source_snapshot": snapshot_evidence,
+                    "business_data_maintenance_hold_required_for_backfill": False,
+                    "warehouse_functional_lock_held": False,
                     "candidate_manifest_path": str(candidate_manifest_path),
                     "candidate_manifest": manifest_payload(candidate_manifest),
                     "raw_row_count": raw_readback.row_count,
                     "raw_destination_size_bytes": raw_path.stat().st_size,
                     "operational_destination_size_bytes": operational_path.stat().st_size,
-                    "old_monolith_unchanged": (
-                        source_path.stat().st_size == plan["source"]["identity"]["size_bytes"]
-                        and source_path.stat().st_ino == plan["source"]["identity"]["inode"]
-                    ),
+                    "old_monolith_retained": self.planner.registry.resolve(
+                        "operational"
+                    ).is_file(),
                     "global_manifest_switched": False,
                     "canonical_source": "monolith",
                     "human_cutover_gate_required": True,
@@ -1722,3 +2414,2221 @@ class FinanceStorageCandidateBuilder:
                 source.close()
                 operational.close()
                 raw.close()
+
+
+class FinanceStorageShadowRunner:
+    """Enable audited monolith outbox capture and reconcile an unselected raw."""
+
+    def __init__(
+        self,
+        runtime_dir: Path,
+        *,
+        candidate_manifest_path: Path,
+        plan_fingerprint: str,
+        approval_reference: str,
+    ) -> None:
+        self.runtime_dir = Path(runtime_dir).expanduser().resolve()
+        self.registry = StoreRegistry(self.runtime_dir)
+        self.candidate_manifest_path = (
+            Path(candidate_manifest_path).expanduser().resolve()
+        )
+        self.plan_fingerprint = str(plan_fingerprint or "").strip()
+        self.approval_reference = str(approval_reference or "").strip()
+        if not self.plan_fingerprint.startswith("sha256:"):
+            raise FinanceStorageMigrationError(
+                "exact candidate plan fingerprint is required"
+            )
+
+    @property
+    def state_path(self) -> Path:
+        return self.runtime_dir / SHADOW_STATE_FILENAME
+
+    def _candidate(self) -> tuple[Any, Path, Path]:
+        payload = _load_private_json(
+            self.candidate_manifest_path,
+            label="candidate generation manifest",
+        )
+        manifest = parse_manifest(payload)
+        if manifest.state != "shadow" or manifest.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "shadow runner requires an unselected candidate manifest"
+            )
+        raw_path = self.registry.resolve("finance_raw", manifest=manifest)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=manifest,
+        )
+        if not raw_path.is_file() or not operational_path.is_file():
+            raise FinanceStorageMigrationError(
+                "candidate generation files are incomplete"
+            )
+        return manifest, raw_path, operational_path
+
+    def status(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return {
+                "contract_version": SHADOW_STATE_CONTRACT,
+                "status": "inactive",
+                "enabled": False,
+                "state_path": str(self.state_path),
+            }
+        state = _load_private_json(
+            self.state_path,
+            label="Finance shadow ingest state",
+        )
+        valid = (
+            str(state.get("contract_version") or "")
+            == SHADOW_STATE_CONTRACT
+            and isinstance(state.get("enabled"), bool)
+        )
+        if not valid:
+            raise FinanceStorageMigrationError(
+                "Finance shadow ingest state is invalid"
+            )
+        return {**state, "state_path": str(self.state_path)}
+
+    def activate(self) -> dict[str, Any]:
+        if not self.approval_reference:
+            raise FinanceStorageMigrationError(
+                "shadow activation requires an approval reference"
+            )
+        active = self.registry.load()
+        if active.state != "monolith" or active.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "shadow activation requires the canonical monolith"
+            )
+        candidate, raw_path, operational_path = self._candidate()
+        existing = self.status()
+        if existing.get("enabled") is True:
+            if (
+                str(existing.get("plan_fingerprint") or "")
+                == self.plan_fingerprint
+                and str(existing.get("candidate_manifest_sha256") or "")
+                == candidate.manifest_sha256
+            ):
+                return {**existing, "idempotent": True}
+            raise FinanceStorageMigrationError(
+                "a different Finance shadow ingest generation is active"
+            )
+        with self.registry.session(
+            "finance_raw",
+            mode="rw",
+            operation="finance_shadow_ingest_schema_activate",
+            isolation_level=None,
+        ) as source:
+            ensure_raw_schema(source)
+            source.commit()
+        state: dict[str, Any] = {
+            "contract_version": SHADOW_STATE_CONTRACT,
+            "status": "active",
+            "enabled": True,
+            "plan_fingerprint": self.plan_fingerprint,
+            "approval_reference": self.approval_reference,
+            "candidate_manifest_path": str(self.candidate_manifest_path),
+            "candidate_manifest_sha256": candidate.manifest_sha256,
+            "raw_generation_id": candidate.raw.generation_id,
+            "operational_generation_id": candidate.operational.generation_id,
+            "raw_path": str(raw_path),
+            "operational_path": str(operational_path),
+            "activated_at": _utc_now(),
+        }
+        state["state_fingerprint"] = _digest(state)
+        _atomic_write_json(self.state_path, state)
+        return {**state, "state_path": str(self.state_path), "idempotent": False}
+
+    def deactivate(self, *, reason: str) -> dict[str, Any]:
+        state = self.status()
+        if state.get("enabled") is False:
+            return {**state, "idempotent": True}
+        candidate, _raw_path, _operational_path = self._candidate()
+        if (
+            str(state.get("plan_fingerprint") or "") != self.plan_fingerprint
+            or str(state.get("candidate_manifest_sha256") or "")
+            != candidate.manifest_sha256
+        ):
+            raise FinanceStorageMigrationError(
+                "shadow deactivate identity does not match"
+            )
+        updated = {
+            key: value
+            for key, value in state.items()
+            if key not in {"state_path", "state_fingerprint"}
+        }
+        updated.update(
+            {
+                "status": "inactive",
+                "enabled": False,
+                "deactivated_at": _utc_now(),
+                "deactivation_reason": str(reason or "")[:1000],
+            }
+        )
+        updated["state_fingerprint"] = _digest(updated)
+        _atomic_write_json(self.state_path, updated)
+        return {
+            **updated,
+            "state_path": str(self.state_path),
+            "idempotent": False,
+        }
+
+    def reconcile_legacy_current(
+        self,
+        *,
+        chunk_size: int = 10_000,
+    ) -> dict[str, Any]:
+        state = self.status()
+        if state.get("enabled") is not True:
+            raise FinanceStorageMigrationError(
+                "legacy reconciliation requires active shadow ingest"
+            )
+        _candidate, raw_path, _operational_path = self._candidate()
+        source_path = self.registry.resolve("operational")
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        destination = sqlite3.connect(
+            raw_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        source.row_factory = sqlite3.Row
+        destination.row_factory = sqlite3.Row
+        started = time.monotonic()
+        try:
+            source.execute("PRAGMA query_only=ON")
+            source.execute("BEGIN")
+            ensure_raw_schema(destination)
+            source_revision = _digest(
+                {
+                    "source": _source_identity(source_path, source),
+                    "row_count": int(
+                        source.execute(
+                            f"SELECT COUNT(*) FROM {LEGACY_RAW_TABLE}"
+                        ).fetchone()[0]
+                    ),
+                    "max_updated_at": str(
+                        source.execute(
+                            f"SELECT COALESCE(MAX(updated_at),'') "
+                            f"FROM {LEGACY_RAW_TABLE}"
+                        ).fetchone()[0]
+                    ),
+                    "candidate_plan": self.plan_fingerprint,
+                }
+            )
+            batch_id = _digest(
+                {
+                    "kind": "legacy_current_reconciliation",
+                    "source_revision": source_revision,
+                }
+            )
+            source_scope = source.execute(
+                f"""SELECT COALESCE(MIN(week_start),''),
+                           COALESCE(MAX(week_end),'')
+                    FROM {LEGACY_RAW_TABLE}"""
+            ).fetchone()
+            destination.execute(
+                """INSERT OR IGNORE INTO finance_raw_ingest_batches(
+                   batch_id,source_identity,source_sha256,report_period,
+                   seller_id,week_start,week_end,row_count,rows_digest,status,
+                   created_at,committed_at
+                   ) VALUES(?,?,?,'all-history','*',?,?,0,?,'loading',?,NULL)""",
+                (
+                    batch_id,
+                    source_revision,
+                    source_revision,
+                    str(source_scope[0]),
+                    str(source_scope[1]),
+                    _digest([]),
+                    _utc_now(),
+                ),
+            )
+            destination.commit()
+            digest = hashlib.sha256()
+            payload_digest = hashlib.sha256()
+            row_count = 0
+            inserted_count = 0
+            reused_count = 0
+            cursor = source.execute(
+                f"""SELECT rowid,* FROM {LEGACY_RAW_TABLE}
+                    ORDER BY rowid"""
+            )
+            while rows := cursor.fetchmany(max(1, int(chunk_size))):
+                destination.execute("BEGIN IMMEDIATE")
+                for row in rows:
+                    identity = [
+                        str(row["seller_id"]),
+                        str(row["report_id"]),
+                        str(row["rrd_id"]),
+                        str(row["row_hash"]),
+                    ]
+                    digest.update(
+                        (_canonical_json(identity) + "\n").encode("utf-8")
+                    )
+                    raw_json_bytes = str(row["raw_json"]).encode("utf-8")
+                    payload_digest.update(
+                        len(raw_json_bytes).to_bytes(8, "big")
+                        + raw_json_bytes
+                    )
+                    raw_row_id = _digest(
+                        {
+                            "seller_id": identity[0],
+                            "report_id": identity[1],
+                            "rrd_id": identity[2],
+                            "row_hash": identity[3],
+                        }
+                    )
+                    inserted = destination.execute(
+                        """INSERT OR IGNORE INTO finance_raw_rows(
+                           raw_row_id,batch_id,batch_sequence_no,seller_id,
+                           report_id,rrd_id,report_type,week_start,week_end,
+                           nm_id,vendor_code,barcode,doc_type_name,
+                           seller_oper_name,row_hash,raw_json,first_seen_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            raw_row_id,
+                            batch_id,
+                            int(row["rowid"]),
+                            row["seller_id"],
+                            row["report_id"],
+                            row["rrd_id"],
+                            row["report_type"],
+                            row["week_start"],
+                            row["week_end"],
+                            row["nm_id"],
+                            row["vendor_code"],
+                            row["barcode"],
+                            row["doc_type_name"],
+                            row["seller_oper_name"],
+                            row["row_hash"],
+                            row["raw_json"],
+                            row["first_seen_at"],
+                        ),
+                    )
+                    if inserted.rowcount:
+                        inserted_count += 1
+                    else:
+                        existing = destination.execute(
+                            """SELECT seller_id,report_id,rrd_id,row_hash,raw_json
+                               FROM finance_raw_rows WHERE raw_row_id=?""",
+                            (raw_row_id,),
+                        ).fetchone()
+                        if (
+                            existing is None
+                            or tuple(existing)
+                            != (
+                                identity[0],
+                                identity[1],
+                                identity[2],
+                                identity[3],
+                                row["raw_json"],
+                            )
+                        ):
+                            raise FinanceStorageMigrationError(
+                                "legacy reconciliation found conflicting "
+                                "immutable raw identity"
+                            )
+                        reused_count += 1
+                    destination.execute(
+                        """INSERT OR IGNORE INTO finance_raw_batch_rows(
+                           batch_id,batch_sequence_no,raw_row_id
+                           ) VALUES(?,?,?)""",
+                        (batch_id, int(row["rowid"]), raw_row_id),
+                    )
+                    row_count += 1
+                destination.commit()
+            logical_digest = "sha256:" + digest.hexdigest()
+            raw_json_digest = "sha256:" + payload_digest.hexdigest()
+            destination.execute("BEGIN IMMEDIATE")
+            destination.execute(
+                """UPDATE finance_raw_ingest_batches
+                   SET row_count=?,rows_digest=?,status='committed',
+                       committed_at=? WHERE batch_id=?""",
+                (row_count, logical_digest, _utc_now(), batch_id),
+            )
+            destination.commit()
+            source.rollback()
+        finally:
+            source.close()
+            destination.close()
+        return {
+            "contract_version": "wb_core_finance_legacy_reconciliation_v1",
+            "status": "reconciled",
+            "source_revision": source_revision,
+            "batch_id": batch_id,
+            "source_row_count": row_count,
+            "logical_digest": logical_digest,
+            "raw_json_digest": raw_json_digest,
+            "inserted_count": inserted_count,
+            "reused_count": reused_count,
+            "missing_current_rows": 0,
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "canonical_source": "monolith",
+            "global_manifest_switched": False,
+        }
+
+    def apply_live_tail(self, *, max_events: int = 100_000) -> dict[str, Any]:
+        state = self.status()
+        if state.get("enabled") is not True:
+            raise FinanceStorageMigrationError(
+                "live-tail apply requires active shadow ingest"
+            )
+        _candidate, raw_path, _operational_path = self._candidate()
+        source_path = self.registry.resolve("finance_raw")
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        destination = sqlite3.connect(
+            raw_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        source.row_factory = sqlite3.Row
+        destination.row_factory = sqlite3.Row
+        bridge = FinanceRawLiveTailBridge()
+        applied = 0
+        try:
+            source.execute("PRAGMA query_only=ON")
+            while applied < max(1, int(max_events)):
+                result = bridge.apply_next(
+                    source=source,
+                    destination=destination,
+                )
+                if result is None:
+                    break
+                applied += 1
+            source_max = int(
+                source.execute(
+                    "SELECT COALESCE(MAX(sequence_no),0) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            cursor_row = destination.execute(
+                """SELECT last_sequence_no,last_event_id
+                   FROM finance_raw_bridge_cursors WHERE bridge_id=?""",
+                (bridge.bridge_id,),
+            ).fetchone()
+            cursor = int(cursor_row["last_sequence_no"]) if cursor_row else 0
+            duplicate_event_ids = int(
+                destination.execute(
+                    """SELECT COUNT(*)-COUNT(DISTINCT event_id)
+                       FROM finance_raw_outbox"""
+                ).fetchone()[0]
+            )
+            duplicate_sequences = int(
+                destination.execute(
+                    """SELECT COUNT(*)-COUNT(DISTINCT sequence_no)
+                       FROM finance_raw_outbox"""
+                ).fetchone()[0]
+            )
+        finally:
+            source.close()
+            destination.close()
+        return {
+            "contract_version": "wb_core_finance_live_tail_v1",
+            "status": "caught_up" if cursor == source_max else "lagging",
+            "applied_events": applied,
+            "source_latest_sequence": source_max,
+            "destination_cursor": cursor,
+            "lag_events": max(0, source_max - cursor),
+            "duplicate_event_ids": duplicate_event_ids,
+            "duplicate_sequences": duplicate_sequences,
+            "global_manifest_switched": False,
+        }
+
+
+class FinanceStorageShadowVerifier:
+    """Persist bounded all-week shadow evidence for one exact candidate."""
+
+    def __init__(
+        self,
+        runtime_dir: Path,
+        *,
+        candidate_manifest_path: Path,
+        candidate_plan_fingerprint: str,
+        minimum_observation_seconds: int = 3600,
+    ) -> None:
+        self.runtime_dir = Path(runtime_dir).expanduser().resolve()
+        self.registry = StoreRegistry(self.runtime_dir)
+        self.candidate_manifest_path = (
+            Path(candidate_manifest_path).expanduser().resolve()
+        )
+        self.candidate_plan_fingerprint = str(
+            candidate_plan_fingerprint or ""
+        ).strip()
+        self.minimum_observation_seconds = max(
+            0,
+            int(minimum_observation_seconds),
+        )
+
+    def _candidate(self) -> tuple[Any, Path, Path]:
+        manifest = parse_manifest(
+            _load_private_json(
+                self.candidate_manifest_path,
+                label="candidate generation manifest",
+            )
+        )
+        if manifest.state != "shadow" or manifest.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "shadow verification requires an unselected candidate"
+            )
+        return (
+            manifest,
+            self.registry.resolve("finance_raw", manifest=manifest),
+            self.registry.resolve("operational", manifest=manifest),
+        )
+
+    @staticmethod
+    def _rows_digest(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+    ) -> LogicalDigest:
+        digest = hashlib.sha256()
+        count = 0
+        for row in conn.execute(
+            f"""SELECT seller_id,week_start,week_end,report_id,rrd_id,row_hash
+                FROM {table}
+                ORDER BY seller_id,week_start,week_end,report_id,rrd_id,row_hash"""
+        ):
+            digest.update(
+                (
+                    _canonical_json([str(value) for value in row])
+                    + "\n"
+                ).encode("utf-8")
+            )
+            count += 1
+        return LogicalDigest(
+            row_count=count,
+            digest="sha256:" + digest.hexdigest(),
+        )
+
+    def verify(self) -> dict[str, Any]:
+        active = self.registry.load()
+        if active.state != "monolith" or active.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "shadow verification requires the canonical monolith"
+            )
+        candidate, raw_path, operational_path = self._candidate()
+        shadow_state = FinanceStorageShadowRunner(
+            self.runtime_dir,
+            candidate_manifest_path=self.candidate_manifest_path,
+            plan_fingerprint=self.candidate_plan_fingerprint,
+            approval_reference="verification-readback",
+        ).status()
+        if (
+            shadow_state.get("enabled") is not True
+            or str(shadow_state.get("candidate_manifest_sha256") or "")
+            != candidate.manifest_sha256
+        ):
+            raise FinanceStorageMigrationError(
+                "exact shadow ingest generation is not active"
+            )
+        source_path = self.registry.resolve("operational", manifest=active)
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        raw = sqlite3.connect(
+            f"file:{raw_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        operational = sqlite3.connect(
+            operational_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        for conn in (source, raw, operational):
+            conn.row_factory = sqlite3.Row
+        try:
+            source.execute("PRAGMA query_only=ON")
+            raw.execute("PRAGMA query_only=ON")
+            ensure_operational_schema(operational)
+            weeks = source.execute(
+                f"""SELECT DISTINCT seller_id,week_start,week_end
+                    FROM {LEGACY_RAW_TABLE}
+                    ORDER BY seller_id,week_start,week_end"""
+            ).fetchall()
+            comparisons = [
+                shadow_compare_week(
+                    source_conn=source,
+                    shadow_conn=raw,
+                    seller_id=str(row["seller_id"]),
+                    week_start=str(row["week_start"]),
+                    week_end=str(row["week_end"]),
+                )
+                for row in weeks
+            ]
+            source_digest = self._rows_digest(
+                source,
+                table=LEGACY_RAW_TABLE,
+            )
+            shadow_digest = self._rows_digest(
+                raw,
+                table="finance_raw_current_rows",
+            )
+            source_max = int(
+                source.execute(
+                    "SELECT COALESCE(MAX(sequence_no),0) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            cursor_row = raw.execute(
+                """SELECT last_sequence_no FROM finance_raw_bridge_cursors
+                   WHERE bridge_id='finance_raw_live_tail_v1'"""
+            ).fetchone()
+            cursor = int(cursor_row[0]) if cursor_row else 0
+            duplicate_events = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT event_id) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            duplicate_sequences = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT sequence_no) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            mismatch_count = sum(
+                1
+                for comparison in comparisons
+                if comparison["status"] != "match"
+            )
+            performance_regressions = [
+                comparison
+                for comparison in comparisons
+                if float(comparison["shadow_latency_ms"])
+                > max(
+                    100.0,
+                    float(comparison["source_latency_ms"]) * 4.0,
+                )
+            ]
+            checked_at = _utc_now()
+            for comparison in comparisons:
+                comparison_id = _digest(
+                    {
+                        "candidate": candidate.manifest_sha256,
+                        "checked_at": checked_at,
+                        "scope": comparison["scope"],
+                    }
+                )
+                operational.execute(
+                    """INSERT OR REPLACE INTO finance_storage_shadow_comparisons(
+                       comparison_id,generation_epoch,scope_json,
+                       source_row_count,shadow_row_count,source_digest,
+                       shadow_digest,source_query_plan_json,
+                       shadow_query_plan_json,source_latency_ms,
+                       shadow_latency_ms,status,detail_json,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        comparison_id,
+                        candidate.generation_epoch,
+                        _canonical_json(comparison["scope"]),
+                        int(comparison["source_row_count"]),
+                        int(comparison["shadow_row_count"]),
+                        comparison["source_digest"],
+                        comparison["shadow_digest"],
+                        _canonical_json(comparison["source_query_plan"]),
+                        _canonical_json(comparison["shadow_query_plan"]),
+                        float(comparison["source_latency_ms"]),
+                        float(comparison["shadow_latency_ms"]),
+                        comparison["status"],
+                        _canonical_json(comparison),
+                        checked_at,
+                    ),
+                )
+            operational.commit()
+        finally:
+            source.close()
+            raw.close()
+            operational.close()
+        evidence_path = operational_path.parent / SHADOW_VERIFICATION_FILENAME
+        prior: dict[str, Any] = {}
+        if evidence_path.exists():
+            prior = _load_private_json(
+                evidence_path,
+                label="shadow verification evidence",
+            )
+            if (
+                str(prior.get("contract_version") or "")
+                != SHADOW_VERIFICATION_CONTRACT
+                or str(prior.get("candidate_manifest_sha256") or "")
+                != candidate.manifest_sha256
+            ):
+                raise FinanceStorageMigrationError(
+                    "shadow verification evidence identity changed"
+                )
+        first_verified_at = str(
+            prior.get("first_verified_at") or checked_at
+        )
+        first_dt = datetime.fromisoformat(
+            first_verified_at.replace("Z", "+00:00")
+        )
+        checked_dt = datetime.fromisoformat(
+            checked_at.replace("Z", "+00:00")
+        )
+        observation_seconds = max(
+            0,
+            int((checked_dt - first_dt).total_seconds()),
+        )
+        blockers: list[dict[str, Any]] = []
+        if (
+            source_digest != shadow_digest
+            or mismatch_count
+        ):
+            blockers.append({"code": "shadow_raw_mismatch"})
+        if cursor != source_max:
+            blockers.append({"code": "live_tail_lag"})
+        if duplicate_events or duplicate_sequences:
+            blockers.append({"code": "duplicate_outbox_event"})
+        if performance_regressions:
+            blockers.append({"code": "material_query_regression"})
+        if observation_seconds < self.minimum_observation_seconds:
+            blockers.append(
+                {
+                    "code": "shadow_soak_incomplete",
+                    "observed_seconds": observation_seconds,
+                    "required_seconds": self.minimum_observation_seconds,
+                }
+            )
+        evidence: dict[str, Any] = {
+            "contract_version": SHADOW_VERIFICATION_CONTRACT,
+            "status": "ready" if not blockers else "soaking",
+            "candidate_plan_fingerprint": self.candidate_plan_fingerprint,
+            "candidate_manifest_sha256": candidate.manifest_sha256,
+            "first_verified_at": first_verified_at,
+            "last_verified_at": checked_at,
+            "observation_seconds": observation_seconds,
+            "minimum_observation_seconds": self.minimum_observation_seconds,
+            "comparison_count": len(comparisons),
+            "mismatch_count": mismatch_count,
+            "source_current": {
+                "row_count": source_digest.row_count,
+                "logical_digest": source_digest.digest,
+            },
+            "candidate_current": {
+                "row_count": shadow_digest.row_count,
+                "logical_digest": shadow_digest.digest,
+            },
+            "outbox": {
+                "source_latest_sequence": source_max,
+                "candidate_cursor": cursor,
+                "lag_events": max(0, source_max - cursor),
+                "duplicate_event_ids": duplicate_events,
+                "duplicate_sequences": duplicate_sequences,
+            },
+            "performance": {
+                "regression_count": len(performance_regressions),
+                "threshold": "shadow <= max(100ms, source*4)",
+            },
+            "warehouse_cost_contract": {
+                "finance_raw_rows_read": 0,
+                "proof": "registry-separated operational store",
+            },
+            "blockers": blockers,
+        }
+        evidence["evidence_fingerprint"] = _digest(evidence)
+        _atomic_write_json(evidence_path, evidence)
+        return {**evidence, "evidence_path": str(evidence_path)}
+
+
+class FinanceStorageCutover:
+    """Fresh operational recopy and atomic split-manifest switch."""
+
+    def __init__(
+        self,
+        runtime_dir: Path,
+        *,
+        candidate_manifest_path: Path,
+        candidate_plan_fingerprint: str,
+        deployed_sha: str,
+    ) -> None:
+        self.runtime_dir = Path(runtime_dir).expanduser().resolve()
+        self.registry = StoreRegistry(self.runtime_dir)
+        self.candidate_manifest_path = (
+            Path(candidate_manifest_path).expanduser().resolve()
+        )
+        self.candidate_plan_fingerprint = str(
+            candidate_plan_fingerprint or ""
+        ).strip()
+        self.deployed_sha = str(deployed_sha or "").strip()
+
+    def _candidate(self) -> tuple[Any, Path, Path]:
+        payload = _load_private_json(
+            self.candidate_manifest_path,
+            label="candidate generation manifest",
+        )
+        manifest = parse_manifest(payload)
+        if manifest.state != "shadow" or manifest.canonical_source != "monolith":
+            raise FinanceStorageMigrationError(
+                "cutover requires an unselected shadow candidate"
+            )
+        raw_path = self.registry.resolve("finance_raw", manifest=manifest)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=manifest,
+        )
+        if not raw_path.is_file() or not operational_path.is_file():
+            raise FinanceStorageMigrationError(
+                "cutover candidate files are incomplete"
+            )
+        return manifest, raw_path, operational_path
+
+    @staticmethod
+    def _fingerprint(plan: Mapping[str, Any]) -> str:
+        stable = json.loads(_canonical_json(plan))
+        stable.pop("fingerprint", None)
+        stable.pop("created_at", None)
+        capacity = stable.get("capacity", {})
+        for key in (
+            "available_bytes",
+            "shortfall_bytes",
+            "remaining_bytes",
+            "sufficient",
+        ):
+            capacity.pop(key, None)
+        return _digest(stable)
+
+    def build_plan(self) -> dict[str, Any]:
+        active = self.registry.load()
+        candidate, raw_path, operational_path = self._candidate()
+        source_path = self.registry.resolve("operational", manifest=active)
+        verification_path = (
+            operational_path.parent / SHADOW_VERIFICATION_FILENAME
+        )
+        verification: dict[str, Any] = {}
+        if verification_path.exists():
+            verification = _load_private_json(
+                verification_path,
+                label="shadow verification evidence",
+            )
+        shadow = FinanceStorageShadowRunner(
+            self.runtime_dir,
+            candidate_manifest_path=self.candidate_manifest_path,
+            plan_fingerprint=self.candidate_plan_fingerprint,
+            approval_reference="status-only",
+        ).status()
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        raw = sqlite3.connect(
+            f"file:{raw_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        source.row_factory = sqlite3.Row
+        raw.row_factory = sqlite3.Row
+        try:
+            for conn in (source, raw):
+                conn.execute("PRAGMA query_only=ON")
+            source_identity = _source_identity(source_path, source)
+            legacy_raw_count = int(
+                source.execute(
+                    f"SELECT COUNT(*) FROM {LEGACY_RAW_TABLE}"
+                ).fetchone()[0]
+            )
+            source_tables = {
+                str(row[0])
+                for row in source.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            source_outbox_max = (
+                int(
+                    source.execute(
+                        "SELECT COALESCE(MAX(sequence_no),0) "
+                        "FROM finance_raw_outbox"
+                    ).fetchone()[0]
+                )
+                if RAW_SCHEMA_TABLES.issubset(source_tables)
+                else 0
+            )
+            candidate_outbox_max = int(
+                raw.execute(
+                    "SELECT COALESCE(MAX(sequence_no),0) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            bridge_row = raw.execute(
+                """SELECT last_sequence_no FROM finance_raw_bridge_cursors
+                   WHERE bridge_id='finance_raw_live_tail_v1'"""
+            ).fetchone()
+            bridge_cursor = (
+                int(bridge_row["last_sequence_no"]) if bridge_row else 0
+            )
+            duplicate_event_ids = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT event_id) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            duplicate_sequences = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT sequence_no) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+        finally:
+            source.close()
+            raw.close()
+        cutover_manifest = build_manifest(
+            state="cutover",
+            canonical_source="split",
+            generation_epoch=candidate.generation_epoch,
+            raw_generation_id=candidate.raw.generation_id,
+            raw_relative_path=candidate.raw.relative_path,
+            raw_watermark=str(source_outbox_max),
+            operational_generation_id=candidate.operational.generation_id,
+            operational_relative_path=candidate.operational.relative_path,
+            operational_watermark=_digest(source_identity),
+            rollback_generation_id="monolith",
+            source_fingerprint=candidate.source_fingerprint,
+            created_at=candidate.created_at,
+        )
+        vfs = os.statvfs(self.runtime_dir)
+        free_bytes = int(vfs.f_bavail * vfs.f_frsize)
+        recopy_bytes = max(
+            int(operational_path.stat().st_size * 1.25),
+            2 * _GIB,
+        )
+        reserve_bytes = 2 * _GIB
+        required_bytes = recopy_bytes + reserve_bytes
+        blockers: list[dict[str, Any]] = []
+        if active.state != "monolith" or active.canonical_source != "monolith":
+            blockers.append({"code": "canonical_source_not_monolith"})
+        if re.fullmatch(r"[0-9a-f]{40}", self.deployed_sha) is None:
+            blockers.append({"code": "deployed_sha_unavailable"})
+        if shadow.get("enabled") is not True:
+            blockers.append({"code": "shadow_ingest_not_active"})
+        if (
+            str(shadow.get("candidate_manifest_sha256") or "")
+            != candidate.manifest_sha256
+        ):
+            blockers.append({"code": "shadow_candidate_identity_mismatch"})
+        if source_outbox_max != bridge_cursor:
+            blockers.append(
+                {
+                    "code": "live_tail_lag",
+                    "source_sequence": source_outbox_max,
+                    "candidate_cursor": bridge_cursor,
+                }
+            )
+        if candidate_outbox_max != source_outbox_max:
+            blockers.append({"code": "candidate_outbox_sequence_mismatch"})
+        if duplicate_event_ids or duplicate_sequences:
+            blockers.append({"code": "duplicate_outbox_event"})
+        if (
+            str(verification.get("contract_version") or "")
+            != SHADOW_VERIFICATION_CONTRACT
+            or str(verification.get("status") or "") != "ready"
+            or str(verification.get("candidate_manifest_sha256") or "")
+            != candidate.manifest_sha256
+            or str(verification.get("candidate_plan_fingerprint") or "")
+            != self.candidate_plan_fingerprint
+            or int(verification.get("mismatch_count") or 0) != 0
+            or int(
+                (verification.get("outbox") or {}).get("lag_events") or 0
+            )
+            != 0
+        ):
+            blockers.append({"code": "shadow_soak_evidence_not_ready"})
+        if free_bytes < required_bytes:
+            blockers.append({"code": "operational_recopy_capacity_shortfall"})
+        plan: dict[str, Any] = {
+            "contract_version": CUTOVER_PLAN_CONTRACT,
+            "mode": "cutover_dry_run",
+            "deployed_sha": self.deployed_sha,
+            "candidate_plan_fingerprint": self.candidate_plan_fingerprint,
+            "candidate_manifest_path": str(self.candidate_manifest_path),
+            "candidate_manifest_sha256": candidate.manifest_sha256,
+            "source": {
+                "path": str(source_path),
+                "identity": source_identity,
+                "legacy_raw_row_count": legacy_raw_count,
+                "outbox_latest_sequence": source_outbox_max,
+            },
+            "candidate": {
+                "raw_path": str(raw_path),
+                "operational_path": str(operational_path),
+                "raw_identity": _destination_path_identity(raw_path),
+                "operational_identity": _destination_path_identity(
+                    operational_path
+                ),
+                "bridge_cursor": bridge_cursor,
+                "outbox_latest_sequence": candidate_outbox_max,
+                "duplicate_event_ids": duplicate_event_ids,
+                "duplicate_sequences": duplicate_sequences,
+            },
+            "shadow_ingest": shadow,
+            "shadow_verification": verification,
+            "target_manifest": manifest_payload(cutover_manifest),
+            "capacity": {
+                "available_bytes": free_bytes,
+                "operational_recopy_bytes": recopy_bytes,
+                "post_cutover_reserve_bytes": reserve_bytes,
+                "required_bytes": required_bytes,
+                "shortfall_bytes": max(0, required_bytes - free_bytes),
+                "remaining_bytes": max(0, free_bytes - required_bytes),
+                "sufficient": free_bytes >= required_bytes,
+            },
+            "critical_window": {
+                "manual_business_writes_blocked": True,
+                "automatic_writers_drained": True,
+                "fresh_operational_recopy": True,
+                "final_raw_tail": True,
+                "atomic_manifest_switch": True,
+                "unrelated_services_stopped": False,
+            },
+            "rollback": {
+                "old_monolith_retained": True,
+                "rollback_generation_id": "monolith",
+                "retirement_authorized": False,
+            },
+            "blockers": blockers,
+            "apply_allowed_by_machine_preflight": not blockers,
+            "human_approval_required": True,
+        }
+        plan["fingerprint"] = self._fingerprint(plan)
+        plan["created_at"] = _utc_now()
+        return plan
+
+    def _hold_evidence(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+        barrier = barrier_status(self.runtime_dir)
+        maintenance = _load_private_json(
+            self.runtime_dir / ".business-data-maintenance.json",
+            label="business-data maintenance state",
+        )
+        if (
+            barrier.get("active") is not True
+            or str(barrier.get("phase") or "") != "held"
+            or barrier.get("hold_confirmed") is not True
+            or str(barrier.get("window_kind") or "") != "final_cutover"
+            or str(barrier.get("window_id") or "")
+            != f"final-cutover-{str(plan['fingerprint']).removeprefix('sha256:')[:20]}"
+        ):
+            raise FinanceStorageMigrationError(
+                "exact final-cutover HTTP write barrier is required"
+            )
+        if (
+            str(maintenance.get("phase") or "") != "held"
+            or not bool((maintenance.get("hold_readback") or {}).get("quiet"))
+        ):
+            raise FinanceStorageMigrationError(
+                "exact quiet writer/timer hold is required for cutover"
+            )
+        return {
+            "barrier": barrier,
+            "maintenance_fingerprint": _digest(maintenance),
+        }
+
+    @staticmethod
+    def _drain_candidate_outbox(
+        raw: sqlite3.Connection,
+        operational: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        applied = 0
+        duplicates = 0
+        while True:
+            cursor_row = operational.execute(
+                """SELECT last_sequence_no FROM finance_operational_consumer_cursors
+                   WHERE consumer_id='finance_operational_projection_v1'"""
+            ).fetchone()
+            cursor = int(cursor_row[0]) if cursor_row else 0
+            event = raw.execute(
+                """SELECT event_id,sequence_no,event_type,payload_json,
+                          payload_sha256
+                   FROM finance_raw_outbox
+                   WHERE sequence_no>? ORDER BY sequence_no LIMIT 1""",
+                (cursor,),
+            ).fetchone()
+            if event is None:
+                break
+            if int(event["sequence_no"]) != cursor + 1:
+                raise FinanceStorageMigrationError(
+                    "candidate outbox sequence gap blocks cutover"
+                )
+            if _digest(str(event["payload_json"])) != str(
+                event["payload_sha256"]
+            ):
+                raise FinanceStorageMigrationError(
+                    "candidate outbox payload digest mismatch"
+                )
+            payload = json.loads(str(event["payload_json"]))
+            operational.execute("BEGIN IMMEDIATE")
+            receipt = operational.execute(
+                """SELECT 1 FROM finance_operational_receipts
+                   WHERE consumer_id='finance_operational_projection_v1'
+                     AND event_id=?""",
+                (event["event_id"],),
+            ).fetchone()
+            if receipt is None:
+                operational.execute(
+                    """INSERT OR IGNORE INTO finance_operational_inbox(
+                       event_id,consumer_id,sequence_no,event_type,
+                       payload_sha256,received_at
+                       ) VALUES(?,'finance_operational_projection_v1',?,?,?,?)""",
+                    (
+                        event["event_id"],
+                        int(event["sequence_no"]),
+                        event["event_type"],
+                        event["payload_sha256"],
+                        _utc_now(),
+                    ),
+                )
+                operational.execute(
+                    """INSERT INTO finance_operational_receipts(
+                       consumer_id,event_id,sequence_no,source_revision,
+                       result_row_count,result_digest,applied_at
+                       ) VALUES('finance_operational_projection_v1',?,?,?,?,?,?)""",
+                    (
+                        event["event_id"],
+                        int(event["sequence_no"]),
+                        str(payload.get("rows_digest") or ""),
+                        int(payload.get("row_count") or 0),
+                        str(payload.get("rows_digest") or ""),
+                        _utc_now(),
+                    ),
+                )
+                applied += 1
+            else:
+                duplicates += 1
+            operational.execute(
+                """INSERT INTO finance_operational_consumer_cursors(
+                   consumer_id,last_sequence_no,last_event_id,
+                   source_revision,updated_at
+                   ) VALUES('finance_operational_projection_v1',?,?,?,?)
+                   ON CONFLICT(consumer_id) DO UPDATE SET
+                   last_sequence_no=excluded.last_sequence_no,
+                   last_event_id=excluded.last_event_id,
+                   source_revision=excluded.source_revision,
+                   updated_at=excluded.updated_at""",
+                (
+                    int(event["sequence_no"]),
+                    event["event_id"],
+                    str(payload.get("rows_digest") or ""),
+                    _utc_now(),
+                ),
+            )
+            operational.commit()
+            raw.execute("BEGIN IMMEDIATE")
+            raw.execute(
+                """UPDATE finance_raw_outbox
+                   SET published_at=?,attempt_count=attempt_count+1,
+                       last_error=NULL WHERE event_id=?""",
+                (_utc_now(), event["event_id"]),
+            )
+            raw.execute(
+                """INSERT INTO finance_raw_consumer_cursors(
+                   consumer_id,last_sequence_no,last_event_id,updated_at
+                   ) VALUES('finance_operational_projection_v1',?,?,?)
+                   ON CONFLICT(consumer_id) DO UPDATE SET
+                   last_sequence_no=excluded.last_sequence_no,
+                   last_event_id=excluded.last_event_id,
+                   updated_at=excluded.updated_at""",
+                (
+                    int(event["sequence_no"]),
+                    event["event_id"],
+                    _utc_now(),
+                ),
+            )
+            raw.commit()
+        latest = int(
+            raw.execute(
+                "SELECT COALESCE(MAX(sequence_no),0) FROM finance_raw_outbox"
+            ).fetchone()[0]
+        )
+        cursor_row = operational.execute(
+            """SELECT last_sequence_no FROM finance_operational_consumer_cursors
+               WHERE consumer_id='finance_operational_projection_v1'"""
+        ).fetchone()
+        final_cursor = int(cursor_row[0]) if cursor_row else 0
+        return {
+            "applied": applied,
+            "duplicate_receipts": duplicates,
+            "latest_sequence": latest,
+            "operational_cursor": final_cursor,
+            "lag_events": max(0, latest - final_cursor),
+        }
+
+    def _fresh_operational_recopy(
+        self,
+        *,
+        source_path: Path,
+        operational_path: Path,
+        candidate: Any,
+    ) -> dict[str, Any]:
+        temporary = operational_path.with_name(
+            ".operational.final-cutover.partial"
+        )
+        if temporary.exists():
+            temporary.unlink()
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        destination = sqlite3.connect(
+            temporary,
+            timeout=60,
+            isolation_level=None,
+        )
+        source.row_factory = sqlite3.Row
+        destination.row_factory = sqlite3.Row
+        table_evidence: list[dict[str, Any]] = []
+        try:
+            source.execute("PRAGMA query_only=ON")
+            source.execute("BEGIN")
+            source_identity = _source_identity(source_path, source)
+            destination.execute("PRAGMA foreign_keys=OFF")
+            source_schema = _schema_inventory(source)
+            excluded = (
+                set(RAW_LEGACY_OBJECTS)
+                | set(RAW_SCHEMA_TABLES)
+                | set(OPERATIONAL_SCHEMA_TABLES)
+            )
+            table_names = [
+                str(item["name"])
+                for item in source_schema
+                if item["type"] == "table"
+                and item["name"] not in excluded
+            ]
+            for table in table_names:
+                schema_row = next(
+                    item
+                    for item in source_schema
+                    if item["type"] == "table" and item["name"] == table
+                )
+                if not schema_row["sql"]:
+                    raise FinanceStorageMigrationError(
+                        f"operational table schema unavailable: {table}"
+                    )
+                destination.execute(str(schema_row["sql"]))
+                for _chunk_no, _copied in _copy_rows(
+                    source,
+                    destination,
+                    table=table,
+                    chunk_size=10_000,
+                ):
+                    pass
+                destination.commit()
+                source_digest = logical_table_digest(source, table)
+                destination_digest = logical_table_digest(
+                    destination,
+                    table,
+                )
+                if source_digest != destination_digest:
+                    raise FinanceStorageMigrationError(
+                        f"fresh operational recopy mismatch: {table}"
+                    )
+                table_evidence.append(
+                    {
+                        "table": table,
+                        "row_count": source_digest.row_count,
+                        "logical_digest": source_digest.digest,
+                        "owner": _table_owner(table)["owner"],
+                    }
+                )
+            for item in source_schema:
+                if (
+                    item["type"] in {"index", "trigger", "view"}
+                    and item["sql"]
+                    and item["table"] not in excluded
+                    and item["name"] not in excluded
+                ):
+                    destination.execute(str(item["sql"]))
+            ensure_operational_schema(destination)
+            bind_generation_identity(
+                destination,
+                logical_store="operational",
+                generation_id=candidate.operational.generation_id,
+                generation_epoch=candidate.generation_epoch,
+                source_fingerprint=candidate.source_fingerprint,
+            )
+            destination.commit()
+            integrity = [
+                str(row[0])
+                for row in destination.execute(
+                    "PRAGMA integrity_check"
+                ).fetchall()
+            ]
+            if integrity != ["ok"]:
+                raise FinanceStorageMigrationError(
+                    "fresh operational generation integrity_check failed"
+                )
+            foreign_keys = destination.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchmany(1)
+            if foreign_keys:
+                raise FinanceStorageMigrationError(
+                    "fresh operational generation foreign_key_check failed"
+                )
+            source.rollback()
+        finally:
+            source.close()
+            destination.close()
+        descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, operational_path)
+        return {
+            "status": "reconciled",
+            "table_count": len(table_evidence),
+            "tables": table_evidence,
+            "non_target_digest": _digest(table_evidence),
+            "source_identity": source_identity,
+            "destination_identity": _destination_path_identity(
+                operational_path
+            ),
+            "integrity_check": "ok",
+        }
+
+    @staticmethod
+    def _legacy_raw_coverage(
+        source_path: Path,
+        candidate_raw_path: Path,
+    ) -> dict[str, Any]:
+        source = sqlite3.connect(
+            f"file:{source_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        source.row_factory = sqlite3.Row
+        try:
+            source.execute("PRAGMA query_only=ON")
+            source.execute(
+                "ATTACH DATABASE ? AS candidate_raw",
+                (f"file:{candidate_raw_path}?mode=ro",),
+            )
+            source_count = int(
+                source.execute(
+                    f"SELECT COUNT(*) FROM {LEGACY_RAW_TABLE}"
+                ).fetchone()[0]
+            )
+            missing = int(
+                source.execute(
+                    f"""SELECT COUNT(*) FROM {LEGACY_RAW_TABLE} AS live
+                        WHERE NOT EXISTS(
+                          SELECT 1 FROM candidate_raw.finance_raw_rows AS raw
+                          WHERE raw.seller_id=live.seller_id
+                            AND raw.report_id=live.report_id
+                            AND raw.rrd_id=live.rrd_id
+                            AND raw.row_hash=live.row_hash
+                        )"""
+                ).fetchone()[0]
+            )
+        finally:
+            source.close()
+        return {
+            "source_current_row_count": source_count,
+            "missing_current_rows": missing,
+            "status": "match" if missing == 0 else "mismatch",
+        }
+
+    def apply(
+        self,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+        approval_reference: str,
+    ) -> dict[str, Any]:
+        exact_fingerprint = str(expected_fingerprint or "")
+        if (
+            str(reviewed_plan.get("contract_version") or "")
+            != CUTOVER_PLAN_CONTRACT
+            or str(reviewed_plan.get("mode") or "") != "cutover_dry_run"
+            or str(reviewed_plan.get("fingerprint") or "")
+            != exact_fingerprint
+            or self._fingerprint(reviewed_plan) != exact_fingerprint
+            or not bool(
+                reviewed_plan.get("apply_allowed_by_machine_preflight")
+            )
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed Finance cutover plan is invalid or blocked"
+            )
+        if not str(approval_reference or "").strip():
+            raise FinanceStorageMigrationError(
+                "Finance cutover approval reference is required"
+            )
+        if (
+            str(reviewed_plan.get("candidate_plan_fingerprint") or "")
+            != self.candidate_plan_fingerprint
+            or str(reviewed_plan.get("deployed_sha") or "")
+            != self.deployed_sha
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed Finance cutover identity does not match the runner"
+            )
+        hold_evidence = self._hold_evidence(reviewed_plan)
+        candidate, raw_path, operational_path = self._candidate()
+        active = self.registry.load()
+        if active.state != "monolith" or active.canonical_source != "monolith":
+            if (
+                active.state == "cutover"
+                and active.raw.generation_id
+                == candidate.raw.generation_id
+                and active.operational.generation_id
+                == candidate.operational.generation_id
+                and active.source_fingerprint
+                == candidate.source_fingerprint
+            ):
+                return {
+                    "contract_version": CUTOVER_RESULT_CONTRACT,
+                    "status": "cutover_complete",
+                    "idempotent": True,
+                    "manifest": manifest_payload(active),
+                }
+            raise FinanceStorageMigrationError(
+                "canonical generation changed before cutover"
+            )
+        if (
+            candidate.manifest_sha256
+            != str(reviewed_plan.get("candidate_manifest_sha256") or "")
+        ):
+            raise FinanceStorageMigrationError(
+                "candidate generation changed before cutover"
+            )
+        shadow = FinanceStorageShadowRunner(
+            self.runtime_dir,
+            candidate_manifest_path=self.candidate_manifest_path,
+            plan_fingerprint=self.candidate_plan_fingerprint,
+            approval_reference=str(approval_reference),
+        )
+        tail = shadow.apply_live_tail(max_events=1_000_000)
+        if tail["lag_events"] or tail["duplicate_event_ids"] or tail[
+            "duplicate_sequences"
+        ]:
+            raise FinanceStorageMigrationError(
+                "final Finance raw live tail is not clean"
+            )
+        source_path = self.registry.resolve("operational", manifest=active)
+        coverage = self._legacy_raw_coverage(source_path, raw_path)
+        if coverage["missing_current_rows"]:
+            raise FinanceStorageMigrationError(
+                "candidate raw is missing current legacy rows"
+            )
+        recopy = self._fresh_operational_recopy(
+            source_path=source_path,
+            operational_path=operational_path,
+            candidate=candidate,
+        )
+        raw = sqlite3.connect(
+            raw_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        operational = sqlite3.connect(
+            operational_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        raw.row_factory = sqlite3.Row
+        operational.row_factory = sqlite3.Row
+        try:
+            outbox = self._drain_candidate_outbox(raw, operational)
+            if outbox["lag_events"]:
+                raise FinanceStorageMigrationError(
+                    "candidate operational outbox drain is incomplete"
+                )
+            raw.execute("PRAGMA wal_checkpoint(FULL)")
+            operational.execute("PRAGMA wal_checkpoint(FULL)")
+        finally:
+            raw.close()
+            operational.close()
+        disabled = shadow.deactivate(
+            reason="split generation becoming canonical"
+        )
+        target_manifest = build_manifest(
+            state="cutover",
+            canonical_source="split",
+            generation_epoch=candidate.generation_epoch,
+            raw_generation_id=candidate.raw.generation_id,
+            raw_relative_path=candidate.raw.relative_path,
+            raw_watermark=str(tail["source_latest_sequence"]),
+            operational_generation_id=candidate.operational.generation_id,
+            operational_relative_path=candidate.operational.relative_path,
+            operational_watermark=_digest(recopy["source_identity"]),
+            rollback_generation_id="monolith",
+            source_fingerprint=candidate.source_fingerprint,
+            created_at=_utc_now(),
+        )
+        try:
+            atomic_write_manifest(
+                self.registry.manifest_path,
+                target_manifest,
+            )
+        except Exception:
+            shadow.activate()
+            raise
+        readback = self.registry.load(require_files=True)
+        if readback.manifest_sha256 != target_manifest.manifest_sha256:
+            raise FinanceStorageMigrationError(
+                "atomic cutover manifest readback mismatch"
+            )
+        result: dict[str, Any] = {
+            "contract_version": CUTOVER_RESULT_CONTRACT,
+            "status": "cutover_complete",
+            "idempotent": False,
+            "plan_fingerprint": str(expected_fingerprint),
+            "approval_reference": str(approval_reference).strip(),
+            "hold_evidence": hold_evidence,
+            "raw_live_tail": tail,
+            "legacy_raw_coverage": coverage,
+            "operational_recopy": recopy,
+            "outbox_reconciliation": outbox,
+            "shadow_ingest": disabled,
+            "manifest": manifest_payload(readback),
+            "global_manifest_switched": True,
+            "canonical_source": "split",
+            "old_monolith_retained": source_path.is_file(),
+            "restart_required": ["wb-core-registry-http.service"],
+            "retirement_authorized": False,
+        }
+        result["evidence_fingerprint"] = _digest(result)
+        evidence_path = (
+            operational_path.parent / "cutover_evidence.json"
+        )
+        _atomic_write_json(evidence_path, result)
+        result["evidence_path"] = str(evidence_path)
+        return result
+
+
+class FinanceStorageRollback:
+    """Build and atomically select a reconciled rollback monolith."""
+
+    def __init__(
+        self,
+        runtime_dir: Path,
+        *,
+        deployed_sha: str,
+    ) -> None:
+        self.runtime_dir = Path(runtime_dir).expanduser().resolve()
+        self.registry = StoreRegistry(self.runtime_dir)
+        self.deployed_sha = str(deployed_sha or "").strip()
+
+    @staticmethod
+    def _fingerprint(plan: Mapping[str, Any]) -> str:
+        stable = json.loads(_canonical_json(plan))
+        stable.pop("fingerprint", None)
+        stable.pop("created_at", None)
+        capacity = stable.get("capacity", {})
+        for key in (
+            "available_bytes",
+            "shortfall_bytes",
+            "remaining_bytes",
+            "sufficient",
+        ):
+            capacity.pop(key, None)
+        return _digest(stable)
+
+    def build_plan(self) -> dict[str, Any]:
+        active = self.registry.load(require_files=True)
+        raw_path = self.registry.resolve("finance_raw", manifest=active)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=active,
+        )
+        retained_monolith = self.runtime_dir / MONOLITH_FILENAME
+        rollback_epoch = "rollback-" + active.generation_epoch[:40]
+        rollback_root = self.runtime_dir / "generations" / rollback_epoch
+        rollback_path = rollback_root / "monolith.sqlite3"
+        raw = sqlite3.connect(
+            f"file:{raw_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        raw.row_factory = sqlite3.Row
+        try:
+            raw.execute("PRAGMA query_only=ON")
+            current = FinanceStorageShadowVerifier._rows_digest(
+                raw,
+                table="finance_raw_current_rows",
+            )
+            latest_outbox = int(
+                raw.execute(
+                    "SELECT COALESCE(MAX(sequence_no),0) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            duplicate_events = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT event_id) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            duplicate_sequences = int(
+                raw.execute(
+                    "SELECT COUNT(*)-COUNT(DISTINCT sequence_no) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+        finally:
+            raw.close()
+        health = storage_health(self.registry)
+        vfs = os.statvfs(self.runtime_dir)
+        free_bytes = int(vfs.f_bavail * vfs.f_frsize)
+        required_bytes = (
+            int(raw_path.stat().st_size)
+            + int(operational_path.stat().st_size * 1.25)
+            + 2 * _GIB
+        )
+        blockers: list[dict[str, Any]] = []
+        if active.state != "cutover" or active.canonical_source != "split":
+            blockers.append({"code": "canonical_source_not_split"})
+        if re.fullmatch(r"[0-9a-f]{40}", self.deployed_sha) is None:
+            blockers.append({"code": "deployed_sha_unavailable"})
+        if not retained_monolith.is_file():
+            blockers.append({"code": "retained_monolith_missing"})
+        if duplicate_events or duplicate_sequences:
+            blockers.append({"code": "duplicate_outbox_event"})
+        if int(health.get("consumer_lag_events") or 0):
+            blockers.append({"code": "operational_consumer_lag"})
+        if int(health.get("actionable_dead_letters") or 0):
+            blockers.append({"code": "actionable_dead_letter"})
+        if free_bytes < required_bytes:
+            blockers.append({"code": "rollback_capacity_shortfall"})
+        plan: dict[str, Any] = {
+            "contract_version": ROLLBACK_PLAN_CONTRACT,
+            "mode": "rollback_dry_run",
+            "deployed_sha": self.deployed_sha,
+            "active_manifest": manifest_payload(active),
+            "raw": {
+                "path": str(raw_path),
+                "current_row_count": current.row_count,
+                "current_logical_digest": current.digest,
+                "latest_outbox_sequence": latest_outbox,
+                "duplicate_event_ids": duplicate_events,
+                "duplicate_sequences": duplicate_sequences,
+            },
+            "operational": {
+                "path": str(operational_path),
+                "identity": _destination_path_identity(operational_path),
+            },
+            "retained_monolith": {
+                "path": str(retained_monolith),
+                "identity": _destination_path_identity(retained_monolith),
+                "mutation_allowed": False,
+            },
+            "target": {
+                "generation_epoch": rollback_epoch,
+                "generation_id": rollback_epoch,
+                "path": str(rollback_path),
+                "relative_path": str(
+                    rollback_path.relative_to(self.runtime_dir)
+                ),
+            },
+            "capacity": {
+                "available_bytes": free_bytes,
+                "required_bytes": required_bytes,
+                "remaining_bytes": max(0, free_bytes - required_bytes),
+                "shortfall_bytes": max(0, required_bytes - free_bytes),
+                "sufficient": free_bytes >= required_bytes,
+            },
+            "critical_window": {
+                "candidate_built_before_hold": True,
+                "post_prepare_raw_tail_replayed": True,
+                "fresh_operational_recopy": True,
+                "atomic_manifest_switch": True,
+                "unrelated_services_stopped": False,
+            },
+            "blockers": blockers,
+            "prepare_allowed_by_machine_preflight": not blockers,
+            "apply_allowed_after_candidate_readback": not blockers,
+            "human_approval_required": True,
+            "old_split_and_original_monolith_retained": True,
+        }
+        plan["fingerprint"] = self._fingerprint(plan)
+        plan["created_at"] = _utc_now()
+        return plan
+
+    @staticmethod
+    def _create_legacy_raw_schema(
+        conn: sqlite3.Connection,
+    ) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS wb_finance_weekly_raw_rows (
+                seller_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                rrd_id TEXT NOT NULL,
+                report_type INTEGER,
+                week_start TEXT NOT NULL,
+                week_end TEXT NOT NULL,
+                nm_id TEXT,
+                vendor_code TEXT,
+                barcode TEXT,
+                doc_type_name TEXT,
+                seller_oper_name TEXT,
+                row_hash TEXT NOT NULL,
+                raw_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(seller_id,report_id,rrd_id)
+            );
+            CREATE INDEX IF NOT EXISTS wb_finance_raw_by_week
+            ON wb_finance_weekly_raw_rows(
+                seller_id,week_start,week_end
+            );
+            CREATE INDEX IF NOT EXISTS wb_finance_raw_by_sku_week
+            ON wb_finance_weekly_raw_rows(
+                seller_id,nm_id,week_start,week_end
+            );
+            """
+        )
+
+    @staticmethod
+    def _copy_current_raw(
+        source: sqlite3.Connection,
+        destination: sqlite3.Connection,
+    ) -> LogicalDigest:
+        destination.execute("DELETE FROM wb_finance_weekly_raw_rows")
+        digest = hashlib.sha256()
+        count = 0
+        cursor = source.execute(
+            """SELECT seller_id,report_id,rrd_id,report_type,week_start,
+                      week_end,nm_id,vendor_code,barcode,doc_type_name,
+                      seller_oper_name,row_hash,raw_json,first_seen_at,
+                      updated_at
+               FROM finance_raw_current_rows
+               ORDER BY seller_id,week_start,week_end,report_id,rrd_id"""
+        )
+        while rows := cursor.fetchmany(10_000):
+            destination.execute("BEGIN IMMEDIATE")
+            for row in rows:
+                destination.execute(
+                    """INSERT INTO wb_finance_weekly_raw_rows
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    tuple(row),
+                )
+                digest.update(
+                    (
+                        _canonical_json(
+                            [
+                                str(row["seller_id"]),
+                                str(row["week_start"]),
+                                str(row["week_end"]),
+                                str(row["report_id"]),
+                                str(row["rrd_id"]),
+                                str(row["row_hash"]),
+                            ]
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                count += 1
+            destination.commit()
+        return LogicalDigest(
+            row_count=count,
+            digest="sha256:" + digest.hexdigest(),
+        )
+
+    def prepare(
+        self,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+        approval_reference: str,
+    ) -> dict[str, Any]:
+        exact = str(expected_fingerprint or "")
+        if (
+            str(reviewed_plan.get("contract_version") or "")
+            != ROLLBACK_PLAN_CONTRACT
+            or str(reviewed_plan.get("mode") or "") != "rollback_dry_run"
+            or str(reviewed_plan.get("fingerprint") or "") != exact
+            or self._fingerprint(reviewed_plan) != exact
+            or not bool(
+                reviewed_plan.get("prepare_allowed_by_machine_preflight")
+            )
+            or not str(approval_reference or "").strip()
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed Finance rollback plan is invalid or blocked"
+            )
+        active = self.registry.load(require_files=True)
+        if active.manifest_sha256 != str(
+            (reviewed_plan.get("active_manifest") or {}).get(
+                "manifest_sha256"
+            )
+            or ""
+        ):
+            raise FinanceStorageMigrationError(
+                "active split generation changed before rollback prepare"
+            )
+        raw_path = self.registry.resolve("finance_raw", manifest=active)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=active,
+        )
+        target_path = Path(str(reviewed_plan["target"]["path"])).resolve()
+        target_path.relative_to(self.runtime_dir)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path = target_path.parent / "rollback_candidate.json"
+        if evidence_path.exists() and target_path.is_file():
+            existing = _load_private_json(
+                evidence_path,
+                label="rollback candidate evidence",
+            )
+            if (
+                str(existing.get("plan_fingerprint") or "") == exact
+                and str(existing.get("status") or "") == "candidate_ready"
+            ):
+                return {
+                    **existing,
+                    "candidate_evidence_path": str(evidence_path),
+                    "idempotent": True,
+                }
+        temporary = target_path.with_name(
+            f".{target_path.name}.partial"
+        )
+        if temporary.exists():
+            temporary.unlink()
+        operational = sqlite3.connect(
+            f"file:{operational_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        candidate = sqlite3.connect(
+            temporary,
+            timeout=60,
+            isolation_level=None,
+        )
+        raw = sqlite3.connect(
+            f"file:{raw_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        for conn in (operational, candidate, raw):
+            conn.row_factory = sqlite3.Row
+        try:
+            operational.execute("PRAGMA query_only=ON")
+            raw.execute("PRAGMA query_only=ON")
+            operational.backup(candidate)
+            self._create_legacy_raw_schema(candidate)
+            raw_digest = self._copy_current_raw(raw, candidate)
+            latest_sequence = int(
+                raw.execute(
+                    "SELECT COALESCE(MAX(sequence_no),0) "
+                    "FROM finance_raw_outbox"
+                ).fetchone()[0]
+            )
+            candidate.execute("PRAGMA wal_checkpoint(FULL)")
+            integrity = [
+                str(row[0])
+                for row in candidate.execute(
+                    "PRAGMA integrity_check"
+                ).fetchall()
+            ]
+            if integrity != ["ok"]:
+                raise FinanceStorageMigrationError(
+                    "rollback candidate integrity_check failed"
+                )
+            foreign_keys = candidate.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchmany(1)
+            if foreign_keys:
+                raise FinanceStorageMigrationError(
+                    "rollback candidate foreign_key_check failed"
+                )
+        finally:
+            operational.close()
+            raw.close()
+            candidate.close()
+        os.replace(temporary, target_path)
+        result: dict[str, Any] = {
+            "contract_version": ROLLBACK_CANDIDATE_CONTRACT,
+            "status": "candidate_ready",
+            "idempotent": False,
+            "plan_fingerprint": exact,
+            "approval_reference": str(approval_reference).strip(),
+            "active_manifest_sha256": active.manifest_sha256,
+            "candidate_path": str(target_path),
+            "captured_outbox_sequence": latest_sequence,
+            "raw_current_row_count": raw_digest.row_count,
+            "raw_current_logical_digest": raw_digest.digest,
+            "integrity_check": "ok",
+            "foreign_key_check_rows": 0,
+            "prepared_at": _utc_now(),
+            "original_monolith_mutated": False,
+            "global_manifest_switched": False,
+        }
+        result["candidate_fingerprint"] = _digest(result)
+        _atomic_write_json(evidence_path, result)
+        return {**result, "candidate_evidence_path": str(evidence_path)}
+
+    @staticmethod
+    def _fresh_operational_recopy(
+        source: sqlite3.Connection,
+        destination: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        source.execute("PRAGMA query_only=ON")
+        source.execute("BEGIN")
+        destination.execute("PRAGMA foreign_keys=OFF")
+        source_schema = _schema_inventory(source)
+        protected = set(RAW_LEGACY_OBJECTS)
+        for item in reversed(
+            [
+                item
+                for item in _schema_inventory(destination)
+                if item["type"] in {"view", "trigger", "index"}
+                and item["sql"]
+                and item["name"] not in protected
+                and item["table"] not in protected
+            ]
+        ):
+            destination.execute(
+                f"DROP {str(item['type']).upper()} IF EXISTS "
+                f"{_quoted(str(item['name']))}"
+            )
+        destination_tables = [
+            str(row[0])
+            for row in destination.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table' AND name NOT LIKE 'sqlite_%'"""
+            ).fetchall()
+            if str(row[0]) != LEGACY_RAW_TABLE
+        ]
+        for table in destination_tables:
+            destination.execute(f"DROP TABLE {_quoted(table)}")
+        destination.commit()
+        table_evidence: list[dict[str, Any]] = []
+        source_tables = [
+            str(item["name"])
+            for item in source_schema
+            if item["type"] == "table"
+            and item["name"] not in RAW_LEGACY_OBJECTS
+            and item["name"] not in RAW_SCHEMA_TABLES
+        ]
+        for table in source_tables:
+            schema = next(
+                item
+                for item in source_schema
+                if item["type"] == "table" and item["name"] == table
+            )
+            if not schema["sql"]:
+                raise FinanceStorageMigrationError(
+                    f"rollback operational schema unavailable: {table}"
+                )
+            destination.execute(str(schema["sql"]))
+            for _chunk_no, _copied in _copy_rows(
+                source,
+                destination,
+                table=table,
+                chunk_size=10_000,
+            ):
+                pass
+            destination.commit()
+            source_digest = logical_table_digest(source, table)
+            target_digest = logical_table_digest(destination, table)
+            if source_digest != target_digest:
+                raise FinanceStorageMigrationError(
+                    f"rollback operational recopy mismatch: {table}"
+                )
+            table_evidence.append(
+                {
+                    "table": table,
+                    "row_count": source_digest.row_count,
+                    "logical_digest": source_digest.digest,
+                }
+            )
+        for item in source_schema:
+            if (
+                item["type"] in {"index", "trigger", "view"}
+                and item["sql"]
+                and item["name"] not in protected
+                and item["table"] not in protected
+                and item["table"] not in RAW_SCHEMA_TABLES
+            ):
+                destination.execute(str(item["sql"]))
+        destination.commit()
+        source.rollback()
+        return {
+            "status": "reconciled",
+            "table_count": len(table_evidence),
+            "tables": table_evidence,
+            "non_target_digest": _digest(table_evidence),
+        }
+
+    @staticmethod
+    def _refresh_post_prepare_raw(
+        raw: sqlite3.Connection,
+        destination: sqlite3.Connection,
+        *,
+        captured_sequence: int,
+    ) -> dict[str, Any]:
+        affected = raw.execute(
+            """SELECT DISTINCT batch.seller_id,batch.week_start,batch.week_end
+               FROM finance_raw_outbox AS event
+               JOIN finance_raw_ingest_batches AS batch
+                 ON batch.batch_id=event.batch_id
+               WHERE event.sequence_no>?
+               ORDER BY batch.seller_id,batch.week_start,batch.week_end""",
+            (captured_sequence,),
+        ).fetchall()
+        refreshed_rows = 0
+        scopes: list[dict[str, Any]] = []
+        for scope in affected:
+            seller_id = str(scope["seller_id"])
+            week_start = str(scope["week_start"])
+            week_end = str(scope["week_end"])
+            if not seller_id or seller_id == "*" or not week_start or not week_end:
+                raise FinanceStorageMigrationError(
+                    "post-prepare raw event has unbounded rollback scope"
+                )
+            destination.execute("BEGIN IMMEDIATE")
+            destination.execute(
+                f"""DELETE FROM {LEGACY_RAW_TABLE}
+                    WHERE seller_id=? AND week_start=? AND week_end=?""",
+                (seller_id, week_start, week_end),
+            )
+            rows = raw.execute(
+                """SELECT seller_id,report_id,rrd_id,report_type,week_start,
+                          week_end,nm_id,vendor_code,barcode,doc_type_name,
+                          seller_oper_name,row_hash,raw_json,first_seen_at,
+                          updated_at
+                   FROM finance_raw_current_rows
+                   WHERE seller_id=? AND week_start=? AND week_end=?
+                   ORDER BY report_id,rrd_id""",
+                (seller_id, week_start, week_end),
+            ).fetchall()
+            for row in rows:
+                destination.execute(
+                    f"INSERT INTO {LEGACY_RAW_TABLE} VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    tuple(row),
+                )
+            destination.commit()
+            refreshed_rows += len(rows)
+            scopes.append(
+                {
+                    "seller_id": seller_id,
+                    "week_start": week_start,
+                    "week_end": week_end,
+                    "row_count": len(rows),
+                }
+            )
+        latest = int(
+            raw.execute(
+                "SELECT COALESCE(MAX(sequence_no),0) "
+                "FROM finance_raw_outbox"
+            ).fetchone()[0]
+        )
+        return {
+            "captured_sequence": captured_sequence,
+            "latest_sequence": latest,
+            "replayed_event_count": max(0, latest - captured_sequence),
+            "affected_scope_count": len(scopes),
+            "refreshed_row_count": refreshed_rows,
+            "scopes": scopes,
+        }
+
+    def apply(
+        self,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+        approval_reference: str,
+        candidate_evidence_path: Path,
+    ) -> dict[str, Any]:
+        exact = str(expected_fingerprint or "")
+        if (
+            str(reviewed_plan.get("contract_version") or "")
+            != ROLLBACK_PLAN_CONTRACT
+            or str(reviewed_plan.get("fingerprint") or "") != exact
+            or self._fingerprint(reviewed_plan) != exact
+            or not str(approval_reference or "").strip()
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed Finance rollback plan is invalid"
+            )
+        evidence = _load_private_json(
+            Path(candidate_evidence_path).expanduser().resolve(),
+            label="rollback candidate evidence",
+        )
+        if (
+            str(evidence.get("contract_version") or "")
+            != ROLLBACK_CANDIDATE_CONTRACT
+            or str(evidence.get("status") or "") != "candidate_ready"
+            or str(evidence.get("plan_fingerprint") or "") != exact
+        ):
+            raise FinanceStorageMigrationError(
+                "rollback candidate evidence is invalid"
+            )
+        barrier = barrier_status(self.runtime_dir)
+        window_id = "rollback-" + exact.removeprefix("sha256:")[:20]
+        if (
+            barrier.get("active") is not True
+            or str(barrier.get("phase") or "") != "held"
+            or barrier.get("hold_confirmed") is not True
+            or str(barrier.get("window_kind") or "") != "rollback_drill"
+            or str(barrier.get("window_id") or "") != window_id
+        ):
+            raise FinanceStorageMigrationError(
+                "exact rollback-drill HTTP write barrier is required"
+            )
+        maintenance = _load_private_json(
+            self.runtime_dir / ".business-data-maintenance.json",
+            label="business-data maintenance state",
+        )
+        if (
+            str(maintenance.get("phase") or "") != "held"
+            or not bool(
+                (maintenance.get("hold_readback") or {}).get("quiet")
+            )
+        ):
+            raise FinanceStorageMigrationError(
+                "exact quiet writer/timer hold is required for rollback"
+            )
+        active = self.registry.load(require_files=True)
+        if active.manifest_sha256 != str(
+            evidence.get("active_manifest_sha256") or ""
+        ):
+            raise FinanceStorageMigrationError(
+                "active split generation changed before rollback"
+            )
+        raw_path = self.registry.resolve("finance_raw", manifest=active)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=active,
+        )
+        candidate_path = Path(
+            str(evidence.get("candidate_path") or "")
+        ).resolve()
+        candidate_path.relative_to(self.runtime_dir)
+        raw = sqlite3.connect(
+            f"file:{raw_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        operational = sqlite3.connect(
+            f"file:{operational_path}?mode=ro",
+            uri=True,
+            timeout=60,
+            isolation_level=None,
+        )
+        candidate = sqlite3.connect(
+            candidate_path,
+            timeout=60,
+            isolation_level=None,
+        )
+        for conn in (raw, operational, candidate):
+            conn.row_factory = sqlite3.Row
+        try:
+            raw.execute("PRAGMA query_only=ON")
+            operational_recopy = self._fresh_operational_recopy(
+                operational,
+                candidate,
+            )
+            raw_replay = self._refresh_post_prepare_raw(
+                raw,
+                candidate,
+                captured_sequence=int(
+                    evidence["captured_outbox_sequence"]
+                ),
+            )
+            expected_raw = FinanceStorageShadowVerifier._rows_digest(
+                raw,
+                table="finance_raw_current_rows",
+            )
+            actual_raw = FinanceStorageShadowVerifier._rows_digest(
+                candidate,
+                table=LEGACY_RAW_TABLE,
+            )
+            if expected_raw != actual_raw:
+                raise FinanceStorageMigrationError(
+                    "rollback raw logical readback mismatch"
+                )
+            quick = [
+                str(row[0])
+                for row in candidate.execute(
+                    "PRAGMA quick_check(1000)"
+                ).fetchall()
+            ]
+            if quick != ["ok"]:
+                raise FinanceStorageMigrationError(
+                    "rollback candidate final quick_check failed"
+                )
+            candidate.execute("PRAGMA wal_checkpoint(FULL)")
+        finally:
+            raw.close()
+            operational.close()
+            candidate.close()
+        target = reviewed_plan["target"]
+        rollback_manifest = build_manifest(
+            state="monolith",
+            canonical_source="monolith",
+            generation_epoch=str(target["generation_epoch"]),
+            raw_generation_id=str(target["generation_id"]),
+            raw_relative_path=str(target["relative_path"]),
+            raw_watermark=str(raw_replay["latest_sequence"]),
+            operational_generation_id=str(target["generation_id"]),
+            operational_relative_path=str(target["relative_path"]),
+            operational_watermark=operational_recopy[
+                "non_target_digest"
+            ],
+            rollback_generation_id=active.generation_epoch,
+            source_fingerprint=_digest(
+                {
+                    "split_manifest": active.manifest_sha256,
+                    "rollback_candidate": evidence[
+                        "candidate_fingerprint"
+                    ],
+                }
+            ),
+            created_at=_utc_now(),
+        )
+        atomic_write_manifest(
+            self.registry.manifest_path,
+            rollback_manifest,
+        )
+        readback = self.registry.load(require_files=True)
+        if readback.manifest_sha256 != rollback_manifest.manifest_sha256:
+            raise FinanceStorageMigrationError(
+                "rollback manifest readback mismatch"
+            )
+        result: dict[str, Any] = {
+            "contract_version": ROLLBACK_RESULT_CONTRACT,
+            "status": "rollback_complete",
+            "plan_fingerprint": exact,
+            "approval_reference": str(approval_reference).strip(),
+            "manifest": manifest_payload(readback),
+            "raw_replay": raw_replay,
+            "raw_readback": {
+                "row_count": actual_raw.row_count,
+                "logical_digest": actual_raw.digest,
+            },
+            "operational_recopy": operational_recopy,
+            "global_manifest_switched": True,
+            "canonical_source": "monolith",
+            "restart_required": ["wb-core-registry-http.service"],
+            "original_monolith_retained": (
+                self.runtime_dir / MONOLITH_FILENAME
+            ).is_file(),
+            "split_generation_retained": (
+                raw_path.is_file() and operational_path.is_file()
+            ),
+            "retirement_authorized": False,
+        }
+        result["evidence_fingerprint"] = _digest(result)
+        result_path = candidate_path.parent / "rollback_evidence.json"
+        _atomic_write_json(result_path, result)
+        return {**result, "evidence_path": str(result_path)}

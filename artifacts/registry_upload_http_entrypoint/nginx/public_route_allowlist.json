@@ -37,6 +37,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "business_data_write_barrier_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/maintenance/write-barrier",
+      "methods": ["GET"]
+    },
+    {
       "name": "own_product_capital_status",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/product-capital/status",

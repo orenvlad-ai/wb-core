@@ -324,6 +324,12 @@ def main() -> None:
                         "human-gate-storage-123" if action == "apply" else ""
                     ),
                     chunk_size=100_000,
+                    source_snapshot_manifest=(
+                        "/opt/wb-core-runtime/state/finance-storage-split-snapshots/"
+                        "fixture/snapshot_manifest.json"
+                        if action in {"dry-run", "apply"}
+                        else ""
+                    ),
                 )
             if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
                 raise AssertionError(
@@ -354,6 +360,11 @@ def main() -> None:
                 "finance-storage-split-dry-run",
                 "--output",
                 str(Path(finance_temp_dir) / "finance-storage-review.json"),
+                "--source-snapshot-manifest",
+                (
+                    "/opt/wb-core-runtime/state/finance-storage-split-snapshots/"
+                    "fixture/snapshot_manifest.json"
+                ),
             ]
         )
         storage_apply_args = hosted_runtime.build_arg_parser().parse_args(
@@ -365,6 +376,11 @@ def main() -> None:
                 "sha256:storage-reviewed",
                 "--approval-reference",
                 "human-gate-storage-123",
+                "--source-snapshot-manifest",
+                (
+                    "/opt/wb-core-runtime/state/finance-storage-split-snapshots/"
+                    "fixture/snapshot_manifest.json"
+                ),
             ]
         )
         if (
@@ -392,6 +408,384 @@ def main() -> None:
         ):
             raise AssertionError(
                 "Finance storage reviewed evidence must be written mode 0600"
+            )
+        snapshot_plan_path = Path(finance_temp_dir) / "snapshot-plan.json"
+        snapshot_fingerprint = "sha256:" + ("9" * 64)
+        snapshot_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_version": (
+                        "wb_core_finance_storage_snapshot_plan_v1"
+                    ),
+                    "mode": "snapshot_dry_run",
+                    "fingerprint": snapshot_fingerprint,
+                    "snapshot_allowed_by_machine_preflight": True,
+                    "target_snapshot": {
+                        "window_id": "snapshot-window-smoke-001",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        snapshot_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-snapshot-apply",
+                "--plan-file",
+                str(snapshot_plan_path),
+                "--fingerprint",
+                snapshot_fingerprint,
+                "--approval-reference",
+                "program-authorization-smoke",
+            ]
+        )
+        maintenance_actions: list[str] = []
+
+        def maintenance_result(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            maintenance_actions.append(action)
+            if action == "hold":
+                return {
+                    "status": "held",
+                    "quiet": True,
+                    "auto_updates": {"revision": 19},
+                }
+            if action == "restore":
+                return {
+                    "status": "restored",
+                    "exact_prior_state_restored": True,
+                }
+            if action == "barrier-release":
+                return {"status": "inactive", "active": False}
+            return {"status": "active", "active": True}
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                return_value={"status": "held"},
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                return_value={
+                    "status": "captured_unverified",
+                    "snapshot_manifest_path": (
+                        "/opt/wb-core-runtime/state/finance-storage-split-"
+                        "snapshots/fixture/snapshot_manifest.json"
+                    ),
+                },
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_storage_split_command(snapshot_args)
+        if maintenance_actions != [
+            "barrier-acquire",
+            "prepare",
+            "hold",
+            "barrier-confirm",
+            "barrier-restoring",
+            "restore",
+            "barrier-release",
+        ]:
+            raise AssertionError(
+                "coherent snapshot must automatically acquire, drain, restore "
+                f"and release exact controls: {maintenance_actions}"
+            )
+        maintenance_actions.clear()
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                return_value={"status": "held"},
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                side_effect=RuntimeError("synthetic snapshot failure"),
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            try:
+                hosted_runtime.run_finance_storage_split_command(snapshot_args)
+            except RuntimeError as exc:
+                if "controls were restored" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("synthetic snapshot failure must propagate")
+        if maintenance_actions[-3:] != [
+            "barrier-restoring",
+            "restore",
+            "barrier-release",
+        ]:
+            raise AssertionError(
+                "snapshot failure must still exactly restore controls before "
+                f"propagating: {maintenance_actions}"
+            )
+        cutover_plan_path = Path(finance_temp_dir) / "cutover-plan.json"
+        cutover_fingerprint = "sha256:" + ("8" * 64)
+        candidate_fingerprint = "sha256:" + ("7" * 64)
+        candidate_manifest_path = (
+            "/opt/wb-core-runtime/state/generations/fixture/"
+            "candidate_manifest.json"
+        )
+        cutover_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_version": (
+                        "wb_core_finance_storage_cutover_plan_v1"
+                    ),
+                    "mode": "cutover_dry_run",
+                    "fingerprint": cutover_fingerprint,
+                    "candidate_plan_fingerprint": candidate_fingerprint,
+                    "apply_allowed_by_machine_preflight": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        cutover_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-cutover-apply",
+                "--plan-file",
+                str(cutover_plan_path),
+                "--fingerprint",
+                cutover_fingerprint,
+                "--approval-reference",
+                "human-cutover-smoke",
+                "--candidate-manifest",
+                candidate_manifest_path,
+                "--candidate-plan-fingerprint",
+                candidate_fingerprint,
+                "--output",
+                str(Path(finance_temp_dir) / "cutover-evidence.json"),
+            ]
+        )
+        shadow_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-shadow-activate",
+                "--candidate-manifest",
+                candidate_manifest_path,
+                "--fingerprint",
+                candidate_fingerprint,
+                "--approval-reference",
+                "human-cutover-smoke",
+            ]
+        )
+        if (
+            cutover_args.finance_storage_split_action != "cutover-apply"
+            or shadow_args.finance_storage_split_action != "shadow-activate"
+        ):
+            raise AssertionError(
+                "hosted runner must expose shadow and cutover lifecycle"
+            )
+        maintenance_actions.clear()
+        warehouse_actions: list[str] = []
+
+        def warehouse_result(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            warehouse_actions.append(action)
+            return {"status": "restored" if action == "restore" else "held"}
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                side_effect=warehouse_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                return_value={
+                    "status": "cutover_complete",
+                    "global_manifest_switched": True,
+                    "canonical_source": "split",
+                },
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_restart_finance_cutover_http_service",
+                return_value={
+                    "service": "wb-core-registry-http.service",
+                    "status": "active",
+                },
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_storage_split_command(cutover_args)
+        if maintenance_actions != [
+            "barrier-acquire",
+            "prepare",
+            "hold",
+            "barrier-confirm",
+            "barrier-restoring",
+            "restore",
+            "barrier-release",
+        ]:
+            raise AssertionError(
+                "cutover must hold, switch, restart, exactly restore and "
+                f"release the barrier: {maintenance_actions}"
+            )
+        if warehouse_actions != ["hold", "restore"]:
+            raise AssertionError(
+                "cutover must exactly restore the warehouse timer boundary"
+            )
+        maintenance_actions.clear()
+        warehouse_actions.clear()
+
+        def failed_cutover(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if action == "cutover-apply":
+                raise RuntimeError("synthetic pre-switch cutover failure")
+            if action == "health":
+                return {"canonical_source": "monolith"}
+            raise AssertionError(f"unexpected action: {action}")
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                side_effect=warehouse_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                side_effect=failed_cutover,
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            try:
+                hosted_runtime.run_finance_storage_split_command(
+                    cutover_args
+                )
+            except RuntimeError as exc:
+                if "exact controls were restored" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    "pre-switch cutover failure must propagate"
+                )
+        if maintenance_actions[-3:] != [
+            "barrier-restoring",
+            "restore",
+            "barrier-release",
+        ]:
+            raise AssertionError(
+                "pre-switch cutover failure must exactly restore controls"
+            )
+        rollback_plan_path = Path(finance_temp_dir) / "rollback-plan.json"
+        rollback_fingerprint = "sha256:" + ("6" * 64)
+        rollback_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_version": (
+                        "wb_core_finance_storage_rollback_plan_v1"
+                    ),
+                    "mode": "rollback_dry_run",
+                    "fingerprint": rollback_fingerprint,
+                    "prepare_allowed_by_machine_preflight": True,
+                    "apply_allowed_after_candidate_readback": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        rollback_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-rollback-apply",
+                "--plan-file",
+                str(rollback_plan_path),
+                "--fingerprint",
+                rollback_fingerprint,
+                "--approval-reference",
+                "human-rollback-smoke",
+                "--rollback-candidate-evidence",
+                (
+                    "/opt/wb-core-runtime/state/generations/"
+                    "rollback-smoke/rollback_candidate.json"
+                ),
+                "--output",
+                str(Path(finance_temp_dir) / "rollback-evidence.json"),
+            ]
+        )
+        maintenance_actions.clear()
+        warehouse_actions.clear()
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                side_effect=warehouse_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                return_value={
+                    "status": "rollback_complete",
+                    "global_manifest_switched": True,
+                    "canonical_source": "monolith",
+                },
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_restart_finance_cutover_http_service",
+                return_value={
+                    "service": "wb-core-registry-http.service",
+                    "status": "active",
+                },
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_storage_split_command(rollback_args)
+        if maintenance_actions != [
+            "barrier-acquire",
+            "prepare",
+            "hold",
+            "barrier-confirm",
+            "barrier-restoring",
+            "restore",
+            "barrier-release",
+        ]:
+            raise AssertionError(
+                "rollback must replay under hold, restart, exactly restore "
+                f"and release controls: {maintenance_actions}"
+            )
+        if warehouse_actions != ["hold", "restore"]:
+            raise AssertionError(
+                "rollback must exactly restore the warehouse timer boundary"
             )
     with TemporaryDirectory(prefix="partner-ads-hosted-smoke-") as partner_temp_dir:
         partner_output = Path(partner_temp_dir) / "partner-diagnostic.json"
@@ -725,6 +1119,32 @@ def main() -> None:
         raise AssertionError(
             "business-data restore must expose exact optimistic policy revision"
         )
+    business_barrier_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "business-data-maintenance",
+            "barrier-acquire",
+            "--window-id",
+            "snapshot-window-001",
+            "--window-kind",
+            "snapshot",
+            "--plan-fingerprint",
+            "sha256:" + ("1" * 64),
+            "--approval-reference",
+            "approval-comment-001",
+            "--actor",
+            "migration_runner",
+            "--reason",
+            "coherent snapshot",
+        ]
+    )
+    if (
+        business_barrier_args.action != "barrier-acquire"
+        or business_barrier_args.window_id != "snapshot-window-001"
+        or business_barrier_args.approval_reference != "approval-comment-001"
+    ):
+        raise AssertionError(
+            "hosted runner must expose exact audited HTTP write barrier controls"
+        )
     business_set_process_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "business-data-maintenance",
@@ -795,6 +1215,48 @@ def main() -> None:
             raise AssertionError(
                 f"hosted set-process command lost {expected_token}: "
                 f"{set_process_command}"
+            )
+    barrier_payload = {
+        "status": "active",
+        "active": True,
+        "phase": "acquiring",
+        "window_id": "snapshot-window-001",
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(barrier_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed,
+    ) as run_mock:
+        hosted_runtime._run_remote_business_data_maintenance_runner(
+            active_target,
+            action="barrier-acquire",
+            window_id="snapshot-window-001",
+            window_kind="snapshot",
+            plan_fingerprint="sha256:" + ("1" * 64),
+            approval_reference="approval-comment-001",
+            actor="migration_runner",
+            reason="coherent snapshot",
+        )
+    barrier_command = " ".join(run_mock.call_args.args[0])
+    for expected_token in (
+        "barrier-acquire",
+        "--window-id",
+        "snapshot-window-001",
+        "--plan-fingerprint",
+        "sha256:" + ("1" * 64),
+        "--approval-reference",
+        "approval-comment-001",
+    ):
+        if expected_token not in barrier_command:
+            raise AssertionError(
+                f"hosted barrier command lost {expected_token}: "
+                f"{barrier_command}"
             )
     with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
         plan_path = Path(opening_temp_dir) / "plan.json"

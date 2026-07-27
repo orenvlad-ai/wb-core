@@ -3169,23 +3169,560 @@ def _run_remote_finance_canonical_action(
     return payload
 
 
+def _restore_finance_storage_window(
+    target: HostedRuntimeTarget,
+    *,
+    hold: Mapping[str, Any],
+    window_id: str,
+    fingerprint: str,
+    reason: str,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    evidence["barrier_restoring"] = (
+        _run_remote_business_data_maintenance_runner(
+            target,
+            action="barrier-restoring",
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+    )
+    paused_revision = int(
+        ((hold.get("auto_updates") or {}).get("revision") or 0)
+    )
+    if paused_revision <= 0:
+        raise RuntimeError(
+            "Finance maintenance hold lacks exact paused policy revision"
+        )
+    restore = _run_remote_business_data_maintenance_runner(
+        target,
+        action="restore",
+        expected_revision=paused_revision,
+        actor="finance_storage_window_runner",
+        reason=reason,
+    )
+    evidence["business_restore"] = restore
+    if (
+        str(restore.get("status") or "") != "restored"
+        or restore.get("exact_prior_state_restored") is not True
+    ):
+        raise RuntimeError(
+            "Finance maintenance exact writer/timer restore is incomplete"
+        )
+    evidence["warehouse_restore"] = (
+        _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="restore",
+        )
+    )
+    evidence["barrier_release"] = (
+        _run_remote_business_data_maintenance_runner(
+            target,
+            action="barrier-release",
+            actor="finance_storage_window_runner",
+            reason="exact pre-window control state restored",
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+    )
+    return evidence
+
+
+def _restart_finance_cutover_http_service(
+    target: HostedRuntimeTarget,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action="finance-storage-cutover-http-restart",
+    )
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError(
+            "Finance cutover requires the canonical registry HTTP service"
+        )
+    command = (
+        f"systemctl restart {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+        f" && systemctl is-active {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300.0,
+        check=False,
+    )
+    if result.returncode != 0 or result.stdout.strip().splitlines()[-1:] != [
+        "active"
+    ]:
+        raise RuntimeError(
+            "Finance cutover HTTP service restart/readback failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    return {
+        "service": ACTIVE_HOSTED_RUNTIME_SERVICE_NAME,
+        "status": "active",
+        "unrelated_services_restarted": [],
+    }
+
+
 def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
     action = str(args.finance_storage_split_action)
     plan_path = (
-        Path(str(args.plan_file)).resolve() if action == "apply" else None
+        Path(str(args.plan_file)).resolve()
+        if action
+        in {
+            "apply",
+            "snapshot-create",
+            "cutover-apply",
+            "rollback-prepare",
+            "rollback-apply",
+        }
+        else None
     )
     if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
         raise ValueError("Finance storage reviewed plan must stay outside the Git checkout")
-    payload = _run_remote_finance_storage_split_action(
-        target,
-        action=action,
-        plan_path=plan_path,
-        fingerprint=str(getattr(args, "fingerprint", "") or ""),
-        approval_reference=str(getattr(args, "approval_reference", "") or ""),
-        chunk_size=int(getattr(args, "chunk_size", 10_000) or 10_000),
+    fingerprint = str(getattr(args, "fingerprint", "") or "")
+    approval_reference = str(
+        getattr(args, "approval_reference", "") or ""
     )
+    source_snapshot_manifest = str(
+        getattr(args, "source_snapshot_manifest", "") or ""
+    )
+    candidate_manifest = str(
+        getattr(args, "candidate_manifest", "") or ""
+    )
+    candidate_plan_fingerprint = str(
+        getattr(args, "candidate_plan_fingerprint", "") or ""
+    )
+    minimum_observation_seconds = int(
+        getattr(args, "minimum_observation_seconds", 3600) or 0
+    )
+    rollback_candidate_evidence = str(
+        getattr(args, "rollback_candidate_evidence", "") or ""
+    )
+    transition_evidence: dict[str, Any] = {}
+    if action == "rollback-apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance storage rollback requires --plan-file"
+            )
+        reviewed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(reviewed_plan, dict)
+            or str(reviewed_plan.get("contract_version") or "")
+            != "wb_core_finance_storage_rollback_plan_v1"
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+            or not bool(
+                reviewed_plan.get("apply_allowed_after_candidate_readback")
+            )
+            or not rollback_candidate_evidence
+        ):
+            raise ValueError(
+                "Finance storage rollback reviewed plan/candidate is not ready"
+            )
+        window_id = (
+            "rollback-" + fingerprint.removeprefix("sha256:")[:20]
+        )
+        transition_evidence["barrier_acquire"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-acquire",
+                actor="finance_storage_rollback_runner",
+                reason="Finance split rollback drill",
+                window_id=window_id,
+                window_kind="rollback_drill",
+                plan_fingerprint=fingerprint,
+                approval_reference=approval_reference,
+            )
+        )
+        transition_evidence["core_prepare"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="prepare",
+                actor="finance_storage_rollback_runner",
+                reason="Finance split rollback drill",
+            )
+        )
+        transition_evidence["warehouse_hold"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="hold",
+                disable_timer=True,
+            )
+        )
+        hold = _run_remote_business_data_maintenance_runner(
+            target,
+            action="hold",
+            actor="finance_storage_rollback_runner",
+            reason="Finance split rollback drill",
+        )
+        transition_evidence["business_hold"] = hold
+        if (
+            str(hold.get("status") or "") != "held"
+            or hold.get("quiet") is not True
+        ):
+            raise RuntimeError(
+                "Finance rollback writer/timer hold readback is incomplete"
+            )
+        transition_evidence["barrier_confirm"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-confirm",
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+        try:
+            payload = _run_remote_finance_storage_split_action(
+                target,
+                action=action,
+                plan_path=plan_path,
+                fingerprint=fingerprint,
+                approval_reference=approval_reference,
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+                rollback_candidate_evidence=(
+                    rollback_candidate_evidence
+                ),
+            )
+            transition_evidence["http_restart"] = (
+                _restart_finance_cutover_http_service(target)
+            )
+        except Exception as exc:
+            health = _run_remote_finance_storage_split_action(
+                target,
+                action="health",
+                plan_path=None,
+                fingerprint="",
+                approval_reference="",
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+            )
+            transition_evidence["failure_health_readback"] = health
+            if str(health.get("canonical_source") or "") == "monolith":
+                raise RuntimeError(
+                    "Finance rollback failed after the rollback manifest "
+                    "became canonical; the HTTP barrier and writer holds "
+                    f"remain active for bounded recovery: {exc}"
+                ) from exc
+            transition_evidence.update(
+                _restore_finance_storage_window(
+                    target,
+                    hold=hold,
+                    window_id=window_id,
+                    fingerprint=fingerprint,
+                    reason="Finance rollback failed before manifest switch",
+                )
+            )
+            raise RuntimeError(
+                "Finance rollback failed before the manifest switch; exact "
+                f"controls were restored: {exc}"
+            ) from exc
+        transition_evidence.update(
+            _restore_finance_storage_window(
+                target,
+                hold=hold,
+                window_id=window_id,
+                fingerprint=fingerprint,
+                reason="Finance rollback and HTTP restart completed",
+            )
+        )
+    elif action == "cutover-apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance storage cutover requires --plan-file"
+            )
+        reviewed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(reviewed_plan, dict)
+            or str(reviewed_plan.get("contract_version") or "")
+            != "wb_core_finance_storage_cutover_plan_v1"
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+            or str(
+                reviewed_plan.get("candidate_plan_fingerprint") or ""
+            )
+            != candidate_plan_fingerprint
+            or not bool(
+                reviewed_plan.get("apply_allowed_by_machine_preflight")
+            )
+        ):
+            raise ValueError(
+                "Finance storage cutover reviewed plan is not ready"
+            )
+        window_id = (
+            "final-cutover-"
+            + fingerprint.removeprefix("sha256:")[:20]
+        )
+        transition_evidence["barrier_acquire"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-acquire",
+                actor="finance_storage_cutover_runner",
+                reason="atomic Finance split final cutover",
+                window_id=window_id,
+                window_kind="final_cutover",
+                plan_fingerprint=fingerprint,
+                approval_reference=approval_reference,
+            )
+        )
+        transition_evidence["core_prepare"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="prepare",
+                actor="finance_storage_cutover_runner",
+                reason="atomic Finance split final cutover",
+            )
+        )
+        transition_evidence["warehouse_hold"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="hold",
+                disable_timer=True,
+            )
+        )
+        hold = _run_remote_business_data_maintenance_runner(
+            target,
+            action="hold",
+            actor="finance_storage_cutover_runner",
+            reason="atomic Finance split final cutover",
+        )
+        transition_evidence["business_hold"] = hold
+        if (
+            str(hold.get("status") or "") != "held"
+            or hold.get("quiet") is not True
+        ):
+            raise RuntimeError(
+                "Finance cutover writer/timer hold readback is incomplete"
+            )
+        transition_evidence["barrier_confirm"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-confirm",
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+        try:
+            payload = _run_remote_finance_storage_split_action(
+                target,
+                action=action,
+                plan_path=plan_path,
+                fingerprint=fingerprint,
+                approval_reference=approval_reference,
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+                source_snapshot_manifest=source_snapshot_manifest,
+                candidate_manifest=candidate_manifest,
+                candidate_plan_fingerprint=candidate_plan_fingerprint,
+                minimum_observation_seconds=minimum_observation_seconds,
+            )
+            transition_evidence["http_restart"] = (
+                _restart_finance_cutover_http_service(target)
+            )
+        except Exception as exc:
+            health = _run_remote_finance_storage_split_action(
+                target,
+                action="health",
+                plan_path=None,
+                fingerprint="",
+                approval_reference="",
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+            )
+            transition_evidence["failure_health_readback"] = health
+            if str(health.get("canonical_source") or "") == "split":
+                raise RuntimeError(
+                    "Finance cutover failed after the split manifest became "
+                    "canonical; the HTTP barrier and writer holds remain active "
+                    f"for bounded recovery: {exc}"
+                ) from exc
+            transition_evidence.update(
+                _restore_finance_storage_window(
+                    target,
+                    hold=hold,
+                    window_id=window_id,
+                    fingerprint=fingerprint,
+                    reason="Finance cutover failed before manifest switch",
+                )
+            )
+            raise RuntimeError(
+                "Finance cutover failed before the manifest switch; exact "
+                f"controls were restored: {exc}"
+            ) from exc
+        transition_evidence.update(
+            _restore_finance_storage_window(
+                target,
+                hold=hold,
+                window_id=window_id,
+                fingerprint=fingerprint,
+                reason="Finance split cutover and HTTP restart completed",
+            )
+        )
+    elif action == "snapshot-create":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance storage coherent snapshot requires --plan-file"
+            )
+        reviewed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(reviewed_plan, dict)
+            or str(reviewed_plan.get("contract_version") or "")
+            != "wb_core_finance_storage_snapshot_plan_v1"
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+            or not bool(
+                reviewed_plan.get("snapshot_allowed_by_machine_preflight")
+            )
+        ):
+            raise ValueError(
+                "Finance storage coherent snapshot plan is not ready"
+            )
+        window_id = str(
+            (reviewed_plan.get("target_snapshot") or {}).get("window_id")
+            or ""
+        )
+        transition_evidence["barrier_acquire"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-acquire",
+                actor="finance_storage_snapshot_runner",
+                reason="coherent Finance migration source snapshot",
+                window_id=window_id,
+                window_kind="snapshot",
+                plan_fingerprint=fingerprint,
+                approval_reference=approval_reference,
+            )
+        )
+        transition_evidence["core_prepare"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="prepare",
+                actor="finance_storage_snapshot_runner",
+                reason="coherent Finance migration source snapshot",
+            )
+        )
+        transition_evidence["warehouse_hold"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="hold",
+                disable_timer=True,
+            )
+        )
+        hold = _run_remote_business_data_maintenance_runner(
+            target,
+            action="hold",
+            actor="finance_storage_snapshot_runner",
+            reason="coherent Finance migration source snapshot",
+        )
+        transition_evidence["business_hold"] = hold
+        if (
+            str(hold.get("status") or "") != "held"
+            or hold.get("quiet") is not True
+        ):
+            raise RuntimeError(
+                "Finance snapshot writer/timer hold readback is incomplete"
+            )
+        transition_evidence["barrier_confirm"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-confirm",
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+        snapshot_error: Exception | None = None
+        try:
+            payload = _run_remote_finance_storage_split_action(
+                target,
+                action=action,
+                plan_path=plan_path,
+                fingerprint=fingerprint,
+                approval_reference=approval_reference,
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+                source_snapshot_manifest=source_snapshot_manifest,
+                candidate_manifest=candidate_manifest,
+                candidate_plan_fingerprint=candidate_plan_fingerprint,
+                minimum_observation_seconds=minimum_observation_seconds,
+            )
+        except Exception as exc:
+            snapshot_error = exc
+            payload = {}
+        transition_evidence["barrier_restoring"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-restoring",
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+        paused_revision = int(
+            ((hold.get("auto_updates") or {}).get("revision") or 0)
+        )
+        if paused_revision <= 0:
+            raise RuntimeError(
+                "Finance snapshot hold lacks exact paused policy revision"
+            )
+        restore = _run_remote_business_data_maintenance_runner(
+            target,
+            action="restore",
+            expected_revision=paused_revision,
+            actor="finance_storage_snapshot_runner",
+            reason="coherent Finance snapshot completed",
+        )
+        transition_evidence["business_restore"] = restore
+        if (
+            str(restore.get("status") or "") != "restored"
+            or restore.get("exact_prior_state_restored") is not True
+        ):
+            raise RuntimeError(
+                "Finance snapshot exact writer/timer restore is incomplete"
+            )
+        transition_evidence["warehouse_restore"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="restore",
+            )
+        )
+        transition_evidence["barrier_release"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-release",
+                actor="finance_storage_snapshot_runner",
+                reason="exact pre-snapshot control state restored",
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+        if snapshot_error is not None:
+            raise RuntimeError(
+                "Finance coherent snapshot failed after exact controls were "
+                f"restored: {snapshot_error}"
+            ) from snapshot_error
+    else:
+        payload = _run_remote_finance_storage_split_action(
+            target,
+            action=action,
+            plan_path=plan_path,
+            fingerprint=fingerprint,
+            approval_reference=approval_reference,
+            chunk_size=int(
+                getattr(args, "chunk_size", 10_000) or 10_000
+            ),
+            source_snapshot_manifest=source_snapshot_manifest,
+            candidate_manifest=candidate_manifest,
+            candidate_plan_fingerprint=candidate_plan_fingerprint,
+            minimum_observation_seconds=minimum_observation_seconds,
+        )
     output = str(getattr(args, "output", "") or "").strip()
     if output:
         output_path = Path(output).resolve()
@@ -3199,6 +3736,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
             "action": f"finance-storage-split-{action}",
             "result": payload,
+            "maintenance_transition_evidence": transition_evidence,
         }
     )
     return 0
@@ -3212,15 +3750,52 @@ def _run_remote_finance_storage_split_action(
     fingerprint: str,
     approval_reference: str,
     chunk_size: int,
+    source_snapshot_manifest: str = "",
+    candidate_manifest: str = "",
+    candidate_plan_fingerprint: str = "",
+    minimum_observation_seconds: int = 3600,
+    rollback_candidate_evidence: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"finance-storage-split-{action}"
     )
-    if action not in {"dry-run", "health", "apply"}:
+    if action not in {
+        "dry-run",
+        "health",
+        "apply",
+        "snapshot-plan",
+        "snapshot-create",
+        "snapshot-integrity",
+        "shadow-status",
+        "shadow-activate",
+        "shadow-reconcile",
+        "shadow-verify",
+        "live-tail-apply",
+        "shadow-deactivate",
+        "cutover-plan",
+        "cutover-apply",
+        "rollback-plan",
+        "rollback-prepare",
+        "rollback-apply",
+    }:
         raise ValueError(f"unsupported Finance storage split action: {action}")
-    if action == "apply":
+    if action in {
+        "apply",
+        "snapshot-create",
+        "snapshot-integrity",
+        "shadow-activate",
+        "shadow-reconcile",
+        "shadow-verify",
+        "live-tail-apply",
+        "shadow-deactivate",
+        "cutover-apply",
+        "rollback-prepare",
+        "rollback-apply",
+    }:
         _ensure_target_allows_mutation(
-            target, action="finance-storage-split-apply", dry_run=False
+            target,
+            action=f"finance-storage-split-{action}",
+            dry_run=False,
         )
     runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
     if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
@@ -3240,6 +3815,41 @@ def _run_remote_finance_storage_split_action(
         "--chunk-size",
         str(chunk_size),
     ]
+    reviewed_plan_json: str | None = None
+    if source_snapshot_manifest:
+        runner_args.extend(
+            [
+                "--source-snapshot-manifest",
+                source_snapshot_manifest,
+            ]
+        )
+    if action.startswith("shadow-") or action in {
+        "live-tail-apply",
+        "cutover-plan",
+        "cutover-apply",
+    }:
+        if not candidate_manifest:
+            raise ValueError(
+                f"Finance storage {action} requires --candidate-manifest"
+            )
+        runner_args.extend(
+            [
+                "--candidate-manifest",
+                candidate_manifest,
+            ]
+        )
+    if action in {"cutover-plan", "cutover-apply"}:
+        if not candidate_plan_fingerprint.startswith("sha256:"):
+            raise ValueError(
+                f"Finance storage {action} requires "
+                "--candidate-plan-fingerprint"
+            )
+        runner_args.extend(
+            [
+                "--candidate-plan-fingerprint",
+                candidate_plan_fingerprint,
+            ]
+        )
     if action == "apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError("Finance storage split apply requires an existing --plan-file")
@@ -3263,6 +3873,156 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
+    elif action == "snapshot-create":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance storage snapshot-create requires an existing --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_snapshot_plan_v1"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or str(plan.get("mode") or "") != "snapshot_dry_run"
+            or not bool(plan.get("snapshot_allowed_by_machine_preflight"))
+        ):
+            raise ValueError(
+                "Finance storage coherent snapshot reviewed plan is invalid"
+            )
+        if not approval_reference.strip():
+            raise ValueError(
+                "Finance storage snapshot-create requires --approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--snapshot-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+    elif action == "snapshot-integrity":
+        if not source_snapshot_manifest:
+            raise ValueError(
+                "Finance storage snapshot-integrity requires "
+                "--source-snapshot-manifest"
+            )
+    elif action in {
+        "shadow-status",
+        "shadow-activate",
+        "shadow-reconcile",
+        "shadow-verify",
+        "live-tail-apply",
+        "shadow-deactivate",
+    }:
+        if not fingerprint.startswith("sha256:"):
+            raise ValueError(
+                f"Finance storage {action} requires exact candidate fingerprint"
+            )
+        runner_args.extend(
+            [
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference or "status-only",
+            ]
+        )
+        if action == "shadow-deactivate":
+            runner_args.extend(
+                ["--reason", "repo-owned shadow lifecycle transition"]
+            )
+        elif action == "shadow-verify":
+            if minimum_observation_seconds < 0:
+                raise ValueError(
+                    "minimum observation seconds cannot be negative"
+                )
+            runner_args.extend(
+                [
+                    "--minimum-observation-seconds",
+                    str(minimum_observation_seconds),
+                ]
+            )
+    elif action == "cutover-apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance storage cutover-apply requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_cutover_plan_v1"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or str(plan.get("candidate_plan_fingerprint") or "")
+            != candidate_plan_fingerprint
+            or not bool(plan.get("apply_allowed_by_machine_preflight"))
+        ):
+            raise ValueError(
+                "Finance storage cutover reviewed plan is invalid"
+            )
+        if not approval_reference.strip():
+            raise ValueError(
+                "Finance storage cutover requires --approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--cutover-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+    elif action in {"rollback-prepare", "rollback-apply"}:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                f"Finance storage {action} requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_rollback_plan_v1"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not bool(
+                plan.get("prepare_allowed_by_machine_preflight")
+            )
+        ):
+            raise ValueError(
+                "Finance storage rollback reviewed plan is invalid"
+            )
+        if not approval_reference.strip():
+            raise ValueError(
+                "Finance storage rollback requires --approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--rollback-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
+        if action == "rollback-apply":
+            if not rollback_candidate_evidence:
+                raise ValueError(
+                    "Finance rollback apply requires candidate evidence"
+                )
+            runner_args.extend(
+                [
+                    "--rollback-candidate-evidence",
+                    rollback_candidate_evidence,
+                ]
+            )
     shell_command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -3273,10 +4033,20 @@ def _run_remote_finance_storage_split_action(
         _remote_shell_command(target, shell_command),
         text=True,
         capture_output=True,
+        input=reviewed_plan_json,
         cwd=ROOT,
         timeout=(
             FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS
-            if action == "apply"
+            if action in {
+                "apply",
+                "snapshot-create",
+                "shadow-reconcile",
+                "shadow-verify",
+                "live-tail-apply",
+                "cutover-apply",
+                "rollback-prepare",
+                "rollback-apply",
+            }
             else FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS
         ),
         check=False,
@@ -3297,14 +4067,27 @@ def _run_remote_finance_storage_split_action(
         raise RuntimeError("Finance storage split runner returned invalid JSON") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("Finance storage split runner returned non-object JSON")
-    if action in {"dry-run", "health"}:
+    if action in {"dry-run", "health", "snapshot-plan"}:
         if action == "dry-run" and (
             payload.get("query_only_contract", {}).get("production_mutation_count") != 0
             or payload.get("query_only_contract", {}).get("destination_bytes_created") != 0
         ):
             raise RuntimeError("Finance storage dry-run did not prove zero mutation/bytes")
-    elif bool(payload.get("global_manifest_switched")):
+    elif action == "apply" and bool(payload.get("global_manifest_switched")):
         raise RuntimeError("candidate builder unexpectedly switched the global manifest")
+    elif action == "cutover-apply" and not bool(
+        payload.get("global_manifest_switched")
+    ):
+        raise RuntimeError(
+            "Finance cutover did not switch the global split manifest"
+        )
+    elif action == "rollback-apply" and (
+        not bool(payload.get("global_manifest_switched"))
+        or str(payload.get("canonical_source") or "") != "monolith"
+    ):
+        raise RuntimeError(
+            "Finance rollback did not switch the canonical monolith manifest"
+        )
     return payload
 
 
@@ -4402,13 +5185,37 @@ def _run_remote_business_data_maintenance_runner(
     desired: str = "",
     actor: str = "repo_owned_cli",
     reason: str = "",
+    window_id: str = "",
+    window_kind: str = "snapshot",
+    plan_fingerprint: str = "",
+    approval_reference: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
     )
-    if action not in {"status", "prepare", "hold", "restore", "set-process"}:
+    if action not in {
+        "status",
+        "prepare",
+        "hold",
+        "restore",
+        "set-process",
+        "barrier-status",
+        "barrier-acquire",
+        "barrier-confirm",
+        "barrier-restoring",
+        "barrier-release",
+    }:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
-    if action in {"prepare", "hold", "restore", "set-process"}:
+    if action in {
+        "prepare",
+        "hold",
+        "restore",
+        "set-process",
+        "barrier-acquire",
+        "barrier-confirm",
+        "barrier-restoring",
+        "barrier-release",
+    }:
         _ensure_target_allows_mutation(
             target,
             action=f"business-data-maintenance-{action}",
@@ -4431,6 +5238,15 @@ def _run_remote_business_data_maintenance_runner(
     if action == "hold":
         runner_args.extend(
             ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
+        )
+    if action in {"prepare", "hold", "restore"}:
+        runner_args.extend(
+            [
+                "--actor",
+                str(actor or "repo_owned_cli"),
+                "--reason",
+                str(reason or "canonical cross-writer maintenance"),
+            ]
         )
     if action == "restore":
         if expected_revision is None:
@@ -4458,6 +5274,52 @@ def _run_remote_business_data_maintenance_runner(
                 str(reason or "owner-controlled recovery"),
             ]
         )
+    elif action in {
+        "barrier-acquire",
+        "barrier-confirm",
+        "barrier-restoring",
+        "barrier-release",
+    }:
+        if not window_id or not plan_fingerprint:
+            raise ValueError(
+                f"business-data maintenance {action} requires exact window "
+                "identity and plan fingerprint"
+            )
+        runner_args.extend(
+            [
+                "--window-id",
+                window_id,
+                "--plan-fingerprint",
+                plan_fingerprint,
+            ]
+        )
+        if action == "barrier-acquire":
+            if not approval_reference:
+                raise ValueError(
+                    "business-data maintenance barrier-acquire requires "
+                    "--approval-reference"
+                )
+            runner_args.extend(
+                [
+                    "--window-kind",
+                    window_kind,
+                    "--approval-reference",
+                    approval_reference,
+                    "--actor",
+                    str(actor or "repo_owned_cli"),
+                    "--reason",
+                    str(reason or "bounded maintenance window"),
+                ]
+            )
+        elif action == "barrier-release":
+            runner_args.extend(
+                [
+                    "--actor",
+                    str(actor or "repo_owned_cli"),
+                    "--reason",
+                    str(reason or "exact maintenance restore confirmed"),
+                ]
+            )
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -4493,14 +5355,22 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
     evidence: dict[str, Any] = {}
     if action == "hold":
         evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
-            target, action="prepare"
+            target,
+            action="prepare",
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or "canonical cross-writer maintenance"),
         )
         evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
             target,
             action="hold",
             disable_timer=True,
         )
-        result = _run_remote_business_data_maintenance_runner(target, action="hold")
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action="hold",
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or "canonical cross-writer maintenance"),
+        )
         if (
             result.get("quiet") is not True
             or str(result.get("status") or "") != "held"
@@ -4519,8 +5389,13 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             target,
             action="restore",
             expected_revision=int(args.expected_revision),
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or "bounded recovery completed"),
         )
-        if str(result.get("status") or "") != "restored":
+        if (
+            str(result.get("status") or "") != "restored"
+            or result.get("exact_prior_state_restored") is not True
+        ):
             raise RuntimeError("business-data maintenance restore readback is incomplete")
         evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
             target,
@@ -4565,6 +5440,31 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
         ):
             raise RuntimeError(
                 "business-data maintenance set-process readback is incomplete"
+            )
+    elif action.startswith("barrier-"):
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action=action,
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or ""),
+            window_id=str(args.window_id or ""),
+            window_kind=str(args.window_kind or "snapshot"),
+            plan_fingerprint=str(args.plan_fingerprint or ""),
+            approval_reference=str(args.approval_reference or ""),
+        )
+        if action == "barrier-status":
+            if "active" not in result:
+                raise RuntimeError(
+                    "business-data maintenance barrier status readback is incomplete"
+                )
+        elif action == "barrier-release":
+            if result.get("active") is not False:
+                raise RuntimeError(
+                    "business-data maintenance barrier release readback is incomplete"
+                )
+        elif result.get("active") is not True:
+            raise RuntimeError(
+                "business-data maintenance active barrier readback is incomplete"
             )
     else:
         result = _run_remote_business_data_maintenance_runner(target, action="status")
@@ -5295,6 +6195,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     finance_storage_split_dry_run.add_argument("--output", required=True)
     finance_storage_split_dry_run.add_argument("--chunk-size", type=int, default=10_000)
+    finance_storage_split_dry_run.add_argument(
+        "--source-snapshot-manifest",
+        required=True,
+        help=(
+            "Exact remote integrity-verified coherent snapshot manifest; "
+            "live monolith scans are not allowed in this hosted phase."
+        ),
+    )
     finance_storage_split_dry_run.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="dry-run",
@@ -5322,9 +6230,266 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_split_apply.add_argument("--fingerprint", required=True)
     finance_storage_split_apply.add_argument("--approval-reference", required=True)
     finance_storage_split_apply.add_argument("--chunk-size", type=int, default=10_000)
+    finance_storage_split_apply.add_argument(
+        "--source-snapshot-manifest",
+        required=True,
+    )
     finance_storage_split_apply.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="apply",
+    )
+
+    finance_storage_snapshot_plan = subparsers.add_parser(
+        "finance-storage-snapshot-plan",
+        help=(
+            "Build a bounded metadata/capacity/open-writer plan for one "
+            "short coherent-copy window; do not scan the live database."
+        ),
+    )
+    finance_storage_snapshot_plan.add_argument("--output", required=True)
+    finance_storage_snapshot_plan.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_snapshot_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-plan",
+    )
+
+    finance_storage_snapshot_apply = subparsers.add_parser(
+        "finance-storage-snapshot-apply",
+        help=(
+            "Automatically acquire the manual write barrier, drain exact "
+            "writers/timers, capture one coherent copy, restore exact prior "
+            "controls and release the barrier."
+        ),
+    )
+    finance_storage_snapshot_apply.add_argument("--plan-file", required=True)
+    finance_storage_snapshot_apply.add_argument("--fingerprint", required=True)
+    finance_storage_snapshot_apply.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_snapshot_apply.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_snapshot_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-create",
+    )
+
+    finance_storage_snapshot_integrity = subparsers.add_parser(
+        "finance-storage-snapshot-integrity",
+        help=(
+            "Run full SQLite integrity and foreign-key checks on the coherent "
+            "copy outside the maintenance window."
+        ),
+    )
+    finance_storage_snapshot_integrity.add_argument(
+        "--source-snapshot-manifest",
+        required=True,
+    )
+    finance_storage_snapshot_integrity.add_argument("--output", required=True)
+    finance_storage_snapshot_integrity.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_snapshot_integrity.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-integrity",
+    )
+
+    for command_name, action_name, help_text in (
+        (
+            "finance-storage-shadow-status",
+            "shadow-status",
+            "Read exact Finance shadow-ingest state.",
+        ),
+        (
+            "finance-storage-shadow-activate",
+            "shadow-activate",
+            "Activate additive Finance raw outbox capture for one approved candidate.",
+        ),
+        (
+            "finance-storage-shadow-reconcile",
+            "shadow-reconcile",
+            "Idempotently reconcile current legacy Finance raw rows into the candidate.",
+        ),
+        (
+            "finance-storage-shadow-verify",
+            "shadow-verify",
+            "Persist all-week shadow equality, lag and performance evidence.",
+        ),
+        (
+            "finance-storage-live-tail-apply",
+            "live-tail-apply",
+            "Apply bounded ordered Finance raw outbox events to the candidate.",
+        ),
+        (
+            "finance-storage-shadow-deactivate",
+            "shadow-deactivate",
+            "Deactivate one exact Finance shadow-ingest generation.",
+        ),
+    ):
+        command = subparsers.add_parser(command_name, help=help_text)
+        command.add_argument("--candidate-manifest", required=True)
+        command.add_argument("--fingerprint", required=True)
+        command.add_argument("--approval-reference", required=True)
+        command.add_argument("--output", default="")
+        command.add_argument("--chunk-size", type=int, default=10_000)
+        if action_name == "shadow-verify":
+            command.add_argument(
+                "--minimum-observation-seconds",
+                type=int,
+                default=3600,
+            )
+        command.set_defaults(
+            handler=run_finance_storage_split_command,
+            finance_storage_split_action=action_name,
+        )
+
+    finance_storage_cutover_plan = subparsers.add_parser(
+        "finance-storage-cutover-plan",
+        help=(
+            "Build an exact final-hold Finance cutover plan without changing "
+            "the global manifest."
+        ),
+    )
+    finance_storage_cutover_plan.add_argument(
+        "--candidate-manifest",
+        required=True,
+    )
+    finance_storage_cutover_plan.add_argument(
+        "--candidate-plan-fingerprint",
+        required=True,
+    )
+    finance_storage_cutover_plan.add_argument("--output", required=True)
+    finance_storage_cutover_plan.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_cutover_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="cutover-plan",
+    )
+
+    finance_storage_cutover_apply = subparsers.add_parser(
+        "finance-storage-cutover-apply",
+        help=(
+            "Run the exact short final hold, fresh operational recopy, "
+            "atomic split-manifest switch and exact control restore."
+        ),
+    )
+    finance_storage_cutover_apply.add_argument("--plan-file", required=True)
+    finance_storage_cutover_apply.add_argument("--fingerprint", required=True)
+    finance_storage_cutover_apply.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_cutover_apply.add_argument(
+        "--candidate-manifest",
+        required=True,
+    )
+    finance_storage_cutover_apply.add_argument(
+        "--candidate-plan-fingerprint",
+        required=True,
+    )
+    finance_storage_cutover_apply.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_cutover_apply.add_argument("--output", required=True)
+    finance_storage_cutover_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="cutover-apply",
+    )
+
+    finance_storage_rollback_plan = subparsers.add_parser(
+        "finance-storage-rollback-plan",
+        help=(
+            "Build a query-only exact plan for a retained, reconciled "
+            "rollback monolith."
+        ),
+    )
+    finance_storage_rollback_plan.add_argument("--output", required=True)
+    finance_storage_rollback_plan.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_rollback_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="rollback-plan",
+    )
+
+    finance_storage_rollback_prepare = subparsers.add_parser(
+        "finance-storage-rollback-prepare",
+        help=(
+            "Build and fully verify the rollback monolith candidate while "
+            "normal split operation remains available."
+        ),
+    )
+    finance_storage_rollback_prepare.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_rollback_prepare.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_rollback_prepare.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_rollback_prepare.add_argument("--output", required=True)
+    finance_storage_rollback_prepare.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_rollback_prepare.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="rollback-prepare",
+    )
+
+    finance_storage_rollback_apply = subparsers.add_parser(
+        "finance-storage-rollback-apply",
+        help=(
+            "Run the short rollback hold, replay post-prepare raw changes, "
+            "recopy operational state and atomically select the monolith."
+        ),
+    )
+    finance_storage_rollback_apply.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_rollback_apply.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_rollback_apply.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_rollback_apply.add_argument(
+        "--rollback-candidate-evidence",
+        required=True,
+    )
+    finance_storage_rollback_apply.add_argument("--output", required=True)
+    finance_storage_rollback_apply.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_rollback_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="rollback-apply",
     )
 
     partner_finance_diagnostic = subparsers.add_parser(
@@ -5859,7 +7024,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     business_data_maintenance.add_argument(
         "action",
-        choices=("status", "hold", "restore", "set-process"),
+        choices=(
+            "status",
+            "hold",
+            "restore",
+            "set-process",
+            "barrier-status",
+            "barrier-acquire",
+            "barrier-confirm",
+            "barrier-restoring",
+            "barrier-release",
+        ),
     )
     business_data_maintenance.add_argument(
         "--expected-revision",
@@ -5885,7 +7060,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     business_data_maintenance.add_argument(
         "--reason",
         default="",
-        help="Audited reason for set-process.",
+        help="Audited reason for maintenance or barrier transitions.",
+    )
+    business_data_maintenance.add_argument(
+        "--window-id",
+        default="",
+        help="Exact bounded maintenance window identity.",
+    )
+    business_data_maintenance.add_argument(
+        "--window-kind",
+        choices=("snapshot", "final_cutover", "rollback_drill"),
+        default="snapshot",
+        help="Bounded maintenance window kind.",
+    )
+    business_data_maintenance.add_argument(
+        "--plan-fingerprint",
+        default="",
+        help="Exact sha256 fingerprint approved for this window.",
+    )
+    business_data_maintenance.add_argument(
+        "--approval-reference",
+        default="",
+        help="Exact human approval reference for barrier acquisition.",
     )
     business_data_maintenance.set_defaults(
         handler=run_business_data_maintenance_command,

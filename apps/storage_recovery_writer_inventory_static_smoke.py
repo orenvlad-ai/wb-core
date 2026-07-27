@@ -53,6 +53,21 @@ WRITERS = [
         "lifecycle": "caller-owned",
     },
     {
+        "owner": "finance_storage_split_coherent_source",
+        "source": "packages/application/finance_storage_migration.py",
+        "cadence": "human_authorized_one_shot",
+        "artifact": "immutable coherent migration-source SQLite copy",
+        "full_monolith": True,
+        "guard": (
+            "exact snapshot plan + HTTP barrier + writer hold + "
+            "offline full integrity"
+        ),
+        "lifecycle": (
+            "retained through cutover observation; separate exact "
+            "retirement gate"
+        ),
+    },
+    {
         "owner": "finance_legacy_helper",
         "source": "apps/wb_finance_weekly.py",
         "cadence": "unreferenced_legacy_helper",

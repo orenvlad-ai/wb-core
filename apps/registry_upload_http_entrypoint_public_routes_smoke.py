@@ -36,6 +36,7 @@ def main() -> None:
         "/v1/registry-upload/bundle",
         "/v1/cost-price/upload",
         "/v1/sheet-vitrina-v1/status",
+        "/v1/sheet-vitrina-v1/maintenance/write-barrier",
         "/v1/sheet-vitrina-v1/job",
         "/v1/sheet-vitrina-v1/web-vitrina",
         "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
@@ -127,6 +128,8 @@ def main() -> None:
     )
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/maintenance/write-barrier {") != 1:
+        raise AssertionError("rendered nginx block must include the maintenance barrier status exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/export.xlsx {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks export exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/ai-prompt {") != 1:

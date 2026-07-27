@@ -1,9 +1,11 @@
 # Migration 124 — Finance raw and warehouse/cost storage split design
 
-Status: **implemented through the inert pre-cutover capability and exact
-query-only dry-run boundary**. The canonical source remains the monolith.
-Candidate creation, live-tail apply, manifest cutover and old-generation
-retirement remain separately human-gated production mutations.
+Status: **repository implementation complete through the inert maintenance
+barrier, coherent-copy integrity gate, candidate/shadow/soak, atomic cutover and
+reconciled rollback-drill capabilities**. The canonical production source
+remains the monolith until the staged runner is deployed and a fresh exact
+fingerprint receives separate human approval. Old-generation retirement is not
+implemented by this runner and remains a later independent gate.
 
 ## Measured production boundary
 
@@ -67,33 +69,61 @@ The implementation is deliberately inert on deploy:
   mixed files or schema identities fail closed.
 - `packages/application/finance_raw_storage.py` owns the raw batch/row/outbox
   schema and the operational inbox/receipt/cursor/dead-letter/shadow schema.
-  Raw rows and one replay event commit in one SQLite transaction. The
+  Immutable rows are linked to every containing source snapshot through
+  `finance_raw_batch_rows`, so an unchanged row can participate in a later
+  batch without duplication or a false count/digest. The
+  `finance_raw_current_rows` view selects the latest exact weekly snapshot and
+  preserves append-only history. Raw rows, batch links and one replay event
+  commit in one SQLite transaction. The
   operational consumer is at-least-once, receipt-idempotent and keeps poison
-  events actionable. Its live-tail bridge mirrors committed batches and outbox
+  events actionable. After cutover the weekly owner acknowledges an event only
+  after the exact seller/week row count, source hash, reports, aggregate,
+  per-SKU, coverage and reconciliation projections all read back; a raw-first
+  crash remains pending/actionable until the idempotent weekly replay completes
+  those projections. Its live-tail bridge mirrors committed batches and outbox
   sequence into an unselected candidate with its own cursor; crash-before-event
   rolls back, crash-after-commit retries as a no-op.
 - `packages/application/finance_storage_migration.py` builds a coherent
-  query-only source plan with the complete table owner/read/write matrix,
+  short-hold SQLite backup and then performs the full `integrity_check` and
+  foreign-key check on that immutable copy outside the live database. Planning
+  and candidate creation use only the integrity-verified copy. The planner
+  emits the complete table owner/read/write matrix,
   direct-open inventory, ordered logical digests, watermarks, chunks, actual
-  query plans, allocation/capacity evidence, writers/timers, target generations,
+  query plans, allocation/capacity evidence, writers/timers and exact writable
+  opener ownership, target generations,
   non-target invariants and rollback scope. The fingerprint excludes only
   volatile free-byte/PID/timer-clock counters that are rechecked immediately
   before apply.
-- `apps/finance_storage_split.py` defaults to `dry-run`. Its separately gated
-  `apply` can build only an unselected candidate generation: it requires an
-  exact reviewed fingerprint, approval reference, active private
-  `business-data-maintenance` hold, the warehouse writer lock and sufficient
-  freshly rechecked capacity. It never writes the global generation manifest.
+- `packages/application/business_data_write_barrier.py` and the hosted HTTP
+  adapter implement a durable fail-closed manual-write barrier. During exact
+  snapshot/final-cutover/rollback windows authenticated `POST`, `PATCH` and
+  `DELETE` business requests return `423`; UI controls are disabled with a
+  visible banner, blocked attempts are audited without request bodies, and
+  reads remain available. Invalid/private-state drift also fails closed.
+- `business-data-maintenance` captures the exact prior owner policy, all known
+  timers/writers/settings and warehouse timer state. Unknown writers/timers
+  block a hold. Release is impossible until exact restore and readback have
+  succeeded.
+- `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
+  cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/
+  verify, cutover plan/apply and rollback plan/prepare/apply. Candidate build,
+  shadow and soak occur without a broad maintenance hold. Cutover performs a
+  fresh operational recopy and final raw tail under the short exact hold,
+  fsyncs and atomically replaces the manifest. Rollback is prepared during
+  normal operation, then replays only post-prepare raw scopes and recopies
+  operational state under its short hold. Original monolith and split files
+  remain retained.
 - `apps/finance_storage_sqlite_open_inventory.py --check-migrated` inventories
   every Python SQLite open and rejects registry bypasses in migrated Finance
   and Partner runtime modules.
-- hosted `finance-storage-split-dry-run` and
-  `finance-storage-split-health` are query-only. Hosted
-  `finance-storage-split-apply` exists for a later exact human gate; deployment
-  does not call it.
+- hosted snapshot/split/shadow/cutover/rollback lifecycle commands are
+  phase-local wrappers around the same repo-owned runner. Plan, health and
+  status actions are read-only; every mutation action checks the active target,
+  reviewed external evidence and exact approval. Deployment invokes none of
+  them.
 
-`WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED` defaults off. If a later
-reviewed stage enables it while the implicit monolith is still selected,
+The private `.finance-storage-shadow-ingest.json` state defaults absent/off.
+If a later reviewed stage enables it while the implicit monolith is selected,
 legacy Finance writes and the new raw/outbox rows share the same transaction.
 It fails closed if the logical files differ. This is shadow infrastructure,
 not a canonical-writer switch.
@@ -126,7 +156,8 @@ Finance tables using:
 
 - unique `(consumer_id, event_id)` receipts;
 - compare-and-set source revision/watermark;
-- deterministic rebuild from raw for a bounded report period;
+- deterministic bounded weekly replay plus complete projection readback before
+  acknowledgement;
 - a dead-letter/actionable retry state, never silent skip;
 - read-after-write row count and digest.
 
@@ -226,8 +257,11 @@ production execution is **not approved** by repository/deploy closure.
 There is no distributed transaction: raw commit is authoritative, and every
 operational effect is replayable from the durable outbox.
 
-Repository status: bounded shadow comparison code exists; production candidate
-bytes, live-tail apply and soak have not started.
+Repository status: implemented and disabled by default. All-week comparison
+persists exact candidate/generation evidence, requires zero mismatch/lag/
+duplicates and enforces a bounded observation duration before cutover can
+become machine-ready. Production candidate bytes, live-tail and soak have not
+started.
 
 ### Stage 5 — cutover
 
@@ -241,19 +275,31 @@ bytes, live-tail apply and soak have not started.
 
 The old monolith remains immutable rollback evidence.
 
-Repository status: not authorized. No command in the current pre-cutover
-closure switches the global manifest.
+Repository status: implemented behind exact plan/fingerprint/approval and
+held-barrier readback, but not authorized or run in production. The hosted
+runner restarts only `wb-core-registry-http.service`; an ambiguous failure
+after manifest switch leaves the write barrier and writer holds active for
+bounded recovery.
 
 ### Stage 6 — rollback and observation
 
 During the observation window:
 
 - every new raw event remains replayable into the old generation;
-- a rollback first drains/replays the post-cutover tail into the old monolith,
-  verifies derived and warehouse/cost watermarks, and only then atomically
-  switches the generation manifest back;
+- a rollback first prepares a new monolith generation, drains/replays the
+  post-prepare tail into it, verifies derived and warehouse/cost watermarks,
+  and only then atomically switches the generation manifest; the original
+  pre-cutover monolith stays immutable evidence;
 - no manual cross-store SQL is allowed;
 - health/UI shows generation ids, cursors, lag, failures and rollback readiness.
+
+Repository status: rollback plan/prepare/apply is implemented but inert.
+Preparation builds and fully checks a new rollback monolith without modifying
+the retained original. Under the rollback hold, post-prepare raw scopes are
+replayed, all operational tables are freshly recopied and logically verified,
+then one monolith manifest is selected atomically. A post-switch ambiguity
+keeps the barrier fail closed. Both the original monolith and split generation
+remain retained.
 
 ### Stage 7 — old-generation retirement
 
@@ -277,26 +323,55 @@ boundary.
   projections and expose their raw outbox watermark.
 - Warehouse/cost planning reads only operational sources. It must report
   `finance_raw_rows_read=0`.
-- Diagnostics requiring both stores open each `mode=ro`, set
-  `query_only=ON`, pin the generation manifest and join in bounded application
-  memory by stable identity.
+- Finance projection code may attach the registry-selected raw generation
+  `mode=ro` as a connection-local schema and expose only a temporary
+  `finance_raw_current_rows` compatibility view while writing derived rows to
+  operational storage. The attach is identity-checked and observed by the
+  registry; no persistent cross-store view, trigger or foreign key is allowed.
+- Diagnostics requiring both stores pin one generation manifest, open both
+  files `mode=ro`, set `query_only=ON` and use only bounded connection-local
+  qualified reads or application-memory joins by stable identity.
 - Production acceptance compares representative current query latency and lock
   wait. Warehouse timer lock time must improve or stay within an approved
   bound; Finance raw queries must not regress materially.
 
 ## Gates and reconciliation
 
+Canonical hosted sequence is phase-local:
+
+1. deploy inert code;
+2. `finance-storage-snapshot-plan`, then the automatically held
+   `finance-storage-snapshot-apply`, then
+   `finance-storage-snapshot-integrity`;
+3. `finance-storage-split-dry-run` against that exact verified snapshot and
+   stop for approval of its exact fingerprint/generation/capacity;
+4. only after approval, `finance-storage-split-apply`, shadow activate,
+   legacy reconcile, bounded live-tail applies and repeated shadow verify until
+   the minimum soak becomes `ready`;
+5. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
+   restart;
+6. production readback/UI observation, rollback plan/prepare and rollback
+   apply drill if the approved program calls for it;
+7. never retire any retained generation in this lifecycle.
+
+Every evidence/plan file is private and outside Git. A new plan fingerprint is
+not normalized into an old approval. The initial program authorization permits
+the short coherent snapshot window, but candidate/backfill/cutover still waits
+for the explicitly requested fresh fingerprint approval.
+
 Required gates are:
 
 1. repository checks and schema/ownership review;
 2. deploy of inert dual-store capability;
-3. fresh query-only production dry-run and capacity reservation;
-4. explicit human approval of exact plan/generation/fingerprint;
-5. bounded backfill and shadow-read evidence;
-6. exact cutover maintenance gate;
-7. post-cutover counts/digests, outbox drain, service/public/UI verification;
-8. observation window and rollback drill;
-9. separate old-generation retirement gate.
+3. fresh query-only production baseline, short write-barrier snapshot and
+   full coherent-copy integrity check outside the live DB;
+4. exact coherent-snapshot dry-run and capacity reservation;
+5. explicit human approval of exact plan/generation/fingerprint;
+6. bounded backfill and shadow-read/soak evidence;
+7. exact cutover maintenance gate;
+8. post-cutover counts/digests, outbox drain, service/public/UI verification;
+9. observation window and rollback drill;
+10. separate old-generation retirement gate.
 
 Closure requires:
 
@@ -322,9 +397,13 @@ Closure requires:
 - Query-plan/index parity and bounded lock/performance tests.
 - Capacity shortfall before any destination bytes, reservation races and
   restart.
+- Durable HTTP/UI barrier restart, invalid-state fail-closed behavior, blocked
+  request audit and exact release only after control restore.
+- Coherent snapshot capture under a short hold and full offline integrity gate;
+  live monolith never receives a long full-database scan.
 - Cutover atomic manifest switch, process restart and tail catch-up.
 - Rollback with post-cutover writes and exact forward replay into the old
-  generation.
+  logical monolith generation while retaining the original file.
 - Non-target runtime contours remain byte/logically unchanged.
 - Full production readback and public/operator UI verification.
 

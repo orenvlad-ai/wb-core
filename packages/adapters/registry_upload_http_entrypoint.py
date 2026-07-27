@@ -28,6 +28,10 @@ from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint,
     SupplierAccountingPackageBlockedError,
 )
+from packages.application.business_data_write_barrier import (
+    audit_blocked_request,
+    barrier_status,
+)
 from packages.application.operator_instructions import (
     INSTRUCTION_NEW_BADGE_LABEL,
     InstructionBlock,
@@ -97,6 +101,9 @@ DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
 DEFAULT_SHEET_WB_FINANCE_REPORT_PATH = "/v1/sheet-vitrina-v1/wb-finance-report"
+DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH = (
+    "/v1/sheet-vitrina-v1/maintenance/write-barrier"
+)
 DEFAULT_PARTNER_REPORT_PREFIX = "/v1/sheet-vitrina-v1/partner-report"
 DEFAULT_PARTNER_REPORT_OPTIONS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/options"
 DEFAULT_PARTNER_REPORT_SETTINGS_PATH = f"{DEFAULT_PARTNER_REPORT_PREFIX}/settings"
@@ -513,6 +520,8 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if not _ensure_business_data_write_allowed(self, parsed.path):
                 return
             if parsed.path in AUTOANSWERS_MUTATION_PATHS and not _ensure_autoanswers_csrf(self, parsed.path):
                 return
@@ -2562,6 +2571,13 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path == DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH:
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    _public_business_data_write_barrier_status(self),
+                )
                 return
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
@@ -4854,6 +4870,8 @@ def _build_handler(
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
                 return
+            if not _ensure_business_data_write_allowed(self, parsed.path):
+                return
             if _is_settings_user_item_path(parsed.path):
                 _handle_settings_user_patch(self, entrypoint, _resolve_settings_user_id(parsed.path))
                 return
@@ -5071,6 +5089,8 @@ def _build_handler(
         def do_DELETE(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
+                return
+            if not _ensure_business_data_write_allowed(self, parsed.path):
                 return
             if _is_settings_user_item_path(parsed.path):
                 _handle_settings_user_delete(self, entrypoint, _resolve_settings_user_id(parsed.path))
@@ -6286,6 +6306,9 @@ def _write_json_response(
     if status == HTTPStatus.SERVICE_UNAVAILABLE and isinstance(payload, Mapping):
         if str(payload.get("code") or "") == "sqlite_write_busy":
             handler.send_header("Retry-After", "2")
+    if status == HTTPStatus.LOCKED and isinstance(payload, Mapping):
+        if str(payload.get("code") or "") == "business_data_maintenance":
+            handler.send_header("Retry-After", "5")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     _write_response_body(handler, body)
@@ -6322,12 +6345,186 @@ def _write_html_response(
     status: HTTPStatus,
     body_text: str,
 ) -> None:
+    if status == HTTPStatus.OK:
+        parsed_path = urllib_parse.urlparse(
+            str(getattr(handler, "path", "") or "")
+        ).path
+        if parsed_path != DEFAULT_WEB_AUTH_LOGIN_PATH:
+            body_text = _inject_business_data_write_barrier_ui(body_text)
     body = body_text.encode("utf-8")
     handler.send_response(status.value)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     _write_response_body(handler, body)
+
+
+def _barrier_runtime_dir(handler: BaseHTTPRequestHandler) -> Path:
+    entrypoint = getattr(handler, "runtime_entrypoint", None)
+    runtime = getattr(entrypoint, "runtime", None)
+    runtime_dir = getattr(runtime, "runtime_dir", None)
+    if runtime_dir is None:
+        raise RuntimeError("registry runtime directory is unavailable")
+    return Path(runtime_dir).resolve()
+
+
+def _public_business_data_write_barrier_status(
+    handler: BaseHTTPRequestHandler,
+) -> dict[str, Any]:
+    try:
+        status = barrier_status(_barrier_runtime_dir(handler))
+    except Exception as exc:
+        status = {
+            "schema_version": "business_data_write_barrier_v1",
+            "status": "invalid_fail_closed",
+            "active": True,
+            "phase": "invalid",
+            "window_id": "",
+            "window_kind": "unknown",
+            "hold_confirmed": False,
+            "message": (
+                "Техническое обслуживание: изменения временно заблокированы, "
+                "пока состояние защитного барьера не подтверждено."
+            ),
+            "error": str(exc),
+        }
+    return {
+        "contract_name": "wb_core_business_data_write_barrier_v1",
+        "status": str(status.get("status") or "invalid_fail_closed"),
+        "active": bool(status.get("active")),
+        "phase": str(status.get("phase") or "invalid"),
+        "window_id": str(status.get("window_id") or ""),
+        "window_kind": str(status.get("window_kind") or ""),
+        "hold_confirmed": bool(status.get("hold_confirmed")),
+        "started_at": str(status.get("started_at") or ""),
+        "message": str(status.get("message") or ""),
+    }
+
+
+def _ensure_business_data_write_allowed(
+    handler: BaseHTTPRequestHandler,
+    path: str,
+) -> bool:
+    status = _public_business_data_write_barrier_status(handler)
+    if not status["active"]:
+        return True
+    request_id = str(
+        handler.headers.get("X-Request-ID", "") or f"wbcore-{uuid4().hex}"
+    ).strip()[:160]
+    remote_address = ""
+    client_address = getattr(handler, "client_address", None)
+    if isinstance(client_address, tuple) and client_address:
+        remote_address = str(client_address[0] or "")
+    audit_result: dict[str, Any]
+    try:
+        audit_result = audit_blocked_request(
+            _barrier_runtime_dir(handler),
+            method=str(getattr(handler, "command", "") or ""),
+            path=path,
+            actor=_current_web_user_config_key(handler),
+            request_id=request_id,
+            remote_address=remote_address,
+        )
+    except Exception:
+        audit_result = {"audited": False}
+    _write_json_response(
+        handler,
+        HTTPStatus.LOCKED,
+        {
+            **status,
+            "status": "blocked",
+            "code": "business_data_maintenance",
+            "retryable": True,
+            "request_id": request_id,
+            "attempt_audited": bool(audit_result.get("audited")),
+        },
+    )
+    return False
+
+
+def _inject_business_data_write_barrier_ui(body_text: str) -> str:
+    if "</body>" not in body_text.lower():
+        return body_text
+    endpoint = json.dumps(
+        DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
+        ensure_ascii=False,
+    )
+    injection = f"""
+<style id="wbCoreMaintenanceBarrierStyle">
+  #wbCoreMaintenanceBarrier {{
+    position: fixed; inset: 0 0 auto 0; z-index: 2147483647;
+    padding: 12px 18px; background: #7f1d1d; color: #fff;
+    font: 600 14px/1.4 system-ui, sans-serif; text-align: center;
+    box-shadow: 0 2px 12px rgba(0,0,0,.25);
+  }}
+  body.wb-core-maintenance-held {{ padding-top: 52px !important; }}
+  [data-wb-core-maintenance-disabled="1"] {{
+    cursor: not-allowed !important; opacity: .55 !important;
+  }}
+</style>
+<div id="wbCoreMaintenanceBarrier" role="status" aria-live="assertive">
+  Проверяем доступность изменений…
+</div>
+<script>
+(() => {{
+  const endpoint = {endpoint};
+  const banner = document.getElementById("wbCoreMaintenanceBarrier");
+  let blocked = true;
+  const controls = () => document.querySelectorAll(
+    'button, input:not([type="hidden"]), select, textarea'
+  );
+  const apply = (status) => {{
+    blocked = Boolean(status && status.active);
+    document.body.classList.toggle("wb-core-maintenance-held", blocked);
+    banner.hidden = !blocked;
+    banner.textContent = blocked
+      ? (status.message || "Техническое обслуживание: изменения временно заблокированы.")
+      : "";
+    controls().forEach((element) => {{
+      if (blocked) {{
+        if (!element.disabled) {{
+          element.dataset.wbCoreMaintenanceDisabled = "1";
+          element.disabled = true;
+        }}
+      }} else if (element.dataset.wbCoreMaintenanceDisabled === "1") {{
+        element.disabled = false;
+        delete element.dataset.wbCoreMaintenanceDisabled;
+      }}
+    }});
+  }};
+  const refresh = async () => {{
+    try {{
+      const response = await fetch(endpoint, {{
+        method: "GET", credentials: "same-origin", cache: "no-store"
+      }});
+      if (!response.ok) throw new Error("maintenance status unavailable");
+      apply(await response.json());
+    }} catch (_) {{
+      apply({{
+        active: true,
+        message: "Не удалось подтвердить доступность изменений. Чтение доступно; изменение данных временно заблокировано."
+      }});
+    }}
+  }};
+  document.addEventListener("submit", (event) => {{
+    const method = String(event.target && event.target.method || "get").toLowerCase();
+    if (blocked && method !== "get") {{
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }}
+  }}, true);
+  apply({{active: true, message: "Проверяем доступность изменений…"}});
+  refresh();
+  window.setInterval(refresh, 3000);
+  window.setInterval(() => apply({{
+    active: blocked,
+    message: banner.textContent
+  }}), 1000);
+}})();
+</script>
+"""
+    index = body_text.lower().rfind("</body>")
+    return body_text[:index] + injection + body_text[index:]
 
 
 def _write_text_response(

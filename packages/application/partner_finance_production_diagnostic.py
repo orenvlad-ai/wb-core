@@ -65,6 +65,7 @@ class PartnerFinanceDiagnosticError(ValueError):
 @dataclass(frozen=True)
 class DiagnosticScope:
     database: Path
+    raw_database: Path | None = None
     seller_id: str = "canonical"
     nm_id: str = ""
     weeks: tuple[str, ...] = ()
@@ -80,6 +81,13 @@ def run_partner_finance_diagnostic(scope: DiagnosticScope) -> dict[str, Any]:
     database = scope.database.expanduser().resolve()
     if not database.is_file():
         raise PartnerFinanceDiagnosticError("runtime SQLite database does not exist")
+    raw_database = (
+        scope.raw_database.expanduser().resolve()
+        if scope.raw_database is not None
+        else database
+    )
+    if not raw_database.is_file():
+        raise PartnerFinanceDiagnosticError("Finance raw SQLite database does not exist")
     if scope.max_weeks < 1 or scope.max_weeks > 128:
         raise PartnerFinanceDiagnosticError("max_weeks must be between 1 and 128")
     if scope.max_groups < 1 or scope.max_groups > 500:
@@ -90,12 +98,26 @@ def run_partner_finance_diagnostic(scope: DiagnosticScope) -> dict[str, Any]:
     uri = "file:" + quote(str(database), safe="/:") + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=60)) as conn:
         conn.row_factory = sqlite3.Row
+        raw_relation = "wb_finance_weekly_raw_rows"
+        if raw_database != database:
+            raw_uri = "file:" + quote(str(raw_database), safe="/:") + "?mode=ro"
+            conn.execute(
+                "ATTACH DATABASE ? AS finance_raw_store",
+                (raw_uri,),
+            )
+            raw_relation = "finance_raw_store.finance_raw_current_rows"
         conn.execute("PRAGMA query_only=ON")
         if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
             raise PartnerFinanceDiagnosticError("SQLite query_only could not be enabled")
         conn.execute("BEGIN")
         try:
-            result = _run_in_snapshot(conn, scope=scope, database=database)
+            result = _run_in_snapshot(
+                conn,
+                scope=scope,
+                database=database,
+                raw_database=raw_database,
+                raw_relation=raw_relation,
+            )
         finally:
             conn.rollback()
     return result
@@ -106,6 +128,8 @@ def _run_in_snapshot(
     *,
     scope: DiagnosticScope,
     database: Path,
+    raw_database: Path,
+    raw_relation: str,
 ) -> dict[str, Any]:
     tables = {
         str(row[0])
@@ -115,15 +139,22 @@ def _run_in_snapshot(
     }
     required = {
         "temporal_source_slot_snapshots",
-        "wb_finance_weekly_raw_rows",
         "wb_finance_weekly_sku_aggregates",
         "wb_finance_weekly_sync",
     }
+    if raw_relation == "wb_finance_weekly_raw_rows":
+        required.add("wb_finance_weekly_raw_rows")
     missing = sorted(required - tables)
     if missing:
         raise PartnerFinanceDiagnosticError(
             "required diagnostic tables are missing: " + ", ".join(missing)
         )
+    try:
+        conn.execute(f"SELECT 1 FROM {raw_relation} LIMIT 0").fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise PartnerFinanceDiagnosticError(
+            "Finance raw diagnostic relation is unavailable"
+        ) from exc
 
     nm_id, weeks, selection = _resolve_scope(conn, scope=scope, tables=tables)
     if len(weeks) > scope.max_weeks:
@@ -198,6 +229,7 @@ def _run_in_snapshot(
                 source_only_bound_exceeded,
             ) = _scan_week_source_only(
                 conn,
+                raw_relation=raw_relation,
                 seller_id=scope.seller_id,
                 week=week,
                 source_hasher=source_hasher,
@@ -295,8 +327,8 @@ def _run_in_snapshot(
         selected_row_count = 0
         account_row_count = 0
         raw_cursor = conn.execute(
-            """SELECT week_start,report_id,rrd_id,row_hash,raw_json
-               FROM wb_finance_weekly_raw_rows
+            f"""SELECT week_start,report_id,rrd_id,row_hash,raw_json
+               FROM {raw_relation}
                WHERE seller_id=? AND week_start=?
                ORDER BY report_id,rrd_id""",
             (scope.seller_id, week),
@@ -552,6 +584,7 @@ def _run_in_snapshot(
         )
     duplicate_rows = _logical_duplicate_evidence(
         conn,
+        raw_relation=raw_relation,
         seller_id=scope.seller_id,
         weeks=weeks,
         mismatch_keys=mismatch_keys,
@@ -612,6 +645,7 @@ def _run_in_snapshot(
         "status": "incomplete" if blockers else "ready",
         "read_only_contract": "sqlite_uri_mode_ro+pragma_query_only+transaction_rollback",
         "database_label": database.name,
+        "finance_raw_database_label": raw_database.name,
         "seller_ref": seller_ref,
         "selection": selection,
         "nm_id": nm_id,
@@ -781,6 +815,7 @@ def _projection(
 def _scan_week_source_only(
     conn: sqlite3.Connection,
     *,
+    raw_relation: str,
     seller_id: str,
     week: str,
     source_hasher: Any,
@@ -795,8 +830,8 @@ def _scan_week_source_only(
     mismatch_count = 0
     bound_exceeded = False
     cursor = conn.execute(
-        """SELECT report_id,rrd_id,row_hash,raw_json
-           FROM wb_finance_weekly_raw_rows
+        f"""SELECT report_id,rrd_id,row_hash,raw_json
+           FROM {raw_relation}
            WHERE seller_id=? AND week_start=?
            ORDER BY report_id,rrd_id""",
         (seller_id, week),
@@ -1362,6 +1397,7 @@ def _finalize_candidates(candidates: Mapping[str, Mapping[str, Any]]) -> list[di
 def _logical_duplicate_evidence(
     conn: sqlite3.Connection,
     *,
+    raw_relation: str,
     seller_id: str,
     weeks: tuple[str, ...],
     mismatch_keys: set[tuple[str, str]],
@@ -1383,7 +1419,7 @@ def _logical_duplicate_evidence(
     placeholders = ",".join("?" for _ in weeks)
     cursor = conn.execute(
         f"""SELECT week_start,report_id,rrd_id,raw_json
-            FROM wb_finance_weekly_raw_rows
+            FROM {raw_relation}
             WHERE seller_id=? AND week_start IN ({placeholders})
             ORDER BY week_start,report_id,rrd_id""",
         (seller_id, *weeks),

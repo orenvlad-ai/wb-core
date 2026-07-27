@@ -22,6 +22,7 @@ from packages.application.partner_finance_production_diagnostic import (  # noqa
     PartnerFinanceDiagnosticError,
     run_partner_finance_diagnostic,
 )
+from packages.application.storage_registry import StoreRegistry  # noqa: E402
 
 
 def _load_env(path: Path) -> None:
@@ -86,17 +87,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _load_env(Path(args.env_file))
 
-    database = (
-        args.database
-        if args.database is not None
-        else args.runtime_dir / "registry_upload_runtime.sqlite3"
-    )
+    raw_database = None
+    if args.database is not None:
+        database = args.database
+    else:
+        registry = StoreRegistry(args.runtime_dir)
+        manifest = registry.load(require_files=True)
+        database = registry.resolve("operational", manifest=manifest)
+        raw_database = registry.resolve("finance_raw", manifest=manifest)
     weeks = [str(item).strip() for item in args.week if str(item).strip()]
     weeks.extend(
         item.strip() for item in str(args.weeks or "").split(",") if item.strip()
     )
     scope = DiagnosticScope(
         database=database,
+        raw_database=raw_database,
         seller_id=str(
             args.seller_id
             or os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID")
