@@ -99,8 +99,13 @@ def main() -> None:
         )
         if sanitized["config"]["scopes"]["sku"]["order"] != ["ctr_current"]:
             raise AssertionError(f"duplicate/empty metric keys must be sanitized, got {sanitized}")
-        if sanitized["config"]["scopes"]["sku"]["display"] != {"orders_current": "hidden"}:
-            raise AssertionError(f"unsupported/shown display values must be sanitized, got {sanitized}")
+        if sanitized["config"]["scopes"]["sku"]["display"] != {
+            "views_current": "shown",
+            "orders_current": "hidden",
+        }:
+            raise AssertionError(
+                f"explicit shown must be preserved and invalid status must be dropped, got {sanitized}"
+            )
         if sanitized["config"]["expanded_anchors"] != ["sku::ctr_current"]:
             raise AssertionError(f"expanded anchors must be deduplicated, got {sanitized}")
         sanitized_raw = str(sanitized["config"])

@@ -518,6 +518,15 @@ def main() -> None:
         assert {item.metric_key for item in metrics} == set(INCIDENT_STOCK_METRIC_KEYS)
         assert incident_stock_total_metric_key("effective", "central") in INCIDENT_STOCK_METRIC_KEYS
         metric_by_key = {item.metric_key: item for item in metrics}
+        short_regions = {
+            "total": "всего",
+            "central": "Центр",
+            "northwest": "СЗ",
+            "volga": "Поволжье",
+            "south_caucasus": "Юг+СКФО",
+            "ural": "Урал",
+            "far_siberia": "ДВ+Сибирь",
+        }
         for variant in ("fact", "incident", "effective"):
             for region in (
                 "total",
@@ -533,6 +542,11 @@ def main() -> None:
                 assert metric_by_key[sku_key].scope == "SKU"
                 assert metric_by_key[total_key].scope == "TOTAL"
                 assert metric_by_key[total_key].calc_ref == sku_key
+                if variant in {"incident", "effective"}:
+                    prefix = "Остаток инц.:" if variant == "incident" else "Остаток без инц.:"
+                    expected_label = f"{prefix} {short_regions[region]}"
+                    assert metric_by_key[sku_key].label_ru == expected_label
+                    assert metric_by_key[total_key].label_ru == expected_label
 
     print("wb_incident_policy_smoke: OK")
 

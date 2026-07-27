@@ -1076,6 +1076,14 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
     page.wait_for_selector("[data-sku-metric-panel]:not([hidden])", timeout=5000)
     default_state = page.evaluate(
         """() => {
+          const visible = (node) => {
+            if (!node) {
+              return false;
+            }
+            const rect = node.getBoundingClientRect();
+            const styles = getComputedStyle(node);
+            return rect.width > 2 && rect.height > 2 && styles.visibility !== 'hidden' && styles.display !== 'none';
+          };
           const all = document.querySelector('[data-sku-metric-all]');
           const options = Array.from(document.querySelectorAll('[data-sku-metric-option]'));
           const visibleSkuRows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'));
@@ -1089,6 +1097,21 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
             return cell ? (cell.getAttribute('data-metric-key') || '') : '';
           }).filter(Boolean)));
           const optionValues = options.map((node) => node.value || node.getAttribute('data-sku-metric-option') || '').filter(Boolean);
+          const presentationRows = Array.from(document.querySelectorAll(
+            '[data-metric-config-row][data-metric-config-scope="sku"]:not(.is-header)'
+          ));
+          const nonHiddenPresentationKeys = presentationRows
+            .filter((row) => (row.getAttribute('data-metric-display-status') || '') !== 'hidden')
+            .map((row) => row.getAttribute('data-metric-config-key') || '')
+            .filter(Boolean);
+          const collapsedPresentationKeys = presentationRows
+            .filter((row) => (row.getAttribute('data-metric-display-status') || '') === 'collapsed')
+            .map((row) => row.getAttribute('data-metric-config-key') || '')
+            .filter(Boolean);
+          const hiddenPresentationKeys = presentationRows
+            .filter((row) => (row.getAttribute('data-metric-display-status') || '') === 'hidden')
+            .map((row) => row.getAttribute('data-metric-config-key') || '')
+            .filter(Boolean);
           const targetMetric = skuMetricKeys.find((key) => optionValues.includes(key)) || optionValues[0] || '';
           const firstOption = document.querySelector('[data-sku-metric-options] > *');
           const toggle = document.querySelector('[data-sku-metric-toggle]');
@@ -1106,6 +1129,11 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
             optionCount: options.length,
             firstOptionIsAll: !!(firstOption && firstOption.classList.contains('sku-metric-option-all')),
             optionValues,
+            nonHiddenPresentationKeys,
+            collapsedPresentationKeys,
+            hiddenPresentationKeys,
+            selectionModeLabels: Array.from(document.querySelectorAll('[data-sku-metric-mode]')).map((node) => (node.textContent || '').trim()),
+            configurePresetVisible: visible(document.querySelector('[data-sku-preset-configure]')),
             skuMetricKeys,
             totalMetricKeys,
             skuRowCount: visibleSkuRows.length,
@@ -1133,7 +1161,13 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
         or int(default_state["checkedIndividualCount"]) != 0
         or int(default_state["optionCount"]) < 2
         or not default_state["firstOptionIsAll"]
-        or default_state["optionValues"] != default_state["skuMetricKeys"]
+        or default_state["optionValues"] != default_state["nonHiddenPresentationKeys"]
+        or not set(default_state["skuMetricKeys"]).issubset(set(default_state["optionValues"]))
+        or not set(default_state["collapsedPresentationKeys"]).issubset(set(default_state["optionValues"]))
+        or set(default_state["hiddenPresentationKeys"]) & set(default_state["optionValues"])
+        or not any(label.startswith("Ручной выбор") for label in default_state["selectionModeLabels"])
+        or not any(label.startswith("Анализ") for label in default_state["selectionModeLabels"])
+        or not default_state["configurePresetVisible"]
         or not default_state["targetMetric"]
         or len(default_state["skuMetricKeys"]) < 2
         or len(default_state["totalMetricKeys"]) < 2
@@ -1499,12 +1533,20 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             "stable incident metrics must remain in visibility settings without "
             f"period rows, missing={missing_incident_metric_keys}"
         )
+    fact_metric_keys = {
+        "wb_stock_fact_qty",
+        "total_wb_stock_fact_qty",
+    }
+    incident_effective_metric_keys = incident_metric_keys - fact_metric_keys
     if any(
         str(metric_config_rows[metric_key]["status"]) != "collapsed"
-        for metric_key in incident_metric_keys
+        for metric_key in fact_metric_keys
+    ) or any(
+        str(metric_config_rows[metric_key]["status"]) != "shown"
+        for metric_key in incident_effective_metric_keys
     ):
         raise AssertionError(
-            "incident metric visibility defaults must remain calm/collapsed, "
+            "incident/effective metrics must default shown while the factual compatibility family stays collapsed, "
             f"rows={metric_config_rows}"
         )
     if int(panel_state["gridColumns"]) != 2:
@@ -1542,7 +1584,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     target_scope = next(
         (
             scope for scope in panel_state["scopeTables"]
-            if len(scope["rows"]) >= 4 and len({str(row["group"]) for row in scope["rows"]}) >= 2
+            if (
+                str(scope["scopeId"]) == "sku"
+                and len(scope["rows"]) >= 4
+                and len({str(row["group"]) for row in scope["rows"]}) >= 2
+            )
         ),
         None,
     )
@@ -1594,6 +1640,31 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if visual_state[hidden_key]["status"] != "hidden" or not visual_state[hidden_key]["muted"]:
         raise AssertionError(f"hidden metric must stay in settings as muted inactive row, got {visual_state}")
 
+    if page.locator("[data-filters-rail]").get_attribute("hidden") is not None:
+        page.locator("[data-filters-toggle]").click()
+    if page.locator("[data-sku-metric-panel]").get_attribute("hidden") is not None:
+        page.locator("[data-sku-metric-toggle]").click()
+    page.wait_for_selector("[data-sku-metric-panel]:not([hidden])", timeout=5000)
+    picker_status_members = page.evaluate(
+        """({collapsedKeys, hiddenKey}) => {
+          const values = Array.from(document.querySelectorAll('[data-sku-metric-option]'))
+            .map((node) => node.getAttribute('data-sku-metric-option') || '')
+            .filter(Boolean);
+          return {
+            values,
+            collapsedIncluded: collapsedKeys.every((metricKey) => values.includes(metricKey)),
+            hiddenExcluded: !values.includes(hiddenKey)
+          };
+        }""",
+        {"collapsedKeys": [collapsed_one, collapsed_two], "hiddenKey": hidden_key},
+    )
+    if not picker_status_members["collapsedIncluded"] or not picker_status_members["hiddenExcluded"]:
+        raise AssertionError(
+            "SKU metric picker must include collapsed metrics and exclude hidden metrics, "
+            f"got {picker_status_members}"
+        )
+    page.locator("[data-sku-metric-toggle]").click()
+
     collapsed_counts = _visible_metric_key_counts(page)
     if int(collapsed_counts.get(anchor_key, 0)) <= 0:
         raise AssertionError(f"anchor metric must remain visible, got counts={collapsed_counts}")
@@ -1611,11 +1682,22 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if not disclosure_state["narrowMetricColumnOk"] or not disclosure_state["buttonsInsideMetricCell"]:
         raise AssertionError(f"disclosure arrow must remain inside narrow metric cell, got {disclosure_state}")
 
-    page.locator('[data-metric-anchor-toggle]').first.click()
+    page.wait_for_timeout(650)
+    page.locator(
+        '[data-metric-anchor-toggle][data-metric-anchor-scope="'
+        + scope_id
+        + '"][data-metric-anchor-key="'
+        + anchor_key
+        + '"]'
+    ).first.evaluate("(button) => button.click()")
     page.wait_for_timeout(150)
     expanded_counts = _visible_metric_key_counts(page)
     if int(expanded_counts.get(collapsed_one, 0)) <= 0 or int(expanded_counts.get(collapsed_two, 0)) <= 0:
-        raise AssertionError(f"disclosure arrow must reveal collapsed metric rows, got {expanded_counts}")
+        raise AssertionError(
+            "disclosure arrow must reveal collapsed metric rows, "
+            f"anchor={anchor_key}, collapsed={[collapsed_one, collapsed_two]}, "
+            f"counts={expanded_counts}"
+        )
     expanded_order = _visible_metric_keys(page)
     expected_reveal = [anchor_key, collapsed_one, collapsed_two]
     anchor_index = expanded_order.index(anchor_key)
@@ -1669,6 +1751,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         expected_display={collapsed_one: "collapsed", hidden_key: "hidden"},
     )
 
+    page.wait_for_timeout(650)
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
@@ -1685,6 +1768,28 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(
             f"expanded collapsed-metric disclosure must persist after reload, got disclosure={reloaded_disclosure}, counts={reloaded_counts}"
         )
+
+    explicit_shown_key = "wb_stock_fact_qty"
+    explicit_shown_selector = (
+        '[data-metric-display-select][data-metric-config-scope="sku"]'
+        f'[data-metric-config-key="{explicit_shown_key}"]'
+    )
+    if page.locator(explicit_shown_selector).count() == 1:
+        page.select_option(explicit_shown_selector, "shown")
+        _wait_for_metric_user_config_display(
+            page,
+            scope_id="sku",
+            expected_display={explicit_shown_key: "shown"},
+        )
+        page.reload(wait_until="commit")
+        page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+        page.evaluate(
+            "() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }"
+        )
+        if page.locator(explicit_shown_selector).input_value() != "shown":
+            raise AssertionError(
+                "an explicitly shown default-collapsed metric must remain shown after reload"
+            )
 
     _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
@@ -1999,6 +2104,7 @@ def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, o
         key for key in total_initial_order if key not in {pair_a["totalKey"], pair_b["totalKey"]}
     ]
     total_display = {pair_b["totalKey"]: "collapsed", pair_a["totalKey"]: "hidden"}
+    page.wait_for_timeout(500)
     _seed_metric_presentation_storage(
         page,
         storage_key=storage_key,
@@ -2019,7 +2125,10 @@ def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, o
     if total_status_after_auto.get(pair_b["totalKey"]) != "collapsed" or total_status_after_auto.get(pair_a["totalKey"]) != "hidden":
         raise AssertionError(f"auto SKU sync must preserve total display statuses, got {total_status_after_auto}")
     if sku_after_auto[:2] != expected_sku_prefix:
-        raise AssertionError(f"auto SKU sync must derive SKU order from total analogs, got {sku_after_auto[:6]}, expected {expected_sku_prefix}")
+        raise AssertionError(
+            "auto SKU sync must derive SKU order from total analogs, "
+            f"got {sku_after_auto[:6]}, expected {expected_sku_prefix}"
+        )
     if sku_status_after_auto.get(pair_b["skuKey"]) != "collapsed" or sku_status_after_auto.get(pair_a["skuKey"]) != "hidden":
         raise AssertionError(f"auto SKU sync must derive SKU statuses from total analogs, got {sku_status_after_auto}")
     if len(sku_after_auto) != len(set(sku_after_auto)) or set(sku_after_auto) != set(sku_initial_order):

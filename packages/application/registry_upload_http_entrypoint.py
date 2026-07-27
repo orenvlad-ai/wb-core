@@ -307,8 +307,11 @@ PromoArtifactGcRunner = Callable[..., dict[str, Any]]
 SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_job_id", default="")
 WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY = "metric_presentation"
 WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION = 1
-WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 2
+WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 3
 WEB_VITRINA_METRIC_DISPLAY_STATUSES = {"shown", "collapsed", "hidden"}
+WEB_VITRINA_SKU_METRIC_SELECTION_MODES = {"manual", "preset"}
+WEB_VITRINA_SKU_METRIC_PRESET_LIMIT = 40
+WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT = 500
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -7509,6 +7512,10 @@ def _optional_int(value: Any) -> int | None:
 
 def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, Mapping) else {}
+    try:
+        source_version = int(source.get("version") or 0)
+    except (TypeError, ValueError):
+        source_version = 0
     scopes_payload = source.get("scopes") if isinstance(source.get("scopes"), Mapping) else {}
     scopes: dict[str, Any] = {}
     for raw_scope_id, raw_scope_payload in scopes_payload.items():
@@ -7534,7 +7541,6 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
                     metric_key
                     and len(metric_key) <= 160
                     and status in WEB_VITRINA_METRIC_DISPLAY_STATUSES
-                    and status != "shown"
                 ):
                     display[metric_key] = status
         scopes[scope_id] = {
@@ -7551,10 +7557,101 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
             expanded_anchors.append(normalized_token)
             seen_anchors.add(normalized_token)
 
+    sku_presets: list[dict[str, Any]] = []
+    seen_preset_ids: set[str] = set()
+    raw_presets = source.get("sku_presets")
+    for raw_preset in raw_presets if isinstance(raw_presets, list) else []:
+        if len(sku_presets) >= WEB_VITRINA_SKU_METRIC_PRESET_LIMIT:
+            break
+        if not isinstance(raw_preset, Mapping):
+            continue
+        preset_id = str(raw_preset.get("preset_id") or "").strip()
+        name = str(raw_preset.get("name") or "").strip()
+        if (
+            not preset_id
+            or len(preset_id) > 80
+            or preset_id in seen_preset_ids
+            or not name
+            or len(name) > 80
+        ):
+            continue
+        metric_keys: list[str] = []
+        seen_metric_keys: set[str] = set()
+        raw_metric_keys = raw_preset.get("metric_keys")
+        for raw_metric_key in raw_metric_keys if isinstance(raw_metric_keys, list) else []:
+            if len(metric_keys) >= WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT:
+                break
+            metric_key = str(raw_metric_key or "").strip()
+            if (
+                metric_key
+                and len(metric_key) <= 160
+                and metric_key not in seen_metric_keys
+            ):
+                metric_keys.append(metric_key)
+                seen_metric_keys.add(metric_key)
+        sku_presets.append(
+            {
+                "preset_id": preset_id,
+                "name": name,
+                "metric_keys": metric_keys,
+            }
+        )
+        seen_preset_ids.add(preset_id)
+
+    raw_selection = source.get("sku_metric_selection")
+    selection_source = raw_selection if isinstance(raw_selection, Mapping) else {}
+    selection_mode = str(selection_source.get("mode") or "manual").strip()
+    if selection_mode not in WEB_VITRINA_SKU_METRIC_SELECTION_MODES:
+        selection_mode = "manual"
+    selection_preset_id = str(selection_source.get("preset_id") or "").strip()
+    if len(selection_preset_id) > 80:
+        selection_preset_id = ""
+    selection_metric_keys: list[str] = []
+    seen_selection_metric_keys: set[str] = set()
+    raw_selection_metric_keys = selection_source.get("metric_keys")
+    for raw_metric_key in (
+        raw_selection_metric_keys if isinstance(raw_selection_metric_keys, list) else []
+    ):
+        if len(selection_metric_keys) >= WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT:
+            break
+        metric_key = str(raw_metric_key or "").strip()
+        if (
+            metric_key
+            and len(metric_key) <= 160
+            and metric_key not in seen_selection_metric_keys
+        ):
+            selection_metric_keys.append(metric_key)
+            seen_selection_metric_keys.add(metric_key)
+    if selection_mode == "preset" and selection_preset_id not in seen_preset_ids:
+        selection_mode = "manual"
+        selection_preset_id = ""
+
+    migrations_source = source.get("migrations")
+    migrations = migrations_source if isinstance(migrations_source, Mapping) else {}
+    incident_effective_shown_v1 = bool(
+        source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+        and migrations.get("incident_effective_shown_v1")
+    )
+    sku_presets_seeded_v1 = bool(
+        source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+        and migrations.get("sku_presets_seeded_v1")
+    )
+
     return {
         "version": WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION,
         "scopes": scopes,
         "expanded_anchors": expanded_anchors,
+        "sku_presets": sku_presets,
+        "sku_metric_selection": {
+            "mode": selection_mode,
+            "preset_id": selection_preset_id,
+            "all": bool(selection_source.get("all", True)),
+            "metric_keys": selection_metric_keys,
+        },
+        "migrations": {
+            "incident_effective_shown_v1": incident_effective_shown_v1,
+            "sku_presets_seeded_v1": sku_presets_seeded_v1,
+        },
     }
 
 
