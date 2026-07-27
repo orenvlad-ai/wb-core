@@ -34,6 +34,7 @@ related_endpoints:
   - "GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
   - "POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
   - "GET/POST /v1/sheet-vitrina-v1/web-vitrina/user-config"
+  - "GET /v1/sheet-vitrina-v1/web-vitrina/business-projection/status"
   - "POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh"
   - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
