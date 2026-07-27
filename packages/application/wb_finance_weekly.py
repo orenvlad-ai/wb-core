@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.finance_raw_storage import (
+    FinanceOutboxConsumer,
     FinanceRawIngestor,
     ensure_raw_schema,
     storage_health,
@@ -46,6 +47,10 @@ OUR_WB_COST_OPENING_DATE = CANONICAL_COST_POLICY_DATE.isoformat()
 OUR_WB_COST_CUTOVER_DATE = CANONICAL_COST_POLICY_DATE
 OUR_WB_COST_CUTOVER_WEEK_START = OUR_WB_COST_CUTOVER_DATE - timedelta(
     days=OUR_WB_COST_CUTOVER_DATE.weekday()
+)
+FINANCE_SHADOW_INGEST_STATE_FILENAME = ".finance-storage-shadow-ingest.json"
+FINANCE_SHADOW_INGEST_STATE_CONTRACT = (
+    "wb_core_finance_shadow_ingest_state_v1"
 )
 RETRO_COST_PERIOD_START = date(2026, 5, 1)
 RETRO_COST_PERIOD_END = date(2026, 6, 30)
@@ -524,7 +529,35 @@ class WbFinanceWeeklyBlock:
 
     def ensure_schema(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        manifest = self.store_registry.load()
+        split_storage = (
+            manifest.state == "cutover"
+            and manifest.canonical_source == "split"
+        )
         with self._connect() as conn:
+            if not split_storage:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS wb_finance_weekly_raw_rows (
+                        seller_id TEXT NOT NULL, report_id TEXT NOT NULL,
+                        rrd_id TEXT NOT NULL, report_type INTEGER,
+                        week_start TEXT NOT NULL, week_end TEXT NOT NULL,
+                        nm_id TEXT, vendor_code TEXT, barcode TEXT,
+                        doc_type_name TEXT, seller_oper_name TEXT,
+                        row_hash TEXT NOT NULL, raw_json TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                        PRIMARY KEY (seller_id, report_id, rrd_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS wb_finance_raw_by_week
+                    ON wb_finance_weekly_raw_rows(
+                        seller_id,week_start,week_end
+                    );
+                    CREATE INDEX IF NOT EXISTS wb_finance_raw_by_sku_week
+                    ON wb_finance_weekly_raw_rows(
+                        seller_id,nm_id,week_start,week_end
+                    );
+                    """
+                )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS wb_finance_weekly_reports (
@@ -534,18 +567,6 @@ class WbFinanceWeeklyBlock:
                     first_loaded_at TEXT NOT NULL, last_synced_at TEXT NOT NULL,
                     PRIMARY KEY (seller_id, report_id)
                 );
-                CREATE TABLE IF NOT EXISTS wb_finance_weekly_raw_rows (
-                    seller_id TEXT NOT NULL, report_id TEXT NOT NULL, rrd_id TEXT NOT NULL,
-                    report_type INTEGER, week_start TEXT NOT NULL, week_end TEXT NOT NULL,
-                    nm_id TEXT, vendor_code TEXT, barcode TEXT, doc_type_name TEXT,
-                    seller_oper_name TEXT, row_hash TEXT NOT NULL, raw_json TEXT NOT NULL,
-                    first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY (seller_id, report_id, rrd_id)
-                );
-                CREATE INDEX IF NOT EXISTS wb_finance_raw_by_week
-                ON wb_finance_weekly_raw_rows(seller_id, week_start, week_end);
-                CREATE INDEX IF NOT EXISTS wb_finance_raw_by_sku_week
-                ON wb_finance_weekly_raw_rows(seller_id,nm_id,week_start,week_end);
                 CREATE TABLE IF NOT EXISTS wb_finance_weekly_sync (
                     seller_id TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL,
                     status TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -704,17 +725,35 @@ class WbFinanceWeeklyBlock:
                 "utf-8"
             )
         ).hexdigest()
-        with self._connect() as conn:
-            shadow_ingest_enabled = (
-                os.environ.get("WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED", "")
-                .strip()
-                .lower()
-                in {"1", "true", "yes"}
+        manifest = self.store_registry.load()
+        split_ingest = (
+            manifest.state == "cutover"
+            and manifest.canonical_source == "split"
+        )
+        shadow_ingest_enabled = self._shadow_ingest_enabled()
+        outbox_result = None
+        if split_ingest:
+            outbox_result = FinanceRawIngestor(
+                self.store_registry,
+                seller_id=self.seller_id,
+                now_factory=lambda: synced,
+            ).ingest_batch(
+                normalized_rows,
+                source_identity=(
+                    "wb-finance-week:"
+                    + week_start.isoformat()
+                    + "/"
+                    + week_end.isoformat()
+                ),
+                source_sha256="sha256:" + full_hash,
+                week_start=week_start,
+                week_end=week_end,
             )
+        with self._connect() as conn:
             if shadow_ingest_enabled:
-                manifest = self.store_registry.load()
                 if (
-                    manifest.state != "monolith"
+                    split_ingest
+                    or manifest.state != "monolith"
                     or self.store_registry.resolve("finance_raw", manifest=manifest)
                     != self.store_registry.resolve("operational", manifest=manifest)
                 ):
@@ -756,6 +795,8 @@ class WbFinanceWeeklyBlock:
                     ),
                 )
                 for row in report_rows:
+                    if split_ingest:
+                        continue
                     raw_json = json.dumps(
                         row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                     )
@@ -788,15 +829,16 @@ class WbFinanceWeeklyBlock:
                     )
             if by_report:
                 placeholders = ",".join("?" for _ in by_report)
-                conn.execute(
-                    f"DELETE FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? AND report_id NOT IN ({placeholders})",
-                    (
-                        self.seller_id,
-                        week_start.isoformat(),
-                        week_end.isoformat(),
-                        *by_report.keys(),
-                    ),
-                )
+                if not split_ingest:
+                    conn.execute(
+                        f"DELETE FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? AND report_id NOT IN ({placeholders})",
+                        (
+                            self.seller_id,
+                            week_start.isoformat(),
+                            week_end.isoformat(),
+                            *by_report.keys(),
+                        ),
+                    )
                 conn.execute(
                     f"DELETE FROM wb_finance_weekly_reports WHERE seller_id=? AND week_start=? AND week_end=? AND report_id NOT IN ({placeholders})",
                     (
@@ -845,8 +887,7 @@ class WbFinanceWeeklyBlock:
                     unchanged,
                 ),
             )
-            outbox_result = None
-            if shadow_ingest_enabled:
+            if shadow_ingest_enabled and not split_ingest:
                 outbox_result = FinanceRawIngestor(
                     self.store_registry,
                     seller_id=self.seller_id,
@@ -866,6 +907,11 @@ class WbFinanceWeeklyBlock:
                 )
             conn.commit()
         aggregate = self.recalculate_week(week_start, week_end)
+        outbox_acknowledgement = None
+        if split_ingest and outbox_result is not None:
+            outbox_acknowledgement = self._acknowledge_split_outbox(
+                expected_sequence=int(outbox_result.sequence_no),
+            )
         return {
             "status": status,
             "week_start": week_start.isoformat(),
@@ -879,6 +925,7 @@ class WbFinanceWeeklyBlock:
                     "batch_id": outbox_result.batch_id,
                     "event_id": outbox_result.event_id,
                     "sequence_no": outbox_result.sequence_no,
+                    "acknowledgement": outbox_acknowledgement,
                 }
                 if outbox_result is not None
                 else {
@@ -887,6 +934,185 @@ class WbFinanceWeeklyBlock:
                 }
             ),
         }
+
+    def _acknowledge_split_outbox(
+        self,
+        *,
+        expected_sequence: int,
+    ) -> dict[str, Any]:
+        """Acknowledge only events whose complete operational projection exists."""
+
+        consumer = FinanceOutboxConsumer(
+            self.store_registry,
+            apply_event=self._verify_outbox_projection,
+            now_factory=lambda: self.now_factory()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        )
+        acknowledged: list[dict[str, Any]] = []
+        while True:
+            result = consumer.consume_next()
+            if result is None:
+                with self.store_registry.session(
+                    "finance_raw",
+                    mode="ro",
+                    operation="wb_finance_outbox_ack_readback",
+                ) as raw:
+                    cursor = raw.execute(
+                        """SELECT last_sequence_no
+                           FROM finance_raw_consumer_cursors
+                           WHERE consumer_id='finance_operational_projection_v1'"""
+                    ).fetchone()
+                last_sequence = int(cursor["last_sequence_no"]) if cursor else 0
+                if last_sequence < expected_sequence:
+                    raise ValueError(
+                        "Finance operational outbox acknowledgement is incomplete"
+                    )
+                return {
+                    "status": "already_acknowledged",
+                    "expected_sequence": expected_sequence,
+                    "last_sequence_no": last_sequence,
+                    "events": acknowledged,
+                }
+            acknowledged.append(
+                {
+                    "event_id": result.event_id,
+                    "sequence_no": result.sequence_no,
+                    "status": result.status,
+                    "duplicate": result.duplicate,
+                }
+            )
+            if result.sequence_no > expected_sequence:
+                raise ValueError(
+                    "Finance outbox cursor advanced beyond the expected event"
+                )
+            if result.sequence_no == expected_sequence:
+                return {
+                    "status": "acknowledged",
+                    "expected_sequence": expected_sequence,
+                    "last_sequence_no": result.sequence_no,
+                    "events": acknowledged,
+                }
+
+    def _verify_outbox_projection(
+        self,
+        conn: sqlite3.Connection,
+        payload: Mapping[str, Any],
+    ) -> tuple[int, str]:
+        """Prove an outbox batch is fully represented in operational storage."""
+
+        if str(payload.get("seller_id") or "") != self.seller_id:
+            raise ValueError("Finance outbox seller identity mismatch")
+        period = str(payload.get("report_period") or "").split("/", 1)
+        if len(period) != 2:
+            raise ValueError("Finance outbox report period is invalid")
+        week_start, week_end = period
+        source_sha = str(payload.get("source_sha256") or "")
+        if not source_sha.startswith("sha256:"):
+            raise ValueError("Finance outbox source digest is invalid")
+        content_hash = source_sha.removeprefix("sha256:")
+        expected_rows = int(payload.get("row_count") or 0)
+        sync = conn.execute(
+            """SELECT raw_row_count,content_hash
+               FROM wb_finance_weekly_sync
+               WHERE seller_id=? AND week_start=? AND week_end=?""",
+            (self.seller_id, week_start, week_end),
+        ).fetchone()
+        report_rows = conn.execute(
+            """SELECT COALESCE(SUM(row_count),0)
+               FROM wb_finance_weekly_reports
+               WHERE seller_id=? AND week_start=? AND week_end=?""",
+            (self.seller_id, week_start, week_end),
+        ).fetchone()
+        projection_counts = {
+            table: int(
+                conn.execute(
+                    f"""SELECT COUNT(*) FROM {table}
+                        WHERE seller_id=? AND week_start=? AND week_end=?""",
+                    (self.seller_id, week_start, week_end),
+                ).fetchone()[0]
+            )
+            for table in (
+                "wb_finance_weekly_aggregates",
+                "wb_finance_weekly_cost_coverage",
+                "wb_finance_weekly_reconciliation",
+            )
+        }
+        sku = conn.execute(
+            """SELECT COUNT(*) AS row_count,
+                      SUM(CASE WHEN week_content_hash<>? THEN 1 ELSE 0 END)
+                         AS mismatched_hashes
+               FROM wb_finance_weekly_sku_aggregates
+               WHERE seller_id=? AND week_start=? AND week_end=?""",
+            (content_hash, self.seller_id, week_start, week_end),
+        ).fetchone()
+        evidence = {
+            "seller_id": self.seller_id,
+            "week_start": week_start,
+            "week_end": week_end,
+            "expected_rows": expected_rows,
+            "sync_raw_row_count": int(sync["raw_row_count"]) if sync else -1,
+            "sync_content_hash": str(sync["content_hash"]) if sync else "",
+            "report_raw_row_count": int(report_rows[0]) if report_rows else -1,
+            "projection_counts": projection_counts,
+            "sku_projection_count": int(sku["row_count"]) if sku else 0,
+            "sku_hash_mismatches": int(sku["mismatched_hashes"] or 0)
+            if sku
+            else -1,
+        }
+        if (
+            sync is None
+            or evidence["sync_raw_row_count"] != expected_rows
+            or evidence["report_raw_row_count"] != expected_rows
+            or evidence["sync_content_hash"] != content_hash
+            or any(value != 1 for value in projection_counts.values())
+            or evidence["sku_projection_count"] < 1
+            or evidence["sku_hash_mismatches"] != 0
+        ):
+            raise ValueError(
+                "Finance operational projection does not match the outbox event"
+            )
+        return expected_rows, "sha256:" + hashlib.sha256(
+            json.dumps(
+                evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _shadow_ingest_enabled(self) -> bool:
+        if (
+            os.environ.get("WB_CORE_FINANCE_STORAGE_SHADOW_INGEST_ENABLED", "")
+            .strip()
+            .lower()
+            in {"1", "true", "yes"}
+        ):
+            return True
+        state_path = (
+            self.runtime_dir / FINANCE_SHADOW_INGEST_STATE_FILENAME
+        )
+        if not state_path.exists():
+            return False
+        if not state_path.is_file() or state_path.stat().st_mode & 0o077:
+            raise ValueError(
+                "Finance shadow ingest state must be a private regular file"
+            )
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Finance shadow ingest state is unreadable"
+            ) from exc
+        if (
+            not isinstance(state, Mapping)
+            or str(state.get("contract_version") or "")
+            != FINANCE_SHADOW_INGEST_STATE_CONTRACT
+            or not isinstance(state.get("enabled"), bool)
+        ):
+            raise ValueError("Finance shadow ingest state is invalid")
+        return bool(state["enabled"])
 
     def recalculate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
         self.ensure_schema()
@@ -3381,6 +3607,12 @@ class WbFinanceWeeklyBlock:
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
+        existing_tables.update(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_temp_master WHERE type='view'"
+            ).fetchall()
+        )
         missing_schema = sorted(required_tables - existing_tables)
         if "wb_finance_weekly_raw_rows" not in existing_tables:
             raise ValueError("Finance raw schema is not deployed")
@@ -4743,11 +4975,33 @@ class WbFinanceWeeklyBlock:
         ).hexdigest()
 
     def _connect(self) -> sqlite3.Connection:
-        return self.store_registry.connect(
+        manifest = self.store_registry.load()
+        conn = self.store_registry.connect(
             "operational",
             mode="rw",
             operation="wb_finance_weekly",
+            manifest=manifest,
         )
+        if (
+            manifest.state == "cutover"
+            and manifest.canonical_source == "split"
+        ):
+            self.store_registry.attach_readonly(
+                conn,
+                "finance_raw",
+                schema_name="finance_raw_store",
+                operation="wb_finance_weekly_raw_read",
+                manifest=manifest,
+            )
+            conn.execute(
+                """CREATE TEMP VIEW wb_finance_weekly_raw_rows AS
+                   SELECT seller_id,report_id,rrd_id,report_type,week_start,
+                          week_end,nm_id,vendor_code,barcode,doc_type_name,
+                          seller_oper_name,row_hash,raw_json,first_seen_at,
+                          updated_at
+                     FROM finance_raw_store.finance_raw_current_rows"""
+            )
+        return conn
 
 
 def block_from_env(runtime_dir: Path) -> WbFinanceWeeklyBlock:

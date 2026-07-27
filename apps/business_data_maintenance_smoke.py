@@ -233,6 +233,38 @@ def _assert_status_does_not_initialize_owner_policy() -> None:
         assert not (runtime_dir / maintenance.POLICY_FILENAME).exists()
 
 
+def _assert_legacy_active_hold_is_not_guessed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        (runtime_dir / maintenance.STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": maintenance.SCHEMA_VERSION,
+                    "phase": "held",
+                    "baseline": {"quiet": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        try:
+            maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+            )
+        except RuntimeError as exc:
+            assert "prior state is unknown" in str(exc)
+        else:
+            raise AssertionError(
+                "legacy active hold without exact signature was guessed"
+            )
+        assert systemd.mutations == []
+        assert schedules.disable_calls == 0
+        assert not (runtime_dir / maintenance.POLICY_FILENAME).exists()
+
+
 def _warehouse_baseline(runtime_dir: Path) -> None:
     (runtime_dir / maintenance.WAREHOUSE_MAINTENANCE_STATE_FILENAME).write_text(
         json.dumps(
@@ -632,6 +664,7 @@ def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_unknown_timer_fails_before_mutation()
     _assert_status_does_not_initialize_owner_policy()
+    _assert_legacy_active_hold_is_not_guessed()
     _assert_exact_policy_restore_and_revision_guards()
     _assert_unknown_policy_state_blocks_resume()
     _assert_policy_v1_hold_restores_exact_feature_schedules_once()
