@@ -1,13 +1,11 @@
-"""Integration smoke-check for COST_PRICE read-side overlay inside sheet_vitrina_v1."""
+"""Integration smoke-check for audit-only COST_PRICE after public retirement."""
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import socket
-import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -48,27 +46,23 @@ ADS_SUM = 50.0
 
 def main() -> None:
     bundle = _load_json(INPUT_BUNDLE_FIXTURE)
-    group_counts = Counter(item["group"] for item in bundle["config_v2"] if item["enabled"])
-    if not group_counts:
+    if not any(item["enabled"] for item in bundle["config_v2"]):
         raise AssertionError("fixture bundle must keep enabled config groups")
     _check_empty_cost_price_state(bundle)
-    _check_cost_price_resolution_and_derived_metrics(bundle, group_counts)
+    _check_cost_price_audit_state_and_public_retirement(bundle)
     print("smoke-check passed")
 
 
 def _check_empty_cost_price_state(bundle: dict[str, Any]) -> None:
     with TemporaryDirectory(prefix="sheet-vitrina-cost-price-empty-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
-        refresh_payload, plan_payload, _status_payload, load_harness = _run_scenario(
+        refresh_payload, plan_payload, _status_payload = _run_scenario(
             bundle=bundle,
             runtime_dir=runtime_dir,
             cost_price_payload=None,
-            run_load_harness=True,
         )
         if refresh_payload["status"] != "success":
             raise AssertionError("refresh must keep ready snapshot materialized when COST_PRICE state is missing")
-        if load_harness["load_result"]["http_status"] != 200:
-            raise AssertionError(f"sheet load must return 200 after refresh, got {load_harness['load_result']}")
 
         yesterday_status = _find_status_row(plan_payload, "cost_price[yesterday_closed]")
         today_status = _find_status_row(plan_payload, "cost_price[today_current]")
@@ -77,23 +71,11 @@ def _check_empty_cost_price_state(bundle: dict[str, Any]) -> None:
         if "not materialized" not in str(today_status["note"]):
             raise AssertionError("missing COST_PRICE current state must explain the gap in STATUS")
 
-        for metric_key in ("cost_price_rub", "avg_cost_price_rub", "total_proxy_profit_rub", "proxy_margin_pct_total"):
-            for row in _find_data_rows(plan_payload, metric_key):
-                if any(cell not in ("", None) for cell in row[2:]):
-                    raise AssertionError(f"{metric_key} must stay blank without authoritative COST_PRICE state")
-
-        loaded_rows = load_harness["sheets"]["DATA_VITRINA"]["values"]
-        for metric_key in ("avg_cost_price_rub", "total_proxy_profit_rub", "proxy_margin_pct_total"):
-            for row in _find_loaded_rows(loaded_rows, metric_key):
-                if any(cell not in ("", None) for cell in row[2:4]):
-                    raise AssertionError(f"loaded {metric_key} must stay blank without COST_PRICE state")
-        print("cost-price-empty: ok -> refresh/load stay truthful without fake values")
+        _assert_no_legacy_public_rows(plan_payload)
+        print("cost-price-empty: ok -> source status remains truthful without public legacy rows")
 
 
-def _check_cost_price_resolution_and_derived_metrics(
-    bundle: dict[str, Any],
-    group_counts: Counter[str],
-) -> None:
+def _check_cost_price_audit_state_and_public_retirement(bundle: dict[str, Any]) -> None:
     cost_price_payload = {
         "dataset_version": "sheet_vitrina_v1_cost_price_overlay__2026-04-16T11:00:00Z",
         "uploaded_at": "2026-04-16T11:00:00Z",
@@ -105,22 +87,15 @@ def _check_cost_price_resolution_and_derived_metrics(
             {"group": "Matte", "cost_price_rub": 60.0, "effective_from": "2026-04-16"},
         ],
     }
-    expected_by_slot = {
-        "yesterday_closed": {"Clean": 20.0, "Anti-Spy": 30.0, "Matte": 50.0},
-        "today_current": {"Clean": 40.0, "Anti-Spy": 30.0, "Matte": 60.0},
-    }
     with TemporaryDirectory(prefix="sheet-vitrina-cost-price-overlay-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
-        refresh_payload, plan_payload, _status_payload, load_harness = _run_scenario(
+        refresh_payload, plan_payload, _status_payload = _run_scenario(
             bundle=bundle,
             runtime_dir=runtime_dir,
             cost_price_payload=cost_price_payload,
-            run_load_harness=True,
         )
         if refresh_payload["status"] != "success":
-            raise AssertionError("refresh must succeed with authoritative COST_PRICE overlay")
-        if load_harness["load_result"]["http_status"] != 200:
-            raise AssertionError(f"sheet load must return 200 after refresh, got {load_harness['load_result']}")
+            raise AssertionError("refresh must succeed with persisted audit-only COST_PRICE")
 
         yesterday_status = _find_status_row(plan_payload, "cost_price[yesterday_closed]")
         today_status = _find_status_row(plan_payload, "cost_price[today_current]")
@@ -134,98 +109,46 @@ def _check_cost_price_resolution_and_derived_metrics(
             if "resolution_rule=latest_effective_from<=slot_date" not in str(row["note"]):
                 raise AssertionError("COST_PRICE status note must expose effective_from resolution rule")
 
-        first_group_rows = {
-            group_name: next(item["nm_id"] for item in bundle["config_v2"] if item["enabled"] and item["group"] == group_name)
-            for group_name in ("Clean", "Anti-Spy", "Matte")
+        state = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir).load_cost_price_current_state()
+        if state.dataset_version != cost_price_payload["dataset_version"]:
+            raise AssertionError(f"audit dataset version was not preserved: {state}")
+        persisted_rows = {
+            (row.group, row.effective_from, row.cost_price_rub)
+            for row in state.cost_price_rows
         }
-        _assert_slot_cost_rows(
-            plan_payload=plan_payload,
-            expected_by_slot=expected_by_slot,
-            nm_ids=first_group_rows,
-        )
-        _assert_total_rows(plan_payload=plan_payload, group_counts=group_counts, expected_by_slot=expected_by_slot)
-
-        loaded_rows = load_harness["sheets"]["DATA_VITRINA"]["values"]
-        _assert_loaded_total_rows(loaded_rows=loaded_rows, group_counts=group_counts, expected_by_slot=expected_by_slot)
-        print("cost-price-overlay: ok -> effective_from resolution and derived totals materialize in plan/load")
-
-
-def _assert_slot_cost_rows(
-    *,
-    plan_payload: dict[str, Any],
-    expected_by_slot: dict[str, dict[str, float]],
-    nm_ids: dict[str, int],
-) -> None:
-    for group_name, nm_id in nm_ids.items():
-        row = _find_exact_data_row(plan_payload, f"SKU:{nm_id}|cost_price_rub")
-        if _row_value(row, 2) != expected_by_slot["yesterday_closed"][group_name]:
-            raise AssertionError(f"unexpected yesterday cost for {group_name}: {row}")
-        if _row_value(row, 3) != expected_by_slot["today_current"][group_name]:
-            raise AssertionError(f"unexpected today cost for {group_name}: {row}")
+        expected_rows = {
+            (
+                str(row["group"]),
+                str(row["effective_from"]),
+                float(row["cost_price_rub"]),
+            )
+            for row in cost_price_payload["cost_price_rows"]
+        }
+        if persisted_rows != expected_rows:
+            raise AssertionError(
+                f"historical COST_PRICE audit rows changed: {persisted_rows}"
+            )
+        _assert_no_legacy_public_rows(plan_payload)
+        print("cost-price-audit: ok -> raw group history persists while public Proxy1 rows stay retired")
 
 
-def _assert_total_rows(
-    *,
-    plan_payload: dict[str, Any],
-    group_counts: Counter[str],
-    expected_by_slot: dict[str, dict[str, float]],
-) -> None:
-    total_order_sum = float(sum(group_counts.values())) * ORDER_SUM
-    yesterday_avg = _weighted_average(group_counts, expected_by_slot["yesterday_closed"])
-    today_avg = _weighted_average(group_counts, expected_by_slot["today_current"])
-    yesterday_profit = _expected_total_proxy_profit(group_counts, expected_by_slot["yesterday_closed"])
-    today_profit = _expected_total_proxy_profit(group_counts, expected_by_slot["today_current"])
-    yesterday_margin = yesterday_profit / total_order_sum
-    today_margin = today_profit / total_order_sum
-
-    avg_row = _find_exact_data_row(plan_payload, "TOTAL|avg_cost_price_rub")
-    if _row_value(avg_row, 2) != round(yesterday_avg, 6):
-        raise AssertionError(f"unexpected avg_cost_price_rub yesterday value: {avg_row}")
-    if _row_value(avg_row, 3) != round(today_avg, 6):
-        raise AssertionError(f"unexpected avg_cost_price_rub today value: {avg_row}")
-
-    profit_row = _find_exact_data_row(plan_payload, "TOTAL|total_proxy_profit_rub")
-    if _row_value(profit_row, 2) != round(yesterday_profit, 6):
-        raise AssertionError(f"unexpected total_proxy_profit_rub yesterday value: {profit_row}")
-    if _row_value(profit_row, 3) != round(today_profit, 6):
-        raise AssertionError(f"unexpected total_proxy_profit_rub today value: {profit_row}")
-
-    margin_row = _find_exact_data_row(plan_payload, "TOTAL|proxy_margin_pct_total")
-    if _row_value(margin_row, 2) != round(yesterday_margin, 6):
-        raise AssertionError(f"unexpected proxy_margin_pct_total yesterday value: {margin_row}")
-    if _row_value(margin_row, 3) != round(today_margin, 6):
-        raise AssertionError(f"unexpected proxy_margin_pct_total today value: {margin_row}")
-
-
-def _assert_loaded_total_rows(
-    *,
-    loaded_rows: list[list[Any]],
-    group_counts: Counter[str],
-    expected_by_slot: dict[str, dict[str, float]],
-) -> None:
-    total_order_sum = float(sum(group_counts.values())) * ORDER_SUM
-    yesterday_profit = _expected_total_proxy_profit(group_counts, expected_by_slot["yesterday_closed"])
-    today_profit = _expected_total_proxy_profit(group_counts, expected_by_slot["today_current"])
-    yesterday_margin = yesterday_profit / total_order_sum
-    today_margin = today_profit / total_order_sum
-
-    profit_rows = _find_loaded_rows(loaded_rows, "total_proxy_profit_rub")
-    if not profit_rows:
-        raise AssertionError("loaded DATA_VITRINA must contain total_proxy_profit_rub row")
-    if [round(float(profit_rows[0][2]), 6), round(float(profit_rows[0][3]), 6)] != [
-        round(yesterday_profit, 6),
-        round(today_profit, 6),
-    ]:
-        raise AssertionError(f"loaded total_proxy_profit_rub values mismatch: {profit_rows[0]}")
-
-    margin_rows = _find_loaded_rows(loaded_rows, "proxy_margin_pct_total")
-    if not margin_rows:
-        raise AssertionError("loaded DATA_VITRINA must contain proxy_margin_pct_total row")
-    if [round(float(margin_rows[0][2]), 6), round(float(margin_rows[0][3]), 6)] != [
-        round(yesterday_margin, 6),
-        round(today_margin, 6),
-    ]:
-        raise AssertionError(f"loaded proxy_margin_pct_total values mismatch: {margin_rows[0]}")
+def _assert_no_legacy_public_rows(plan_payload: dict[str, Any]) -> None:
+    retired = {
+        "cost_price_rub",
+        "avg_cost_price_rub",
+        "profit_proxy_rub",
+        "proxy_profit_rub",
+        "total_proxy_profit_rub",
+        "proxy_margin_pct",
+        "proxy_margin_pct_total",
+    }
+    leaked = {
+        metric_key
+        for metric_key in retired
+        if _find_data_rows(plan_payload, metric_key)
+    }
+    if leaked:
+        raise AssertionError(f"legacy COST_PRICE/Proxy1 rows leaked into active plan: {sorted(leaked)}")
 
 
 def _run_scenario(
@@ -233,8 +156,7 @@ def _run_scenario(
     bundle: dict[str, Any],
     runtime_dir: Path,
     cost_price_payload: dict[str, Any] | None,
-    run_load_harness: bool,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     entrypoint = _build_entrypoint(runtime_dir=runtime_dir)
     port = _reserve_free_port()
     config = RegistryUploadHttpEntrypointConfig(
@@ -284,12 +206,7 @@ def _run_scenario(
         if status_code != 200:
             raise AssertionError(f"status endpoint must return 200 after refresh, got {status_code}")
 
-        load_harness_result = (
-            _run_load_only_harness(endpoint_url=upload_url, as_of_date=AS_OF_DATE)
-            if run_load_harness
-            else {"sheets": {}}
-        )
-        return refresh_payload, plan_payload, status_payload, load_harness_result
+        return refresh_payload, plan_payload, status_payload
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -390,21 +307,6 @@ def _request_date(request: object) -> str:
     raise AssertionError("synthetic source request must carry a date field")
 
 
-def _expected_total_proxy_profit(group_counts: Counter[str], cost_by_group: dict[str, float]) -> float:
-    total = 0.0
-    for group_name, count in group_counts.items():
-        per_sku = ORDER_SUM * 0.5096 - ORDER_COUNT * 0.91 * cost_by_group[group_name] - ADS_SUM
-        total += count * per_sku
-    return total
-
-
-def _weighted_average(group_counts: Counter[str], values_by_group: dict[str, float]) -> float:
-    total_items = sum(group_counts.values())
-    if total_items == 0:
-        raise AssertionError("weighted average requires at least one enabled config row")
-    return sum(group_counts[group_name] * values_by_group[group_name] for group_name in group_counts) / total_items
-
-
 def _find_status_row(plan_payload: dict[str, Any], source_key: str) -> dict[str, Any]:
     status_sheet = _find_sheet(plan_payload, "STATUS")
     for row in status_sheet["rows"]:
@@ -418,29 +320,11 @@ def _find_data_rows(plan_payload: dict[str, Any], metric_key: str) -> list[list[
     return [row for row in data_sheet["rows"] if len(row) >= 3 and str(row[1]).endswith(f"|{metric_key}")]
 
 
-def _find_exact_data_row(plan_payload: dict[str, Any], row_key: str) -> list[Any]:
-    data_sheet = _find_sheet(plan_payload, "DATA_VITRINA")
-    for row in data_sheet["rows"]:
-        if len(row) >= 2 and row[1] == row_key:
-            return row
-    raise AssertionError(f"DATA_VITRINA row for {row_key!r} is missing")
-
-
-def _find_loaded_rows(rows: list[list[Any]], metric_key: str) -> list[list[Any]]:
-    return [row for row in rows if len(row) >= 4 and str(row[1]) == metric_key]
-
-
 def _find_sheet(plan_payload: dict[str, Any], sheet_name: str) -> dict[str, Any]:
     for sheet in plan_payload["sheets"]:
         if sheet["sheet_name"] == sheet_name:
             return sheet
     raise AssertionError(f"sheet {sheet_name!r} is missing")
-
-
-def _row_value(row: list[Any], index: int) -> float | None:
-    if len(row) <= index or row[index] in ("", None):
-        return None
-    return round(float(row[index]), 6)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -469,27 +353,6 @@ def _get_json(url: str) -> tuple[int, dict[str, Any]]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
-
-
-def _run_load_only_harness(*, endpoint_url: str, as_of_date: str) -> dict[str, Any]:
-    return json.loads(
-        subprocess.check_output(
-            [
-                "node",
-                str(ROOT / "apps" / "sheet_vitrina_v1_registry_upload_trigger_harness.js"),
-                "--mode",
-                "load_only",
-                "--scriptPath",
-                str(ROOT / "gas" / "sheet_vitrina_v1" / "RegistryUploadTrigger.gs"),
-                "--endpointUrl",
-                endpoint_url,
-                "--asOfDate",
-                as_of_date,
-            ],
-            cwd=ROOT,
-            text=True,
-        )
-    )
 
 
 def _reserve_free_port() -> int:

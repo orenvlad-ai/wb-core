@@ -1239,6 +1239,27 @@ def _run_warehouse_ui_flow(
             "own_total_confirmed_share_pct",
             "own_inventory_capital_return_pct",
             "own_underaccepted_wb_qty",
+            "cost_price_rub",
+            "avg_cost_price_rub",
+            "profit_proxy_rub",
+            "proxy_profit_rub",
+            "total_proxy_profit_rub",
+            "proxy_margin_pct",
+            "proxy_margin_pct_total",
+            "wb_stock_fact_qty",
+            "wb_stock_fact_qty_central",
+            "wb_stock_fact_qty_northwest",
+            "wb_stock_fact_qty_volga",
+            "wb_stock_fact_qty_south_caucasus",
+            "wb_stock_fact_qty_ural",
+            "wb_stock_fact_qty_far_siberia",
+            "total_wb_stock_fact_qty",
+            "total_wb_stock_fact_qty_central",
+            "total_wb_stock_fact_qty_northwest",
+            "total_wb_stock_fact_qty_volga",
+            "total_wb_stock_fact_qty_south_caucasus",
+            "total_wb_stock_fact_qty_ural",
+            "total_wb_stock_fact_qty_far_siberia",
         )
         leaked_archived = [
             metric_key
@@ -1266,10 +1287,8 @@ def _run_warehouse_ui_flow(
         ]
         _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
         incident_metric_keys = (
-            "wb_stock_fact_qty",
             "wb_stock_incident_qty",
             "wb_stock_effective_qty",
-            "total_wb_stock_fact_qty",
             "total_wb_stock_incident_qty",
             "total_wb_stock_effective_qty",
         )
@@ -1280,7 +1299,19 @@ def _run_warehouse_ui_flow(
         ]
         _assert(
             not missing_incident_metrics,
-            f"stable fact/incident/effective metric family is configurable: {missing_incident_metrics}",
+            f"stable incident/effective metric family is configurable: {missing_incident_metrics}",
+        )
+        leaked_retired_config = [
+            metric_key
+            for metric_key in archived_metric_keys
+            if page.locator(
+                f'[data-metric-config-key="{metric_key}"]'
+            ).count()
+            > 0
+        ]
+        _assert(
+            not leaked_retired_config,
+            f"retired metrics are absent from Vitrina settings: {leaked_retired_config}",
         )
         incident_metric_display = {
             metric_key: page.locator(
@@ -1613,6 +1644,15 @@ def _assert_vitrina_incident_provisional_profile(
         "_ural",
         "_far_siberia",
     )
+    canonical_fact_key_by_suffix = {
+        "": "stock_total",
+        "_central": "stock_ru_central",
+        "_northwest": "stock_ru_northwest",
+        "_volga": "stock_ru_volga",
+        "_south_caucasus": "stock_ru_south_caucasus",
+        "_ural": "stock_ru_ural",
+        "_far_siberia": "stock_ru_far_siberia",
+    }
 
     def _cells(metric_key: str) -> dict[str, tuple[Decimal | None, Any]]:
         locator = page.locator(
@@ -1632,7 +1672,7 @@ def _assert_vitrina_incident_provisional_profile(
     positive_incident_cells = 0
     provisional_filled_cells = 0
     for suffix in suffixes:
-        fact_key = f"wb_stock_fact_qty{suffix}"
+        fact_key = canonical_fact_key_by_suffix[suffix]
         incident_key = f"wb_stock_incident_qty{suffix}"
         effective_key = f"wb_stock_effective_qty{suffix}"
         fact_cells = _cells(fact_key)
@@ -1642,7 +1682,7 @@ def _assert_vitrina_incident_provisional_profile(
             {
                 row_id
                 for row_id in (
-                    set(fact_cells) | set(incident_cells) | set(effective_cells)
+                    set(incident_cells) | set(effective_cells)
                 )
                 if row_id.startswith("SKU:")
             }
@@ -1650,18 +1690,21 @@ def _assert_vitrina_incident_provisional_profile(
         projected: list[tuple[Decimal, Decimal, Decimal]] = []
         blank_count = 0
         for row_id in sku_ids:
-            triple = (
-                fact_cells.get(row_id, (None, None))[0],
+            incident_pair = (
                 incident_cells.get(row_id, (None, None))[0],
                 effective_cells.get(row_id, (None, None))[0],
             )
-            if triple == (None, None, None):
+            if incident_pair == (None, None):
                 blank_count += 1
                 continue
+            triple = (
+                fact_cells.get(row_id, (None, None))[0],
+                *incident_pair,
+            )
             _assert(
                 all(value is not None for value in triple),
                 f"{row_id} {suffix or 'total'} keeps one complete "
-                "fact/incident/effective triple or three blanks",
+                "canonical-fact/incident/effective triple when the incident pair is published",
             )
             fact = Decimal(triple[0])
             incident = Decimal(triple[1])
@@ -1673,7 +1716,7 @@ def _assert_vitrina_incident_provisional_profile(
                 f"{row_id} {suffix or 'total'} incident arithmetic reconciles",
             )
             projected.append((fact, incident, effective))
-            for mapping in (fact_cells, incident_cells, effective_cells):
+            for mapping in (incident_cells, effective_cells):
                 cell = mapping[row_id][1]
                 classes = str(cell.get_attribute("class") or "")
                 title = str(cell.get_attribute("title") or "")

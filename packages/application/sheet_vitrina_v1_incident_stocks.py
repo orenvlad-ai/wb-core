@@ -47,6 +47,18 @@ INCIDENT_STOCK_METRIC_KEYS = (
     *INCIDENT_STOCK_SKU_METRIC_KEYS,
     *INCIDENT_STOCK_TOTAL_METRIC_KEYS,
 )
+INCIDENT_STOCK_FACT_SKU_METRIC_KEYS = tuple(
+    incident_stock_metric_key("fact", region)
+    for region, _source, _suffix in INCIDENT_STOCK_FIELDS
+)
+INCIDENT_STOCK_FACT_TOTAL_METRIC_KEYS = tuple(
+    incident_stock_total_metric_key("fact", region)
+    for region, _source, _suffix in INCIDENT_STOCK_FIELDS
+)
+INCIDENT_STOCK_FACT_METRIC_KEYS = (
+    *INCIDENT_STOCK_FACT_SKU_METRIC_KEYS,
+    *INCIDENT_STOCK_FACT_TOTAL_METRIC_KEYS,
+)
 
 
 def extend_metrics_with_incident_stock_metrics(

@@ -8,6 +8,9 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_STOCKS_ARCHIVED_METRIC_KEYS,
     ONEC_STOCKS_SOURCE_KEY,
 )
+from packages.application.sheet_vitrina_v1_incident_stocks import (
+    INCIDENT_STOCK_FACT_METRIC_KEYS,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import OUR_WB_ARCHIVED_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
@@ -15,14 +18,27 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
 
 
+LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS = (
+    "cost_price_rub",
+    "avg_cost_price_rub",
+    "profit_proxy_rub",
+    "proxy_profit_rub",
+    "total_proxy_profit_rub",
+    "proxy_margin_pct",
+    "proxy_margin_pct_total",
+)
+
+
 ARCHIVED_PUBLIC_METRIC_KEYS = frozenset(
     (
         *ONEC_STOCKS_ARCHIVED_METRIC_KEYS,
         *OUR_WB_ARCHIVED_METRIC_KEYS,
         *OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
+        *INCIDENT_STOCK_FACT_METRIC_KEYS,
+        *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
     )
 )
-ARCHIVED_ONLY_SOURCE_KEYS = frozenset({ONEC_STOCKS_SOURCE_KEY})
+ARCHIVED_ONLY_SOURCE_KEYS = frozenset({ONEC_STOCKS_SOURCE_KEY, "cost_price"})
 
 
 def filter_archived_public_metrics(metrics: Iterable[MetricV2Item]) -> list[MetricV2Item]:

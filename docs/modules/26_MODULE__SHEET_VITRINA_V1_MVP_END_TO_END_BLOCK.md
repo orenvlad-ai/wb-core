@@ -490,13 +490,22 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - route не rebuild-ит truth и не подмешивает implicit refresh;
   - operator/public wording distinguishes technical write completion from confirmed material update, unchanged/no-op and first-write `not_verified`.
 
-## 3.1.1 Cost overlay и новые operator-facing metrics
+## 3.1.1 Legacy COST_PRICE audit и active operator-facing economics
 
-- Current canonical read-side keys для cost overlay:
-  - `cost_price_rub` = SKU-level resolved себестоимость по authoritative `COST_PRICE`
-  - `avg_cost_price_rub` = weighted average по enabled SKU rows
-  - `total_proxy_profit_rub` = canonical TOTAL key для operator-facing строки `Прибыль прокси всего, ₽`
-  - `proxy_margin_pct_total` = canonical TOTAL key для operator-facing строки `Прокси маржинальность всего, %`
+Legacy `COST_PRICE` хранится как server-owned group/effective-date audit dataset, но больше не является active public cost model. Central archived-metric boundary удаляет всю зависимую Proxy 1 closure из catalog, ready-plan rows, public read contract, filters/settings/picker, activity labels and source-group refresh. Persisted historical rows и upload/current-state records не удаляются.
+
+| Stable key(s) | Source / formula | Direct consumers before retirement | Active decision |
+| --- | --- | --- | --- |
+| `wb_stock_fact_qty*`, `total_wb_stock_fact_qty*` | the same `StocksItem.stock_total` / `stock_ru_*` values as `stock_total` / `total_stock_total` and regional canonical rows | Vitrina incident-family presentation only | archived from public catalog/read/filter/UI; raw stock and old ready evidence retained |
+| `wb_stock_incident_qty*`, `total_wb_stock_incident_qty*` | exact selected physical warehouse quantity | Vitrina incident presentation | remains active/public |
+| `wb_stock_effective_qty*`, `total_wb_stock_effective_qty*` | `fact − incident` | Vitrina availability presentation | remains active/public |
+| `cost_price_rub`, `avg_cost_price_rub` | legacy `COST_PRICE` group rule, `max(effective_from <= slot_date)`; TOTAL is enabled-SKU average | Proxy 1 and old operator rows | audit-only; public catalog/read/filter/UI/source status excluded |
+| `proxy_profit_rub`, `profit_proxy_rub`, `total_proxy_profit_rub` | `orderSum × 0.5096 − orderCount × 0.91 × cost_price_rub − ads_sum`; TOTAL sum | legacy Proxy 1 profit/margin and old saved views | retired atomically with its cost dependency |
+| `proxy_margin_pct`, `proxy_margin_pct_total` | Proxy 1 profit divided by order revenue; TOTAL ratio of aggregates | legacy operator rows | retired atomically with Proxy 1 |
+| `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and TOTAL keys | canonical daily WB WAC plus versioned calculation parameters | Web Vitrina, Finance, Partner, SKU Management | remains canonical active/public |
+| `own_capital_*`, `own_total_*` canonical stage/product-capital rows | functional warehouse quantity/capital/WAC projection | Web Vitrina and capital consumers | remains canonical active/public |
+
+Saved metric-presentation state is compatible by intersection with the current server catalog: unknown retired keys are dropped from order/display/expanded anchors, active keys are appended in canonical order, and the cleaned state is persisted on migration or the next explicit user change. No dead metric row or zero-count picker option is created.
 - Current 1C-based profitability keys are runtime-extended from repo code, not guessed from legacy bootstrap:
   - `onec_WB_STOCK_unit_cost_rub` = SKU-level 1C WB unit cost source metric
   - `onec_total_cost_rub` / `total_onec_total_cost_rub` = SKU/TOTAL 1C товарный капитал source metrics
@@ -513,8 +522,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
 - Ordinary manual/auto vitrina refresh reads the already materialized functional warehouse/cost state and never runs WB supply sync, stock fetch or Seller Portal automation. The separate bounded hourly/manual WB pipeline owns external refresh and atomic functional publication.
 - Frozen snapshots created before margin 3 entered the runtime catalog are completed only by the guarded margin-3 one-off runner described above. Ordinary historical refresh, replace-existing materialization and workbook/stock importers are prohibited for this repair because they can rewrite unrelated frozen cells.
 - Management proxy WB cost rows are not strict accounting FIFO. Proxy 2 remains technical archive only and cannot substitute Proxy 3; source/component statuses must stay explicit when values are estimates or pending components.
-- `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
-- `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
+- Existing Proxy 1 keys remain evaluable only for historical/audit reproducibility; they are not active surface keys and cannot be selected by a public source-group refresh.
 
 ## 3.1.2 Daily live refresh scheduling
 
@@ -553,21 +561,21 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - refresh/load cycle защищён bounded mutual exclusion lock и не должен destructively смешивать parallel auto/manual/retry writes
   - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs plus latest semantic auto result payload, чтобы block `Автообновления` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math
-- `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
-- Расчёт остаётся server-side:
-  - SKU `proxy_profit_rub` / `profit_proxy_rub` uses existing canonical formula `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
-  - TOTAL `total_proxy_profit_rub` = sum of SKU `proxy_profit_rub`;
-  - TOTAL `proxy_margin_pct_total` = `total_proxy_profit_rub / total_orderSum`, если denominator допустим.
+- Legacy Proxy 1 calculation remains server-side audit logic only:
+  - SKU `proxy_profit_rub` / `profit_proxy_rub` uses `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
+  - TOTAL `total_proxy_profit_rub` is the sum of SKU `proxy_profit_rub`;
+  - TOTAL `proxy_margin_pct_total` is `total_proxy_profit_rub / total_orderSum`, если denominator допустим;
+  - none of these rows is published through the active public catalog/read/UI.
   - 1C `proxy_profit_2_rub` uses the same coefficients and dependencies as `proxy_profit_rub`, replacing only `cost_price_rub` with `onec_WB_STOCK_unit_cost_rub`;
   - `proxy_profit_3_rub` always uses the effective versioned `buyout_rate`, included expense rates and shared canonical `our_wb_unit_cost_rub` projection; before `2026-07-01` the resolver projects same-`nmId` cost/settings from 01.07 and never reads Proxy 2;
   - `proxy_margin_3_pct` divides by `orderSum × buyout_rate`; TOTAL divides summed complete SKU profits by summed expected buyout revenue. Missing operands stay blank and a zero denominator returns blank; TOTAL is not an average of SKU percentages;
   - 1C percent totals `proxy_margin_2_pct_total` and `inventory_capital_return_pct_total` are ratio-of-aggregates, not averages of SKU rows;
   - margin 3 SKU/TOTAL rows are Python runtime extensions placed immediately after profit 3 and assigned to the same web-vitrina source/group refresh set, so profit and margin update atomically in partial merges;
   - the initial effective version is `91%` buyout, `44%` included expenses and `56%` retained share; hardcoded `0.5096/0.91` are not active Proxy 3 formula inputs.
-- Пустой или неполный `COST_PRICE` dataset не валит refresh/load:
-  - cost-based rows остаются blank;
-  - `STATUS.cost_price[*]` объясняет missing/incomplete coverage;
-  - current truth не подменяет blanks выдуманными значениями.
+- Пустой или неполный `COST_PRICE` dataset не валит active refresh:
+  - internal `STATUS.cost_price[*]` remains truthful audit evidence;
+  - the audit-only source does not downgrade public refresh status and does not appear as an active source;
+  - current public truth не подменяет canonical WB WAC / Proxy 3 legacy group values.
 
 ## 3.2 Expanded operator seed bounded шага
 
@@ -611,7 +619,7 @@ Bounded допущение:
   - `yesterday_closed` читается только из accepted/runtime-cached promo truth;
   - low-confidence cross-year labels не invent-ят exact dates и остаются truthful `promo_start_at/end_at = null`.
 - `stocks[yesterday_closed]` больше не является declared gap: official historical Seller Analytics CSV path materialized и authoritative runtime cache `temporal_source_snapshots[source_key=stocks]` now owns the closed-day truth for this source family.
-- Legacy `cogs_by_group` rule module не используется как live fallback для `sheet_vitrina_v1`: текущий contour опирается только на authoritative `COST_PRICE` dataset.
+- Legacy `cogs_by_group` / `COST_PRICE` contour не используется как live fallback для active Vitrina economics: он сохраняется только для audit reproducibility, while public cost/profit reads canonical WB WAC / Proxy 3.
 - Поэтому full current truth / `STATUS` остаются шире чисто sheet-side presentation pass.
 - Это сознательно лучше, чем тихо подменять server contour локальным fixture/rule path или возвращать heavy aggregation logic в Apps Script.
 
@@ -718,9 +726,9 @@ Bounded допущение:
   - что `GET /v1/sheet-vitrina-v1/job` показывает построчные start / key steps / finish / error для operator actions;
   - что `GET /v1/sheet-vitrina-v1/web-vitrina` возвращает stable library-agnostic contract и honors optional `as_of_date` without refresh/upstream fetch;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
-  - что authoritative `COST_PRICE` current state резолвится server-side по `group + latest effective_from <= slot_date`;
-  - что `total_proxy_profit_rub` и `proxy_margin_pct_total` materialize-ятся в `DATA_VITRINA` только при applicable `COST_PRICE` coverage;
-  - что empty/missing `COST_PRICE` state оставляет cost-based rows blank и surface-ит truthful `STATUS.cost_price[*]`;
+  - что legacy `COST_PRICE` current state and group/effective-date rows remain readable as audit evidence;
+  - что `cost_price_rub`, `avg_cost_price_rub` and the complete Proxy 1 dependency family are absent from active plan/public read/filter/settings/picker and source-group refresh;
+  - что `stock_*`, incident/effective stock, canonical WB WAC / Proxy 3 and product-capital rows remain active;
   - что при отсутствии ready snapshot load path возвращает явную ошибку `ready snapshot missing`;
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
   - что current-snapshot-only sources materialize-ят `yesterday_closed` через accepted-current rollover seam и не blank-ят already accepted previous-day truth;
