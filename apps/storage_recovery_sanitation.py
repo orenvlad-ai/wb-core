@@ -271,7 +271,7 @@ def plan_family(
     verified = sorted(
         analysis["verified"],
         key=lambda item: (
-            int(item["source_mtime_ns"]),
+            _source_generation_mtime_ns(item),
             str(item["archive_path"]),
         ),
         reverse=True,
@@ -709,6 +709,7 @@ def _owned_source_sidecars(bundle: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _archive_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     archive = Path(str(manifest["archive_path"]))
+    source_mtime_ns = _source_generation_mtime_ns(manifest)
     return {
         "archive_path": str(archive),
         "manifest_path": str(
@@ -719,7 +720,12 @@ def _archive_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "source_path": str(manifest["source_path"]),
         "source_size_bytes": int(manifest["source_size_bytes"]),
         "source_sha256": str(manifest["source_sha256"]),
-        "source_mtime_ns": int(manifest["source_mtime_ns"]),
+        "source_mtime_ns": source_mtime_ns,
+        "source_mtime_origin": (
+            "manifest"
+            if manifest.get("source_mtime_ns") is not None
+            else "legacy_archived_at"
+        ),
         "decompressed_size_bytes": int(
             manifest["actual_decompressed_size_bytes"]
         ),
@@ -728,6 +734,37 @@ def _archive_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         ),
         "restore_probe": "verified",
     }
+
+
+def _source_generation_mtime_ns(manifest: dict[str, Any]) -> int:
+    """Return a stable generation order for current and legacy manifests."""
+
+    explicit = manifest.get("source_mtime_ns")
+    if explicit is not None:
+        return int(explicit)
+    archived_at = str(manifest.get("archived_at") or "").strip()
+    if not archived_at:
+        raise SanitationError(
+            "verified legacy archive has neither source_mtime_ns nor archived_at"
+        )
+    try:
+        parsed = datetime.fromisoformat(archived_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SanitationError(
+            "verified legacy archive has an invalid archived_at"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise SanitationError(
+            "verified legacy archive archived_at must include timezone"
+        )
+    utc = parsed.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = utc - epoch
+    return (
+        delta.days * 86_400 * 1_000_000_000
+        + delta.seconds * 1_000_000_000
+        + delta.microseconds * 1_000
+    )
 
 
 def _canonical_roots(

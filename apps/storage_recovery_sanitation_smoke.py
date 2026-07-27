@@ -130,6 +130,27 @@ def run() -> None:
         verified = verify_archive_manifest(manifests[0])
         assert verified["actual_decompressed_sha256"] == verified["source_sha256"]
         assert foreign.read_text(encoding="utf-8") == "keep"
+
+        # Stage 1 standard manifests predate source_mtime_ns. Their verified
+        # archived_at remains an exact, timezone-aware generation-order fallback.
+        legacy_manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        legacy_manifest.pop("source_mtime_ns")
+        manifests[0].write_text(
+            json.dumps(legacy_manifest, sort_keys=True),
+            encoding="utf-8",
+        )
+        legacy_plan = plan_family(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            root_name="root",
+            family="wb-finance-canonical",
+            reserved_free_bytes=0,
+        )
+        assert legacy_plan["status"] == "no_change"
+        assert legacy_plan["retained"][0]["source_mtime_origin"] == (
+            "legacy_archived_at"
+        )
+
         legacy_sidecar = Path(str(verified["source_path"]) + "-shm")
         legacy_sidecar.write_bytes(b"\0" * 32768)
         sidecar_plan = plan_family(
