@@ -68,7 +68,7 @@ def main() -> None:
         if any(cell == "Дефицит" for row in direct_rows for cell in row):
             raise AssertionError("direct operator export must not contain deficit header or values")
 
-        broken = _result_payload()
+        broken = _result_payload(calculation_id="export-run-broken")
         broken["districts"][1]["rows"] = [
             _row(999999, "SKU без баркода", allocated_qty=4),
         ]
@@ -81,7 +81,7 @@ def main() -> None:
             if (
                 "атомарно отменена" not in message
                 or "ЦФО Юг" not in message
-                or "R260720-export-run-001-002" not in message
+                or "R260720-export-run-broken-002" not in message
                 or "SKU nmId=999999" not in message
                 or "отсутствует баркод" not in message
             ):
@@ -176,7 +176,7 @@ def _check_single_recommendation_archive(
     runtime: RegistryUploadDbBackedRuntime,
     block: WbRegionalSupplyBlock,
 ) -> None:
-    payload = _result_payload()
+    payload = _result_payload(calculation_id="export-run-single")
     payload["districts"] = [payload["districts"][0]]
     payload["settings"]["included_district_keys"] = [PLANNING_ZONE_CENTRAL_NORTH]
     payload["summary"] = {"total_qty": 5, "estimated_weight": 0.43, "estimated_volume": 0.0}
@@ -192,7 +192,7 @@ def _check_same_destination_archive(
     runtime: RegistryUploadDbBackedRuntime,
     block: WbRegionalSupplyBlock,
 ) -> None:
-    payload = _result_payload()
+    payload = _result_payload(calculation_id="export-run-same-destination")
     payload["districts"][1]["planning_zone_label"] = "ЦФО Север"
     runtime.save_wb_regional_supply_result_state(calculated_at=CALCULATED_AT, payload=payload)
     archive_bytes, _ = block.download_all_recommendations_archive()
@@ -308,7 +308,10 @@ def _nomenclature(nm_id: int, barcode: str, name: str) -> dict[str, object]:
     }
 
 
-def _result_payload() -> dict[str, object]:
+def _result_payload(
+    *,
+    calculation_id: str = CALCULATION_ID,
+) -> dict[str, object]:
     districts = [
         {
             "district_key": PLANNING_ZONE_CENTRAL_NORTH,
@@ -336,7 +339,7 @@ def _result_payload() -> dict[str, object]:
     return {
         "payload_version": "v2_planning_zones",
         "status": "success",
-        "calculation_id": CALCULATION_ID,
+        "calculation_id": calculation_id,
         "calculated_at": CALCULATED_AT,
         "report_date": REPORT_DATE,
         "horizon_days": 7,

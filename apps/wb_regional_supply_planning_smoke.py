@@ -509,7 +509,7 @@ def _seed_last_result(
         payload={
             "status": "success",
             "payload_version": "v2_planning_zones",
-            "calculation_id": "calc-planning-smoke",
+            "calculation_id": f"calc-planning-smoke-{allocated_second}",
             "calculated_at": ACTIVATED_AT,
             "report_date": "2026-07-19",
             "settings": {"included_district_keys": list(SUPPLY_PLANNING_ZONE_KEYS)},

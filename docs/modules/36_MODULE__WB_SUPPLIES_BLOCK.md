@@ -91,7 +91,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
 # 1. Contract
 
 - Operator surface: `Поставки` has sibling inner sections `Расчёты`, `Wildberries`, `ФФ`, `От поставщика`. The `ФФ` section contains inner subsections `Услуги ФФ` and `Остатки ФФ`.
-- `Расчёты` keeps the existing factory-order and WB regional calculators.
+- `Расчёты` keeps the factory-order and WB regional calculators and adds their shared read-only immutable `Реестр расчётов`; the registry is a calculation-history surface, not a second WB supplies source.
 - `Услуги ФФ` is a separate server-owned upload/payment-validation contour documented in `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md`; this module only defines how active approved Fulfillment expense lines are rendered over WB supply rows.
 - `От поставщика` remains the supplier invoice registry and is not redefined by this module.
 - `Wildberries` renders one screen:
@@ -343,7 +343,10 @@ Contract:
 - quantity source is only goods composition `nmId -> quantity`; accepted/ready/partial reception fields are not used for overlay quantity;
 - unknown active SKU, missing `nmId`, missing/non-positive quantity and non-active `nmId` goods rows are skipped with diagnostics;
 - response exposes status/date evidence, date source field, warehouse/district mapping evidence, usable SKU count/quantity, skipped goods and disabled reasons.
-- the operator UI `Обновить список` action is sync-first: it runs bounded official `POST .../wb-supplies/sync` with `enrich=changed_only`, reloads cached list/options, preserves valid selected ids and shows a controlled warning when stale/invalid selected ids are dropped after revalidation.
+- the first successful options load of a fresh operator page visibly selects every option where the backend returns `eligible_for_overlay=true` and `disabled=false`; browser code does not duplicate status/date/composition/mapping eligibility rules;
+- after that first default, manual uncheck/recheck is preserved across `Обновить список`, repeated option loads, rerenders and switching between factory/regional forms. Refresh may only drop an id that is no longer present/valid and never silently re-add a manually removed id. A new page open starts a new selection session and evaluates the current backend default again;
+- exact visible selected ids are posted as `selected_wb_supply_ids` and stored with the calculation result/immutable registry evidence. Empty and partial manual selections remain valid;
+- the operator UI `Обновить список` action is sync-first: it runs bounded official `POST .../wb-supplies/sync` with `enrich=changed_only`, reloads cached list/options, preserves the current manual selection and shows a controlled warning when stale/invalid selected ids are dropped after revalidation.
 
 # 4.1 Warehouse District Mapping
 

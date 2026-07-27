@@ -439,6 +439,18 @@
       "methods": ["GET", "POST"]
     },
     {
+      "name": "sheet_vitrina_supply_calculations",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/calculations",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_calculation_records",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/calculations/",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_supply_wb_warehouse_exclusion_options",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options",

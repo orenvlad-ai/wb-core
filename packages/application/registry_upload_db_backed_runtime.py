@@ -81,6 +81,12 @@ SUPPLIER_CONFIRMATION_DB_FILENAME = "supplier_confirmation_runtime.sqlite3"
 MIN_SQLITE_BUSY_TIMEOUT_MS = 5_000
 DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000
 MAX_SQLITE_BUSY_TIMEOUT_MS = 300_000
+SUPPLY_CALCULATION_REGISTRY_MAX_COMPLETE_RECORDS = 200
+SUPPLY_CALCULATION_REGISTRY_DEFAULT_PAGE_SIZE = 25
+SUPPLY_CALCULATION_REGISTRY_MAX_PAGE_SIZE = 100
+SUPPLY_CALCULATION_REGISTRY_MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
+SUPPLY_CALCULATION_REGISTRY_MAX_METADATA_BYTES = 8 * 1024 * 1024
+SUPPLY_CALCULATION_REGISTRY_MAX_EXPORT_BYTES = 64 * 1024 * 1024
 _SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
 _SCHEMA_READY_LOCK = threading.Lock()
 _CONFIRMATION_SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
@@ -7128,27 +7134,25 @@ class RegistryUploadDbBackedRuntime:
         *,
         calculated_at: str,
         payload: Mapping[str, Any],
+        evidence: Mapping[str, Any] | None = None,
+        export_bytes: bytes | None = None,
+        export_filename: str | None = None,
+        export_content_type: str | None = None,
     ) -> None:
         _validate_timestamp(calculated_at, field_name="calculated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_factory_order_result_state(
-                    slot,
-                    calculated_at,
-                    result_json
-                )
-                VALUES(1, ?, ?)
-                ON CONFLICT(slot) DO UPDATE SET
-                    calculated_at = excluded.calculated_at,
-                    result_json = excluded.result_json
-                """,
-                (
-                    calculated_at,
-                    json.dumps(dict(payload), ensure_ascii=False),
-                ),
+            _save_supply_calculation_record(
+                conn,
+                calculation_type="factory_order",
+                calculated_at=calculated_at,
+                payload=payload,
+                evidence=evidence,
+                export_bytes=export_bytes,
+                export_filename=export_filename,
+                export_content_type=export_content_type,
+                latest_table="sheet_vitrina_v1_factory_order_result_state",
             )
             conn.commit()
 
@@ -7174,51 +7178,50 @@ class RegistryUploadDbBackedRuntime:
         *,
         calculated_at: str,
         payload: Mapping[str, Any],
+        evidence: Mapping[str, Any] | None = None,
+        export_bytes: bytes | None = None,
+        export_filename: str | None = None,
+        export_content_type: str | None = None,
     ) -> None:
         _validate_timestamp(calculated_at, field_name="calculated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_wb_regional_supply_result_state(
-                    slot,
-                    calculated_at,
-                    result_json
-                )
-                VALUES(1, ?, ?)
-                ON CONFLICT(slot) DO UPDATE SET
-                    calculated_at = excluded.calculated_at,
-                    result_json = excluded.result_json
-                """,
-                (
-                    calculated_at,
-                    json.dumps(dict(payload), ensure_ascii=False),
-                ),
-            )
-            audit_row = _build_wb_regional_supply_calculation_audit_row(
+            registry_inserted = _save_supply_calculation_record(
+                conn,
+                calculation_type="wb_regional",
                 calculated_at=calculated_at,
                 payload=payload,
+                evidence=evidence,
+                export_bytes=export_bytes,
+                export_filename=export_filename,
+                export_content_type=export_content_type,
+                latest_table="sheet_vitrina_v1_wb_regional_supply_result_state",
             )
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_wb_regional_supply_calculation_audit(
-                    saved_at,
-                    calculated_at,
-                    calculation_id,
-                    report_date,
-                    metadata_json
+            if registry_inserted:
+                audit_row = _build_wb_regional_supply_calculation_audit_row(
+                    calculated_at=calculated_at,
+                    payload=payload,
                 )
-                VALUES(?, ?, ?, ?, ?)
-                """,
-                (
-                    calculated_at,
-                    audit_row["calculated_at"],
-                    audit_row["calculation_id"],
-                    audit_row["report_date"],
-                    json.dumps(audit_row, ensure_ascii=False, sort_keys=True),
-                ),
-            )
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_wb_regional_supply_calculation_audit(
+                        saved_at,
+                        calculated_at,
+                        calculation_id,
+                        report_date,
+                        metadata_json
+                    )
+                    VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (
+                        calculated_at,
+                        audit_row["calculated_at"],
+                        audit_row["calculation_id"],
+                        audit_row["report_date"],
+                        json.dumps(audit_row, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
             conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
@@ -7231,6 +7234,233 @@ class RegistryUploadDbBackedRuntime:
                 """
             )
             conn.commit()
+
+    def describe_temporal_source_window(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+    ) -> dict[str, Any]:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT snapshot_date, captured_at, payload_json
+                FROM temporal_source_snapshots
+                WHERE source_key = ?
+                  AND snapshot_date >= ?
+                  AND snapshot_date <= ?
+                ORDER BY snapshot_date ASC
+                """,
+                (str(source_key or "").strip(), date_from, date_to),
+            ).fetchall()
+        digest_payload = [
+            {
+                "snapshot_date": str(row["snapshot_date"]),
+                "captured_at": str(row["captured_at"] or ""),
+                "payload_sha256": "sha256:" + hashlib.sha256(
+                    str(row["payload_json"] or "").encode("utf-8")
+                ).hexdigest(),
+            }
+            for row in rows
+        ]
+        return {
+            "source_key": str(source_key or "").strip(),
+            "date_from": date_from,
+            "date_to": date_to,
+            "snapshot_count": len(rows),
+            "earliest_snapshot_date": str(rows[0]["snapshot_date"]) if rows else "",
+            "latest_snapshot_date": str(rows[-1]["snapshot_date"]) if rows else "",
+            "captured_at_min": min((str(row["captured_at"] or "") for row in rows), default=""),
+            "captured_at_max": max((str(row["captured_at"] or "") for row in rows), default=""),
+            "fingerprint": _canonical_json_sha256(digest_payload),
+        }
+
+    def describe_factory_order_dataset_evidence(self, dataset_type: str) -> dict[str, Any]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    uploaded_at,
+                    row_count,
+                    rows_json,
+                    uploaded_filename,
+                    uploaded_content_type,
+                    workbook_blob
+                FROM sheet_vitrina_v1_factory_order_dataset_state
+                WHERE dataset_type = ?
+                """,
+                (str(dataset_type or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return {
+                "dataset_type": str(dataset_type or "").strip(),
+                "status": "missing",
+                "row_count": 0,
+                "rows_fingerprint": _canonical_json_sha256([]),
+                "workbook_sha256": "",
+            }
+        workbook_bytes = bytes(row["workbook_blob"] or b"")
+        try:
+            rows_payload = json.loads(str(row["rows_json"] or "[]"))
+        except json.JSONDecodeError:
+            rows_payload = []
+        return {
+            "dataset_type": str(dataset_type or "").strip(),
+            "status": "uploaded",
+            "uploaded_at": str(row["uploaded_at"] or ""),
+            "row_count": int(row["row_count"] or 0),
+            "uploaded_filename": str(row["uploaded_filename"] or ""),
+            "uploaded_content_type": str(row["uploaded_content_type"] or ""),
+            "rows_fingerprint": _canonical_json_sha256(rows_payload),
+            "workbook_sha256": (
+                "sha256:" + hashlib.sha256(workbook_bytes).hexdigest()
+                if workbook_bytes
+                else ""
+            ),
+        }
+
+    def list_supply_calculation_registry(
+        self,
+        *,
+        calculation_type: str | None = None,
+        report_date_from: str | None = None,
+        report_date_to: str | None = None,
+        limit: int = SUPPLY_CALCULATION_REGISTRY_DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        normalized_type = _normalize_supply_calculation_type(
+            calculation_type,
+            allow_empty=True,
+        )
+        normalized_date_from = str(report_date_from or "").strip()
+        normalized_date_to = str(report_date_to or "").strip()
+        if normalized_date_from:
+            _validate_iso_date(normalized_date_from, field_name="report_date_from")
+        if normalized_date_to:
+            _validate_iso_date(normalized_date_to, field_name="report_date_to")
+        if normalized_date_from and normalized_date_to and normalized_date_to < normalized_date_from:
+            raise ValueError("report_date_to must be >= report_date_from")
+        normalized_limit = min(
+            max(int(limit), 1),
+            SUPPLY_CALCULATION_REGISTRY_MAX_PAGE_SIZE,
+        )
+        normalized_offset = max(int(offset), 0)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if normalized_type:
+            clauses.append("calculation_type = ?")
+            params.append(normalized_type)
+        if normalized_date_from:
+            clauses.append("report_date >= ?")
+            params.append(normalized_date_from)
+        if normalized_date_to:
+            clauses.append("report_date <= ?")
+            params.append(normalized_date_to)
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            total_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS row_count
+                FROM sheet_vitrina_v1_supply_calculation_registry
+                {where_sql}
+                """,
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_supply_calculation_registry
+                {where_sql}
+                ORDER BY calculated_at DESC, record_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, normalized_limit, normalized_offset),
+            ).fetchall()
+        return {
+            "contract_name": "sheet_vitrina_v1_supply_calculation_registry",
+            "contract_version": 1,
+            "retention": {
+                "complete_record_limit": SUPPLY_CALCULATION_REGISTRY_MAX_COMPLETE_RECORDS,
+                "legacy_metadata_source_limit": 200,
+                "default_page_size": SUPPLY_CALCULATION_REGISTRY_DEFAULT_PAGE_SIZE,
+                "max_page_size": SUPPLY_CALCULATION_REGISTRY_MAX_PAGE_SIZE,
+                "order": "calculated_at DESC, record_id DESC",
+                "max_payload_bytes": SUPPLY_CALCULATION_REGISTRY_MAX_PAYLOAD_BYTES,
+                "max_metadata_bytes": SUPPLY_CALCULATION_REGISTRY_MAX_METADATA_BYTES,
+                "max_export_bytes": SUPPLY_CALCULATION_REGISTRY_MAX_EXPORT_BYTES,
+            },
+            "filters": {
+                "calculation_type": normalized_type or "",
+                "report_date_from": normalized_date_from,
+                "report_date_to": normalized_date_to,
+            },
+            "pagination": {
+                "limit": normalized_limit,
+                "offset": normalized_offset,
+                "total": int(total_row["row_count"] if total_row is not None else 0),
+            },
+            "records": [_supply_calculation_registry_row_to_list_item(row) for row in rows],
+        }
+
+    def load_supply_calculation_registry_record(self, record_id: str) -> dict[str, Any] | None:
+        normalized_record_id = str(record_id or "").strip()
+        if not normalized_record_id:
+            raise ValueError("record_id is required")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supply_calculation_registry
+                WHERE record_id = ?
+                """,
+                (normalized_record_id,),
+            ).fetchone()
+        return _supply_calculation_registry_row_to_detail(row) if row is not None else None
+
+    def load_supply_calculation_registry_export(
+        self,
+        record_id: str,
+    ) -> tuple[bytes, str, str]:
+        normalized_record_id = str(record_id or "").strip()
+        if not normalized_record_id:
+            raise ValueError("record_id is required")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    completeness,
+                    export_filename,
+                    export_content_type,
+                    export_blob
+                FROM sheet_vitrina_v1_supply_calculation_registry
+                WHERE record_id = ?
+                """,
+                (normalized_record_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(normalized_record_id)
+        if str(row["completeness"] or "") != "complete":
+            raise ValueError(
+                "Legacy metadata-only запись не содержит воспроизводимого payload/export."
+            )
+        export_bytes = bytes(row["export_blob"] or b"")
+        if not export_bytes:
+            raise ValueError("Историческая выгрузка для этой записи недоступна.")
+        return (
+            export_bytes,
+            str(row["export_filename"] or "calculation-export.bin"),
+            str(row["export_content_type"] or "application/octet-stream"),
+        )
 
     def load_wb_regional_supply_result_state(self) -> dict[str, Any] | None:
         with _connect(self.db_path) as conn:
@@ -9051,6 +9281,416 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _canonical_supply_calculation_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(
+        _canonical_supply_calculation_json(value).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_supply_calculation_type(
+    value: Any,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "factory": "factory_order",
+        "factory_order": "factory_order",
+        "regional": "wb_regional",
+        "wb_regional": "wb_regional",
+    }
+    if not normalized and allow_empty:
+        return ""
+    if normalized not in aliases:
+        raise ValueError("calculation_type must be factory_order or wb_regional")
+    return aliases[normalized]
+
+
+def _save_supply_calculation_record(
+    conn: sqlite3.Connection,
+    *,
+    calculation_type: str,
+    calculated_at: str,
+    payload: Mapping[str, Any],
+    evidence: Mapping[str, Any] | None,
+    export_bytes: bytes | None,
+    export_filename: str | None,
+    export_content_type: str | None,
+    latest_table: str,
+) -> bool:
+    normalized_type = _normalize_supply_calculation_type(calculation_type)
+    payload_dict = dict(payload)
+    calculation_id = str(payload_dict.get("calculation_id") or "").strip()
+    if not calculation_id:
+        raise ValueError("calculation_id is required for immutable registry persistence")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", calculation_id):
+        raise ValueError("calculation_id has invalid format")
+    report_date = str(payload_dict.get("report_date") or "").strip()
+    _validate_iso_date(report_date, field_name="report_date")
+    payload_json = _canonical_supply_calculation_json(payload_dict)
+    if len(payload_json.encode("utf-8")) > SUPPLY_CALCULATION_REGISTRY_MAX_PAYLOAD_BYTES:
+        raise ValueError("calculation registry payload exceeds bounded storage limit")
+    payload_sha256 = "sha256:" + hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    normalized_export_bytes = bytes(export_bytes or b"")
+    if len(normalized_export_bytes) > SUPPLY_CALCULATION_REGISTRY_MAX_EXPORT_BYTES:
+        raise ValueError("calculation registry export exceeds bounded storage limit")
+    normalized_export_filename = str(export_filename or "").strip()
+    normalized_export_content_type = str(export_content_type or "").strip()
+    export_sha256 = (
+        "sha256:" + hashlib.sha256(normalized_export_bytes).hexdigest()
+        if normalized_export_bytes
+        else ""
+    )
+    metadata = _build_supply_calculation_registry_metadata(
+        calculation_type=normalized_type,
+        payload=payload_dict,
+        evidence=evidence,
+        export_filename=normalized_export_filename,
+        export_content_type=normalized_export_content_type,
+        export_sha256=export_sha256,
+    )
+    metadata_json = _canonical_supply_calculation_json(metadata)
+    if len(metadata_json.encode("utf-8")) > SUPPLY_CALCULATION_REGISTRY_MAX_METADATA_BYTES:
+        raise ValueError("calculation registry metadata exceeds bounded storage limit")
+    existing = conn.execute(
+        """
+        SELECT
+            calculation_type,
+            completeness,
+            calculated_at,
+            payload_sha256,
+            metadata_json,
+            export_sha256,
+            export_filename,
+            export_content_type
+        FROM sheet_vitrina_v1_supply_calculation_registry
+        WHERE record_id = ?
+        """,
+        (calculation_id,),
+    ).fetchone()
+    if existing is not None:
+        exact_same = (
+            str(existing["calculation_type"] or "") == normalized_type
+            and str(existing["completeness"] or "") == "complete"
+            and str(existing["calculated_at"] or "") == calculated_at
+            and str(existing["payload_sha256"] or "") == payload_sha256
+            and str(existing["metadata_json"] or "") == metadata_json
+            and str(existing["export_sha256"] or "") == export_sha256
+            and str(existing["export_filename"] or "") == normalized_export_filename
+            and str(existing["export_content_type"] or "") == normalized_export_content_type
+        )
+        if not exact_same:
+            raise ValueError(
+                f"calculation_id collision for immutable registry record: {calculation_id}"
+            )
+        registry_inserted = False
+    else:
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_supply_calculation_registry(
+                record_id,
+                calculation_id,
+                calculation_type,
+                completeness,
+                calculated_at,
+                report_date,
+                status,
+                payload_json,
+                metadata_json,
+                payload_sha256,
+                export_filename,
+                export_content_type,
+                export_blob,
+                export_sha256,
+                source,
+                source_id,
+                created_at
+            )
+            VALUES(?, ?, ?, 'complete', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'calculation', ?, ?)
+            """,
+            (
+                calculation_id,
+                calculation_id,
+                normalized_type,
+                calculated_at,
+                report_date,
+                str(payload_dict.get("status") or ""),
+                payload_json,
+                metadata_json,
+                payload_sha256,
+                normalized_export_filename or None,
+                normalized_export_content_type or None,
+                sqlite3.Binary(normalized_export_bytes) if normalized_export_bytes else None,
+                export_sha256 or None,
+                calculation_id,
+                calculated_at,
+            ),
+        )
+        registry_inserted = True
+
+    conn.execute(
+        f"""
+        INSERT INTO {latest_table}(
+            slot,
+            calculated_at,
+            result_json
+        )
+        VALUES(1, ?, ?)
+        ON CONFLICT(slot) DO UPDATE SET
+            calculated_at = excluded.calculated_at,
+            result_json = excluded.result_json
+        """,
+        (calculated_at, payload_json),
+    )
+    protected_record_ids = _latest_supply_calculation_record_ids(conn)
+    protected_placeholders = ",".join("?" for _ in protected_record_ids)
+    conn.execute(
+        f"""
+        DELETE FROM sheet_vitrina_v1_supply_calculation_registry
+        WHERE completeness = 'complete'
+          AND record_id NOT IN (
+              SELECT record_id
+              FROM sheet_vitrina_v1_supply_calculation_registry
+              WHERE completeness = 'complete'
+              ORDER BY
+                  CASE
+                      WHEN record_id IN ({protected_placeholders}) THEN 0
+                      ELSE 1
+                  END,
+                  calculated_at DESC,
+                  record_id DESC
+              LIMIT ?
+          )
+        """,
+        (
+            *protected_record_ids,
+            SUPPLY_CALCULATION_REGISTRY_MAX_COMPLETE_RECORDS,
+        ),
+    )
+    return registry_inserted
+
+
+def _latest_supply_calculation_record_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    record_ids: set[str] = set()
+    for table_name in (
+        "sheet_vitrina_v1_factory_order_result_state",
+        "sheet_vitrina_v1_wb_regional_supply_result_state",
+    ):
+        row = conn.execute(
+            f"SELECT result_json FROM {table_name} WHERE slot = 1"
+        ).fetchone()
+        if row is None:
+            continue
+        payload = _loads_json_object(row["result_json"])
+        calculation_id = str(payload.get("calculation_id") or "").strip()
+        if calculation_id:
+            record_ids.add(calculation_id)
+    return tuple(sorted(record_ids))
+
+
+def _build_supply_calculation_registry_metadata(
+    *,
+    calculation_type: str,
+    payload: Mapping[str, Any],
+    evidence: Mapping[str, Any] | None,
+    export_filename: str,
+    export_content_type: str,
+    export_sha256: str,
+) -> dict[str, Any]:
+    settings = _mapping_or_empty(payload.get("settings"))
+    summary = _mapping_or_empty(payload.get("summary"))
+    overlay = _mapping_or_empty(payload.get("wb_supply_overlay"))
+    selected_ids_payload = settings.get("selected_wb_supply_ids")
+    selected_ids = [
+        str(item)
+        for item in selected_ids_payload
+        if str(item or "").strip()
+    ] if isinstance(selected_ids_payload, (list, tuple)) else []
+    selected_supply_count = _audit_int(
+        overlay.get("selected_supply_count", overlay.get("selected_supplies_count"))
+    ) or len(selected_ids)
+    selected_supply_qty = _audit_float(
+        _mapping_or_empty(overlay.get("stock_ff")).get(
+            "total_selected_qty",
+            overlay.get("stock_ff_total_selected"),
+        )
+    )
+    incident = _mapping_or_empty(payload.get("wb_warehouse_exclusion"))
+    policy = _mapping_or_empty(incident.get("policy"))
+    quality = _mapping_or_empty(incident.get("quality"))
+    incident_revision = _audit_int(
+        incident.get("policy_revision", quality.get("policy_revision", policy.get("revision")))
+    )
+    incident_status = (
+        "active"
+        if bool(incident.get("policy_active", policy.get("active")))
+        else "inactive"
+    )
+    if not incident and not policy and not quality:
+        incident_status = "unknown"
+    key_settings = {
+        key: settings.get(key)
+        for key in (
+            "stock_ff_source",
+            "factory_inbound_source",
+            "sales_avg_period_days",
+            "prod_lead_time_days",
+            "lead_time_factory_to_ff_days",
+            "lead_time_ff_to_wb_days",
+            "safety_days_mp",
+            "safety_days_ff",
+            "cycle_order_days",
+            "cycle_supply_days",
+            "lead_time_to_region_days",
+            "lead_time_to_region_days_by_district",
+            "safety_days",
+            "order_batch_qty",
+            "included_district_keys",
+        )
+        if key in settings
+    }
+    return {
+        "contract_name": "sheet_vitrina_v1_supply_calculation_registry_record",
+        "contract_version": 1,
+        "calculation_type": calculation_type,
+        "calculation_id": str(payload.get("calculation_id") or ""),
+        "calculated_at": str(payload.get("calculated_at") or ""),
+        "report_date": str(payload.get("report_date") or ""),
+        "status": str(payload.get("status") or ""),
+        "summary": {
+            "total_qty": _audit_int(summary.get("total_qty")),
+            "estimated_weight": _audit_float(summary.get("estimated_weight")),
+            "estimated_volume": _audit_float(summary.get("estimated_volume")),
+        },
+        "key_settings": key_settings,
+        "selected_wb_supply_ids": selected_ids,
+        "selected_wb_supply_count": selected_supply_count,
+        "selected_wb_supply_qty": selected_supply_qty,
+        "incident_policy": {
+            "revision": incident_revision,
+            "status": incident_status,
+            "effective_from": str(
+                policy.get("effective_from")
+                or quality.get("policy_effective_date")
+                or ""
+            ),
+            "snapshot_date": str(
+                incident.get("snapshot_date")
+                or quality.get("snapshot_date")
+                or ""
+            ),
+            "snapshot_digest": str(
+                incident.get("snapshot_digest")
+                or incident.get("raw_rows_digest")
+                or quality.get("raw_rows_digest")
+                or ""
+            ),
+            "quality_state": str(quality.get("state") or ""),
+        },
+        "warning_count": len(payload.get("warnings") or [])
+        if isinstance(payload.get("warnings"), (list, tuple))
+        else 0,
+        "evidence": dict(evidence or {}),
+        "export": {
+            "filename": export_filename,
+            "content_type": export_content_type,
+            "sha256": export_sha256,
+            "available": bool(export_sha256),
+        },
+    }
+
+
+def _supply_calculation_registry_row_metadata(row: sqlite3.Row) -> dict[str, Any]:
+    metadata = _loads_json_object(row["metadata_json"])
+    if metadata:
+        return metadata
+    return {
+        "calculation_id": str(row["calculation_id"] or ""),
+        "calculation_type": str(row["calculation_type"] or ""),
+        "calculated_at": str(row["calculated_at"] or ""),
+        "report_date": str(row["report_date"] or ""),
+        "status": str(row["status"] or ""),
+    }
+
+
+def _supply_calculation_registry_row_to_list_item(row: sqlite3.Row) -> dict[str, Any]:
+    metadata = _supply_calculation_registry_row_metadata(row)
+    summary = _mapping_or_empty(metadata.get("summary"))
+    incident = _mapping_or_empty(metadata.get("incident_policy"))
+    export = _mapping_or_empty(metadata.get("export"))
+    legacy_settings = _mapping_or_empty(metadata.get("settings"))
+    key_settings = _mapping_or_empty(metadata.get("key_settings")) or legacy_settings
+    legacy_overlay = _mapping_or_empty(metadata.get("wb_supply_overlay_summary"))
+    selected_supply_count = _audit_int(metadata.get("selected_wb_supply_count"))
+    if not selected_supply_count:
+        selected_supply_count = _audit_int(
+            legacy_settings.get(
+                "selected_wb_supply_ids_count",
+                legacy_overlay.get("selected_supply_count"),
+            )
+        )
+    selected_supply_qty = _audit_float(metadata.get("selected_wb_supply_qty"))
+    if not selected_supply_qty:
+        selected_supply_qty = _audit_float(
+            legacy_overlay.get("stock_ff_total_selected")
+        )
+    return {
+        "record_id": str(row["record_id"]),
+        "calculation_id": str(row["calculation_id"] or ""),
+        "calculation_type": str(row["calculation_type"] or ""),
+        "completeness": str(row["completeness"] or ""),
+        "is_reproducible": str(row["completeness"] or "") == "complete",
+        "calculated_at": str(row["calculated_at"] or ""),
+        "report_date": str(row["report_date"] or ""),
+        "status": str(row["status"] or ""),
+        "summary": dict(summary),
+        "key_settings": dict(key_settings),
+        "selected_wb_supply_count": selected_supply_count,
+        "selected_wb_supply_qty": selected_supply_qty,
+        "incident_policy": dict(incident),
+        "warning_count": _audit_int(metadata.get("warning_count")),
+        "download_available": bool(
+            str(row["completeness"] or "") == "complete"
+            and bool(row["export_blob"])
+        ),
+        "export": dict(export),
+        "legacy_note": (
+            "Старая metadata-only запись: точный payload и выгрузка не сохранялись."
+            if str(row["completeness"] or "") != "complete"
+            else ""
+        ),
+    }
+
+
+def _supply_calculation_registry_row_to_detail(row: sqlite3.Row) -> dict[str, Any]:
+    result = _supply_calculation_registry_row_to_list_item(row)
+    payload_json = str(row["payload_json"] or "")
+    try:
+        payload = json.loads(payload_json) if payload_json else None
+    except json.JSONDecodeError:
+        payload = None
+    metadata = _supply_calculation_registry_row_metadata(row)
+    result.update(
+        {
+            "payload": payload if isinstance(payload, dict) else None,
+            "payload_sha256": str(row["payload_sha256"] or ""),
+            "metadata": metadata,
+            "evidence": dict(_mapping_or_empty(metadata.get("evidence"))),
+            "export_sha256": str(row["export_sha256"] or ""),
+        }
+    )
+    return result
+
+
 def _build_wb_regional_supply_calculation_audit_row(
     *,
     calculated_at: str,
@@ -10042,6 +10682,42 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_regional_supply_calculation_audit_recent
         ON sheet_vitrina_v1_wb_regional_supply_calculation_audit(id DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supply_calculation_registry (
+            record_id TEXT PRIMARY KEY,
+            calculation_id TEXT NOT NULL,
+            calculation_type TEXT NOT NULL,
+            completeness TEXT NOT NULL,
+            calculated_at TEXT NOT NULL,
+            report_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT,
+            metadata_json TEXT NOT NULL,
+            payload_sha256 TEXT,
+            export_filename TEXT,
+            export_content_type TEXT,
+            export_blob BLOB,
+            export_sha256 TEXT,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(source, source_id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS sheet_vitrina_v1_supply_calculation_registry_complete_identity
+        ON sheet_vitrina_v1_supply_calculation_registry(calculation_type, calculation_id)
+        WHERE completeness = 'complete';
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supply_calculation_registry_recent
+        ON sheet_vitrina_v1_supply_calculation_registry(calculated_at DESC, record_id DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supply_calculation_registry_type_date
+        ON sheet_vitrina_v1_supply_calculation_registry(
+            calculation_type,
+            report_date DESC,
+            calculated_at DESC,
+            record_id DESC
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies (
             supply_id TEXT PRIMARY KEY,
@@ -11122,6 +11798,78 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_factory_order_dataset_state",
         column_name="workbook_blob",
         column_sql="BLOB",
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO sheet_vitrina_v1_supply_calculation_registry(
+            record_id,
+            calculation_id,
+            calculation_type,
+            completeness,
+            calculated_at,
+            report_date,
+            status,
+            payload_json,
+            metadata_json,
+            payload_sha256,
+            export_filename,
+            export_content_type,
+            export_blob,
+            export_sha256,
+            source,
+            source_id,
+            created_at
+        )
+        SELECT
+            'legacy-regional-audit:' || CAST(audit.id AS TEXT),
+            audit.calculation_id,
+            'wb_regional',
+            'legacy_metadata',
+            audit.calculated_at,
+            audit.report_date,
+            'legacy',
+            NULL,
+            audit.metadata_json,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            'regional_metadata_audit',
+            CAST(audit.id AS TEXT),
+            audit.saved_at
+        FROM (
+            SELECT
+                id,
+                saved_at,
+                calculated_at,
+                calculation_id,
+                report_date,
+                metadata_json
+            FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
+            ORDER BY id DESC
+            LIMIT 200
+        ) AS audit
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM sheet_vitrina_v1_supply_calculation_registry AS complete
+            WHERE complete.completeness = 'complete'
+              AND complete.calculation_type = 'wb_regional'
+              AND complete.calculation_id = audit.calculation_id
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM sheet_vitrina_v1_supply_calculation_registry
+        WHERE source = 'regional_metadata_audit'
+          AND source_id NOT IN (
+              SELECT CAST(id AS TEXT)
+              FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
+              ORDER BY id DESC
+              LIMIT 200
+          )
+        """
     )
 def _ensure_column(
     conn: sqlite3.Connection,

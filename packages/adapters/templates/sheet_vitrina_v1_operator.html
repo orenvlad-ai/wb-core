@@ -4372,6 +4372,7 @@
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы расчёта поставок">
           <button class="subsection-button is-active" type="button" data-supply-section-button="factory" aria-selected="true">Заказ на фабрике</button>
           <button class="subsection-button" type="button" data-supply-section-button="regional" aria-selected="false">Поставка на Wildberries</button>
+          <button class="subsection-button" type="button" data-supply-section-button="registry" aria-selected="false">Реестр расчётов</button>
         </div>
 
         <section class="supply-panel" data-supply-section-panel="factory">
@@ -4742,6 +4743,83 @@
               </table>
             </div>
             <div id="regionalPlanningDiagnostics" class="regional-planning-diagnostics" hidden></div>
+          </section>
+        </section>
+
+        <section class="supply-panel" data-supply-section-panel="registry" hidden>
+          <section class="block summary-card" aria-labelledby="supplyCalculationRegistryTitle">
+            <div class="wb-supply-overlay-head">
+              <div>
+                <h2 id="supplyCalculationRegistryTitle" class="block-title">Реестр расчётов поставок</h2>
+                <p class="field-note">Полные записи воспроизводят сохранённый результат и выгрузку без обращения к текущим изменяемым источникам. Старые metadata-only записи отмечены отдельно.</p>
+              </div>
+              <button id="supplyCalculationRegistryRefreshButton" class="action-button secondary-button" type="button">Обновить</button>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label for="supplyCalculationRegistryType">Тип расчёта</label>
+                <select id="supplyCalculationRegistryType">
+                  <option value="">Все типы</option>
+                  <option value="factory_order">Заказ на фабрике</option>
+                  <option value="wb_regional">Поставка на Wildberries</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="supplyCalculationRegistryDateFrom">Дата отчёта от</label>
+                <input id="supplyCalculationRegistryDateFrom" type="date">
+              </div>
+              <div class="field">
+                <label for="supplyCalculationRegistryDateTo">Дата отчёта до</label>
+                <input id="supplyCalculationRegistryDateTo" type="date">
+              </div>
+            </div>
+            <p id="supplyCalculationRegistryMessage" class="section-message">Реестр ещё не загружен.</p>
+            <div class="district-table-wrap">
+              <table class="district-table" aria-label="Реестр расчётов поставок">
+                <thead>
+                  <tr>
+                    <th>Тип</th>
+                    <th>Время расчёта</th>
+                    <th>Дата отчёта</th>
+                    <th>Итог</th>
+                    <th>Ключевые параметры</th>
+                    <th>WB-поставки</th>
+                    <th>Incident policy</th>
+                    <th>Статус записи</th>
+                    <th>Действия</th>
+                  </tr>
+                </thead>
+                <tbody id="supplyCalculationRegistryBody">
+                  <tr><td colspan="9">Реестр ещё не загружен.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="factory-actions">
+              <button id="supplyCalculationRegistryPrevButton" class="action-button secondary-button" type="button" disabled>Назад</button>
+              <span id="supplyCalculationRegistryPage" class="field-note">-</span>
+              <button id="supplyCalculationRegistryNextButton" class="action-button secondary-button" type="button" disabled>Далее</button>
+            </div>
+          </section>
+          <section id="supplyCalculationRegistryDetail" class="block regional-planning-panel regional-planning-fullwidth" aria-labelledby="supplyCalculationRegistryDetailTitle" hidden>
+            <div class="regional-planning-head">
+              <div>
+                <h2 id="supplyCalculationRegistryDetailTitle" class="block-title">Точный сохранённый результат</h2>
+                <p id="supplyCalculationRegistryDetailMeta" class="section-message"></p>
+              </div>
+              <a id="supplyCalculationRegistryDownload" class="action-button secondary-button" href="#" hidden>Скачать историческую выгрузку</a>
+            </div>
+            <dl id="supplyCalculationRegistryDetailSummary" class="summary-grid"></dl>
+            <p id="supplyCalculationRegistrySelectedSupplies" class="field-note"></p>
+            <div class="district-table-wrap">
+              <table class="district-table" aria-label="Строки исторического расчёта">
+                <thead id="supplyCalculationRegistryDetailHead"></thead>
+                <tbody id="supplyCalculationRegistryDetailBody"></tbody>
+              </table>
+            </div>
+            <details class="regional-diagnostics-details">
+              <summary>Параметры, evidence и warnings</summary>
+              <pre id="supplyCalculationRegistryEvidence" class="regional-planning-diagnostics"></pre>
+            </details>
           </section>
         </section>
         </section>
@@ -5229,6 +5307,24 @@
       const supplyModePanels = Array.from(document.querySelectorAll("[data-supply-mode-panel]"));
       const supplySectionButtons = Array.from(document.querySelectorAll("[data-supply-section-button]"));
       const supplySectionPanels = Array.from(document.querySelectorAll("[data-supply-section-panel]"));
+      const supplyCalculationRegistryRefreshButton = document.getElementById("supplyCalculationRegistryRefreshButton");
+      const supplyCalculationRegistryType = document.getElementById("supplyCalculationRegistryType");
+      const supplyCalculationRegistryDateFrom = document.getElementById("supplyCalculationRegistryDateFrom");
+      const supplyCalculationRegistryDateTo = document.getElementById("supplyCalculationRegistryDateTo");
+      const supplyCalculationRegistryMessage = document.getElementById("supplyCalculationRegistryMessage");
+      const supplyCalculationRegistryBody = document.getElementById("supplyCalculationRegistryBody");
+      const supplyCalculationRegistryPrevButton = document.getElementById("supplyCalculationRegistryPrevButton");
+      const supplyCalculationRegistryNextButton = document.getElementById("supplyCalculationRegistryNextButton");
+      const supplyCalculationRegistryPage = document.getElementById("supplyCalculationRegistryPage");
+      const supplyCalculationRegistryDetail = document.getElementById("supplyCalculationRegistryDetail");
+      const supplyCalculationRegistryDetailTitle = document.getElementById("supplyCalculationRegistryDetailTitle");
+      const supplyCalculationRegistryDetailMeta = document.getElementById("supplyCalculationRegistryDetailMeta");
+      const supplyCalculationRegistryDownload = document.getElementById("supplyCalculationRegistryDownload");
+      const supplyCalculationRegistryDetailSummary = document.getElementById("supplyCalculationRegistryDetailSummary");
+      const supplyCalculationRegistrySelectedSupplies = document.getElementById("supplyCalculationRegistrySelectedSupplies");
+      const supplyCalculationRegistryDetailHead = document.getElementById("supplyCalculationRegistryDetailHead");
+      const supplyCalculationRegistryDetailBody = document.getElementById("supplyCalculationRegistryDetailBody");
+      const supplyCalculationRegistryEvidence = document.getElementById("supplyCalculationRegistryEvidence");
 
       const refreshButton = document.getElementById("refreshButton");
       const loadButton = document.getElementById("loadButton");
@@ -5590,7 +5686,7 @@
       const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "fulfillment", "shipment-registry", "cny-account", "supplier"]);
       const DEFAULT_FF_SECTION = "services";
       const VALID_FF_SECTIONS = new Set(["services", "stocks", "operations"]);
-      const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
+      const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional", "registry"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
       const DEFAULT_STOCK_FF_SOURCE = "manual_excel";
@@ -5732,6 +5828,11 @@
       let regionalCalculationInFlight = false;
       let regionalPlanningInFlightDistrictKey = "";
       let regionalPlanningFilterState = { search: "" };
+      let supplyCalculationRegistryLoaded = false;
+      let supplyCalculationRegistryLoading = false;
+      let supplyCalculationRegistryOffset = 0;
+      let supplyCalculationRegistryTotal = 0;
+      const supplyCalculationRegistryLimit = 25;
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -5792,7 +5893,8 @@
       let wbSuppliesSyncSeq = 0;
       let wbSupplyOverlayLoading = false;
       let wbSupplyOverlayOptionsPayload = null;
-      let selectedWbSupplyIds = normalizeWbSupplyOverlayIds(persistedOperatorUiState.selected_wb_supply_ids);
+      let selectedWbSupplyIds = [];
+      let wbSupplyOverlaySelectionInitialized = false;
       let wbWarehouseExclusionLoading = false;
       let wbWarehouseExclusionPayload = null;
       let wbWarehouseExclusionRevision = 0;
@@ -5939,9 +6041,8 @@
       }
 
       function persistWbSupplyOverlaySelection() {
-        writePersistedOperatorUiState({
-          selected_wb_supply_ids: selectedWbSupplyIds.slice()
-        });
+        // Selection is calculation-session state. A genuinely new page open
+        // must re-apply the current backend-owned eligible default.
       }
 
       function persistWbWarehouseExclusionSelection() {
@@ -6572,6 +6673,9 @@
         supplySectionPanels.forEach((panel) => {
           panel.hidden = panel.dataset.supplySectionPanel !== activeSectionName;
         });
+        if (activeSectionName === "registry" && !supplyCalculationRegistryLoaded) {
+          loadSupplyCalculationRegistry();
+        }
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_section: activeSectionName });
         }
@@ -6812,6 +6916,34 @@
       supplySectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateSupplySection(button.dataset.supplySectionButton));
       });
+      if (supplyCalculationRegistryRefreshButton) {
+        supplyCalculationRegistryRefreshButton.addEventListener("click", () => loadSupplyCalculationRegistry());
+      }
+      [supplyCalculationRegistryType, supplyCalculationRegistryDateFrom, supplyCalculationRegistryDateTo]
+        .filter(Boolean)
+        .forEach((control) => {
+          control.addEventListener("change", () => loadSupplyCalculationRegistry({resetOffset: true}));
+        });
+      if (supplyCalculationRegistryPrevButton) {
+        supplyCalculationRegistryPrevButton.addEventListener("click", () => {
+          supplyCalculationRegistryOffset = Math.max(0, supplyCalculationRegistryOffset - supplyCalculationRegistryLimit);
+          loadSupplyCalculationRegistry();
+        });
+      }
+      if (supplyCalculationRegistryNextButton) {
+        supplyCalculationRegistryNextButton.addEventListener("click", () => {
+          supplyCalculationRegistryOffset += supplyCalculationRegistryLimit;
+          loadSupplyCalculationRegistry();
+        });
+      }
+      if (supplyCalculationRegistryBody) {
+        supplyCalculationRegistryBody.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-supply-calculation-open]");
+          if (button) {
+            openSupplyCalculationRegistryRecord(button.dataset.supplyCalculationOpen);
+          }
+        });
+      }
 
       reportSectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateReportSection(button.dataset.reportSectionButton));
@@ -8656,17 +8788,28 @@
 
       function reconcileSelectedWbSupplyIdsWithOptions(payload) {
         const rawOptions = Array.isArray(payload && payload.options) ? payload.options : [];
-        if (!rawOptions.length) {
-          return { dropped: [] };
+        const eligibleIds = overlayEligibleOptions(payload)
+          .map((item) => String(item.supply_id || "").trim())
+          .filter(Boolean);
+        const eligible = new Set(eligibleIds);
+        if (!wbSupplyOverlaySelectionInitialized) {
+          if (!rawOptions.length) {
+            return { dropped: [], defaulted: [] };
+          }
+          selectedWbSupplyIds = eligibleIds;
+          wbSupplyOverlaySelectionInitialized = true;
+          return { dropped: [], defaulted: eligibleIds.slice() };
         }
-        const eligible = new Set(overlayEligibleOptions(payload).map((item) => String(item.supply_id || "").trim()).filter(Boolean));
+        if (!rawOptions.length) {
+          return { dropped: [], defaulted: [] };
+        }
         const next = selectedWbSupplyIds.filter((id) => eligible.has(id));
         const dropped = selectedWbSupplyIds.filter((id) => !eligible.has(id));
         if (next.length !== selectedWbSupplyIds.length) {
           selectedWbSupplyIds = next;
           persistWbSupplyOverlaySelection();
         }
-        return { dropped };
+        return { dropped, defaulted: [] };
       }
 
       async function loadWbSupplyOverlayOptions(options) {
@@ -8718,11 +8861,13 @@
           const warningDetails = payload.warning_details && typeof payload.warning_details === "object" ? payload.warning_details : {};
           const unmappedCount = Number(warningDetails.unmapped_warehouse_count || summary.unmapped_warehouse_count || 0);
           const droppedCount = Array.isArray(selectionReconcile.dropped) ? selectionReconcile.dropped.length : 0;
+          const defaultedCount = Array.isArray(selectionReconcile.defaulted) ? selectionReconcile.defaulted.length : 0;
           renderWbSupplyOverlayWarnings(payload);
           setWbSupplyOverlayMessage(
             (syncFirst ? "WB-поставки обновлены. " : "") +
               "Доступно к расчёту: " + valueOrDash(summary.eligible) +
               " / всего " + valueOrDash(summary.total) +
+              (defaultedCount ? ". Автоматически выбрано eligible: " + defaultedCount : "") +
               (warnings.length ? ". Есть warnings: " + (unmappedCount > 0 ? unmappedCount + " складов без ФО" : warnings.length) + "." : ".") +
               (droppedCount ? " Выбор обновлён: снято stale/invalid " + droppedCount + "." : ""),
             warnings.length || droppedCount ? "warning" : ""
@@ -8814,6 +8959,7 @@
 
       function setSelectedWbSupplyIds(value, options) {
         selectedWbSupplyIds = normalizeWbSupplyOverlayIds(value);
+        wbSupplyOverlaySelectionInitialized = true;
         if (wbSupplyOverlayOptions) {
           const selected = new Set(selectedWbSupplyIds);
           Array.from(wbSupplyOverlayOptions.querySelectorAll("[data-wb-supply-overlay-checkbox]")).forEach((input) => {
@@ -8824,6 +8970,240 @@
         updateWbSupplyOverlayButtons();
         if (!options || options.persist !== false) {
           persistWbSupplyOverlaySelection();
+        }
+      }
+
+      function supplyCalculationTypeLabel(value) {
+        return String(value || "") === "factory_order"
+          ? "Заказ на фабрике"
+          : String(value || "") === "wb_regional"
+            ? "Поставка на Wildberries"
+            : valueOrDash(value);
+      }
+
+      function supplyCalculationKeySettingsText(settings) {
+        const value = settings && typeof settings === "object" ? settings : {};
+        const parts = [];
+        if (value.stock_ff_source) parts.push("Остатки ФФ: " + value.stock_ff_source);
+        if (value.factory_inbound_source) parts.push("В пути: " + value.factory_inbound_source);
+        if (value.sales_avg_period_days !== undefined) parts.push("усреднение " + value.sales_avg_period_days + " дн.");
+        if (value.cycle_order_days !== undefined) parts.push("цикл " + value.cycle_order_days + " дн.");
+        if (value.cycle_supply_days !== undefined) parts.push("цикл " + value.cycle_supply_days + " дн.");
+        if (value.order_batch_qty !== undefined) parts.push("короб " + value.order_batch_qty);
+        return parts.join(" · ") || "—";
+      }
+
+      function setSupplyCalculationRegistryMessage(text, stateClass) {
+        if (!supplyCalculationRegistryMessage) return;
+        supplyCalculationRegistryMessage.textContent = text || "";
+        supplyCalculationRegistryMessage.className = "section-message" + (
+          stateClass ? " is-" + stateClass : ""
+        );
+      }
+
+      function updateSupplyCalculationRegistryPagination() {
+        const start = supplyCalculationRegistryTotal
+          ? supplyCalculationRegistryOffset + 1
+          : 0;
+        const end = Math.min(
+          supplyCalculationRegistryOffset + supplyCalculationRegistryLimit,
+          supplyCalculationRegistryTotal
+        );
+        supplyCalculationRegistryPage.textContent = start + "–" + end + " из " + supplyCalculationRegistryTotal;
+        supplyCalculationRegistryPrevButton.disabled = supplyCalculationRegistryLoading || supplyCalculationRegistryOffset <= 0;
+        supplyCalculationRegistryNextButton.disabled = supplyCalculationRegistryLoading ||
+          supplyCalculationRegistryOffset + supplyCalculationRegistryLimit >= supplyCalculationRegistryTotal;
+      }
+
+      function renderSupplyCalculationRegistry(payload) {
+        const records = Array.isArray(payload && payload.records) ? payload.records : [];
+        const pagination = payload && payload.pagination && typeof payload.pagination === "object"
+          ? payload.pagination
+          : {};
+        supplyCalculationRegistryTotal = Number(pagination.total || 0);
+        if (!records.length) {
+          supplyCalculationRegistryBody.innerHTML = "<tr><td colspan=\"9\">По выбранным фильтрам расчётов нет.</td></tr>";
+          updateSupplyCalculationRegistryPagination();
+          return;
+        }
+        supplyCalculationRegistryBody.innerHTML = records.map((record) => {
+          const summary = record.summary && typeof record.summary === "object" ? record.summary : {};
+          const incident = record.incident_policy && typeof record.incident_policy === "object"
+            ? record.incident_policy
+            : {};
+          const wbText = formatWbNumber(record.selected_wb_supply_count || 0) + " шт. поставок · " +
+            formatWbNumber(record.selected_wb_supply_qty || 0) + " ед.";
+          const incidentText = incident.status === "unknown"
+            ? "evidence отсутствует"
+            : "rev " + valueOrDash(incident.revision) + " · " + valueOrDash(incident.status) +
+              (incident.quality_state ? " · " + incident.quality_state : "");
+          const completeness = record.is_reproducible
+            ? "Полная · immutable"
+            : "Legacy · metadata-only";
+          const actions = [
+            "<button class=\"district-selector-button\" type=\"button\" data-supply-calculation-open=\"" +
+              escapeHtml(String(record.record_id || "")) + "\">Открыть</button>",
+            record.download_available
+              ? "<a class=\"district-selector-button\" href=\"" +
+                  escapeHtml(config.supply_calculations_path + "/" + encodeURIComponent(String(record.record_id || "")) + "/download") +
+                  "\">Скачать</a>"
+              : ""
+          ].filter(Boolean).join(" ");
+          return [
+            "<tr>",
+            "<td>" + escapeHtml(supplyCalculationTypeLabel(record.calculation_type)) + "</td>",
+            "<td>" + escapeHtml(formatTimestamp(record.calculated_at, "—")) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(record.report_date)) + "</td>",
+            "<td>" + escapeHtml(formatWbNumber(summary.total_qty || 0)) + " шт.<br><span class=\"field-note\">" +
+              escapeHtml(formatWbNumber(summary.estimated_weight || 0)) + " кг · " +
+              escapeHtml(formatWbNumber(summary.estimated_volume || 0)) + " м³</span></td>",
+            "<td>" + escapeHtml(supplyCalculationKeySettingsText(record.key_settings)) + "</td>",
+            "<td>" + escapeHtml(wbText) + "</td>",
+            "<td>" + escapeHtml(incidentText) + "</td>",
+            "<td>" + escapeHtml(completeness) +
+              (record.legacy_note ? "<br><span class=\"field-note\">" + escapeHtml(record.legacy_note) + "</span>" : "") +
+              "</td>",
+            "<td>" + actions + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+        updateSupplyCalculationRegistryPagination();
+      }
+
+      async function loadSupplyCalculationRegistry(options) {
+        if (!config.supply_calculations_path || supplyCalculationRegistryLoading) return;
+        if (options && options.resetOffset) supplyCalculationRegistryOffset = 0;
+        const params = new URLSearchParams({
+          limit: String(supplyCalculationRegistryLimit),
+          offset: String(supplyCalculationRegistryOffset)
+        });
+        if (supplyCalculationRegistryType.value) {
+          params.set("calculation_type", supplyCalculationRegistryType.value);
+        }
+        if (supplyCalculationRegistryDateFrom.value) {
+          params.set("report_date_from", supplyCalculationRegistryDateFrom.value);
+        }
+        if (supplyCalculationRegistryDateTo.value) {
+          params.set("report_date_to", supplyCalculationRegistryDateTo.value);
+        }
+        supplyCalculationRegistryLoading = true;
+        updateSupplyCalculationRegistryPagination();
+        setSupplyCalculationRegistryMessage("Читаем immutable registry...", "");
+        try {
+          const response = await fetch(config.supply_calculations_path + "?" + params.toString(), {
+            method: "GET",
+            headers: {"Accept": "application/json"},
+            cache: "no-store"
+          });
+          const payload = await readJson(response);
+          if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          renderSupplyCalculationRegistry(payload);
+          supplyCalculationRegistryLoaded = true;
+          setSupplyCalculationRegistryMessage(
+            "Показано " + (Array.isArray(payload.records) ? payload.records.length : 0) +
+              " из " + valueOrDash(payload.pagination && payload.pagination.total) +
+              ". Порядок стабилен: новые расчёты сверху.",
+            ""
+          );
+        } catch (error) {
+          setSupplyCalculationRegistryMessage(
+            "Не удалось загрузить реестр: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          supplyCalculationRegistryLoading = false;
+          updateSupplyCalculationRegistryPagination();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderSupplyCalculationRegistryDetail(record) {
+        const metadata = record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+        const payload = record.payload && typeof record.payload === "object" ? record.payload : null;
+        const summary = record.summary && typeof record.summary === "object" ? record.summary : {};
+        const selectedIds = Array.isArray(metadata.selected_wb_supply_ids)
+          ? metadata.selected_wb_supply_ids
+          : [];
+        supplyCalculationRegistryDetail.hidden = false;
+        supplyCalculationRegistryDetailTitle.textContent = supplyCalculationTypeLabel(record.calculation_type) +
+          " · " + valueOrDash(record.calculation_id);
+        supplyCalculationRegistryDetailMeta.textContent = record.is_reproducible
+          ? "Immutable snapshot · " + formatTimestamp(record.calculated_at, "—")
+          : "Legacy metadata-only: точный прошлый payload не сохранялся.";
+        supplyCalculationRegistryDetailSummary.innerHTML = [
+          ["Дата отчёта", valueOrDash(record.report_date)],
+          ["Общее количество", formatWbNumber(summary.total_qty || 0)],
+          ["Расчётный вес", formatWbNumber(summary.estimated_weight || 0)],
+          ["Расчётный объём", formatWbNumber(summary.estimated_volume || 0)],
+          ["Warnings", valueOrDash(record.warning_count)],
+          ["Payload digest", valueOrDash(record.payload_sha256)]
+        ].map((item) => "<div><dt>" + escapeHtml(item[0]) + "</dt><dd>" + escapeHtml(item[1]) + "</dd></div>").join("");
+        supplyCalculationRegistrySelectedSupplies.textContent = selectedIds.length
+          ? "Учтённые WB supply IDs: " + selectedIds.join(", ")
+          : "WB-поставки не учитывались или exact IDs отсутствуют в legacy metadata.";
+        if (record.download_available) {
+          supplyCalculationRegistryDownload.href = config.supply_calculations_path + "/" +
+            encodeURIComponent(String(record.record_id || "")) + "/download";
+          supplyCalculationRegistryDownload.hidden = false;
+        } else {
+          supplyCalculationRegistryDownload.hidden = true;
+          supplyCalculationRegistryDownload.removeAttribute("href");
+        }
+        if (!payload) {
+          supplyCalculationRegistryDetailHead.innerHTML = "<tr><th>Legacy metadata</th></tr>";
+          supplyCalculationRegistryDetailBody.innerHTML = "<tr><td>Строки результата не сохранялись и не могут быть восстановлены.</td></tr>";
+        } else if (record.calculation_type === "factory_order") {
+          supplyCalculationRegistryDetailHead.innerHTML = "<tr><th>nmId</th><th>SKU</th><th>Рекомендовано</th><th>Покрытие</th><th>Дефицит</th></tr>";
+          const rows = Array.isArray(payload.rows) ? payload.rows : [];
+          supplyCalculationRegistryDetailBody.innerHTML = rows.length
+            ? rows.map((row) => "<tr><td>" + escapeHtml(valueOrDash(row.nm_id)) + "</td><td>" +
+                escapeHtml(valueOrDash(row.sku_comment)) + "</td><td>" +
+                escapeHtml(formatWbNumber(row.recommended_order_qty || 0)) + "</td><td>" +
+                escapeHtml(formatWbNumber(row.coverage_qty || 0)) + "</td><td>" +
+                escapeHtml(formatWbNumber(row.shortage_qty || 0)) + "</td></tr>").join("")
+            : "<tr><td colspan=\"5\">Строк нет.</td></tr>";
+        } else {
+          supplyCalculationRegistryDetailHead.innerHTML = "<tr><th>Направление</th><th>nmId</th><th>SKU</th><th>К поставке</th><th>Дефицит</th></tr>";
+          const districts = Array.isArray(payload.districts) ? payload.districts : [];
+          const rows = [];
+          districts.forEach((district) => {
+            (Array.isArray(district.rows) ? district.rows : []).forEach((row) => rows.push({district, row}));
+          });
+          supplyCalculationRegistryDetailBody.innerHTML = rows.length
+            ? rows.map((item) => "<tr><td>" + escapeHtml(valueOrDash(item.district.district_name_ru)) +
+                "</td><td>" + escapeHtml(valueOrDash(item.row.nm_id)) + "</td><td>" +
+                escapeHtml(valueOrDash(item.row.sku_comment)) + "</td><td>" +
+                escapeHtml(formatWbNumber(item.row.allocated_qty || 0)) + "</td><td>" +
+                escapeHtml(formatWbNumber(item.row.deficit_qty || 0)) + "</td></tr>").join("")
+            : "<tr><td colspan=\"5\">Строк нет.</td></tr>";
+        }
+        supplyCalculationRegistryEvidence.textContent = JSON.stringify({
+          settings: payload && payload.settings ? payload.settings : metadata.key_settings,
+          evidence: record.evidence || {},
+          warnings: payload && Array.isArray(payload.warnings) ? payload.warnings : [],
+          export_sha256: record.export_sha256 || ""
+        }, null, 2);
+        supplyCalculationRegistryDetail.scrollIntoView({behavior: "smooth", block: "start"});
+        scheduleEmbeddedHeightPost();
+      }
+
+      async function openSupplyCalculationRegistryRecord(recordId) {
+        if (!config.supply_calculations_path || !recordId) return;
+        setSupplyCalculationRegistryMessage("Читаем точный snapshot расчёта...", "");
+        try {
+          const response = await fetch(
+            config.supply_calculations_path + "/" + encodeURIComponent(recordId),
+            {method: "GET", headers: {"Accept": "application/json"}, cache: "no-store"}
+          );
+          const payload = await readJson(response);
+          if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          renderSupplyCalculationRegistryDetail(payload);
+          setSupplyCalculationRegistryMessage("Точный snapshot открыт.", "success");
+        } catch (error) {
+          setSupplyCalculationRegistryMessage(
+            "Не удалось открыть расчёт: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
         }
       }
 
@@ -14157,6 +14537,7 @@
             renderWbWarehouseExclusionOptions(wbWarehouseExclusionPayload);
           }
           renderFactoryResult(payload);
+          supplyCalculationRegistryLoaded = false;
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
           setFactoryMessage(
             warnings.length
@@ -14210,6 +14591,7 @@
             renderWbWarehouseExclusionOptions(wbWarehouseExclusionPayload);
           }
           renderRegionalResult(payload, payload.active_sku_count, { source: "calculate" });
+          supplyCalculationRegistryLoaded = false;
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
           await loadRegionalStatus({ preserveCurrentRegionalResult: true });
         } catch (error) {

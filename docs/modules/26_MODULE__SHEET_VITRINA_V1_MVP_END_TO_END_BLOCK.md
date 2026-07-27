@@ -86,6 +86,9 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
+  - "GET /v1/sheet-vitrina-v1/supply/calculations"
+  - "GET /v1/sheet-vitrina-v1/supply/calculations/{record_id}"
+  - "GET /v1/sheet-vitrina-v1/supply/calculations/{record_id}/download"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 related_runners:
   - "apps/seller_portal_relogin_session.py"
@@ -284,6 +287,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - shared block `Остатки ФФ` reused by both supply calculations
   - bounded subsection `Заказ на фабрике`
   - bounded subsection `Поставка на Wildberries`
+  - read-only subsection `Реестр расчётов` for exact factory-order and WB regional history
   - explicit actions `Скачать шаблон остатков ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставку на Wildberries`
   - uploads for all operator XLSX files start automatically right after file selection; current uploaded file download/delete lifecycle stays visible in the same block
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
@@ -302,7 +306,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
   - `Остатки ФФ` manual Excel source requires one row per active SKU and rejects duplicate `nmId`
   - the same shared `Остатки ФФ` source selector is reused by factory-order and regional blocks; manual uploaded dataset/state remains one entity, while `1С / Фулфилмент` reads existing materialized 1C `FF_STOCK` metric `onec_FF_STOCK_qty` and does not create a second `stock_ff` upload contract/entity
-  - the shared `Остатки ФФ` block also exposes calculation-only selector `Учесть WB-поставки` backed by `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`; selector options include only statuses `3/4/6`, statuses `1/2/5` and `Допринято` are not rendered, selected ids are sent explicitly as `selected_wb_supply_ids` in both factory-order and WB regional calculate requests, while backend always revalidates status/date/composition/active SKU/mapping from server runtime cache; long unmapped-warehouse warnings are collapsed behind details in the operator UI
+  - the shared `Остатки ФФ` block also exposes calculation-only selector `Учесть WB-поставки` backed by `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`; selector options include only statuses `3/4/6`, statuses `1/2/5` and `Допринято` are not rendered. On first successful option load after a fresh page open, every option with backend `eligible_for_overlay=true` and `disabled=false` is visibly checked. Manual uncheck/recheck remains authoritative for that open page across refresh, rerender and form switching; a new page load applies a new current eligible default. Selected ids are sent explicitly as `selected_wb_supply_ids` in both factory-order and WB regional calculate requests, while backend always revalidates status/date/composition/active SKU/mapping from server runtime cache; long unmapped-warehouse warnings are collapsed behind details in the operator UI
   - selected WB supplies are overlay evidence only: they do not replace manual Excel / 1C as the `stock_ff` source, do not become ЕБД metric truth, do not write ready/web-vitrina snapshots and do not mutate WB Supplies API
   - common ФФ overlay formula for manual Excel and `1С / Фулфилмент` is `effective_stock_ff = max(base_stock_ff - selected_wb_supply_qty, 0)` plus `over_reserved_qty = max(selected_wb_supply_qty - base_stock_ff, 0)`; over-reserved rows warn but do not fail the calculation. For source `Остатки ФФ` / `ff_stock_ledger`, selected WB supplies are not deducted from `stock_ff` again, but still add factory inbound and WB regional projection.
   - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
@@ -316,6 +320,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - planning calls WB `acceptance/options` only after complete server-owned barcode resolution. The ordinary manager table contains only exact-zone, direct, active, unblocked full-storage destinations that accept all required barcodes with `canBox=true`; СЦ/СГТ/specialised/partial/blocked/unclassified evidence is diagnostic-only. It renders role, warehouseID, barcode coverage, package support, unique chronological dates, separate first available/free dates, tariffs, direct-destination state and explicit reason codes. It remains manual/read-only and creates or books nothing in WB.
   - direct planning-zone XLSX files retain their stable ASCII route filenames (`wb_regional_central_north_fo.xlsx`, `wb_regional_central_east_fo.xlsx`, `wb_regional_central_south_fo.xlsx`, plus unchanged non-Central stems) and now include only `nmId / SKU / Количество к поставке`; `Дефицит` remains backend/UI calculation truth but is not exported to the operator workbook.
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` and button `Скачать все рекомендации` build one atomic archive `Рекомендации_поставок_<date>_<time>_<calculation_id>.zip`. Every included recommendation follows UI order and gets a unique safe `ordinal + calculation_id + destination` folder/prefix with exactly two files: operator recommendation and WB-upload XLSX copied from the checked-in canonical `Sheet1 / Баркод / Количество` template. Exact nomenclature barcodes are text, duplicates are summed, totals reconcile, and any missing/ambiguous barcode or invalid quantity returns one controlled error without a partial archive.
+  - every successful calculation atomically updates the compatible latest-result slot and appends one immutable complete registry snapshot. The unified registry is server-owned, bounded to `200` complete rows, paginated `25` by default (`100` maximum), stably ordered by calculation time and identity, and filtered by type/date. Detail reopens the exact stored settings, selected WB supply ids, incident/source evidence, warnings, summary and full result rows. Historical download streams the exact XLSX/ZIP bytes saved with that record rather than regenerating from latest/current state. Legacy regional metadata-only audit rows remain visible with an explicit incomplete/non-reproducible marker and no fabricated payload or download.
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows
