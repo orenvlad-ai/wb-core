@@ -69,6 +69,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- `GET /v1/sheet-vitrina-v1/web-vitrina/business-projection/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check`
@@ -641,6 +642,7 @@ Canonical `loopback-probe`, `public-probe` and `deploy-and-verify` are auth-awar
 - when production WebCore app-level auth is configured, the runner may create a short-lived same-origin session cookie from the hosted runtime env file and use it only in memory for probe requests; the cookie, password hash and session secret must not be printed in JSON, logs, PR text or handoff;
 - unauthenticated browser/curl reads may return login redirect or auth error after auth hardening, but the canonical runner must verify the authenticated operator surface with sanitized auth metadata only;
 - bounded JSON reads must continue across short socket chunks until EOF or the configured byte limit plus one byte; a short transport read is not EOF and must not turn a valid large response into a false `expected JSON object response` failure;
+- warehouse detail responses declare a small `probe_shape` before their potentially large provenance collections. When a valid response exceeds the bounded body prefix, the probe requires the exact warehouse identity plus the `balances`/`documents` collection declaration instead of treating a collection key beyond the byte limit as absent; missing or mismatched bounded shape remains fail-closed;
 - full `POST /v1/sheet-vitrina-v1/refresh` is a heavy mutating/deep check and is not part of ordinary health probes; it runs only when `--include-refresh` is passed, while `--skip-refresh` remains a compatibility force-skip flag;
 - deploy closure must use canonical probes for service health and may run the explicit deep refresh probe only when the task scope actually changes refresh semantics.
 
@@ -657,6 +659,11 @@ Public probe validates:
   - `Лог` must render below that table as the secondary block and keep the existing job/log download contour
   - the former sibling block `Обновление данных` is no longer rendered or exposed as an active page-composition activity block; persisted STATUS/read-side fields remain internal truth for other status contracts
   - top summary must be compact (`Обновлено`, `Статус`, `Период`); the old bulky `Свежесть данных`/`Строки` cards are not separate page blocks. Automatic freshness is monitored in Settings.
+- `GET /v1/sheet-vitrina-v1/web-vitrina/business-projection/status` is a
+  repo-owned exact public route and a mandatory deploy probe. It returns only
+  the bounded projection revision/outbox/failure status used by visible-tab
+  revision checks; proxy/fallback `404` is a failed deployment, not an
+  acceptable empty projection.
 - `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` returns/persists runtime-managed web-vitrina refresh schedules. Business cadence remains in the existing runtime JSON and is edited only by the Vitrina card in `Настройки → Автообновления`; response exposes timezone, mutability, `next_auto_run_at`, `last_auto_run_at`, `last_auto_success_at`, `last_auto_error_summary` and per-schedule next/last/status fields.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now` launches the existing async full-refresh job with auto-schedule trigger metadata and is exposed only in Settings. The route must return a job payload quickly and must not call archived Google Sheets/GAS load.
 - `GET /v1/sheet-vitrina-v1/prices/spp-test/history`, bounded by `limit<=50` and an opaque cursor, reads existing and new `sheet_vitrina_v1_prices/spp_tests/jobs/*.json` newest-first; `GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}` accepts only a safe job id and returns sanitized lifecycle detail without headers, credentials or internal paths. Legacy jobs keep `trigger_source=null`; new jobs record `manual` or `schedule`.
@@ -821,3 +828,18 @@ For server/operator-only changes that do not touch archived bound Apps Script gu
 ## SKU management runtime/write contract
 
 The authenticated public route family is exact GET `/v1/sheet-vitrina-v1/sku-management`, narrow per-SKU GET `/v1/sheet-vitrina-v1/sku-management/sku/{nm_id}`, and guarded GET/POST prefix `/v1/sheet-vitrina-v1/sku-management/`; app session and `sku_management` section authorization remain authoritative. The narrow per-SKU route is a distinct quick mutation read model: one exact price read, one campaign/placement index read, local temporal projections and filtered history, with sanitized phase timings/call counts. It must not invoke the full SKU table, stock/forecast/supply collection, Ads fullstats/minimum/recommendation enrichment or all-active price reads. Dedicated price and exact-placement bid blocks are part of normal runtime construction and require no post-deploy feature-flag enablement. `WB_PRICES_WRITE_ENABLED` and `SHEET_VITRINA_ADS_WRITE_ENABLED` continue to gate their legacy standalone tabs but do not disable this separately authorized workflow. Its sufficient mandatory gates are one stored target/preview, explicit confirmation, stale/min/quarantine validation, backend-only WB call, audit and exact readback. Price upload status and exact tuple readback share one bounded early-cadence/deadline loop; bid readback targets only exact `nm_id + advert_id + placement`; optional public buyer-price enrichment never blocks already confirmed seller-price success. Deploy itself performs no WB mutation.
+
+## Warehouse business projection deployment
+
+Migration 126 deploys additive SQLite tables, nullable functional-version
+columns, triggers, status route and bounded worker code. Schema initialization
+does not rewrite historical business rows and does not run an external source
+refresh. Projection publication remains source-triggered and transactionally
+bounded; failed candidate retains last-good state.
+
+Historical production warehouse/capital correction is explicitly not part of
+deploy or UI acceptance. It requires a separate `scope:production-mutation`
+task with query-only diagnostic manifest, human gate, exact
+backup/reversibility and reconciliation. Production verification for this
+LOOP is read-only schema/status/readback plus isolated UI revision-flow
+evidence.

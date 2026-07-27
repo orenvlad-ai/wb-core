@@ -84,8 +84,21 @@ Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths 
 - каждый merged change подтверждается в current `origin/main`, а live/runtime change дополнительно — canonical deploy и live/public verify.
 ## Canonical cost and product movement
 
-From `2026-07-01`, cost consumers share the functional historical/current daily WB WAC projection; full physical warehouse truth begins only at production `warehouse_functional_cutover_v1`. Physical sources remain supplier registry, append-only `ff_stock_ledger`, persisted WB supply evidence and complete official WB contour snapshots. Modules 40/45 are compatibility projections and cannot own independent quantity, cost or baseline truth.
+From `2026-07-01`, cost consumers share the functional historical/current daily WB WAC projection; full physical warehouse truth begins only at production `warehouse_functional_cutover_v1`. Physical sources remain supplier registry, append-only `ff_stock_ledger`, persisted WB supply evidence and complete official WB contour snapshots. Module 40 and the public read facade of module 45 cannot own independent quantity, cost or baseline truth; module 45's stable source events are canonical inputs to the same functional projection, not a competing read model.
 
 The functional engine owns six mutually exclusive stages. Open `packed - accepted` stays in `FF → WB` only until final acceptance; positive final difference then becomes `Расхождения приёмки WB`. Transitional unmatched doprinato is audit, not a negative warehouse. Accepted supply never adds quantity on top of the official WB snapshot.
 
 The frozen 24.06 opening-cost map is a guarded migration fact, not a refreshed fallback. It derives missing SKU cost through explicit same-price-band/interpolation/extrapolation/fallback quality and must cover every positive historical WB quantity without silent zero/NULL. Future purchase-price changes cannot rewrite it. Any correction requires a fingerprinted targeted replay from factual effective date.
+
+## Functional time versus audit time
+
+Warehouse/product-capital source truth follows
+`business_effective_date`/`snapshot_date`. `recorded_at`, `created_at`,
+`effective_at` and `published_at` prove when evidence or a projection revision
+was stored; they never move a business event to a later functional day.
+
+The one-way contour is canonical source documents/operations → canonical
+events and source revisions → exact business-date functional projection →
+read-only Web Vitrina materialization. The projection may replace only its
+owned stable warehouse/product-capital metric keys in memory. Vitrina cannot
+write sources and cannot calculate an alternative warehouse state.

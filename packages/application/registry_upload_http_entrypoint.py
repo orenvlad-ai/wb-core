@@ -317,6 +317,9 @@ WEB_VITRINA_SKU_METRIC_HIGHLIGHT_LIMIT = 6
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+SHEET_VITRINA_BUSINESS_PROJECTION_STATUS_ROUTE = (
+    "/v1/sheet-vitrina-v1/web-vitrina/business-projection/status"
+)
 SHEET_VITRINA_AUTO_SCHEDULES_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 SHEET_VITRINA_AUTO_SCHEDULES_RUN_NOW_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
 SHEET_VITRINA_SELLER_SESSION_CHECK_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-session/check"
@@ -1367,6 +1370,15 @@ class RegistryUploadHttpEntrypoint:
                 )
             )
         )
+
+    def handle_sheet_web_vitrina_business_projection_status_request(
+        self,
+    ) -> dict[str, Any]:
+        from packages.application.warehouse_business_projection import (
+            load_warehouse_business_projection_status,
+        )
+
+        return load_warehouse_business_projection_status(self.runtime)
 
     def handle_sheet_web_vitrina_page_composition_request(
         self,

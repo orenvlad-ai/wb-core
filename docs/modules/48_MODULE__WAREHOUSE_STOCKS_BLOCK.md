@@ -303,3 +303,26 @@ correction and functional economics no longer retain separate full backups.
 Capacity, CAS lifecycle, retention, artifact identity, orphan/quarantine and
 rollback status are read through the central registry and rendered on
 `Обновление и пересчёт`.
+
+## Bounded business-time rematerializer
+
+The functional warehouse remains the sole calculator for the six-stage
+warehouse/cost truth. Every source revision carries a stable source identity,
+revision, business-effective date and affected SKU closure. The durable
+projection outbox coalesces repeats/concurrent requests by earliest affected
+date and SKU closure. Supplier/CNY/financial costs, factual supplier
+boundaries, FF ledger operations, fulfillment costs, WB supply transitions,
+official WB/WAC and audited event compensation enter this contour through
+their existing canonical source/event or targeted-queue transaction.
+
+The rematerializer reads no external producer and never invokes a full Vitrina
+refresh. It publishes only public warehouse/product-capital SKU/TOTAL metrics,
+exact coverage/presentation/provenance and affected dates. A planned full
+functional refresh remains a read consumer of the same current projection and
+naturally absorbs its revision without another Vitrina-side calculation.
+
+If an exact daily base/event projection is missing, only owned metric keys are
+marked unavailable/provisional. Other ready-snapshot sources are neither
+fabricated nor copied from yesterday. Candidate publication is atomic;
+conservation, cost-only quantity invariance, non-target digests and source
+revision are checked before current-state switch.

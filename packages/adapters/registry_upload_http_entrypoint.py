@@ -106,6 +106,9 @@ DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-re
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
+DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH = (
+    "/v1/sheet-vitrina-v1/web-vitrina/business-projection/status"
+)
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 WEB_VITRINA_HISTORY_MODE_EXPLICIT = "explicit"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -3238,6 +3241,30 @@ def _build_handler(
                     filename=filename,
                     as_attachment=True,
                 )
+                return
+
+            if (
+                parsed.path
+                == DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
+            ):
+                try:
+                    payload = (
+                        entrypoint
+                        .handle_sheet_web_vitrina_business_projection_status_request()
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {
+                            "error": (
+                                "warehouse business projection status failed: "
+                                f"{exc}"
+                            )
+                        },
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
@@ -7572,6 +7599,7 @@ def _required_section_for_path(path: str) -> str:
     normalized = str(path or "").split("?", 1)[0]
     if normalized in {
         DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
         DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
         DEFAULT_SHEET_REFRESH_PATH,
@@ -8527,6 +8555,9 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "seller_recovery_start_path": DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH,
         "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "page_composition_surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+        "business_projection_status_path": (
+            DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
+        ),
     }
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (

@@ -1399,13 +1399,15 @@ def main() -> None:
             "contract_name": "sheet_vitrina_v1_warehouse_functional",
             "contract_version": "v2",
             "status": "ready",
+            "probe_shape": {
+                "warehouse_key": "ff",
+                "required_collections": ["balances", "documents"],
+            },
             "warehouse": {"warehouse_key": "ff", "warehouse_name": "Склад FF"},
-            "balances": [],
-            "documents": [],
         },
         separators=(",", ":"),
         ensure_ascii=False,
-    )[:-1] + ',"oversized":['
+    )[:-1] + ',"balances":[{"oversized":"'
     warehouse_result = {
         "route": "warehouse_ff",
         "method": "GET",
@@ -1432,9 +1434,11 @@ def main() -> None:
             "contract_name": "sheet_vitrina_v1_warehouse_functional",
             "contract_version": "v2",
             "status": "ready",
+            "probe_shape": {
+                "warehouse_key": "ff",
+                "required_collections": ["balances", "documents"],
+            },
             "warehouse": invalid_warehouse,
-            "balances": [],
-            "documents": [],
         }
         invalid_result = {
             **warehouse_result,
@@ -1443,7 +1447,7 @@ def main() -> None:
                 separators=(",", ":"),
                 ensure_ascii=False,
             )[:-1]
-            + ',"oversized":[',
+            + ',"balances":[{"oversized":"',
         }
         invalid_evaluation = hosted_runtime._evaluate_route_result(
             invalid_result,
@@ -1454,6 +1458,42 @@ def main() -> None:
                 "invalid truncated FF warehouse detail must fail closed: "
                 + str(invalid_evaluation)
             )
+    missing_shape_result = {
+        **warehouse_result,
+        "body_excerpt": json.dumps(
+            {
+                "contract_name": "sheet_vitrina_v1_warehouse_functional",
+                "contract_version": "v2",
+                "status": "ready",
+                "warehouse": {"warehouse_key": "ff"},
+            },
+            separators=(",", ":"),
+        )[:-1]
+        + ',"balances":[{"oversized":"',
+    }
+    missing_shape_evaluation = hosted_runtime._evaluate_route_result(
+        missing_shape_result,
+        route_paths=active_target.route_paths,
+    )
+    if missing_shape_evaluation["ok"] is not False:
+        raise AssertionError(
+            "truncated FF warehouse detail without bounded shape evidence must fail closed"
+        )
+    wrong_shape_result = {
+        **warehouse_result,
+        "body_excerpt": truncated_warehouse_prefix.replace(
+            '"required_collections":["balances","documents"]',
+            '"required_collections":["balances"]',
+        ),
+    }
+    wrong_shape_evaluation = hosted_runtime._evaluate_route_result(
+        wrong_shape_result,
+        route_paths=active_target.route_paths,
+    )
+    if wrong_shape_evaluation["ok"] is not False:
+        raise AssertionError(
+            "truncated FF warehouse detail with incomplete bounded shape must fail closed"
+        )
 
     with TemporaryDirectory(prefix="hosted-runtime-contract-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -1925,6 +1965,10 @@ def main() -> None:
                 raise AssertionError("web-vitrina read route with seeded snapshot must be publicly readable")
             if route_map["web_vitrina_page_composition"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page composition surface must be publicly readable")
+            if route_map["web_vitrina_business_projection_status"]["http_status"] != 200:
+                raise AssertionError(
+                    "business projection status route must be publicly readable"
+                )
             if route_map["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must be publicly readable")
             if route_map["stock_report"]["http_status"] != 200:
@@ -1991,6 +2035,15 @@ def main() -> None:
                 raise AssertionError("operator reports embedded panel must stay 200")
             if loopback_routes["web_vitrina_page_composition"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page composition surface must stay 200")
+            if (
+                loopback_routes["web_vitrina_business_projection_status"][
+                    "http_status"
+                ]
+                != 200
+            ):
+                raise AssertionError(
+                    "business projection status loopback route must stay 200"
+                )
             if loopback_routes["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must stay 200")
             if loopback_routes["stock_report"]["http_status"] != 200:

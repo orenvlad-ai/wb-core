@@ -277,3 +277,20 @@ closure and never requests a coherent store backup; the legacy
 `ff_reservations_transit_cost_recovery` apply entrypoint remains disabled.
 Earlier coherent-backup wording for bounded FF recovery is superseded by
 module 51.
+
+## Projection outbox
+
+Every immutable FF operation line creates a durable
+`ff_stock_physical_movement` projection request in the same ledger transaction.
+Identity is `operation_id + line_no + nm_id`; the business date is the
+explicit operation `business_effective_date` (source acceptance/shipment date
+when available, otherwise the canonical Yekaterinburg date of a manual
+operation), while `created_at` remains audit time. Requests coalesce by
+operation revision, earliest date and SKU closure.
+
+An FF-only revision never guesses capital. If exact capital/event proof is not
+yet available, the owned projection keeps last-good values visibly
+provisional or unavailable and leaves every non-owned Vitrina cell untouched.
+The subsequent canonical event/full functional publication consumes the same
+source revision; no second FF ledger and no Vitrina-side quantity calculator
+are introduced.

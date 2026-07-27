@@ -34,6 +34,9 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
     extend_metrics_with_sku_action_metrics,
 )
 from packages.application.wb_incident_policy import get_policy_state, policy_badge
+from packages.application.warehouse_business_projection import (
+    apply_warehouse_business_projection_overlay,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
 )
@@ -207,6 +210,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             period_refresh_summary = _active_refresh_summary(refresh_status)
             source_status_snapshot_as_of_date = snapshot.as_of_date
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
+        snapshot = apply_warehouse_business_projection_overlay(
+            self.runtime,
+            snapshot=snapshot,
+        )
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
         load_window_status = _resolve_latest_load_window_status(
@@ -275,6 +282,12 @@ class SheetVitrinaV1WebVitrinaBlock:
                 incident_policy_badge=policy_badge(current_incident_policy),
                 incident_projection_quality=_incident_projection_quality_badge(
                     snapshot
+                ),
+                warehouse_business_projection=deepcopy(
+                    dict(snapshot.metadata or {}).get(
+                        "warehouse_business_projection"
+                    )
+                    or {}
                 ),
             ),
             status_summary=WebVitrinaContractStatusSummary(

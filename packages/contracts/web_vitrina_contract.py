@@ -21,6 +21,7 @@ class WebVitrinaContractMeta:
     row_count: int
     incident_policy_badge: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
+    warehouse_business_projection: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

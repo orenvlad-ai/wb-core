@@ -590,6 +590,11 @@ class OurWbCostBlock:
         now = self.timestamp_factory()
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.warehouse_business_projection import (
+                ensure_warehouse_projection_source_outbox,
+            )
+
+            ensure_warehouse_projection_source_outbox(conn)
             for snapshot_date in dates:
                 stock_by_nm = stock_by_date.get(snapshot_date, {})
                 current_by_nm: dict[int, dict[str, float | str | None]] = {}

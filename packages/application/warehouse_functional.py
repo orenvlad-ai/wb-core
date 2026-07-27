@@ -30,6 +30,9 @@ from packages.application.warehouse_archival_estimate import (
     overlay_opening_cost_rows,
 )
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+from packages.application.warehouse_business_projection import (
+    ensure_functional_version_business_time_schema,
+)
 from packages.application.warehouse_event_order import (
     ff_operation_replay_sort_key as _ff_operation_replay_sort_key,
 )
@@ -376,7 +379,25 @@ def enqueue_warehouse_targeted_recalculation(
         str(recovery["operation_id"]),
         after_digest=_fingerprint({"queue": dict(result)}),
     )
-    return {**result, "recovery_policy": recovery}
+    try:
+        from packages.application.warehouse_business_projection import (
+            drain_warehouse_business_projection_outbox,
+        )
+
+        business_projection = drain_warehouse_business_projection_outbox(
+            runtime,
+            published_at=now,
+        )
+    except Exception as exc:  # source mutation and outbox remain durable
+        business_projection = {
+            "status": "error",
+            "error": str(exc).replace("\n", " ")[:1000],
+        }
+    return {
+        **result,
+        "recovery_policy": recovery,
+        "business_projection": business_projection,
+    }
 
 
 def _targeted_enqueue_noop_row(
@@ -3960,7 +3981,15 @@ class WarehouseFunctionalBlock:
             )
         backup = recovery
         now = self.timestamp_factory()
-        publication_effective_at = now if kind == "functional_cutover" else str(normalized["captured_at"])
+        # ``effective_at`` remains a compatibility audit timestamp.  Functional
+        # history is selected by the explicit business date below.
+        publication_effective_at = (
+            now if kind == "functional_cutover" else str(normalized["captured_at"])
+        )
+        business_effective_date = _business_date_value(
+            normalized.get("effective_date")
+            or dict(normalized.get("wb_snapshot") or {}).get("snapshot_date")
+        )
         version_id = "whfv_" + fingerprint.removeprefix("sha256:")[:24]
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
@@ -4168,14 +4197,17 @@ class WarehouseFunctionalBlock:
                 self._upsert_supplier_flows(conn, normalized.get("lines") or [], created_at=now)
                 conn.execute(
                     """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
-                           version_id,cutover_id,version_kind,effective_at,status,plan_fingerprint,
+                           version_id,cutover_id,version_kind,effective_at,
+                           business_effective_date,published_at,status,plan_fingerprint,
                            local_source_digest,source_watermarks_json,created_at
-                       ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         version_id,
                         FUNCTIONAL_CUTOVER_ID,
                         kind,
                         publication_effective_at,
+                        business_effective_date,
+                        now,
                         "good",
                         fingerprint,
                         current_digest,
@@ -4789,6 +4821,10 @@ class WarehouseFunctionalBlock:
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "ready",
+            "probe_shape": {
+                "warehouse_key": warehouse_key,
+                "required_collections": ["balances", "documents"],
+            },
             "cutover": readback["cutover"],
             "active_version": readback["active_version"],
             "sync": readback["sync"],
@@ -6810,8 +6846,14 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ensure_functional_version_business_time_schema(conn)
     ensure_wb_supply_box_correction_schema(conn)
     ensure_archival_estimate_schema(conn)
+    from packages.application.warehouse_business_projection import (
+        ensure_warehouse_projection_source_outbox,
+    )
+
+    ensure_warehouse_projection_source_outbox(conn)
 
 
 def _source_rows(
