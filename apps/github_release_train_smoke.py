@@ -2412,6 +2412,23 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         ):
             assert required.casefold() in folded
         assert "target" in folded and "monitor" in folded and "readback" in folded
+        for terminal_required in (
+            "TERMINAL_MONITOR_SUMMARY",
+            "успешно завершена",
+            "2–5",
+            "Проверено:",
+            "canonical terminal state",
+            "release:done",
+            "release:production",
+            "verified user artifact",
+            "partial",
+            "terminal failure",
+            "ложн",
+            "только после",
+            "silent cleanup",
+            "не являются корректным завершением мониторинга",
+        ):
+            assert terminal_required.casefold() in folded
 
     explicit_classes = (
         "`КЛАСС ЗАДАЧИ: СТАНДАРТ`",

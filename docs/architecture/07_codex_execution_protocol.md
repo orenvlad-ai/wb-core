@@ -227,6 +227,17 @@ Reporter automation остаётся `ACTIVE`, пока в list есть хот�
 
 Name/ID и progress weights для разных targets должны быть однозначны. Progress без evidence не начисляется: процент строится только по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
 
+### Terminal Summary До Cleanup
+
+Когда exact target достигает доказанного terminal result, external supervisor reporter сначала публикует в initiating/reporting thread отдельный `TERMINAL_MONITOR_SUMMARY`:
+
+- при success однозначно сообщает, что задача успешно завершена;
+- перечисляет 2–5 коротких пунктов с тем, что фактически реализовано/изменено, только по proven evidence;
+- отдельной строкой пишет `Проверено: <checks/evidence>; canonical terminal state: <release:done | release:production | verified user artifact | другой contour-specific result>.`;
+- при partial result или terminal failure вместо success называет точный незавершённый результат/blocker и не использует ложное «готово».
+
+Только после публикации этого summary reporter удаляет exact target из durable list, сохраняет остальные non-terminal targets и readback-подтверждает update. Pause/delete разрешён только при пустом list либо explicit user stop всего reporter. Одна финальная progress-line или silent cleanup без короткого итогового summary не являются корректным завершением мониторинга.
+
 ### Нормативные Примеры
 
 - **Один новый target, свободный initiating thread.** Создать один `external supervisor reporter`, destination = initiating thread, durable list = exact target; затем readback, `wait_threads(timeoutMs: 0)` и первая подписанная report line.
@@ -246,7 +257,7 @@ Target интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CON
 
 ### Cleanup И Local Availability
 
-Cleanup выполняет reporter после доказанного terminal target state или explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+Cleanup выполняет reporter только после обязательного `TERMINAL_MONITOR_SUMMARY` для доказанного terminal target state либо после explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
 
 ## Шесть Execution-Контуров
 
