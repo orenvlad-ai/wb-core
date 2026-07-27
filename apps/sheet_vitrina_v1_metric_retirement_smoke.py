@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.sheet_vitrina_v1_metric_retirement_production_ui_flow import (  # noqa: E402
+    _add_auth_cookie,
+)
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     _active_incident_metric_catalog,
     _active_web_vitrina_source_keys,
@@ -63,6 +66,7 @@ def main() -> None:
     _assert_stock_fact_is_duplicate_projection()
     _assert_public_catalog_retirement()
     _assert_legacy_cost_source_and_dependency_closure()
+    _assert_production_ui_auth_contract()
     print("sheet_vitrina_v1_metric_retirement: ok")
 
 
@@ -233,6 +237,42 @@ def _assert_legacy_cost_source_and_dependency_closure() -> None:
         )
     if "cost_price" in _active_web_vitrina_source_keys():
         raise AssertionError("audit-only COST_PRICE still appears as an active public source")
+
+
+def _assert_production_ui_auth_contract() -> None:
+    class _Context:
+        def __init__(self) -> None:
+            self.cookies: list[dict[str, object]] = []
+
+        def add_cookies(self, cookies: list[dict[str, object]]) -> None:
+            self.cookies.extend(cookies)
+
+    context = _Context()
+    _add_auth_cookie(
+        context,
+        base_url="https://api.example.test",
+        auth_cookie="wb_core_web_session=opaque",
+    )
+    if context.cookies != [
+        {
+            "name": "wb_core_web_session",
+            "value": "opaque",
+            "url": "https://api.example.test",
+            "httpOnly": True,
+            "sameSite": "Lax",
+        }
+    ]:
+        raise AssertionError("production UI flow did not install the app-session cookie")
+    try:
+        _add_auth_cookie(
+            context,
+            base_url="https://api.example.test",
+            auth_cookie="wrong_cookie=opaque",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("production UI flow must reject an unexpected cookie")
 
 
 def _metric_from_dict(item: dict[str, object]) -> MetricV2Item:
