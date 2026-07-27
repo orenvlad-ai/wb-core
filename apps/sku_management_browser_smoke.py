@@ -47,7 +47,9 @@ def main() -> None:
             const nativeFetch = window.fetch.bind(window);
             window.fetch = function(input, init) {
               const url = String(input || "");
-              const delay = url.includes("/sku-management/price/preview") || url.includes("/sku-management/bid/preview")
+              const delay = url.includes("/sku-management/sku/")
+                ? 260
+                : url.includes("/sku-management/price/preview") || url.includes("/sku-management/bid/preview")
                 ? 160
                 : url.includes("/sku-management/price/commit") || url.includes("/sku-management/bid/commit")
                   ? 360
@@ -105,6 +107,7 @@ def main() -> None:
                         "operation_id": "op-price",
                         "parameter": "seller_price",
                         "nm_id": 101,
+                        "product_name": "HIGH risk product",
                         "current": {"price": 1000, "discount": 5, "discountedPrice": 950},
                         "new": {"price": 1000, "discount": 15, "discountedPrice": 850},
                         "target_seller_price": 850,
@@ -133,6 +136,8 @@ def main() -> None:
                 committed_parameters.append("seller_price")
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({
                     "status": "success",
+                    "nm_id": 101,
+                    "product_name": "HIGH risk product",
                     "confirmed_value": 850,
                     "confirmed_price": 1000,
                     "confirmed_discount": 15,
@@ -151,6 +156,7 @@ def main() -> None:
                         "operation_id": "op-bid",
                         "parameter": "advertising_bid",
                         "nm_id": 101,
+                        "product_name": "HIGH risk product",
                         "advert_id": 78,
                         "campaign_name": "Recommendations",
                         "placement": "recommendations",
@@ -172,6 +178,11 @@ def main() -> None:
                 committed_parameters.append("advertising_bid")
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({
                     "status": "success",
+                    "nm_id": 101,
+                    "product_name": "HIGH risk product",
+                    "advert_id": 78,
+                    "campaign_name": "Recommendations",
+                    "placement": "recommendations",
                     "confirmed_value": 18,
                     "readback_status": "matching",
                     "event": {"event_id": "event-bid", "confirmed_at": "2026-07-14T10:05:00Z"},
@@ -292,9 +303,13 @@ def main() -> None:
               const opener = document.createElement('button');
               opener.id = 'fixture-vitrina-sku-opener';
               document.body.appendChild(opener);
-              openVitrinaSkuModal(101, opener);
+              openVitrinaSkuModal(101, opener, 'HIGH risk product');
             }"""
         )
+        page.locator('[data-sku-management-modal][data-sku-modal-state="quick_loading"]').wait_for()
+        loading_identity = page.locator("[data-sku-management-modal]").inner_text()
+        if "HIGH risk product" not in loading_identity or "nmID 101" not in loading_identity:
+            raise AssertionError("quick modal must render known product identity before remote data finishes")
         page.locator('[data-sku-management-modal][data-sku-modal-state="quick_ready"]').wait_for()
         quick_modal = page.locator("[data-sku-management-modal]")
         if "HIGH risk product" not in quick_modal.inner_text() or "nmID 101" not in quick_modal.inner_text():
@@ -303,9 +318,25 @@ def main() -> None:
             raise AssertionError("Vitrina SKU popup must expose price and exact campaign/placement controls")
         if "confirmed / matching" not in quick_modal.inner_text():
             raise AssertionError("Vitrina SKU popup history must be filtered to the selected nmID and expose readback")
+        quick_price = quick_modal.locator("[data-quick-sku-price]")
+        quick_price.click()
+        quick_price.fill("851")
+        quick_select = quick_modal.locator("[data-quick-sku-bid-option]")
+        quick_select.select_option("78|recommendations")
+        quick_modal.click(position={"x": 4, "y": 4})
+        if quick_modal.get_attribute("data-sku-modal-state") != "quick_ready" or quick_price.input_value() != "851":
+            raise AssertionError("input/select interaction and backdrop clicks must not close or reset the mutation modal")
+        page.keyboard.press("Shift+Tab")
+        focus_inside = page.evaluate(
+            "() => document.querySelector('[data-sku-management-modal]').contains(document.activeElement)"
+        )
+        if not focus_inside:
+            raise AssertionError("quick mutation modal must trap keyboard focus")
         page.keyboard.press("Escape")
         if not quick_modal.is_hidden():
             raise AssertionError("Escape must close the side-effect-free SKU popup")
+        if page.evaluate("() => document.activeElement && document.activeElement.id") != "fixture-vitrina-sku-opener":
+            raise AssertionError("closing the quick modal must return focus to its opener")
         if len(modal_styles["cards"]) < 3 or any(item != {"background": "rgb(23, 25, 31)", "opacity": "1"} for item in modal_styles["cards"]):
             raise AssertionError(f"all operator modal cards must be fully opaque: {modal_styles}")
         if "0.76" not in modal_styles["backdrop"] or modal_styles["modalZ"] <= modal_styles["headerZ"]:
@@ -493,12 +524,24 @@ def main() -> None:
         history_before_price = history_reads[0]
         page.locator("[data-sku-modal-confirm]").click()
         _assert_modal_state(page, "commit_running")
+        page.keyboard.press("Escape")
+        page.locator("[data-sku-management-modal]").click(position={"x": 4, "y": 4})
+        _assert_modal_state(page, "commit_running")
         page.wait_for_timeout(160)
         _assert_modal_state(page, "readback_pending")
         page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'success'")
         modal_text = page.locator("[data-sku-management-modal]").inner_text()
-        if "Цена изменена" not in modal_text or "950 → 850 ₽" not in modal_text or "WB readback" not in modal_text:
-            raise AssertionError("price success must expose old/confirmed values only after matching readback")
+        if (
+            "Цена изменена" not in modal_text
+            or "HIGH risk product" not in modal_text
+            or "nmID: 101" not in modal_text
+            or "950 → 850 ₽" not in modal_text
+            or "Было: 950 ₽" not in modal_text
+            or "Запрошено: 850 ₽" not in modal_text
+            or "Подтверждено: 850 ₽" not in modal_text
+            or "WB readback" not in modal_text
+        ):
+            raise AssertionError("price success must expose full product identity and old/requested/confirmed values")
         if not commit_payloads[-1].get("override_stabilization") or not commit_payloads[-1].get("override_warnings"):
             raise AssertionError("explicit UI override must be sent and audited")
         if page.locator('[data-sku-price-input="101"]').count() != 1 or page.locator('[data-sku-price-edit="101"]').count() != 0:
@@ -566,8 +609,14 @@ def main() -> None:
         page.locator('[data-sku-bid-preview="101"]').click()
         _assert_modal_state(page, "preview_loading")
         page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'preview_ready'")
-        if "78 / recommendations" not in page.locator("[data-sku-management-modal]").inner_text() or "Всё равно изменить" not in page.locator("[data-sku-modal-confirm]").inner_text():
-            raise AssertionError("multiple campaigns require exact advert_id/placement and cross-warning override")
+        bid_preview_text = page.locator("[data-sku-management-modal]").inner_text()
+        if (
+            "78 / Recommendations / recommendations" not in bid_preview_text
+            or "HIGH risk product" not in bid_preview_text
+            or "nmID: 101" not in bid_preview_text
+            or "Всё равно изменить" not in page.locator("[data-sku-modal-confirm]").inner_text()
+        ):
+            raise AssertionError("multiple campaigns require full SKU/advert/campaign/placement identity and cross-warning override")
         if preview_payloads[-1].get("advert_id") != 78 or preview_payloads[-1].get("placement") != "recommendations":
             raise AssertionError("frontend must not collapse placement identity")
         bid_scroll_before = page.evaluate("() => { const shell=document.querySelector('.sku-management-table-shell'); shell.scrollLeft=360; shell.scrollTop=18; return {left:shell.scrollLeft,top:shell.scrollTop}; }")
@@ -575,11 +624,23 @@ def main() -> None:
         history_before_bid = history_reads[0]
         page.locator("[data-sku-modal-confirm]").click()
         _assert_modal_state(page, "commit_running")
+        page.keyboard.press("Escape")
+        page.locator("[data-sku-management-modal]").click(position={"x": 4, "y": 4})
+        _assert_modal_state(page, "commit_running")
         page.wait_for_timeout(160)
         _assert_modal_state(page, "readback_pending")
         page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'success'")
-        if "Ставка изменена" not in page.locator("[data-sku-management-modal]").inner_text() or "17 → 18 ₽" not in page.locator("[data-sku-management-modal]").inner_text():
-            raise AssertionError("bid success must expose confirmed matching WB readback")
+        bid_success_text = page.locator("[data-sku-management-modal]").inner_text()
+        if (
+            "Ставка изменена" not in bid_success_text
+            or "HIGH risk product" not in bid_success_text
+            or "nmID: 101" not in bid_success_text
+            or "17 → 18 ₽" not in bid_success_text
+            or "advert_id: 78" not in bid_success_text
+            or "campaign: Recommendations" not in bid_success_text
+            or "placement: recommendations" not in bid_success_text
+        ):
+            raise AssertionError("bid success must expose full product and exact campaign/placement identity")
         if commit_payloads[-1].get("preview_id") != "bid-preview" or not commit_payloads[-1].get("override_stabilization"):
             raise AssertionError("bid commit must use only the confirmed preview with override")
         page.wait_for_timeout(800)

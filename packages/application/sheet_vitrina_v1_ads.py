@@ -192,18 +192,76 @@ class SheetVitrinaV1AdsBlock:
     def build_placement_index(self, *, bypass_cache: bool = False) -> dict[int, list[dict[str, Any]]]:
         """Return current campaign/placement identity without per-row min/recommendation calls."""
 
+        return self.build_placement_index_read(
+            bypass_cache=bypass_cache
+        )["index"]
+
+    def build_placement_index_read(
+        self,
+        *,
+        bypass_cache: bool = False,
+    ) -> dict[str, Any]:
+        """Return placement identity plus sanitized cache/network call diagnostics."""
+
         campaigns_payload = self._load_campaigns(bypass_cache=bypass_cache)
         reverse_index = _build_reverse_index(campaigns_payload["campaigns"])
         return {
-            int(nm_id): [
-                {
-                    **dict(row),
-                    "current_bid_rub": _kopecks_to_rub(_optional_int(row.get("current_bid_kopecks"))),
-                    "campaign_fetched_at": campaigns_payload["fetched_at"],
-                }
-                for row in rows
-            ]
-            for nm_id, rows in reverse_index.items()
+            "index": {
+                int(nm_id): [
+                    {
+                        **dict(row),
+                        "current_bid_rub": _kopecks_to_rub(
+                            _optional_int(row.get("current_bid_kopecks"))
+                        ),
+                        "campaign_fetched_at": campaigns_payload["fetched_at"],
+                    }
+                    for row in rows
+                ]
+                for nm_id, rows in reverse_index.items()
+            },
+            "diagnostics": {
+                "source_mode": str(
+                    campaigns_payload.get("_read_source_mode") or "unknown"
+                ),
+                "remote_call_counts": dict(
+                    campaigns_payload.get("_remote_call_counts") or {}
+                ),
+            },
+        }
+
+    def read_exact_bid(
+        self,
+        *,
+        nm_id: int,
+        advert_id: int,
+        placement: str,
+    ) -> dict[str, Any]:
+        """Read one mutation tuple without stats, minimum or recommendation fanout."""
+
+        normalized_nm_id = _as_positive_int(nm_id, "nm_id")
+        normalized_advert_id = _as_positive_int(advert_id, "advert_id")
+        normalized_placement = normalize_placement(placement)
+        row = self._find_current_row(
+            nm_id=normalized_nm_id,
+            advert_id=normalized_advert_id,
+            placement=normalized_placement,
+            bypass_cache=True,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_ads_exact_bid_readback",
+            "fetched_at": self.timestamp_factory(),
+            "nm_id": normalized_nm_id,
+            "advert_id": normalized_advert_id,
+            "campaign_name": str(row.get("campaign_name") or ""),
+            "placement": normalized_placement,
+            "payment_type": str(row.get("payment_type") or ""),
+            "bid_type": str(row.get("bid_type") or ""),
+            "status": _as_int(row.get("status"), default=0),
+            "current_bid_kopecks": _optional_int(row.get("current_bid_kopecks")),
+            "current_bid_rub": _kopecks_to_rub(
+                _optional_int(row.get("current_bid_kopecks"))
+            ),
+            "read_scope": "exact_advert_placement_without_stats_min_recommendations",
         }
 
     def preview_bid_change(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -380,7 +438,13 @@ class SheetVitrinaV1AdsBlock:
         if not bypass_cache and self._campaign_cache:
             age = now_monotonic - float(self._campaign_cache.get("cached_at_monotonic") or 0)
             if age <= self.cache_ttl_seconds:
-                return dict(self._campaign_cache["payload"])
+                cached = dict(self._campaign_cache["payload"])
+                cached["_read_source_mode"] = "cache"
+                cached["_remote_call_counts"] = {
+                    "campaign_count": 0,
+                    "adverts_batch": 0,
+                }
+                return cached
         count_payload = self.source.fetch_campaign_count()
         advert_ids = extract_advert_ids_from_count(count_payload)
         adverts_payload = self.source.fetch_adverts(advert_ids, statuses=sorted(SUPPORTED_BID_STATUSES))
@@ -391,13 +455,42 @@ class SheetVitrinaV1AdsBlock:
             "fetched_at": self.timestamp_factory(),
             "advert_ids": advert_ids,
             "campaigns": campaigns,
+            "_read_source_mode": "network",
+            "_remote_call_counts": {
+                "campaign_count": 1,
+                "adverts_batch": 1,
+            },
         }
         self._campaign_cache = {"cached_at_monotonic": now_monotonic, "payload": payload}
         return payload
 
     def _find_current_row(self, *, nm_id: int, advert_id: int, placement: str, bypass_cache: bool) -> dict[str, Any]:
-        campaigns_payload = self._load_campaigns(bypass_cache=bypass_cache)
-        for campaign in campaigns_payload["campaigns"]:
+        campaigns: list[dict[str, Any]] = []
+        if not bypass_cache and self._campaign_cache:
+            cached_payload = self._campaign_cache.get("payload")
+            if isinstance(cached_payload, Mapping):
+                campaigns = [
+                    dict(item)
+                    for item in cached_payload.get("campaigns", [])
+                    if isinstance(item, Mapping)
+                    and int(item.get("advert_id") or 0) == advert_id
+                ]
+        if not campaigns:
+            adverts_payload = self.source.fetch_adverts(
+                [advert_id],
+                statuses=sorted(SUPPORTED_BID_STATUSES),
+            )
+            raw_adverts = (
+                adverts_payload.get("adverts")
+                if isinstance(adverts_payload, Mapping)
+                else []
+            )
+            campaigns = [
+                _parse_campaign(advert)
+                for advert in raw_adverts or []
+                if isinstance(advert, Mapping)
+            ]
+        for campaign in campaigns:
             if int(campaign["advert_id"]) != advert_id:
                 continue
             for row in _campaign_placement_rows(campaign):

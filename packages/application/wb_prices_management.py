@@ -68,7 +68,11 @@ class WbPricesManagementBlock:
         filter_nm_id = _optional_positive_int(_single_param(params.get("filterNmID") or params.get("nm_id")))
         active_nm_ids = [filter_nm_id] if filter_nm_id is not None else self._load_active_nm_ids()
         requested_nm_ids = _dedupe_ints(active_nm_ids)[:MAX_PRICE_CHANGES_PER_UPLOAD]
-        if requested_nm_ids:
+        provided_payload = params.get("_current_goods_payload")
+        if isinstance(provided_payload, Mapping):
+            payload = provided_payload
+            source_mode = "provided_current_goods_payload"
+        elif requested_nm_ids:
             payload = self.source.fetch_goods_by_nm_ids(requested_nm_ids)
             source_mode = "active_registry_nm_list"
         else:
@@ -106,11 +110,23 @@ class WbPricesManagementBlock:
             },
         }
 
-    def preview_changes(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def preview_changes(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        current_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         changes = _parse_changes(payload)
         nm_ids = [change.nm_id for change in changes]
-        current_payload = self.source.fetch_goods_by_nm_ids(nm_ids)
-        current_by_nm = {good.nm_id: good for good in normalize_goods_payload(current_payload)}
+        current_goods_payload = (
+            current_payload
+            if isinstance(current_payload, Mapping)
+            else self.source.fetch_goods_by_nm_ids(nm_ids)
+        )
+        current_by_nm = {
+            good.nm_id: good
+            for good in normalize_goods_payload(current_goods_payload)
+        }
         enrichment = self._load_nomenclature_enrichment()
         rows: list[dict[str, Any]] = []
         valid_changes: list[dict[str, Any]] = []

@@ -7531,7 +7531,11 @@
         if (skuButton) {
           event.preventDefault();
           event.stopPropagation();
-          openVitrinaSkuModal(Number(skuButton.getAttribute("data-open-vitrina-sku")), skuButton);
+          openVitrinaSkuModal(
+            Number(skuButton.getAttribute("data-open-vitrina-sku")),
+            skuButton,
+            String(skuButton.getAttribute("data-vitrina-sku-name") || skuButton.textContent || "").trim()
+          );
           return;
         }
         const toggle = event.target.closest("[data-metric-anchor-toggle]");
@@ -8187,7 +8191,10 @@
             if (focusable.length) {
               const first = focusable[0];
               const last = focusable[focusable.length - 1];
-              if (event.shiftKey && document.activeElement === first) {
+              if (!skuManagementModalNode.contains(document.activeElement)) {
+                event.preventDefault();
+                (event.shiftKey ? last : first).focus();
+              } else if (event.shiftKey && document.activeElement === first) {
                 event.preventDefault();
                 last.focus();
               } else if (!event.shiftKey && document.activeElement === last) {
@@ -13419,7 +13426,7 @@
       const nmId = skuClusterIdentity(nextRow);
       const labelHtml = ALLOWED_UNIFIED_TABS.has(SKU_MANAGEMENT_UNIFIED_TAB) && /^\d+$/.test(nmId)
         ? '<button class="sku-separator-label" type="button" data-open-vitrina-sku="' + escapeHtml(nmId) +
-          '" title="Открыть управление SKU: ' + escapeHtml(label) + '">' + escapeHtml(label) + '</button>'
+          '" data-vitrina-sku-name="' + escapeHtml(label) + '" title="Открыть управление SKU: ' + escapeHtml(label) + '">' + escapeHtml(label) + '</button>'
         : '<span class="sku-separator-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>';
       return [
         '<tr class="sku-separator-row" data-row-kind="separator" data-separator-next-label="' + escapeHtml(label) + '">',
@@ -22253,29 +22260,42 @@
       await requestSkuManagementPreview("bid",{nm_id:nmId,advert_id:Number(parts[0]),placement:parts[1],requested_bid_rub:input&&input.value});
     }
 
-    async function openVitrinaSkuModal(nmId, opener) {
+    async function openVitrinaSkuModal(nmId, opener, productName) {
       if (!ALLOWED_UNIFIED_TABS.has(SKU_MANAGEMENT_UNIFIED_TAB) || !Number.isFinite(nmId) || nmId <= 0) return;
       const requestToken = ++state.skuManagement.modalRequestToken;
       state.skuManagement.quickOrigin = true;
-      state.skuManagement.quickSku = null;
+      state.skuManagement.quickSku = {
+        nm_id: Number(nmId),
+        name: String(productName || "SKU").trim() || "SKU",
+        remote_data_loading: true
+      };
       state.skuManagement.quickHistoryRows = [];
       state.skuManagement.modalOpener = opener || document.activeElement;
       state.skuManagement.modalError = "";
       state.skuManagement.modalState = "quick_loading";
       renderSkuManagementModal();
+      window.setTimeout(function() {
+        const focusTarget = skuManagementModalNode && skuManagementModalNode.querySelector("[data-sku-modal-cancel]");
+        if (focusTarget) focusTarget.focus();
+      }, 0);
       try {
         const prefix = String(WEB_VITRINA_CONFIG.sku_management_sku_path || WEB_VITRINA_CONFIG.sku_management_path + "/sku").replace(/\/$/, "");
         const response = await fetch(prefix + "/" + encodeURIComponent(String(nmId)), {headers: {Accept: "application/json"}});
         const payload = await readJsonResponse(response, "non-json SKU detail response");
         if (requestToken !== state.skuManagement.modalRequestToken) return;
         if (!response.ok) throw new Error((payload && payload.error) || ("SKU detail route returned " + response.status));
-        const row = payload && payload.row;
-        if (!row || Number(row.nm_id) !== Number(nmId)) throw new Error("SKU detail returned a mismatching nmID");
-        state.skuManagement.quickSku = row;
+        const remoteRow = payload && payload.row;
+        if (!remoteRow || Number(remoteRow.nm_id) !== Number(nmId)) throw new Error("SKU detail returned a mismatching nmID");
+        let row = Object.assign({}, state.skuManagement.quickSku || {}, remoteRow, {remote_data_loading: false});
         state.skuManagement.quickHistoryRows = (((payload || {}).history || {}).rows || []);
         const index = state.skuManagement.rows.findIndex(function(item) { return Number(item.nm_id) === Number(nmId); });
-        if (index >= 0) state.skuManagement.rows[index] = row;
-        else state.skuManagement.rows.push(row);
+        if (index >= 0) {
+          Object.assign(state.skuManagement.rows[index], row);
+          row = state.skuManagement.rows[index];
+        } else {
+          state.skuManagement.rows.push(row);
+        }
+        state.skuManagement.quickSku = row;
         state.skuManagement.modalState = "quick_ready";
         renderSkuManagementModal();
         window.setTimeout(function() {
@@ -22363,17 +22383,19 @@
 
     function skuManagementPreviewFactsHtml(p){
       if(!p)return "";
-      if(state.skuManagement.previewKind==="price")return '<p><strong>Текущая / целевая цена продавца:</strong> '+escapeHtml(p.current.discountedPrice)+' → '+escapeHtml(p.target_seller_price)+' ₽</p><p><strong>Первоначальная цена:</strong> '+escapeHtml(p.current.price)+' → '+escapeHtml(p.new.price)+' ₽ · <strong>скидка:</strong> '+escapeHtml(p.current.discount)+'% → '+escapeHtml(p.new.discount)+'%</p><p><strong>Текущая цена покупателя:</strong> '+escapeHtml(p.current_buyer_price==null?"н/д":p.current_buyer_price+" ₽")+' · оценочная цена не подменяет факт.</p>';
-      return '<p><strong>advert_id / placement:</strong> '+escapeHtml(p.advert_id)+' / '+escapeHtml(p.placement)+'</p><p><strong>Ставка:</strong> '+escapeHtml(p.old_value)+' → '+escapeHtml(p.requested_value)+' ₽ · минимум '+escapeHtml(p.min_bid_rub==null?"н/д":p.min_bid_rub+' ₽')+'</p>';
+      const identity='<p><strong>Товар:</strong> '+escapeHtml(p.product_name||"SKU")+' · <strong>nmID:</strong> '+escapeHtml(p.nm_id)+'</p>';
+      if(state.skuManagement.previewKind==="price")return identity+'<p><strong>Текущая / целевая цена продавца:</strong> '+escapeHtml(p.current.discountedPrice)+' → '+escapeHtml(p.target_seller_price)+' ₽</p><p><strong>Первоначальная цена:</strong> '+escapeHtml(p.current.price)+' → '+escapeHtml(p.new.price)+' ₽ · <strong>скидка:</strong> '+escapeHtml(p.current.discount)+'% → '+escapeHtml(p.new.discount)+'%</p><p><strong>Текущая цена покупателя:</strong> '+escapeHtml(p.current_buyer_price==null?"н/д":p.current_buyer_price+" ₽")+' · оценочная цена не подменяет факт.</p>';
+      return identity+'<p><strong>advert_id / campaign / placement:</strong> '+escapeHtml(p.advert_id)+' / '+escapeHtml(p.campaign_name||"—")+' / '+escapeHtml(p.placement)+'</p><p><strong>Ставка:</strong> '+escapeHtml(p.old_value)+' → '+escapeHtml(p.requested_value)+' ₽ · минимум '+escapeHtml(p.min_bid_rub==null?"н/д":p.min_bid_rub+' ₽')+'</p>';
     }
 
     function renderSkuManagementModal(){
       if(!skuManagementModalNode)return;const modalState=String(state.skuManagement.modalState||"idle");const p=state.skuManagement.preview;
       skuManagementModalNode.setAttribute("data-sku-modal-state",modalState);skuManagementModalNode.hidden=modalState==="idle";
+      skuManagementModalNode.querySelectorAll("[data-sku-modal-cancel]").forEach(function(node){node.disabled=["commit_running","readback_pending"].includes(modalState);});
       if(skuManagementModalConfirmButton)skuManagementModalConfirmButton.hidden=["quick_loading","quick_ready"].includes(modalState);
       if(skuManagementModalSecondaryButton)skuManagementModalSecondaryButton.hidden=["commit_running","readback_pending","success","controlled_error"].includes(modalState);
       if(modalState==="quick_loading"){
-        skuManagementModalTitleNode.textContent="Загрузка SKU";skuManagementModalBodyNode.innerHTML='<p class="sku-modal-state">Загружаем точный SKU Management read model…</p>';skuManagementModalSecondaryButton.textContent="Отмена";return;
+        const identity=state.skuManagement.quickSku||{};skuManagementModalTitleNode.textContent="Управление SKU";skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state"><strong>'+escapeHtml(identity.name||"SKU")+'</strong><p>nmID '+escapeHtml(identity.nm_id||"—")+'</p><p>Догружаем текущую цену и точные campaign/placement данные…</p></div>';skuManagementModalSecondaryButton.textContent="Отмена";return;
       }
       if(modalState==="quick_ready"&&state.skuManagement.quickSku){
         skuManagementModalTitleNode.textContent="Управление SKU";skuManagementModalBodyNode.innerHTML=skuQuickReadyHtml(state.skuManagement.quickSku);skuManagementModalSecondaryButton.textContent="Закрыть";return;
@@ -22393,8 +22415,9 @@
         skuManagementModalConfirmButton.textContent="Изменение выполняется…";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
       }
       if(modalState==="success"&&state.skuManagement.pendingConfirmedUpdate){
-        const update=state.skuManagement.pendingConfirmedUpdate;const payload=update.payload||{};const preview=update.preview||{};const oldValue=update.kind==="price"?(preview.current||{}).discountedPrice:preview.old_value;const label=update.kind==="price"?"Цена изменена":"Ставка изменена";
-        skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
+        const update=state.skuManagement.pendingConfirmedUpdate;const payload=update.payload||{};const preview=update.preview||{};const oldValue=update.kind==="price"?(preview.current||{}).discountedPrice:preview.old_value;const requestedValue=update.kind==="price"?preview.target_seller_price:preview.requested_value;const label=update.kind==="price"?"Цена изменена":"Ставка изменена";const productName=payload.product_name||preview.product_name||((state.skuManagement.quickSku||{}).name)||"SKU";const nmId=payload.nm_id||preview.nm_id||((state.skuManagement.quickSku||{}).nm_id);
+        const bidIdentity=update.kind==="bid"?'<p><strong>advert_id:</strong> '+escapeHtml(payload.advert_id||preview.advert_id)+' · <strong>campaign:</strong> '+escapeHtml(payload.campaign_name||preview.campaign_name||"—")+' · <strong>placement:</strong> '+escapeHtml(payload.placement||preview.placement||"—")+'</p>':"";
+        skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p><strong>Товар:</strong> '+escapeHtml(productName)+'</p><p><strong>nmID:</strong> '+escapeHtml(nmId)+'</p>'+bidIdentity+'<p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p><strong>Было:</strong> '+escapeHtml(oldValue)+' ₽ · <strong>Запрошено:</strong> '+escapeHtml(requestedValue)+' ₽ · <strong>Подтверждено:</strong> '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
         skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;return;
       }
       if(modalState==="controlled_error"){
@@ -22427,7 +22450,7 @@
     function handleSkuManagementModalClick(event){
       if(event.target.closest("[data-quick-sku-price-preview]")){previewQuickSkuPrice();return;}
       if(event.target.closest("[data-quick-sku-bid-preview]")){previewQuickSkuBid();return;}
-      if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode)closeSkuManagementModal();
+      if(event.target.closest("[data-sku-modal-cancel]"))closeSkuManagementModal();
     }
 
     function handleSkuManagementModalPrimaryAction(){

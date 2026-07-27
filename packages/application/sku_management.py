@@ -511,8 +511,10 @@ class SkuManagementBlock:
         now_factory: Callable[[], datetime] | None = None,
         timestamp_factory: Callable[[], str] | None = None,
         sleep: Callable[[float], None] | None = None,
-        readback_attempts: int = 4,
-        readback_delay_seconds: float = 10.0,
+        monotonic_factory: Callable[[], float] | None = None,
+        readback_attempts: int = 8,
+        readback_delay_seconds: float = 0.35,
+        readback_deadline_seconds: float = 20.0,
     ) -> None:
         self.runtime = runtime
         self.runtime_dir = runtime_dir
@@ -524,9 +526,47 @@ class SkuManagementBlock:
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.timestamp_factory = timestamp_factory or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
+        self.monotonic_factory = monotonic_factory or time.monotonic
         self.readback_attempts = max(int(readback_attempts), 1)
         self.readback_delay_seconds = max(float(readback_delay_seconds), 0.0)
+        self.readback_deadline_seconds = max(float(readback_deadline_seconds), 0.0)
         self._preview_dir = runtime_dir / "sheet_vitrina_v1_sku_management" / "previews"
+
+    def _measure_phase(
+        self,
+        phases_ms: dict[str, float],
+        name: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        started = self.monotonic_factory()
+        try:
+            return operation()
+        finally:
+            phases_ms[name] = round(
+                max(self.monotonic_factory() - started, 0.0) * 1000,
+                2,
+            )
+
+    def _diagnostics(
+        self,
+        *,
+        started: float,
+        phases_ms: Mapping[str, float],
+        remote_call_counts: Mapping[str, int],
+        skipped_paths: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        return {
+            "total_ms": round(
+                max(self.monotonic_factory() - started, 0.0) * 1000,
+                2,
+            ),
+            "phases_ms": dict(phases_ms),
+            "remote_call_counts": {
+                str(key): int(value)
+                for key, value in remote_call_counts.items()
+            },
+            "skipped_paths": [str(item) for item in skipped_paths],
+        }
 
     def get_settings(self, *, user_key: str) -> dict[str, Any]:
         record = self.runtime.load_sheet_vitrina_user_config(user_key=user_key, config_key=SKU_MANAGEMENT_CONFIG_KEY)
@@ -910,24 +950,259 @@ class SkuManagementBlock:
         }
 
     def build_sku_detail(self, nm_id: int, *, user_key: str) -> dict[str, Any]:
-        """Narrow per-SKU query over the same management service and contracts."""
+        """Build the quick mutation read model without the forecast/table fanout."""
 
         if isinstance(nm_id, bool) or int(nm_id) <= 0:
             raise SkuManagementError("nm_id must be positive", http_status=422)
-        table = self.build_table(user_key=user_key, only_nm_ids=[int(nm_id)])
-        history = self.history({"nm_id": int(nm_id), "limit": 50, "offset": 0})
+        del user_key  # quick read uses section auth, not per-user forecast settings
+        normalized_nm_id = int(nm_id)
+        started = self.monotonic_factory()
+        phases_ms: dict[str, float] = {}
+        remote_call_counts = {
+            "wb_prices_exact_goods": 0,
+            "wb_ads_campaign_count": 0,
+            "wb_ads_adverts_batch": 0,
+            "wb_ads_fullstats": 0,
+            "wb_ads_min_bid": 0,
+            "wb_ads_recommendations": 0,
+            "wb_stocks": 0,
+            "forecast_or_supply": 0,
+        }
+        source_warnings: list[str] = []
+
+        active = self._measure_phase(
+            phases_ms,
+            "identity",
+            self._active_skus,
+        )
+        sku = next(
+            (
+                dict(item)
+                for item in active
+                if int(item.get("nm_id") or 0) == normalized_nm_id
+            ),
+            None,
+        )
+        if sku is None:
+            raise SkuManagementError(
+                "SKU is not active in canonical config_v2",
+                http_status=404,
+                payload={"missing_nm_ids": [normalized_nm_id]},
+            )
+
+        price_payload: Mapping[str, Any] = {}
+        try:
+            remote_call_counts["wb_prices_exact_goods"] += 1
+            price_payload = self._measure_phase(
+                phases_ms,
+                "price_exact_read",
+                lambda: self.prices_block.source.fetch_goods_by_nm_ids(
+                    [normalized_nm_id]
+                ),
+            )
+            price_table = self._measure_phase(
+                phases_ms,
+                "price_local_enrichment",
+                lambda: self.prices_block.build_goods_table(
+                    {
+                        "filterNmID": normalized_nm_id,
+                        "_current_goods_payload": price_payload,
+                    }
+                ),
+            )
+        except Exception as exc:
+            price_table = {"rows": [], "generated_at": ""}
+            source_warnings.append(
+                f"price evidence unavailable ({type(exc).__name__})"
+            )
+        price = next(
+            (
+                dict(item)
+                for item in price_table.get("rows", [])
+                if int(item.get("nmID") or 0) == normalized_nm_id
+            ),
+            {},
+        )
+
+        snapshots = self._measure_phase(
+            phases_ms,
+            "current_snapshot_projection",
+            lambda: self._snapshot_projection([normalized_nm_id]).get(
+                normalized_nm_id,
+                {},
+            ),
+        )
+        buyer = {
+            "value": snapshots.get("public_buyer_price"),
+            "source": "spp_proxy_temporal_snapshot",
+            "freshness": snapshots.get("public_buyer_price__date", ""),
+            "observed_at": snapshots.get(
+                "public_buyer_price__observed_at",
+                "",
+            ),
+            "quality": (
+                "observed"
+                if snapshots.get("public_buyer_price") is not None
+                else "missing"
+            ),
+        }
+        try:
+            placement_read = self._measure_phase(
+                phases_ms,
+                "ads_exact_placement_index",
+                self.ads_block.build_placement_index_read,
+            )
+            placement_index = placement_read["index"]
+            placement_call_counts = (
+                placement_read.get("diagnostics", {}).get(
+                    "remote_call_counts",
+                    {},
+                )
+            )
+            remote_call_counts["wb_ads_campaign_count"] += int(
+                placement_call_counts.get("campaign_count") or 0
+            )
+            remote_call_counts["wb_ads_adverts_batch"] += int(
+                placement_call_counts.get("adverts_batch") or 0
+            )
+            ad_options = [
+                dict(item)
+                for item in placement_index.get(normalized_nm_id, [])
+            ]
+        except Exception as exc:
+            ad_options = []
+            source_warnings.append(
+                "advertising placement evidence unavailable "
+                f"({type(exc).__name__})"
+            )
+        history = self._measure_phase(
+            phases_ms,
+            "history",
+            lambda: self.history(
+                {"nm_id": normalized_nm_id, "limit": 50, "offset": 0}
+            ),
+        )
+        latest = self.runtime.latest_sku_action_events_by_nm(
+            [normalized_nm_id]
+        ).get(normalized_nm_id, {})
+        bid_values = [
+            value
+            for item in ad_options
+            if (value := _optional_float(item.get("current_bid_rub"))) is not None
+        ]
+        price_updated_at = str(
+            price.get("updated_at")
+            or price.get("fetched_at")
+            or price_table.get("generated_at")
+            or ""
+        )
+        bid_updated_at = max(
+            (
+                str(item.get("campaign_fetched_at") or "")
+                for item in ad_options
+            ),
+            default="",
+        )
+        row = {
+            **sku,
+            "seller_price": price.get("discountedPrice"),
+            "seller_price_updated_at": price_updated_at,
+            "initial_price": price.get("price"),
+            "seller_discount": price.get("discount"),
+            "buyer_price": buyer.get("value"),
+            "buyer_price_source": buyer.get("source", ""),
+            "buyer_price_freshness": buyer.get("freshness", ""),
+            "buyer_price_quality": buyer.get("quality", "missing"),
+            "buyer_price_updated_at": str(
+                buyer.get("observed_at") or buyer.get("freshness") or ""
+            ),
+            "spp_proxy": snapshots.get("spp_proxy"),
+            "spp_proxy_updated_at": str(
+                snapshots.get("spp_proxy__observed_at")
+                or snapshots.get("spp_proxy__date")
+                or ""
+            ),
+            "promo_label": price.get("promoLabel") or "н/д",
+            "promo_count": snapshots.get("promo_count_by_price"),
+            "promo_participation": snapshots.get("promo_participation"),
+            "promo_freshness": str(
+                snapshots.get("promo_participation__observed_at")
+                or snapshots.get("promo_count_by_price__observed_at")
+                or snapshots.get("promo_participation__date")
+                or snapshots.get("promo_count_by_price__date")
+                or ""
+            ),
+            "campaign_count": len(
+                {int(item.get("advert_id") or 0) for item in ad_options}
+            ),
+            "placement_count": len(ad_options),
+            "campaigns_updated_at": bid_updated_at,
+            "ad_options": ad_options,
+            "current_bid": (
+                bid_values[0]
+                if len(ad_options) == 1 and bid_values
+                else None
+            ),
+            "current_bid_updated_at": bid_updated_at,
+            "bid_sort_value": min(bid_values) if bid_values else None,
+            "last_price_change_at": str(
+                (latest.get(PRICE_PARAMETER) or {}).get("confirmed_at") or ""
+            ),
+            "last_bid_change_at": str(
+                (latest.get(BID_PARAMETER) or {}).get("confirmed_at") or ""
+            ),
+            "source_warnings": source_warnings,
+        }
+        diagnostics = self._diagnostics(
+            started=started,
+            phases_ms=phases_ms,
+            remote_call_counts=remote_call_counts,
+            skipped_paths=(
+                "sku_management.build_table",
+                "stocks",
+                "forecast",
+                "supplier_shipments",
+                "wb_supplies",
+                "ads_fullstats",
+                "ads_min_bids",
+                "ads_recommendations",
+                "all_sku_prices",
+            ),
+        )
         return {
             "contract_name": "sheet_vitrina_v1_sku_management_detail",
-            "generated_at": table["generated_at"],
-            "row": table["rows"][0],
-            "meta": table["meta"],
+            "generated_at": self.timestamp_factory(),
+            "row": row,
+            "meta": {
+                "read_scope": "quick_exact_sku_mutation",
+                "writes_enabled": True,
+                "diagnostics": diagnostics,
+            },
             "history": history,
         }
 
     def preview_price(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        started = self.monotonic_factory()
+        phases_ms: dict[str, float] = {}
+        remote_call_counts = {
+            "wb_prices_exact_goods": 0,
+            "wb_prices_preview_duplicate_goods": 0,
+            "wb_quarantine_scan": 0,
+            "public_buyer_price_network": 0,
+        }
         nm_id = _positive_int(payload.get("nm_id"), "nm_id")
         target = _money_decimal(payload.get("target_seller_price"), "target_seller_price")
-        current_payload = self.prices_block.source.fetch_goods_by_nm_ids([nm_id])
+        identity = self._measure_phase(
+            phases_ms,
+            "identity",
+            lambda: self._product_identity(nm_id),
+        )
+        remote_call_counts["wb_prices_exact_goods"] += 1
+        current_payload = self._measure_phase(
+            phases_ms,
+            "current_price",
+            lambda: self.prices_block.source.fetch_goods_by_nm_ids([nm_id]),
+        )
         goods = normalize_goods_payload(current_payload)
         if not goods:
             raise SkuManagementError("current WB price was not found", http_status=404)
@@ -937,8 +1212,21 @@ class SkuManagementBlock:
             current_price=good.price,
             current_discount=good.discount,
         )
-        delegated = self.prices_block.preview_changes(
-            {"changes": [{"nmID": nm_id, "price": combination["price"], "discount": combination["discount"]}]}
+        delegated = self._measure_phase(
+            phases_ms,
+            "guarded_price_preview",
+            lambda: self.prices_block.preview_changes(
+                {
+                    "changes": [
+                        {
+                            "nmID": nm_id,
+                            "price": combination["price"],
+                            "discount": combination["discount"],
+                        }
+                    ]
+                },
+                current_payload=current_payload,
+            ),
         )
         row = delegated["preview"]["rows"][0]
         if not row.get("valid"):
@@ -946,18 +1234,33 @@ class SkuManagementBlock:
         warnings = list(row.get("warnings") or [])
         current_view = {}
         try:
-            current_view = next(
-                (
-                    item for item in self.prices_block.build_goods_table({"filterNmID": nm_id}).get("rows", [])
-                    if int(item.get("nmID") or 0) == nm_id
+            current_view = self._measure_phase(
+                phases_ms,
+                "price_local_enrichment",
+                lambda: next(
+                    (
+                        item
+                        for item in self.prices_block.build_goods_table(
+                            {
+                                "filterNmID": nm_id,
+                                "_current_goods_payload": current_payload,
+                            }
+                        ).get("rows", [])
+                        if int(item.get("nmID") or 0) == nm_id
+                    ),
+                    {},
                 ),
-                {},
             )
         except Exception:
             current_view = {}
         quarantine_rows: list[Mapping[str, Any]] = []
         try:
-            quarantine_rows = self._load_price_quarantine_rows(nm_id)
+            remote_call_counts["wb_quarantine_scan"] += 1
+            quarantine_rows = self._measure_phase(
+                phases_ms,
+                "quarantine",
+                lambda: self._load_price_quarantine_rows(nm_id),
+            )
         except SkuManagementError:
             raise
         except Exception as exc:
@@ -984,14 +1287,38 @@ class SkuManagementBlock:
         stabilization_codes = [item["code"] for item in stabilization]
         warnings.extend(stabilization_codes)
         override_required_warnings.extend(stabilization_codes)
-        buyer = self._fetch_buyer_price(nm_id)
+        buyer = self._measure_phase(
+            phases_ms,
+            "buyer_price_cached_projection",
+            lambda: self._current_buyer_price_projection([nm_id]).get(
+                nm_id,
+                {
+                    "value": None,
+                    "source": "spp_proxy_temporal_snapshot",
+                    "freshness": "",
+                    "observed_at": "",
+                    "quality": "missing",
+                },
+            ),
+        )
         if buyer.get("quality") != "observed":
             warnings.append("public_buyer_price_missing_or_stale")
+        diagnostics = self._diagnostics(
+            started=started,
+            phases_ms=phases_ms,
+            remote_call_counts=remote_call_counts,
+            skipped_paths=(
+                "duplicate_current_price_reads",
+                "public_buyer_price_network",
+            ),
+        )
         preview = {
             "preview_id": uuid4().hex,
             "operation_id": str(delegated["preview"].get("operation_id") or uuid4().hex),
             "parameter": PRICE_PARAMETER,
             "nm_id": nm_id,
+            "product_name": identity["product_name"],
+            "sku": identity["sku"],
             "actor": actor,
             "created_at": self.timestamp_factory(),
             "expires_at_epoch": int(delegated["preview"].get("expires_at_epoch") or 0),
@@ -1007,6 +1334,7 @@ class SkuManagementBlock:
             "warnings": _dedupe_strings(warnings),
             "override_required_warnings": _dedupe_strings(override_required_warnings),
             "stabilization_warnings": stabilization,
+            "diagnostics": diagnostics,
         }
         self._save_preview(preview)
         response_preview = dict(preview)
@@ -1014,6 +1342,16 @@ class SkuManagementBlock:
         return {"status": "preview_ready", "preview": response_preview, "writes_enabled": True}
 
     def commit_price(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        started = self.monotonic_factory()
+        phases_ms: dict[str, float] = {}
+        remote_call_counts = {
+            "wb_quarantine_scan": 0,
+            "wb_prices_current_tuple": 0,
+            "wb_prices_upload": 0,
+            "wb_prices_upload_status": 0,
+            "wb_prices_tuple_readback": 0,
+            "public_buyer_price_network": 0,
+        }
         preview = self._load_preview(payload.get("preview_id"), expected_parameter=PRICE_PARAMETER)
         self._validate_confirmation(preview, payload=payload, actor=actor)
         stabilization_override = bool(preview.get("stabilization_warnings")) and (
@@ -1025,14 +1363,34 @@ class SkuManagementBlock:
         )
         self._claim_preview(preview)
         try:
-            self._assert_price_not_quarantined(int(preview["nm_id"]))
-            self._assert_price_promo_fresh(preview)
-            current_goods = normalize_goods_payload(
-                self.prices_block.source.fetch_goods_by_nm_ids([int(preview["nm_id"])])
+            remote_call_counts["wb_quarantine_scan"] += 1
+            self._measure_phase(
+                phases_ms,
+                "quarantine_recheck",
+                lambda: self._assert_price_not_quarantined(
+                    int(preview["nm_id"])
+                ),
             )
+            remote_call_counts["wb_prices_current_tuple"] += 1
+            current_goods_payload = self._measure_phase(
+                phases_ms,
+                "current_tuple_recheck",
+                lambda: self.prices_block.source.fetch_goods_by_nm_ids(
+                    [int(preview["nm_id"])]
+                ),
+            )
+            current_goods = normalize_goods_payload(current_goods_payload)
             if not current_goods:
                 raise SkuManagementError("current WB price disappeared after preview", http_status=409)
             current_good = current_goods[0]
+            self._measure_phase(
+                phases_ms,
+                "promo_recheck",
+                lambda: self._assert_price_promo_fresh(
+                    preview,
+                    current_goods_payload=current_goods_payload,
+                ),
+            )
             expected_current = preview["current"]
             if (
                 int(current_good.price) != int(expected_current["price"])
@@ -1050,35 +1408,75 @@ class SkuManagementBlock:
                         }
                     },
                 )
-            upload = self.prices_block.upload_task(preview["delegated_confirmation"], actor=actor)
+            remote_call_counts["wb_prices_upload"] += 1
+            upload = self._measure_phase(
+                phases_ms,
+                "upload",
+                lambda: self.prices_block.upload_task(
+                    preview["delegated_confirmation"],
+                    actor=actor,
+                ),
+            )
             upload_id = _positive_int(upload.get("uploadID"), "uploadID")
-            status_payload: Mapping[str, Any] = {}
-            for attempt in range(self.readback_attempts):
-                status_payload = self.prices_block.get_upload_task(upload_id)
-                if status_payload.get("is_final"):
-                    break
-                if attempt + 1 < self.readback_attempts:
-                    self.sleep(self.readback_delay_seconds)
+            confirmed, observed, status_payload, polling = self._measure_phase(
+                phases_ms,
+                "upload_status_and_tuple_readback",
+                lambda: self._poll_price_upload_and_tuple(
+                    upload_id=upload_id,
+                    nm_id=int(preview["nm_id"]),
+                    target=float(preview["target_seller_price"]),
+                    expected_price=int(preview["new"]["price"]),
+                    expected_discount=int(preview["new"]["discount"]),
+                ),
+            )
+            remote_call_counts["wb_prices_upload_status"] += int(
+                polling.get("status_reads") or 0
+            )
+            remote_call_counts["wb_prices_tuple_readback"] += int(
+                polling.get("tuple_reads") or 0
+            )
             if status_payload.get("status") != "success":
                 raise SkuManagementError(
                     "WB price upload did not finish with success",
                     http_status=502,
-                    payload={"readback": dict(status_payload)},
+                    payload={
+                        "readback_status": "error",
+                        "readback": dict(status_payload),
+                        "polling": polling,
+                    },
                 )
-            confirmed, observed = self._readback_price(
-                int(preview["nm_id"]),
-                target=float(preview["target_seller_price"]),
-                expected_price=int(preview["new"]["price"]),
-                expected_discount=int(preview["new"]["discount"]),
-            )
             if confirmed is None:
                 raise SkuManagementError(
                     "WB price readback does not match the requested price/discount/seller-price tuple",
                     http_status=409,
-                    payload={"readback_status": "mismatch", "readback": observed, "target": preview["new"]},
+                    payload={
+                        "readback_status": "mismatch",
+                        "readback": observed,
+                        "target": preview["new"],
+                        "polling": polling,
+                    },
                 )
             confirmed_at = self.timestamp_factory()
-            buyer = self._readback_buyer_price(int(preview["nm_id"]))
+            buyer = {
+                **dict(preview.get("buyer_price_evidence") or {}),
+                "quality": "deferred",
+                "value": None,
+                "post_commit_refresh": "not_awaited",
+                "reason": (
+                    "optional public buyer-price enrichment does not block "
+                    "confirmed seller-price success"
+                ),
+            }
+            diagnostics = self._diagnostics(
+                started=started,
+                phases_ms=phases_ms,
+                remote_call_counts=remote_call_counts,
+                skipped_paths=(
+                    "second_current_tuple_read",
+                    "sequential_status_then_tuple_polling",
+                    "blocking_public_buyer_price_readback",
+                ),
+            )
             event = self._persist_event(
                 preview=preview,
                 actor=actor,
@@ -1089,20 +1487,39 @@ class SkuManagementBlock:
                 stabilization_override=stabilization_override,
                 warning_override=warning_override,
                 readback_status="matching",
-                readback={"upload": dict(status_payload), "price": observed, "buyer_price": buyer},
+                readback={
+                    "upload": dict(status_payload),
+                    "price": observed,
+                    "buyer_price": buyer,
+                    "polling": polling,
+                    "diagnostics": diagnostics,
+                },
                 confirmed_at=confirmed_at,
             )
             return {
                 "status": "success",
+                "nm_id": int(preview["nm_id"]),
+                "product_name": str(preview.get("product_name") or "SKU"),
                 "confirmed_value": confirmed,
+                "old_value": float(preview["current"]["discountedPrice"]),
+                "requested_value": float(preview["target_seller_price"]),
                 "confirmed_price": observed.get("price"),
                 "confirmed_discount": observed.get("discount"),
                 "confirmed_seller_price": observed.get("seller_price"),
                 "readback_status": "matching",
                 "buyer_price": buyer,
+                "diagnostics": diagnostics,
                 "event": event,
             }
         except Exception as exc:
+            diagnostics = self._diagnostics(
+                started=started,
+                phases_ms=phases_ms,
+                remote_call_counts=remote_call_counts,
+                skipped_paths=("blocking_public_buyer_price_readback",),
+            )
+            if isinstance(exc, SkuManagementError):
+                exc.payload.setdefault("diagnostics", diagnostics)
             self._persist_failure(
                 preview=preview,
                 actor=actor,
@@ -1113,7 +1530,19 @@ class SkuManagementBlock:
             raise
 
     def preview_bid(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
-        delegated = self.ads_block.preview_bid_change(payload)
+        started = self.monotonic_factory()
+        phases_ms: dict[str, float] = {}
+        remote_call_counts = {
+            "wb_ads_exact_advert": 1,
+            "wb_ads_min_bid": 1,
+            "wb_ads_fullstats": 0,
+            "wb_ads_recommendations": 0,
+        }
+        delegated = self._measure_phase(
+            phases_ms,
+            "exact_bid_preview",
+            lambda: self.ads_block.preview_bid_change(payload),
+        )
         facts = dict(delegated["preview"])
         if facts.get("min_bid_rub") is None:
             raise SkuManagementError(
@@ -1122,13 +1551,26 @@ class SkuManagementBlock:
                 payload={"safety_status": "min_bid_unavailable"},
             )
         nm_id = int(facts["nm_id"])
+        identity = self._measure_phase(
+            phases_ms,
+            "identity",
+            lambda: self._product_identity(nm_id),
+        )
         stabilization = self._stabilization_warnings(nm_id=nm_id, parameter=BID_PARAMETER, actor=actor)
         warnings = list(facts.get("warnings") or []) + [item["code"] for item in stabilization]
+        diagnostics = self._diagnostics(
+            started=started,
+            phases_ms=phases_ms,
+            remote_call_counts=remote_call_counts,
+            skipped_paths=("ads_fullstats", "ads_recommendations"),
+        )
         preview = {
             "preview_id": uuid4().hex,
             "operation_id": str(facts.get("operation_id") or uuid4().hex),
             "parameter": BID_PARAMETER,
             "nm_id": nm_id,
+            "product_name": identity["product_name"],
+            "sku": identity["sku"],
             "actor": actor,
             "created_at": self.timestamp_factory(),
             "expires_at_epoch": int(facts.get("expires_at_epoch") or 0),
@@ -1143,6 +1585,7 @@ class SkuManagementBlock:
             "override_required_warnings": [item["code"] for item in stabilization],
             "stabilization_warnings": stabilization,
             "current_bid_freshness": facts.get("created_at"),
+            "diagnostics": diagnostics,
         }
         self._save_preview(preview)
         response_preview = dict(preview)
@@ -1150,6 +1593,17 @@ class SkuManagementBlock:
         return {"status": "preview_ready", "preview": response_preview, "writes_enabled": True}
 
     def commit_bid(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        started = self.monotonic_factory()
+        phases_ms: dict[str, float] = {}
+        remote_call_counts = {
+            "wb_ads_commit_exact_advert": 0,
+            "wb_ads_commit_min_bid": 0,
+            "wb_ads_patch": 0,
+            "wb_ads_exact_bid_readback": 0,
+            "wb_ads_fullstats": 0,
+            "wb_ads_min_bid_readback": 0,
+            "wb_ads_recommendations": 0,
+        }
         preview = self._load_preview(payload.get("preview_id"), expected_parameter=BID_PARAMETER)
         self._validate_confirmation(preview, payload=payload, actor=actor)
         stabilization_override = bool(preview.get("stabilization_warnings")) and (
@@ -1161,28 +1615,48 @@ class SkuManagementBlock:
         )
         self._claim_preview(preview)
         try:
-            delegated = self.ads_block.commit_bid_change({"preview_id": preview["delegated_preview_id"]}, actor=actor)
-            confirmed: float | None = None
-            readback: Mapping[str, Any] = {}
-            for attempt in range(self.readback_attempts):
-                detail = self.ads_block.build_sku_detail(int(preview["nm_id"]), bypass_cache=True)
-                readback = detail
-                for row in detail.get("rows", []):
-                    if int(row.get("advert_id") or 0) == int(preview["advert_id"]) and str(row.get("placement") or "") == preview["placement"]:
-                        value = _optional_float(row.get("current_bid_rub"))
-                        if value is not None and abs(value - float(preview["requested_value"])) < 0.001:
-                            confirmed = value
-                if confirmed is not None:
-                    break
-                if attempt + 1 < self.readback_attempts:
-                    self.sleep(self.readback_delay_seconds)
+            delegated = self._measure_phase(
+                phases_ms,
+                "guarded_bid_commit",
+                lambda: self.ads_block.commit_bid_change(
+                    {"preview_id": preview["delegated_preview_id"]},
+                    actor=actor,
+                ),
+            )
+            remote_call_counts["wb_ads_commit_exact_advert"] = 1
+            remote_call_counts["wb_ads_commit_min_bid"] = 1
+            remote_call_counts["wb_ads_patch"] = 1
+            confirmed, readback, polling = self._measure_phase(
+                phases_ms,
+                "exact_bid_readback",
+                lambda: self._poll_exact_bid_readback(preview),
+            )
+            remote_call_counts["wb_ads_exact_bid_readback"] += int(
+                polling.get("exact_reads") or 0
+            )
             if confirmed is None:
                 raise SkuManagementError(
                     "WB bid readback does not match requested bid",
                     http_status=409,
-                    payload={"readback": dict(readback), "target": preview["requested_value"]},
+                    payload={
+                        "readback_status": "mismatch",
+                        "readback": dict(readback),
+                        "target": preview["requested_value"],
+                        "polling": polling,
+                    },
                 )
             confirmed_at = self.timestamp_factory()
+            diagnostics = self._diagnostics(
+                started=started,
+                phases_ms=phases_ms,
+                remote_call_counts=remote_call_counts,
+                skipped_paths=(
+                    "ads_sku_detail",
+                    "ads_fullstats",
+                    "ads_min_bid_readback",
+                    "ads_recommendations",
+                ),
+            )
             event = self._persist_event(
                 preview=preview,
                 actor=actor,
@@ -1193,11 +1667,42 @@ class SkuManagementBlock:
                 stabilization_override=stabilization_override,
                 warning_override=warning_override,
                 readback_status="matching",
-                readback={"commit": delegated, "detail": dict(readback)},
+                readback={
+                    "commit": delegated,
+                    "exact_bid": dict(readback),
+                    "polling": polling,
+                    "diagnostics": diagnostics,
+                },
                 confirmed_at=confirmed_at,
             )
-            return {"status": "success", "confirmed_value": confirmed, "readback_status": "matching", "event": event}
+            return {
+                "status": "success",
+                "nm_id": int(preview["nm_id"]),
+                "product_name": str(preview.get("product_name") or "SKU"),
+                "advert_id": int(preview["advert_id"]),
+                "campaign_name": str(preview.get("campaign_name") or ""),
+                "placement": str(preview["placement"]),
+                "old_value": float(preview["old_value"]),
+                "requested_value": float(preview["requested_value"]),
+                "confirmed_value": confirmed,
+                "readback_status": "matching",
+                "diagnostics": diagnostics,
+                "event": event,
+            }
         except Exception as exc:
+            diagnostics = self._diagnostics(
+                started=started,
+                phases_ms=phases_ms,
+                remote_call_counts=remote_call_counts,
+                skipped_paths=(
+                    "ads_sku_detail",
+                    "ads_fullstats",
+                    "ads_min_bid_readback",
+                    "ads_recommendations",
+                ),
+            )
+            if isinstance(exc, SkuManagementError):
+                exc.payload.setdefault("diagnostics", diagnostics)
             self._persist_failure(
                 preview=preview,
                 actor=actor,
@@ -1206,6 +1711,77 @@ class SkuManagementBlock:
                 warning_override=warning_override,
             )
             raise
+
+    def _poll_exact_bid_readback(
+        self,
+        preview: Mapping[str, Any],
+    ) -> tuple[float | None, Mapping[str, Any], dict[str, Any]]:
+        started = self.monotonic_factory()
+        deadline = (
+            started + self.readback_deadline_seconds
+            if self.readback_deadline_seconds > 0
+            else None
+        )
+        readback: Mapping[str, Any] = {}
+        cadence: list[float] = []
+        exact_reads = 0
+        attempts = 0
+        target = float(preview["requested_value"])
+        for attempt in range(self.readback_attempts):
+            attempts = attempt + 1
+            exact_reads += 1
+            readback = self.ads_block.read_exact_bid(
+                nm_id=int(preview["nm_id"]),
+                advert_id=int(preview["advert_id"]),
+                placement=str(preview["placement"]),
+            )
+            value = _optional_float(readback.get("current_bid_rub"))
+            if value is not None and abs(value - target) < 0.001:
+                return (
+                    value,
+                    readback,
+                    {
+                        "attempts": attempts,
+                        "exact_reads": exact_reads,
+                        "deadline_seconds": self.readback_deadline_seconds,
+                        "cadence_seconds": cadence,
+                        "elapsed_ms": round(
+                            max(self.monotonic_factory() - started, 0.0)
+                            * 1000,
+                            2,
+                        ),
+                        "outcome": "matching",
+                    },
+                )
+            if attempt + 1 >= self.readback_attempts:
+                break
+            now = self.monotonic_factory()
+            if deadline is not None and now >= deadline:
+                break
+            delay = min(
+                self.readback_delay_seconds * (1.7**attempt),
+                3.0,
+            )
+            if deadline is not None:
+                delay = min(delay, max(deadline - now, 0.0))
+            cadence.append(round(delay, 3))
+            if delay > 0:
+                self.sleep(delay)
+        return (
+            None,
+            readback,
+            {
+                "attempts": attempts,
+                "exact_reads": exact_reads,
+                "deadline_seconds": self.readback_deadline_seconds,
+                "cadence_seconds": cadence,
+                "elapsed_ms": round(
+                    max(self.monotonic_factory() - started, 0.0) * 1000,
+                    2,
+                ),
+                "outcome": "deadline_or_attempts_exhausted",
+            },
+        )
 
     def history(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -1234,6 +1810,29 @@ class SkuManagementBlock:
                 }
             )
         return rows
+
+    def _product_identity(self, nm_id: int) -> dict[str, Any]:
+        identity = next(
+            (
+                dict(item)
+                for item in self._active_skus()
+                if int(item.get("nm_id") or 0) == int(nm_id)
+            ),
+            None,
+        )
+        if identity is None:
+            raise SkuManagementError(
+                "SKU is not active in canonical config_v2",
+                http_status=404,
+                payload={"missing_nm_ids": [int(nm_id)]},
+            )
+        return {
+            "nm_id": int(nm_id),
+            "product_name": str(
+                identity.get("name") or identity.get("sku") or "SKU"
+            ),
+            "sku": str(identity.get("sku") or ""),
+        }
 
     def _collect_forecast_evidence(
         self,
@@ -1852,6 +2451,124 @@ class SkuManagementBlock:
                     warnings.append({"code": "cross_parameter_stabilization", "message": f"По этому SKU продолжается период стабилизации после изменения {source_label}. Изменение {target_label} усложнит оценку результата.", "elapsed_days": elapsed, "remaining_days": other_days - elapsed})
         return warnings
 
+    def _poll_price_upload_and_tuple(
+        self,
+        *,
+        upload_id: int,
+        nm_id: int,
+        target: float,
+        expected_price: int,
+        expected_discount: int,
+    ) -> tuple[
+        float | None,
+        dict[str, Any],
+        Mapping[str, Any],
+        dict[str, Any],
+    ]:
+        started = self.monotonic_factory()
+        deadline = (
+            started + self.readback_deadline_seconds
+            if self.readback_deadline_seconds > 0
+            else None
+        )
+        status_payload: Mapping[str, Any] = {}
+        observed: dict[str, Any] = {
+            "price": None,
+            "discount": None,
+            "seller_price": None,
+            "status": "missing",
+        }
+        status_reads = 0
+        tuple_reads = 0
+        cadence: list[float] = []
+        attempts = 0
+        for attempt in range(self.readback_attempts):
+            attempts = attempt + 1
+            status_reads += 1
+            status_payload = self.prices_block.get_upload_task(upload_id)
+            if status_payload.get("is_final"):
+                if status_payload.get("status") != "success":
+                    break
+                tuple_reads += 1
+                goods = normalize_goods_payload(
+                    self.prices_block.source.fetch_goods_by_nm_ids([nm_id])
+                )
+                if goods:
+                    good = goods[0]
+                    observed = {
+                        "price": float(good.price),
+                        "discount": int(good.discount),
+                        "seller_price": float(good.discounted_price),
+                        "status": "observed",
+                    }
+                    if (
+                        int(good.price) == int(expected_price)
+                        and int(good.discount) == int(expected_discount)
+                        and abs(float(good.discounted_price) - target) < 0.011
+                    ):
+                        observed["status"] = "matching"
+                        return (
+                            float(good.discounted_price),
+                            observed,
+                            status_payload,
+                            {
+                                "attempts": attempts,
+                                "status_reads": status_reads,
+                                "tuple_reads": tuple_reads,
+                                "deadline_seconds": self.readback_deadline_seconds,
+                                "cadence_seconds": cadence,
+                                "elapsed_ms": round(
+                                    max(
+                                        self.monotonic_factory() - started,
+                                        0.0,
+                                    )
+                                    * 1000,
+                                    2,
+                                ),
+                                "outcome": "matching",
+                            },
+                        )
+            if attempt + 1 >= self.readback_attempts:
+                break
+            now = self.monotonic_factory()
+            if deadline is not None and now >= deadline:
+                break
+            delay = min(
+                self.readback_delay_seconds * (1.7**attempt),
+                3.0,
+            )
+            if deadline is not None:
+                delay = min(delay, max(deadline - now, 0.0))
+            cadence.append(round(delay, 3))
+            if delay > 0:
+                self.sleep(delay)
+        if observed.get("seller_price") is not None:
+            observed["status"] = "mismatch"
+        return (
+            None,
+            observed,
+            status_payload,
+            {
+                "attempts": attempts,
+                "status_reads": status_reads,
+                "tuple_reads": tuple_reads,
+                "deadline_seconds": self.readback_deadline_seconds,
+                "cadence_seconds": cadence,
+                "elapsed_ms": round(
+                    max(self.monotonic_factory() - started, 0.0) * 1000,
+                    2,
+                ),
+                "outcome": (
+                    "upload_error"
+                    if status_payload.get("is_final")
+                    and status_payload.get("status") != "success"
+                    else "mismatch"
+                    if observed.get("seller_price") is not None
+                    else "deadline_or_attempts_exhausted"
+                ),
+            },
+        )
+
     def _readback_price(
         self,
         nm_id: int,
@@ -1923,13 +2640,23 @@ class SkuManagementBlock:
             payload={"safety_status": "quarantine_evidence_truncated"},
         )
 
-    def _assert_price_promo_fresh(self, preview: Mapping[str, Any]) -> None:
+    def _assert_price_promo_fresh(
+        self,
+        preview: Mapping[str, Any],
+        *,
+        current_goods_payload: Mapping[str, Any] | None = None,
+    ) -> None:
         nm_id = int(preview["nm_id"])
+        table_params: dict[str, Any] = {"filterNmID": nm_id}
+        if current_goods_payload is not None:
+            table_params["_current_goods_payload"] = current_goods_payload
         try:
             current = next(
                 (
                     item
-                    for item in self.prices_block.build_goods_table({"filterNmID": nm_id}).get("rows", [])
+                    for item in self.prices_block.build_goods_table(
+                        table_params
+                    ).get("rows", [])
                     if int(item.get("nmID") or 0) == nm_id
                 ),
                 {},

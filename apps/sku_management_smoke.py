@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+import time
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,8 @@ class FakePrices:
         self.quarantined = False
         self.quarantine_error = False
         self.upload_calls = 0
+        self.goods_by_nm_calls = 0
+        self.delay_seconds = 0.0
 
     def _good(self):
         discounted = round(self.price * (100 - self.discount) / 100, 2)
@@ -57,6 +60,9 @@ class FakePrices:
         return {"data": {"listGoods": rows}}
 
     def fetch_goods_by_nm_ids(self, nm_ids):
+        self.goods_by_nm_calls += 1
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         return {"data": {"listGoods": [self._good()] if NM_ID in [int(item) for item in nm_ids] else []}}
 
     def upload_task(self, goods):
@@ -88,36 +94,65 @@ class FakeAds:
     def __init__(self) -> None:
         self.bid = 1500
         self.min_bid = 1000
+        self.ignore_patch = False
+        self.calls = {
+            "count": 0,
+            "adverts": 0,
+            "min": 0,
+            "recommendations": 0,
+            "fullstats": 0,
+            "patch": 0,
+        }
+        self.delay_seconds = 0.0
 
     def fetch_campaign_count(self):
+        self.calls["count"] += 1
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         return {"adverts": [{"status": 9, "advert_list": [{"advertId": 77}]}]}
 
     def fetch_adverts(self, advert_ids, *, statuses=None, payment_type=""):
+        self.calls["adverts"] += 1
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         return {"adverts": [{"id": 77, "status": 9, "bid_type": "manual", "settings": {"name": "SKU campaign", "payment_type": "cpm", "placements": {"search": True}}, "nm_settings": [{"nm_id": NM_ID, "bids_kopecks": {"search": self.bid}}]}]}
 
     def fetch_min_bids(self, *, advert_id, nm_ids, payment_type, placement_types):
+        self.calls["min"] += 1
         if self.min_bid is None:
             return {"bids": []}
         return {"bids": [{"nm_id": NM_ID, "bids": [{"type": "search", "value": self.min_bid}]}]}
 
     def fetch_recommendations(self, *, advert_id, nm_id):
+        self.calls["recommendations"] += 1
         return {"base": {"competitiveBid": {"bidKopecks": 1600}}}
 
     def fetch_fullstats(self, advert_ids, *, begin_date, end_date):
+        self.calls["fullstats"] += 1
         return []
 
     def patch_bids(self, payload):
-        self.bid = int(payload["bids"][0]["nm_bids"][0]["bid_kopecks"])
+        self.calls["patch"] += 1
+        if not self.ignore_patch:
+            self.bid = int(payload["bids"][0]["nm_bids"][0]["bid_kopecks"])
         return {"result": "ok"}
 
 
 class FakeBuyer:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def fetch(self, request):
+        self.calls += 1
         return {"snapshot_date": request.snapshot_date, "data": {"items": [{"nmId": NM_ID, "public_buyer_price": 777.0}]}, "diagnostics": {"fresh": True}}
 
 
 class FakeStocksBlock:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def execute(self, request):
+        self.calls += 1
         item = SimpleNamespace(
             nm_id=NM_ID,
             stock_total=180.0,
@@ -160,7 +195,11 @@ class FakeStocksBlock:
 
 
 class FakeSalesHistory:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def load_order_count_samples_by_date(self, **kwargs):
+        self.calls += 1
         return {NM_ID: [((date(2026, 7, 12) - __import__("datetime").timedelta(days=index)).isoformat(), 10.0) for index in range(30)]}
 
 
@@ -187,14 +226,16 @@ def main() -> None:
         ads_source = FakeAds()
         prices = WbPricesManagementBlock(runtime=runtime, runtime_dir=runtime_dir, source=prices_source, now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", safety_config=WbPricesSafetyConfig(True, 300))
         ads = SheetVitrinaV1AdsBlock(runtime=runtime, runtime_dir=runtime_dir, source=ads_source, now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", cache_ttl_seconds=0, safety_config=AdsSafetyConfig(True, 100000, __import__("decimal").Decimal("100"), 100000, 300))
-        block = SkuManagementBlock(runtime=runtime, runtime_dir=runtime_dir, prices_block=prices, ads_block=ads, stocks_block=FakeStocksBlock(), sales_history=FakeSalesHistory(), buyer_price_source=FakeBuyer(), now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", sleep=lambda _: None, readback_attempts=2, readback_delay_seconds=0)
+        buyer_source = FakeBuyer()
+        block = SkuManagementBlock(runtime=runtime, runtime_dir=runtime_dir, prices_block=prices, ads_block=ads, stocks_block=FakeStocksBlock(), sales_history=FakeSalesHistory(), buyer_price_source=buyer_source, now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", sleep=lambda _: None, readback_attempts=2, readback_delay_seconds=0)
         _settings_and_table(block)
+        _quick_detail_narrow_call_graph(block, prices_source, ads_source)
         missing_sales = SkuManagementBlock(runtime=runtime, runtime_dir=runtime_dir, prices_block=prices, ads_block=ads, stocks_block=FakeStocksBlock(), sales_history=EmptySalesHistory(), buyer_price_source=FakeBuyer(), now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", sleep=lambda _: None, readback_attempts=2, readback_delay_seconds=0)
         missing_sales_row = next(item for item in missing_sales.build_table(user_key="operator")["rows"] if item["nm_id"] == NM_ID)
         if missing_sales_row["risk"] != "unknown" or missing_sales_row["daily_demand"] is not None:
             raise AssertionError("absent sales samples must remain unknown rather than optimistic zero demand")
-        _price_write(block, runtime, prices_source)
-        _bid_write_and_stabilization(block, runtime)
+        _price_write(block, runtime, prices_source, buyer_source)
+        _bid_write_and_stabilization(block, runtime, ads_source)
         _daily_projection(runtime)
     with TemporaryDirectory(prefix="sku-management-default-gates-") as tmp:
         runtime_dir = Path(tmp)
@@ -611,7 +652,63 @@ def _settings_and_table(block) -> None:
     )
 
 
-def _price_write(block, runtime, prices_source) -> None:
+def _quick_detail_narrow_call_graph(block, prices_source, ads_source) -> None:
+    price_calls_before = prices_source.goods_by_nm_calls
+    ads_calls_before = dict(ads_source.calls)
+    stocks_calls_before = block.stocks_block.calls
+    sales_calls_before = block.sales_history.calls
+    prices_source.delay_seconds = 0.03
+    ads_source.delay_seconds = 0.03
+    started = time.monotonic()
+    try:
+        detail = block.build_sku_detail(NM_ID, user_key="operator")
+    finally:
+        prices_source.delay_seconds = 0.0
+        ads_source.delay_seconds = 0.0
+    elapsed_ms = (time.monotonic() - started) * 1000
+    diagnostics = detail["meta"]["diagnostics"]
+    price_delta = prices_source.goods_by_nm_calls - price_calls_before
+    ads_delta = {
+        key: ads_source.calls[key] - ads_calls_before[key]
+        for key in ads_calls_before
+    }
+    if price_delta != 1:
+        raise AssertionError(f"quick detail must perform one exact price read: {price_delta}")
+    if ads_delta != {
+        "count": 1,
+        "adverts": 1,
+        "min": 0,
+        "recommendations": 0,
+        "fullstats": 0,
+        "patch": 0,
+    }:
+        raise AssertionError(f"quick detail advertising call graph widened: {ads_delta}")
+    if block.stocks_block.calls != stocks_calls_before or block.sales_history.calls != sales_calls_before:
+        raise AssertionError("quick detail must not invoke stocks, sales forecast or supply work")
+    if detail["meta"]["read_scope"] != "quick_exact_sku_mutation":
+        raise AssertionError(detail["meta"])
+    if diagnostics["remote_call_counts"] != {
+        "wb_prices_exact_goods": 1,
+        "wb_ads_campaign_count": 1,
+        "wb_ads_adverts_batch": 1,
+        "wb_ads_fullstats": 0,
+        "wb_ads_min_bid": 0,
+        "wb_ads_recommendations": 0,
+        "wb_stocks": 0,
+        "forecast_or_supply": 0,
+    }:
+        raise AssertionError(diagnostics)
+    if elapsed_ms >= 500 or diagnostics["total_ms"] >= 500:
+        raise AssertionError(
+            f"artificial-delay quick detail must avoid sequential full-table latency: "
+            f"wall={elapsed_ms:.2f} diagnostics={diagnostics}"
+        )
+    row = detail["row"]
+    if row["nm_id"] != NM_ID or row["name"] != "SKU management fixture" or len(row["ad_options"]) != 1:
+        raise AssertionError(row)
+
+
+def _price_write(block, runtime, prices_source, buyer_source) -> None:
     prices_source.quarantined = True
     try:
         block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")
@@ -647,16 +744,37 @@ def _price_write(block, runtime, prices_source) -> None:
     block._snapshot_projection = original_snapshot_projection
     block.prices_block.build_goods_table = original_table
 
+    price_reads_before = prices_source.goods_by_nm_calls
     preview = block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")
+    if prices_source.goods_by_nm_calls - price_reads_before != 1:
+        raise AssertionError("price preview must reuse its single exact current-price read")
     facts = preview["preview"]
-    if facts["new"]["discountedPrice"] != 850 or facts["current_buyer_price"] != 777:
+    if (
+        facts["new"]["discountedPrice"] != 850
+        or facts["current_buyer_price"] != 777
+        or facts["product_name"] != "SKU management fixture"
+    ):
         raise AssertionError(facts)
+    commit_price_reads_before = prices_source.goods_by_nm_calls
     committed = block.commit_price(
         {"preview_id": facts["preview_id"], "confirm": True, "override_warnings": True},
         actor="operator",
     )
-    if committed["status"] != "success" or committed["confirmed_value"] != 850:
+    if prices_source.goods_by_nm_calls - commit_price_reads_before != 2:
+        raise AssertionError("price commit must use one current-tuple read and one matching readback")
+    if buyer_source.calls:
+        raise AssertionError("optional buyer-price enrichment must not block preview or commit")
+    if (
+        committed["status"] != "success"
+        or committed["confirmed_value"] != 850
+        or committed["old_value"] != 900
+        or committed["requested_value"] != 850
+        or committed["product_name"] != "SKU management fixture"
+        or committed["nm_id"] != NM_ID
+    ):
         raise AssertionError(committed)
+    if committed["buyer_price"].get("post_commit_refresh") != "not_awaited":
+        raise AssertionError("buyer-price enrichment must be explicitly deferred")
     latest = runtime.latest_sku_action_events_by_nm([NM_ID])[NM_ID][PRICE_PARAMETER]
     if latest["confirmed_value"] != 850 or not latest["confirmed_at"]:
         raise AssertionError(latest)
@@ -722,7 +840,7 @@ def _price_write(block, runtime, prices_source) -> None:
         raise AssertionError("readback mismatch must persist a controlled failure event")
 
 
-def _bid_write_and_stabilization(block, runtime) -> None:
+def _bid_write_and_stabilization(block, runtime, ads_source) -> None:
     block.ads_block.source.min_bid = None
     try:
         block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 18}, actor="operator")
@@ -747,6 +865,7 @@ def _bid_write_and_stabilization(block, runtime) -> None:
         raise AssertionError("a higher current WB minimum must block bid commit before PATCH")
     block.ads_block.source.min_bid = 1000
 
+    call_counts_before = dict(ads_source.calls)
     cross = block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 18}, actor="operator")["preview"]
     if "cross_parameter_stabilization" not in cross["warnings"]:
         raise AssertionError(cross)
@@ -758,8 +877,82 @@ def _bid_write_and_stabilization(block, runtime) -> None:
     else:
         raise AssertionError("stabilization warning must require explicit override")
     committed = block.commit_bid({"preview_id": cross["preview_id"], "confirm": True, "override_stabilization": True}, actor="operator")
-    if committed["confirmed_value"] != 18 or committed["event"]["stabilization_override"] is not True:
+    call_delta = {
+        key: ads_source.calls[key] - call_counts_before[key]
+        for key in call_counts_before
+    }
+    if call_delta != {
+        "count": 0,
+        "adverts": 3,
+        "min": 2,
+        "recommendations": 0,
+        "fullstats": 0,
+        "patch": 1,
+    }:
+        raise AssertionError(f"bid preview/commit/readback call graph widened: {call_delta}")
+    if (
+        committed["confirmed_value"] != 18
+        or committed["old_value"] != 15
+        or committed["requested_value"] != 18
+        or committed["product_name"] != "SKU management fixture"
+        or committed["nm_id"] != NM_ID
+        or committed["advert_id"] != 77
+        or committed["campaign_name"] != "SKU campaign"
+        or committed["placement"] != "search"
+        or committed["event"]["stabilization_override"] is not True
+    ):
         raise AssertionError(committed)
+    mismatch = block.preview_bid(
+        {
+            "nm_id": NM_ID,
+            "advert_id": 77,
+            "placement": "search",
+            "requested_bid_rub": 19,
+        },
+        actor="operator",
+    )["preview"]
+    ads_source.ignore_patch = True
+    try:
+        block.commit_bid(
+            {
+                "preview_id": mismatch["preview_id"],
+                "confirm": True,
+                "override_stabilization": True,
+            },
+            actor="operator",
+        )
+    except SkuManagementError as exc:
+        readback = exc.payload.get("readback") or {}
+        if (
+            exc.http_status != 409
+            or exc.payload.get("readback_status") != "mismatch"
+            or readback.get("advert_id") != 77
+            or readback.get("placement") != "search"
+            or readback.get("current_bid_rub") != 18
+        ):
+            raise
+    else:
+        raise AssertionError("exact bid readback mismatch must fail closed")
+    finally:
+        ads_source.ignore_patch = False
+    mismatch_error = next(
+        item
+        for item in runtime.list_sku_action_events(
+            parameter="advertising_bid",
+            status="error",
+            limit=50,
+        )["rows"]
+        if item["preview_id"] == mismatch["preview_id"]
+    )
+    if (
+        mismatch_error["parameter"] != "advertising_bid"
+        or mismatch_error["confirmed_value"] is not None
+        or mismatch_error["commit_status"] != "error"
+        or mismatch_error["readback_status"] != "mismatch"
+    ):
+        raise AssertionError(
+            f"bid mismatch must persist a controlled failure event: {mismatch_error}"
+        )
     same = block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 19}, actor="operator")["preview"]
     if "same_parameter_stabilization" not in same["warnings"]:
         raise AssertionError(same)
@@ -800,6 +993,34 @@ def _seed_runtime(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:
         raise AssertionError(result)
     runtime.save_nomenclature_item({"item_id": "sku-management-primary", "is_active": True, "our_sku": "SKU-1", "nm_id": NM_ID, "barcode": "4600000000001", "nomenclature_name": "SKU management fixture", "product_type": "case", "match_key": "sku-management", "created_at": "2026-07-13T08:00:00Z", "updated_at": "2026-07-13T08:00:00Z"})
     runtime.create_ff_stock_operation(operation_id="ff_open", operation_type="manual_receipt", source_type="manual_excel", source_key="ff_open", source_object_id="ff_open", source_object_label="FF opening", created_at="2026-07-13T08:00:00Z", created_by="smoke", lines=[{"nm_id": NM_ID, "quantity_delta": 40}])
+    runtime.save_temporal_source_snapshot(
+        source_key="spp_proxy",
+        snapshot_date="2026-07-13",
+        captured_at="2026-07-13T08:00:00Z",
+        payload={
+            "items": [
+                {
+                    "nm_id": NM_ID,
+                    "public_buyer_price": 777.0,
+                    "spp_proxy": 0.22,
+                }
+            ]
+        },
+    )
+    runtime.save_temporal_source_snapshot(
+        source_key="promo_by_price",
+        snapshot_date="2026-07-13",
+        captured_at="2026-07-13T08:00:00Z",
+        payload={
+            "items": [
+                {
+                    "nm_id": NM_ID,
+                    "promo_participation": 0.0,
+                    "promo_count_by_price": 0.0,
+                }
+            ]
+        },
+    )
     return runtime
 
 
