@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
@@ -11,6 +12,7 @@ OWN_PRODUCT_CAPITAL_SOURCE_KEY = "own_product_capital"
 OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID = "webcore_product_capital"
 OWN_PRODUCT_CAPITAL_SOURCE_GROUP_LABEL_RU = "WebCore"
 OWN_PRODUCT_CAPITAL_SECTION_RU = "Товарный капитал"
+OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU = "Склад WB: весь контур, шт"
 
 OWN_PRODUCT_CAPITAL_STAGES: tuple[str, ...] = (
     "PRODUCTION",
@@ -158,7 +160,19 @@ def extend_metrics_with_own_product_capital_metrics(
     metrics: Iterable[MetricV2Item],
 ) -> list[MetricV2Item]:
     archived = set(OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS)
-    existing = [item for item in metrics if item.metric_key not in archived]
+    wb_contour_quantity_keys = {
+        own_stage_metric_key("WB", "qty"),
+        own_stage_total_metric_key("WB", "qty"),
+    }
+    existing = [
+        (
+            replace(item, label_ru=OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU)
+            if item.metric_key in wb_contour_quantity_keys
+            else item
+        )
+        for item in metrics
+        if item.metric_key not in archived
+    ]
     existing_keys = {item.metric_key for item in existing}
     additions = [item for item in build_own_product_capital_metric_items() if item.metric_key not in existing_keys]
     return [*existing, *additions]
@@ -182,7 +196,11 @@ def build_own_product_capital_metric_items() -> list[MetricV2Item]:
                         metric_key=metric_key,
                         enabled=True,
                         scope=scope,
-                        label_ru=f"{stage_label}: {OWN_PRODUCT_CAPITAL_FIELD_LABELS_RU[field]}",
+                        label_ru=(
+                            OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU
+                            if stage == "WB" and field == "qty"
+                            else f"{stage_label}: {OWN_PRODUCT_CAPITAL_FIELD_LABELS_RU[field]}"
+                        ),
                         calc_type="metric",
                         calc_ref=calc_ref,
                         show_in_data=True,
