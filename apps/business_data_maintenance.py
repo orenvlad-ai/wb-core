@@ -1068,7 +1068,17 @@ def _autoanswers_process_actual_state(
         )
     ):
         stop_reason = "run_cap_missing"
-    if (
+    elif (
+        stop_reason == "worker_unavailable"
+        and requested_at is not None
+        and requested_at > now - timedelta(minutes=3)
+    ):
+        # Match the feature-owned lifecycle contract: a newly resumed timer
+        # receives one scheduler interval to produce its first post-request
+        # tick.  Treating the stale pre-request worker_unavailable marker as
+        # immediate drift makes an otherwise exact outer restore impossible.
+        stop_reason = ""
+    elif (
         mode in {"manual", "draft_only", "auto_safe", "auto_all"}
         and not fresh_tick
         and (
@@ -2156,7 +2166,11 @@ def maintenance_restore(
                     maintenance_restore as restore_warehouse_timer,
                 )
 
-                warehouse_result = restore_warehouse_timer(runtime_dir)
+                warehouse_result = restore_warehouse_timer(
+                    runtime_dir,
+                    allow_outer_hold_recovery=service_continuity
+                    is not None,
+                )
             else:
                 warehouse_result = warehouse_restore(runtime_dir)
             if str((warehouse_result or {}).get("status") or "") != "restored":

@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 from packages.application.warehouse_functional_lock import (
     WAREHOUSE_FUNCTIONAL_LOCK_FILENAME,
 )
+from packages.application.business_data_write_barrier import barrier_status
 
 
 WAREHOUSE_FUNCTIONAL_TIMER_UNIT = "wb-core-warehouse-functional-sync.timer"
@@ -32,6 +33,7 @@ WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME = (
 WAREHOUSE_FUNCTIONAL_MAINTENANCE_AUDIT_FILENAME = (
     ".warehouse-functional-maintenance-audit.jsonl"
 )
+OUTER_BUSINESS_MAINTENANCE_STATE_FILENAME = ".business-data-maintenance.json"
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
 SERVICE_QUIESCENT_STATES = frozenset({"inactive", "failed"})
 
@@ -267,6 +269,15 @@ def _load_state(runtime_dir: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path.name} is not a JSON object")
+    return payload
+
+
 def _save_state(runtime_dir: Path, payload: Mapping[str, Any]) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     path = _state_path(runtime_dir)
@@ -437,6 +448,7 @@ def maintenance_restore(
     *,
     client: SystemdClient | None = None,
     proc_root: Path = Path("/proc"),
+    allow_outer_hold_recovery: bool = False,
 ) -> dict[str, Any]:
     systemd = client or SystemdClient()
     state = _load_state(runtime_dir)
@@ -461,8 +473,80 @@ def maintenance_restore(
             or current["units"]["service"]["unit_digest"]
             != restored_service.get("unit_digest")
         ):
-            raise RuntimeError("restored warehouse units drifted from their recorded state")
-        return {**current, "status": "restored", "idempotent": True}
+            if not allow_outer_hold_recovery:
+                raise RuntimeError(
+                    "restored warehouse units drifted from their recorded state"
+                )
+            outer_state = _load_json(
+                runtime_dir / OUTER_BUSINESS_MAINTENANCE_STATE_FILENAME
+            )
+            barrier = barrier_status(runtime_dir)
+            restored_timer = (
+                (((state.get("restore_readback") or {}).get("units") or {}).get("timer"))
+                or {}
+            )
+            expected_outer_rollback = bool(
+                str((outer_state or {}).get("phase") or "")
+                in {"holding", "prepared"}
+                and not bool(
+                    (outer_state or {}).get("exact_prior_state_restored")
+                )
+                and barrier.get("active") is True
+                and str(barrier.get("phase") or "") == "acquiring"
+                and barrier.get("hold_confirmed") is False
+                and bool(state.get("timer_disabled_for_hold"))
+                and restored_timer.get("is_enabled")
+                == baseline_timer.get("is_enabled")
+                and restored_timer.get("is_active")
+                == baseline_timer.get("is_active")
+                and restored_timer.get("unit_digest")
+                == baseline_timer.get("unit_digest")
+                and current["units"]["timer"]["is_enabled"] == "disabled"
+                and current["units"]["timer"]["is_active"] == "inactive"
+                and current["units"]["timer"]["unit_digest"]
+                == restored_timer.get("unit_digest")
+                and current["units"]["service"]["quiescent"] is True
+                and current["units"]["service"]["unit_digest"]
+                == restored_service.get("unit_digest")
+                and not current["warehouse_lock"]["held"]
+                and not current["finance_apply_processes"]
+            )
+            if not expected_outer_rollback:
+                raise RuntimeError(
+                    "restored warehouse drift is not the exact fail-closed "
+                    "outer-hold rollback footprint"
+                )
+            recovery_evidence = {
+                "started_at": _utc_now(),
+                "outer_phase": str((outer_state or {}).get("phase") or ""),
+                "barrier_window_id": str(barrier.get("window_id") or ""),
+                "barrier_plan_fingerprint": str(
+                    barrier.get("plan_fingerprint") or ""
+                ),
+                "previous_restore_captured_at": str(
+                    (state.get("restore_readback") or {}).get(
+                        "captured_at"
+                    )
+                    or ""
+                ),
+                "rollback_readback": _bounded_readback(current),
+            }
+            state.update(
+                {
+                    "phase": "held",
+                    "outer_hold_recovery": recovery_evidence,
+                }
+            )
+            _save_state(runtime_dir, state)
+            _append_audit(
+                runtime_dir,
+                {
+                    "event": "outer_hold_restore_recovery_started",
+                    **state,
+                },
+            )
+        else:
+            return {**current, "status": "restored", "idempotent": True}
     if state.get("phase") != "held":
         raise RuntimeError(f"warehouse maintenance phase is {state.get('phase')!r}, not held")
     current = maintenance_status(runtime_dir, client=systemd, proc_root=proc_root)

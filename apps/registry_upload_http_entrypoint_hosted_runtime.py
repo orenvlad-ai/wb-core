@@ -5161,6 +5161,7 @@ def _run_remote_warehouse_functional_maintenance_action(
     *,
     action: str,
     disable_timer: bool = False,
+    allow_outer_hold_recovery: bool = False,
 ) -> dict[str, Any]:
     """Inspect, hold or restore only the warehouse functional timer boundary."""
 
@@ -5198,6 +5199,8 @@ def _run_remote_warehouse_functional_maintenance_action(
         )
         if disable_timer:
             runner_args.append("--disable-timer")
+    elif action == "restore" and allow_outer_hold_recovery:
+        runner_args.append("--allow-outer-hold-recovery")
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -5248,6 +5251,9 @@ def run_warehouse_functional_maintenance_command(args: argparse.Namespace) -> in
     payload = _run_remote_warehouse_functional_maintenance_action(
         target,
         action=str(args.action),
+        allow_outer_hold_recovery=bool(
+            args.allow_outer_hold_recovery
+        ),
     )
     _print_json(
         {
@@ -7108,6 +7114,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "action",
         choices=("status", "hold", "restore"),
     )
+    functional_maintenance.add_argument(
+        "--allow-outer-hold-recovery",
+        action="store_true",
+        help=(
+            "Reapply the original warehouse timer baseline only for the exact "
+            "unconfirmed outer-hold rollback footprint."
+        ),
+    )
     functional_maintenance.set_defaults(
         handler=run_warehouse_functional_maintenance_command,
     )
@@ -8374,12 +8388,40 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
 
     if route == "web_vitrina_group_refresh_missing_group":
         error_text = str(payload.get("error", "") or payload.get("detail", "") or "")
-        evaluation["ok"] = status == 400 and "source_group_id is required" in error_text
-        evaluation["detail"] = (
-            "web-vitrina group-refresh route is publicly published and reached app-level validation"
-            if evaluation["ok"]
-            else "expected app-level JSON 400 for POST group-refresh without source_group_id"
+        validation_reached = (
+            status == 400
+            and "source_group_id is required" in error_text
         )
+        maintenance_fail_closed = bool(
+            status == 423
+            and payload.get("contract_name")
+            == "wb_core_business_data_write_barrier_v1"
+            and payload.get("status") == "blocked"
+            and payload.get("active") is True
+            and str(payload.get("phase") or "")
+            in {"acquiring", "held", "restoring"}
+            and payload.get("code") == "business_data_maintenance"
+            and payload.get("retryable") is True
+            and payload.get("attempt_audited") is True
+            and bool(str(payload.get("window_id") or ""))
+        )
+        evaluation["ok"] = validation_reached or maintenance_fail_closed
+        if validation_reached:
+            evaluation["detail"] = (
+                "web-vitrina group-refresh route is publicly published and "
+                "reached app-level validation"
+            )
+        elif maintenance_fail_closed:
+            evaluation["detail"] = (
+                "web-vitrina group-refresh route is published and its harmless "
+                "POST probe was correctly blocked by the audited maintenance "
+                "barrier"
+            )
+        else:
+            evaluation["detail"] = (
+                "expected app-level JSON 400 validation or exact audited "
+                "maintenance-barrier 423"
+            )
         return evaluation
 
     if route == "factory_order_recommendation":

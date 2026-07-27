@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import sys
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.business_data_maintenance import (  # noqa: E402
+    _autoanswers_process_actual_state,
     _autoanswers_budget_monitor_state,
     _with_operator_process_status,
 )
@@ -70,6 +73,70 @@ def _assert_statuses() -> None:
             payload,
             master_desired=master_desired,
         )["operator_status"] == expected
+
+
+def _assert_autoanswers_resume_grace_ignores_stale_worker_marker() -> None:
+    requested_at = datetime.now(timezone.utc).isoformat()
+    feature = {
+        "mode": "auto_all",
+        "policy_epoch": 23,
+        "transition_run_id": "transition-smoke",
+        "run_max_usd": "50.0",
+        "run_max_paid_reviews": None,
+        "last_scheduler_tick_at": "2026-01-01T00:00:00Z",
+        "stop_reason": "worker_unavailable",
+        "budget": {"budget_state": "ready"},
+        "lifecycle": {
+            "requested_mode": "auto_all",
+            "policy_epoch": 23,
+            "transition_run_id": "transition-smoke",
+            "suspended_by_master": False,
+            "requested_at": requested_at,
+            "last_error": "",
+        },
+    }
+    timer = {
+        "is_enabled": "enabled",
+        "is_active": "active",
+        "properties": {},
+    }
+    service = {
+        "is_enabled": "static",
+        "is_active": "inactive",
+        "properties": {"Result": "success"},
+    }
+    components = {
+        "readonly_sync": "wb-core-autoanswers-readonly-sync.timer",
+        "worker": "wb-core-autoanswers-worker.timer",
+    }
+    status = {
+        "timers": {unit: dict(timer) for unit in components.values()},
+        "services": {
+            unit.removesuffix(".timer") + ".service": dict(service)
+            for unit in components.values()
+        },
+    }
+    spec = {
+        "key": "autoanswers",
+        "display_name": "Autoanswers",
+        "control_owner": "feature",
+        "control_location": "Отзывы → Отзывы",
+        "desired_source": "autoanswers_feature_settings",
+        "components": components,
+    }
+    with mock.patch(
+        "apps.business_data_maintenance._autoanswers_feature_state",
+        return_value=feature,
+    ):
+        result = _autoanswers_process_actual_state(
+            status=status,
+            policy={"master_desired": True},
+            runtime_dir=Path("/unused"),
+            spec=spec,
+        )
+    assert result["drift_status"] == "matched"
+    assert result["lifecycle_state"] == "starting"
+    assert result["stop_reason"] == ""
 
 
 def _assert_budget_hold() -> None:
@@ -156,6 +223,7 @@ def _assert_ui_copy() -> None:
 
 def main() -> int:
     _assert_statuses()
+    _assert_autoanswers_resume_grace_ignores_stale_worker_marker()
     _assert_budget_hold()
     _assert_ui_copy()
     print("business data maintenance status smoke: ok")
