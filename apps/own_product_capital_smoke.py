@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -1675,6 +1676,11 @@ def _save_expense_document(
             "document_id": document_id,
             "supplier_order_id": "expense-shipment",
             "document_type": document_type,
+            "file_sha256": (
+                hashlib.sha256(document_id.encode("utf-8")).hexdigest()
+                if document_type == "bank_fee_statement"
+                else ""
+            ),
             "original_filename": f"{document_id}.pdf",
             "uploaded_at": NOW,
             "updated_at": NOW,

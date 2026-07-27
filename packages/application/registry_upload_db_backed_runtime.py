@@ -811,6 +811,11 @@ class RegistryUploadDbBackedRuntime:
                     else ""
                 )
                 if cutover is not None and date_key >= cutover_date:
+                    from packages.application.warehouse_business_projection import (
+                        ensure_functional_version_business_time_schema,
+                    )
+
+                    ensure_functional_version_business_time_schema(conn)
                     version_candidates = conn.execute(
                         """SELECT version.*
                            FROM sheet_vitrina_v1_warehouse_functional_versions version
@@ -818,15 +823,19 @@ class RegistryUploadDbBackedRuntime:
                              ON snapshot.version_id=version.version_id
                            WHERE version.cutover_id='warehouse_functional_cutover_v1'
                              AND version.status='good' AND snapshot.snapshot_date=?
-                           ORDER BY snapshot.snapshot_date DESC,version.created_at DESC""",
+                           ORDER BY
+                             COALESCE(NULLIF(version.published_at,''),version.created_at) DESC,
+                             version.created_at DESC,version.version_id DESC""",
                         (date_key,),
                     ).fetchall()
                     version = next(
                         (
                             row
                             for row in version_candidates
-                            if business_date_from_timestamp(str(row["effective_at"]))
-                            == date_key
+                            if str(
+                                row["business_effective_date"]
+                                or date_key
+                            ) <= date_key
                         ),
                         None,
                     )
@@ -2924,6 +2933,7 @@ class RegistryUploadDbBackedRuntime:
         source_object_id: str = "",
         source_object_label: str = "",
         created_at: str,
+        business_effective_date: str = "",
         created_by: str = "",
         warnings: list[str] | None = None,
         diagnostics: Mapping[str, Any] | None = None,
@@ -2940,6 +2950,14 @@ class RegistryUploadDbBackedRuntime:
         if not normalized_source_key:
             raise ValueError("source_key is required")
         _validate_timestamp(created_at, field_name="created_at")
+        normalized_business_date = (
+            str(business_effective_date or "").strip()
+            or business_date_from_timestamp(created_at)
+        )
+        _validate_iso_date(
+            normalized_business_date,
+            field_name="business_effective_date",
+        )
         normalized_lines = [dict(item) for item in (lines or [])]
         sku_ids = {
             int(item.get("nm_id"))
@@ -2951,6 +2969,11 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.warehouse_business_projection import (
+                ensure_warehouse_projection_source_outbox,
+            )
+
+            ensure_warehouse_projection_source_outbox(conn)
             existing = conn.execute(
                 """
                 SELECT *
@@ -2973,6 +2996,7 @@ class RegistryUploadDbBackedRuntime:
                     source_object_id,
                     source_object_label,
                     created_at,
+                    business_effective_date,
                     created_by,
                     sku_count,
                     total_quantity_delta,
@@ -2984,7 +3008,7 @@ class RegistryUploadDbBackedRuntime:
                     source_file_sha256,
                     source_file_blob
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_operation_id,
@@ -2994,6 +3018,7 @@ class RegistryUploadDbBackedRuntime:
                     str(source_object_id or "").strip(),
                     str(source_object_label or "").strip(),
                     created_at,
+                    normalized_business_date,
                     str(created_by or "").strip(),
                     len(sku_ids),
                     total_quantity_delta,
@@ -3062,6 +3087,7 @@ class RegistryUploadDbBackedRuntime:
         source_object_label: str,
         created_at: str,
         created_by: str,
+        business_effective_date: str = "",
         warnings: list[str] | None,
         diagnostics: Mapping[str, Any] | None,
         lines: list[Mapping[str, Any]],
@@ -3082,6 +3108,14 @@ class RegistryUploadDbBackedRuntime:
         if not normalized_source_key:
             raise ValueError("source_key is required")
         _validate_timestamp(created_at, field_name="created_at")
+        normalized_business_date = (
+            str(business_effective_date or "").strip()
+            or business_date_from_timestamp(created_at)
+        )
+        _validate_iso_date(
+            normalized_business_date,
+            field_name="business_effective_date",
+        )
         normalized_lines = [dict(item) for item in lines]
         if not normalized_lines:
             raise ValueError("guarded FF stock operation requires lines")
@@ -3095,6 +3129,11 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.warehouse_business_projection import (
+                ensure_warehouse_projection_source_outbox,
+            )
+
+            ensure_warehouse_projection_source_outbox(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
                 existing = conn.execute(
@@ -3337,10 +3376,11 @@ class RegistryUploadDbBackedRuntime:
                     """
                     INSERT INTO sheet_vitrina_v1_ff_stock_operations(
                         operation_id, operation_type, source_type, source_key,
-                        source_object_id, source_object_label, created_at, created_by,
-                        sku_count, total_quantity_delta, total_quantity_abs,
+                        source_object_id, source_object_label, created_at,
+                        business_effective_date, created_by, sku_count,
+                        total_quantity_delta, total_quantity_abs,
                         warnings_json, diagnostics_json
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         normalized_operation_id,
@@ -3350,6 +3390,7 @@ class RegistryUploadDbBackedRuntime:
                         str(source_object_id or "").strip(),
                         str(source_object_label or "").strip(),
                         created_at,
+                        normalized_business_date,
                         str(created_by or "").strip(),
                         len(line_nm_ids),
                         total_quantity_delta,
@@ -8663,6 +8704,11 @@ def _ff_stock_operation_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
         "source_object_id": row["source_object_id"] or "",
         "source_object_label": row["source_object_label"] or "",
         "created_at": row["created_at"] or "",
+        "business_effective_date": (
+            (row["business_effective_date"] or "")
+            if "business_effective_date" in keys
+            else ""
+        ),
         "created_by": row["created_by"] or "",
         "sku_count": int(row["sku_count"] or 0),
         "total_quantity_delta": float(row["total_quantity_delta"] or 0.0),
@@ -9885,6 +9931,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             source_object_id TEXT,
             source_object_label TEXT,
             created_at TEXT NOT NULL,
+            business_effective_date TEXT,
             created_by TEXT,
             sku_count INTEGER NOT NULL DEFAULT 0,
             total_quantity_delta REAL NOT NULL DEFAULT 0,
@@ -11054,6 +11101,12 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(
         conn,
+        table_name="sheet_vitrina_v1_ff_stock_operations",
+        column_name="business_effective_date",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
         table_name="sheet_vitrina_v1_factory_order_dataset_state",
         column_name="uploaded_filename",
         column_sql="TEXT",
@@ -11070,8 +11123,6 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         column_name="workbook_blob",
         column_sql="BLOB",
     )
-
-
 def _ensure_column(
     conn: sqlite3.Connection,
     *,

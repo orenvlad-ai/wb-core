@@ -821,3 +821,18 @@ For server/operator-only changes that do not touch archived bound Apps Script gu
 ## SKU management runtime/write contract
 
 The authenticated public route family is exact GET `/v1/sheet-vitrina-v1/sku-management`, narrow per-SKU GET `/v1/sheet-vitrina-v1/sku-management/sku/{nm_id}`, and guarded GET/POST prefix `/v1/sheet-vitrina-v1/sku-management/`; app session and `sku_management` section authorization remain authoritative. Dedicated price and exact-placement bid blocks are part of normal runtime construction and require no post-deploy feature-flag enablement. `WB_PRICES_WRITE_ENABLED` and `SHEET_VITRINA_ADS_WRITE_ENABLED` continue to gate their legacy standalone tabs but do not disable this separately authorized workflow. Its sufficient mandatory gates are one stored target/preview, explicit confirmation, stale/min/quarantine validation, backend-only WB call, audit and exact readback. Deploy itself performs no WB mutation.
+
+## Warehouse business projection deployment
+
+Migration 126 deploys additive SQLite tables, nullable functional-version
+columns, triggers, status route and bounded worker code. Schema initialization
+does not rewrite historical business rows and does not run an external source
+refresh. Projection publication remains source-triggered and transactionally
+bounded; failed candidate retains last-good state.
+
+Historical production warehouse/capital correction is explicitly not part of
+deploy or UI acceptance. It requires a separate `scope:production-mutation`
+task with query-only diagnostic manifest, human gate, exact
+backup/reversibility and reconciliation. Production verification for this
+LOOP is read-only schema/status/readback plus isolated UI revision-flow
+evidence.

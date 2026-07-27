@@ -2,9 +2,9 @@
 title: "Модуль: own_product_capital_block"
 doc_id: "WB-CORE-MODULE-45-OWN-PRODUCT-CAPITAL-BLOCK"
 doc_type: "module"
-status: "active_read_side_facade"
-purpose: "Зафиксировать compatibility projection товарного капитала поверх active functional engine шести складов."
-scope: "Public SKU/TOTAL metric keys, Decimal aggregate semantics, canonical warehouse quantities/capital и legacy audit boundary."
+status: "active_event_projection_facade"
+purpose: "Зафиксировать canonical event input и compatibility read projection товарного капитала внутри active functional engine шести складов."
+scope: "Canonical source events/revisions, public SKU/TOTAL metric keys, Decimal aggregate semantics, functional warehouse quantities/capital и legacy pre-projection audit boundary."
 source_basis:
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
@@ -19,7 +19,9 @@ related_tables:
   - "sheet_vitrina_v1_warehouse_functional_versions"
   - "sheet_vitrina_v1_warehouse_functional_balances"
   - "sheet_vitrina_v1_warehouse_functional_documents"
-  - "sheet_vitrina_v1_own_capital_* (legacy audit)"
+  - "sheet_vitrina_v1_own_capital_events (canonical source-event input)"
+  - "sheet_vitrina_v1_own_capital_daily_state (bounded functional projection input)"
+  - "sheet_vitrina_v1_own_capital_* (other legacy audit/read support)"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
@@ -95,3 +97,24 @@ Source change/archive не удаляет ledger evidence: он сбрасыва
 An operator CNY document is durable audit evidence; exclusion never deletes its file or source row. Canonical replay removes the derived supplier-payment layer and its capital events for an excluded document, rebases remaining cumulative payment shares, and recalculates capital. Relink first compensates the old derived layer, atomically changes the document shipment context under `BEGIN IMMEDIATE`, then rebuilds exactly one posted ledger operation and one payment layer for the target shipment. Old and target expense certification are reset and one combined targeted warehouse request covers both SKU sets. Repeating the confirmation or bounded recovery is a no-op and cannot create a second CNY document, ledger operation or capital layer.
 
 Archiving a logistics/customs/bank-fee financial source likewise compensates every derived `cost_payment:financial_expense:<document_id>:*` event before recalculation. The financial document, expense lines and file remain audit evidence, but none of their derived capital survives in the active chain; restore rematerializes the original source once.
+
+## Business-time projection seam
+
+The public facade still does not own an independent warehouse baseline.
+Canonical source revisions and event evidence feed the functional
+warehouse/product-capital calculation; `warehouse_business_projection_v1`
+publishes only its bounded exact-date owned metric rows for read consumers.
+Web Vitrina is not a calculator and cannot write to source/event tables.
+
+Functional versions now separate `business_effective_date` from
+`published_at`. Historical selection requires exact snapshot date and
+business-effective eligibility; the technical publication timestamp only
+orders competing revisions. Same-day event replay uses explicit source-credit
+then physical-stage order, never `created_at`.
+
+Cost-only events preserve all quantity keys byte-for-byte and change
+capital/WAC once from the source business date. Physical movements carry exact
+or proportional capital with conservation. Event insert/delete,
+certification and official WB/WAC changes enqueue the projection in the same
+transaction. A complete candidate atomically replaces only its date/SKU/TOTAL
+rows; failure preserves last-good current rows.

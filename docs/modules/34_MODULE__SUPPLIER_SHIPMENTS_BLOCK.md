@@ -465,3 +465,20 @@ Historical `supplier_26gn390_recovery` and
 `supplier_cny_payment_10_recovery` apply entrypoints are diagnostic-only and
 fail closed. Any earlier paragraph describing a fresh coherent backup for
 these bounded paths is historical and superseded by module 51.
+
+## Business-date factual projection
+
+`actual_shipment_date` and `actual_ff_acceptance_date` are functional business
+boundaries. A correction recorded or published later reprojects the affected
+supplier flow beginning with the earliest old/new factual date; technical
+`created_at`, `effective_at` and `published_at` are audit fields only. The
+source row, exact source revision, targeted queue completion, immutable
+functional version and `warehouse_business_projection_v1` current switch are
+one transaction. A failed candidate leaves the shipment row and both
+last-good projections unchanged.
+
+For each exact date the replay removes only the stable supplier flow from
+production/China→FF and places the same quantity/capital in its business-date
+stage. Same-SKU flows from other shipments and every non-target SKU remain
+byte-semantic invariant. Apply waits for terminal job readback and signals an
+open Vitrina to reread table data automatically.

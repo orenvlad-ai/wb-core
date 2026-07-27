@@ -34,10 +34,16 @@ from packages.application.warehouse_functional import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_business_projection import (
+    ensure_warehouse_business_projection_schema,
+    publish_targeted_supplier_business_projection,
+    record_failed_business_projection,
+)
 from packages.application.warehouse_recovery_policy import (
     RecoveryState,
     WarehouseRecoveryRegistry,
 )
+from packages.business_time import business_date_from_timestamp
 
 
 TARGETED_PUBLICATION_TABLE = (
@@ -554,15 +560,17 @@ class WarehouseTargetedSupplierReplay:
         before_digest = _fingerprint(before_rows)
         after_digest = _fingerprint(after_rows)
         would_change = old_date != new_date or before_digest != after_digest
-        earliest = min(
-            value
-            for value in (
-                str(header.get("shipment_date") or "")[:10],
-                old_date[:10],
-                new_date[:10],
-            )
-            if value
-        )
+        # A factual correction becomes effective at the changed factual
+        # boundary.  The planned/source shipment date is not a substitute.
+        factual_boundaries = [
+            value for value in (old_date[:10], new_date[:10]) if value
+        ]
+        # A zero-change validation can legitimately have neither factual
+        # boundary.  Its fallback is never published because would_change is
+        # false; keeping the plan total preserves the existing no-op contract.
+        earliest = min(factual_boundaries) if factual_boundaries else str(
+            header.get("shipment_date") or business_date_from_timestamp(_now())
+        )[:10]
         fingerprint_material = {
             "contract": "warehouse_targeted_supplier_replay_v1",
             "shipment_id": selected_id,
@@ -573,6 +581,7 @@ class WarehouseTargetedSupplierReplay:
             "base_version_id": base_version_id,
             "affected_nm_ids": nm_ids,
             "earliest_business_date": earliest,
+            "business_effective_date": earliest,
             "target_before_digest": before_digest,
             "target_after_digest": after_digest,
             "non_target_digest": non_target_digest,
@@ -775,6 +784,9 @@ class WarehouseTargetedSupplierReplay:
         try:
             with _connect(self.runtime.db_path) as conn:
                 ensure_warehouse_targeted_replay_schema(conn)
+                # Schema preparation must finish before BEGIN IMMEDIATE:
+                # sqlite3.executescript commits implicitly.
+                ensure_warehouse_business_projection_schema(conn)
                 existing = conn.execute(
                     f"SELECT * FROM {TARGETED_PUBLICATION_TABLE} "
                     "WHERE plan_fingerprint=?",
@@ -889,14 +901,18 @@ class WarehouseTargetedSupplierReplay:
                     conn.execute(
                         """
                         INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
-                            version_id,cutover_id,version_kind,effective_at,status,
-                            plan_fingerprint,local_source_digest,source_watermarks_json,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                            version_id,cutover_id,version_kind,effective_at,
+                            business_effective_date,published_at,status,
+                            plan_fingerprint,local_source_digest,
+                            source_watermarks_json,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             version_id,
                             FUNCTIONAL_CUTOVER_ID,
                             "targeted_supplier_replay",
+                            now,
+                            str(plan["business_effective_date"]),
                             now,
                             "good",
                             fingerprint,
@@ -1295,12 +1311,35 @@ class WarehouseTargetedSupplierReplay:
                         """,
                         (now, queue_id),
                     )
+                    business_projection = publish_targeted_supplier_business_projection(
+                        conn,
+                        plan={
+                            **dict(plan),
+                            "stable_source_id": f"supplier_shipment:{shipment_id}",
+                        },
+                        published_version_id=version_id,
+                        published_at=now,
+                        inject_failure=self._inject,
+                    )
                     self._inject("before_commit")
                     conn.commit()
                 except Exception:
                     conn.rollback()
                     raise
         except Exception as exc:
+            try:
+                record_failed_business_projection(
+                    self.runtime,
+                    stable_source_id=f"supplier_shipment:{shipment_id}",
+                    source_revision=str(plan["source_revision"]),
+                    business_effective_date=str(plan["business_effective_date"]),
+                    published_at=now,
+                    error=str(exc),
+                )
+            except Exception:
+                # Recovery/job evidence remains authoritative if even the
+                # independent failed-candidate marker cannot be recorded.
+                pass
             recovery_registry.fail_recoverable(
                 str(recovery["operation_id"]),
                 error=str(exc),
@@ -1318,6 +1357,7 @@ class WarehouseTargetedSupplierReplay:
             "idempotent": False,
             "version_id": version_id,
             "publication_id": publication_id,
+            "business_projection": business_projection,
             "backup": {
                 "kind": "target_scoped_before_image",
                 "full_database_copy": False,

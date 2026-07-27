@@ -3476,6 +3476,14 @@
       text-shadow: 0 0 0 rgba(180, 83, 9, 0.18);
     }
 
+    .vitrina-table td.cell-business-projection-updated {
+      color: var(--accent-hover);
+      font-weight: 800;
+      background: rgba(139, 92, 246, 0.12);
+      box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.42);
+      transition: color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+    }
+
     .vitrina-table td.cell-history-unavailable {
       color: var(--muted);
       background: color-mix(in srgb, var(--surface-2) 86%, transparent);
@@ -3492,6 +3500,12 @@
 
     .vitrina-table tbody tr:hover td.cell-session-highlight-latest-confirmed {
       color: #92400e;
+    }
+
+    .vitrina-table tbody tr:hover td.cell-business-projection-updated {
+      color: #7c3aed;
+      background: rgba(139, 92, 246, 0.18);
+      box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.58);
     }
 
     .vitrina-table th:last-child,
@@ -7053,6 +7067,17 @@
         displayedSavedAt: "",
         showingCached: false,
         freshLoading: false
+      },
+      businessProjection: {
+        revisionNo: 0,
+        revisionId: "",
+        publishedAt: "",
+        polling: false,
+        pollTimer: null,
+        highlights: new Set(),
+        highlightTimer: null,
+        channel: null,
+        lastFailureRevisionId: ""
       },
       history: {
         availableDates: [],
@@ -13224,6 +13249,7 @@
     function renderPage(payload, options) {
       const normalizedOptions = options || {};
       state.composition = payload;
+      rememberBusinessProjection(payload);
       state.page.lastRenderedAt = new Date();
       registerTableSurfaceAssets(payload);
       setStatusBadge(payload);
@@ -13561,6 +13587,14 @@
         classes.push("cell-session-highlight-updated");
       } else if (highlightStatus === "latest_confirmed") {
         classes.push("cell-session-highlight-latest-confirmed");
+      }
+      if (
+        cellDate
+        && state.businessProjection.highlights.has(
+          String(row.row_id || "") + "|" + cellDate
+        )
+      ) {
+        classes.push("cell-business-projection-updated");
       }
       if (String(cell.presentation_state || "") === "unavailable") {
         classes.push("cell-history-unavailable");
@@ -19509,6 +19543,277 @@
       return merged;
     }
 
+    function businessProjectionMeta(payload) {
+      return (payload && payload.meta && payload.meta.warehouse_business_projection) || {};
+    }
+
+    function rememberBusinessProjection(payload) {
+      const projection = businessProjectionMeta(payload);
+      const revisionNo = Number(projection.revision_no || 0);
+      if (revisionNo >= state.businessProjection.revisionNo) {
+        state.businessProjection.revisionNo = revisionNo;
+        state.businessProjection.revisionId = String(projection.revision_id || "");
+        state.businessProjection.publishedAt = String(projection.published_at || "");
+      }
+    }
+
+    function businessProjectionValueIndex(payload) {
+      const index = new Map();
+      const surface = (payload && payload.table_surface) || {};
+      const dateColumns = (surface.columns || []).filter(function(column) {
+        return String(column.id || "").startsWith("date:");
+      });
+      (surface.rows || []).forEach(function(row) {
+        const rowId = String(row.row_id || "");
+        dateColumns.forEach(function(column) {
+          index.set(
+            rowId + "|" + String(column.id).slice(5),
+            JSON.stringify(cellValue(row, column.id))
+          );
+        });
+      });
+      return index;
+    }
+
+    function projectionHighlightKeys(previousPayload, nextPayload) {
+      const declared = businessProjectionMeta(nextPayload).changed_cells;
+      const before = businessProjectionValueIndex(previousPayload);
+      const after = businessProjectionValueIndex(nextPayload);
+      if (Array.isArray(declared) && declared.length) {
+        const changedDeclared = new Set();
+        declared.forEach(function(item) {
+          const key = String(item.row_id || "")
+            + "|"
+            + String(item.as_of_date || "");
+          if (
+            key !== "|"
+            && after.has(key)
+            && before.get(key) !== after.get(key)
+          ) {
+            changedDeclared.add(key);
+          }
+        });
+        return changedDeclared;
+      }
+      const changed = new Set();
+      after.forEach(function(value, key) {
+        if (before.has(key) && before.get(key) !== value) {
+          changed.add(key);
+        }
+      });
+      return changed;
+    }
+
+    function showBusinessProjectionHighlights(keys) {
+      if (state.businessProjection.highlightTimer) {
+        window.clearTimeout(state.businessProjection.highlightTimer);
+      }
+      state.businessProjection.highlights = new Set(keys || []);
+      state.businessProjection.highlightTimer = window.setTimeout(function() {
+        state.businessProjection.highlights.clear();
+        tableBodyNode.querySelectorAll(".cell-business-projection-updated").forEach(function(cell) {
+          cell.classList.remove("cell-business-projection-updated");
+        });
+      }, 3200);
+    }
+
+    function setBusinessProjectionStatus(text, tone, detail) {
+      setLoadStatusLamp(text, tone || "neutral");
+      if (tableLoadStatusNode && detail) {
+        tableLoadStatusNode.setAttribute("title", String(detail));
+        tableLoadStatusNode.setAttribute("aria-label", String(detail));
+      }
+    }
+
+    async function reloadBusinessProjectionTable(statusPayload) {
+      const previousPayload = state.composition;
+      if (!previousPayload) {
+        return;
+      }
+      const scrollTop = tableScrollNode ? tableScrollNode.scrollTop : 0;
+      const scrollLeft = tableScrollNode ? tableScrollNode.scrollLeft : 0;
+      setBusinessProjectionStatus(
+        "Обновляется",
+        "neutral",
+        "Перечитываем только данные таблицы из новой business-time projection."
+      );
+      const response = await fetch(
+        buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
+          includeTableData: true
+        }).toString(),
+        {
+          method: "GET",
+          headers: {"Accept": "application/json"},
+          cache: "no-store"
+        }
+      );
+      const payload = await readJsonResponse(
+        response,
+        "non-json business projection table response"
+      );
+      if (!response.ok) {
+        throw new Error(
+          (payload && payload.error)
+            ? payload.error
+            : "business projection table route returned " + response.status
+        );
+      }
+      if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
+        throw new Error("unexpected business projection table payload");
+      }
+      const tableSurface = payload.table_surface || {};
+      if (String(tableSurface.table_data_state || "included") !== "included") {
+        throw new Error("business projection table payload did not include rows");
+      }
+      const renderPayload = mergeDeferredShellWithFreshTable(
+        previousPayload,
+        payload
+      );
+      const changedKeys = projectionHighlightKeys(
+        previousPayload,
+        renderPayload
+      );
+      state.composition = renderPayload;
+      registerTableSurfaceAssets(renderPayload);
+      renderVitrinaIncidentPolicyBadge(
+        (renderPayload.meta || {}).incident_policy_badge
+      );
+      renderVitrinaIncidentQualityBadge(
+        (renderPayload.meta || {}).incident_projection_quality
+      );
+      showBusinessProjectionHighlights(changedKeys);
+      renderTable();
+      if (tableScrollNode) {
+        tableScrollNode.scrollTop = scrollTop;
+        tableScrollNode.scrollLeft = scrollLeft;
+      }
+      rememberBusinessProjection(renderPayload);
+      if (statusPayload) {
+        state.businessProjection.revisionNo = Number(
+          statusPayload.revision_no || state.businessProjection.revisionNo
+        );
+        state.businessProjection.revisionId = String(
+          statusPayload.revision_id || state.businessProjection.revisionId
+        );
+        state.businessProjection.publishedAt = String(
+          statusPayload.published_at || state.businessProjection.publishedAt
+        );
+      }
+      setBusinessProjectionStatus(
+        "обновлено",
+        "neutral",
+        "Таблица перечитана из согласованной business-time projection."
+      );
+      window.setTimeout(function() {
+        if (tableLoadStatusNode && !state.businessProjection.polling) {
+          tableLoadStatusNode.hidden = true;
+        }
+      }, 1800);
+    }
+
+    function scheduleBusinessProjectionPoll(delayMs) {
+      if (state.businessProjection.pollTimer) {
+        window.clearTimeout(state.businessProjection.pollTimer);
+      }
+      state.businessProjection.pollTimer = window.setTimeout(
+        pollBusinessProjectionRevision,
+        Number(delayMs) || 12000
+      );
+    }
+
+    async function pollBusinessProjectionRevision() {
+      if (
+        state.businessProjection.polling
+        || document.visibilityState !== "visible"
+        || !WEB_VITRINA_CONFIG.business_projection_status_path
+      ) {
+        scheduleBusinessProjectionPoll(12000);
+        return;
+      }
+      state.businessProjection.polling = true;
+      try {
+        const response = await fetch(
+          WEB_VITRINA_CONFIG.business_projection_status_path,
+          {
+            headers: {"Accept": "application/json"},
+            cache: "no-store"
+          }
+        );
+        const payload = await readJsonResponse(
+          response,
+          "non-json business projection status response"
+        );
+        if (!response.ok) {
+          throw new Error(
+            (payload && payload.error)
+              ? payload.error
+              : "business projection status returned " + response.status
+          );
+        }
+        if (payload.updating) {
+          setBusinessProjectionStatus(
+            "Обновляется",
+            "neutral",
+            "Идёт bounded пересчёт складских и капитальных показателей."
+          );
+        }
+        const revisionNo = Number(payload.revision_no || 0);
+        if (revisionNo > state.businessProjection.revisionNo) {
+          await reloadBusinessProjectionTable(payload);
+        }
+        const failure = payload.latest_failure || null;
+        const failureId = String((failure && failure.revision_id) || "");
+        if (
+          failureId
+          && failureId !== state.businessProjection.lastFailureRevisionId
+          && String((failure && failure.published_at) || "")
+            >= String(state.businessProjection.publishedAt || "")
+        ) {
+          state.businessProjection.lastFailureRevisionId = failureId;
+          setBusinessProjectionStatus(
+            "ошибка обновления",
+            "warning",
+            "Сохранено последнее согласованное значение. Повтор доступен у владельца операции: "
+              + String((failure && failure.error) || "неизвестная ошибка")
+          );
+        }
+      } catch (error) {
+        // A lightweight revision-check failure must not hide the last good table.
+      } finally {
+        state.businessProjection.polling = false;
+        scheduleBusinessProjectionPoll(12000);
+      }
+    }
+
+    function initializeBusinessProjectionMonitoring() {
+      if (!WEB_VITRINA_CONFIG.business_projection_status_path) {
+        return;
+      }
+      if (typeof window.BroadcastChannel === "function") {
+        state.businessProjection.channel = new BroadcastChannel(
+          "wb-core:warehouse-business-projection:v1"
+        );
+        state.businessProjection.channel.addEventListener("message", function(event) {
+          const payload = event.data || {};
+          if (payload.type === "warehouse_business_projection_changed") {
+            pollBusinessProjectionRevision();
+          } else if (payload.type === "warehouse_business_projection_updating") {
+            setBusinessProjectionStatus(
+              "Обновляется",
+              "neutral",
+              "Операция опубликована; ожидаем terminal business-time projection."
+            );
+          }
+        });
+      }
+      document.addEventListener("visibilitychange", function() {
+        if (document.visibilityState === "visible") {
+          pollBusinessProjectionRevision();
+        }
+      });
+      scheduleBusinessProjectionPoll(1500);
+    }
+
     async function loadDeferredTableData(requestId, shellPayload) {
       try {
         const response = await fetch(
@@ -22485,6 +22790,7 @@
     purgeObsoleteHistoryStorage();
     if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
       loadPageComposition();
+      initializeBusinessProjectionMonitoring();
     }
     if (ALLOWED_UNIFIED_TABS.has(WAREHOUSES_UNIFIED_TAB)) {
       loadWbIncidentPolicy();

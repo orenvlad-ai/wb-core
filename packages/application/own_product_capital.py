@@ -1765,9 +1765,12 @@ class OwnProductCapitalBlock:
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
             _ensure_own_capital_schema(conn)
-            events = [dict(row) for row in conn.execute(
+            events = sorted(
+                (dict(row) for row in conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_own_capital_events ORDER BY effective_date, created_at, event_id"
-            ).fetchall()]
+                ).fetchall()),
+                key=_event_business_order,
+            )
             certifications = {
                 str(row["shipment_id"]): bool(row["expenses_complete"])
                 for row in conn.execute(
@@ -1906,6 +1909,14 @@ class OwnProductCapitalBlock:
                 "date_to": end,
             }
         )
+        from packages.application.warehouse_business_projection import (
+            drain_warehouse_business_projection_outbox,
+        )
+
+        drain_warehouse_business_projection_outbox(
+            self.runtime,
+            published_at=self.timestamp_factory(),
+        )
         return OwnProductCapitalRebuildResult(len(events), len(dates), changed, blockers, run_fingerprint)
 
     def load_daily_metric_lookup(
@@ -1922,6 +1933,17 @@ class OwnProductCapitalBlock:
             revalidate_current_sources=revalidate_current_sources,
         )
         if functional is not None:
+            from packages.application.warehouse_business_projection import (
+                load_current_business_projection_metrics,
+            )
+
+            functional.update(
+                load_current_business_projection_metrics(
+                    self.runtime,
+                    as_of_date=as_of_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
+            )
             return functional
         if as_of_date >= "2026-07-01":
             canonical = self._load_canonical_daily_metric_lookup(as_of_date)
@@ -2031,6 +2053,11 @@ class OwnProductCapitalBlock:
             }
             if not required.issubset(tables):
                 return None
+            from packages.application.warehouse_business_projection import (
+                ensure_functional_version_business_time_schema,
+            )
+
+            ensure_functional_version_business_time_schema(conn)
             cutover = conn.execute(
                 """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
                    WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
@@ -2045,20 +2072,26 @@ class OwnProductCapitalBlock:
                 return {} if as_of_date >= "2026-07-01" else None
             version_candidates = conn.execute(
                 """SELECT version.version_id,version.effective_at,
+                          version.business_effective_date,version.published_at,
                           snapshot.requested_nm_ids_json,snapshot.items_json
                    FROM sheet_vitrina_v1_warehouse_functional_versions version
                    JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
                      ON snapshot.version_id=version.version_id
                    WHERE version.cutover_id='warehouse_functional_cutover_v1'
                      AND version.status='good' AND snapshot.snapshot_date=?
-                   ORDER BY snapshot.snapshot_date DESC,version.created_at DESC""",
+                   ORDER BY
+                     COALESCE(NULLIF(version.published_at,''),version.created_at) DESC,
+                     version.created_at DESC,version.version_id DESC""",
                 (as_of_date,),
             ).fetchall()
             version = next(
                 (
                     row
                     for row in version_candidates
-                    if business_date_from_timestamp(str(row["effective_at"])) == as_of_date
+                    if str(
+                        row["business_effective_date"]
+                        or as_of_date
+                    ) <= as_of_date
                 ),
                 None,
             )
@@ -2529,14 +2562,17 @@ class OwnProductCapitalBlock:
         as_of_date = _iso_date(as_of_date, "as_of_date")
         with _connect(self.runtime.db_path) as conn:
             _ensure_own_capital_schema(conn)
-            events = conn.execute(
+            events = sorted(
+                (dict(row) for row in conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_own_capital_events
                 WHERE effective_date <= ?
                 ORDER BY effective_date, created_at, event_id
                 """,
                 (as_of_date,),
-            ).fetchall()
+                ).fetchall()),
+                key=_event_business_order,
+            )
             certifications = {
                 str(row["shipment_id"]): bool(row["expenses_complete"])
                 for row in conn.execute(
@@ -2545,7 +2581,7 @@ class OwnProductCapitalBlock:
             }
         state: dict[int, dict[str, dict[str, Any]]] = {}
         for event in events:
-            _apply_event(state, dict(event), certifications=certifications)
+            _apply_event(state, event, certifications=certifications)
         return state
 
     def _wb_supply_layers(self, supply_id: str) -> dict[int, dict[str, Decimal]]:
@@ -2824,6 +2860,11 @@ def _ensure_own_capital_schema(conn: sqlite3.Connection) -> None:
             WHERE physical_total_quantity = '0' AND total_quantity != '0'
             """
         )
+    from packages.application.warehouse_business_projection import (
+        ensure_warehouse_projection_source_outbox,
+    )
+
+    ensure_warehouse_projection_source_outbox(conn)
 
 
 def _expense_event_plans(
@@ -2987,6 +3028,34 @@ def _physical_stage_for_supplier_payment(
     if actual_shipment_date and _iso_date(actual_shipment_date, "actual_shipment_date") <= effective_date:
         return STAGE_PRODUCTION_TO_FF
     return STAGE_PRODUCTION
+
+
+def _event_business_order(event: Mapping[str, Any]) -> tuple[str, int, str]:
+    """Stable functional order inside one business date.
+
+    ``created_at`` is deliberately excluded: it is audit time and must not
+    decide whether a same-day physical movement sees its source capital layer.
+    """
+
+    event_type = str(event.get("event_type") or "")
+    stage_from = str(event.get("stage_from") or "")
+    stage_to = str(event.get("stage_to") or "")
+    if event_type == EVENT_SUPPLIER_PAYMENT:
+        priority = 10
+    elif event_type == EVENT_COST_PAYMENT:
+        priority = 20
+    else:
+        priority = {
+            (STAGE_PRODUCTION, STAGE_PRODUCTION_TO_FF): 30,
+            (STAGE_PRODUCTION_TO_FF, STAGE_FF): 40,
+            (STAGE_FF, STAGE_FF_TO_WB): 50,
+            (STAGE_FF_TO_WB, STAGE_WB): 60,
+        }.get((stage_from, stage_to), 80)
+    return (
+        str(event.get("effective_date") or ""),
+        priority,
+        str(event.get("event_id") or ""),
+    )
 
 
 def _apply_event(

@@ -139,6 +139,10 @@ def build_web_vitrina_page_composition(
             "incident_projection_quality": dict(
                 contract_payload["meta"].get("incident_projection_quality") or {}
             ),
+            "warehouse_business_projection": dict(
+                contract_payload["meta"].get("warehouse_business_projection")
+                or {}
+            ),
         },
         "historical_access": _build_historical_access(
             page_route=page_route,

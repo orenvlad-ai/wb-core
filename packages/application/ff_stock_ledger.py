@@ -464,6 +464,14 @@ class FfStockLedgerBlock:
             str(recovery["operation_id"]),
             after_digest=plan_fingerprint,
         )
+        from packages.application.warehouse_business_projection import (
+            drain_warehouse_business_projection_outbox,
+        )
+
+        business_projection = drain_warehouse_business_projection_outbox(
+            self.runtime,
+            published_at=self.timestamp_factory(),
+        )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -473,6 +481,7 @@ class FfStockLedgerBlock:
                 "rows": self.current_balance_rows(),
             },
             "recovery_policy": recovery,
+            "business_projection": business_projection,
         }
 
     def download_operation_source_file(self, operation_id: str) -> tuple[bytes, str, str]:
@@ -510,6 +519,9 @@ class FfStockLedgerBlock:
             source_object_id=shipment_id,
             source_object_label=label,
             created_at=self.timestamp_factory(),
+            business_effective_date=str(
+                header.get("actual_ff_acceptance_date") or ""
+            ),
             created_by="system",
             warnings=warnings,
             diagnostics={"shipment_id": shipment_id},
@@ -897,6 +909,7 @@ class FfStockLedgerBlock:
             source_object_id=supply_id or cache_key,
             source_object_label=label,
             created_at=self.timestamp_factory(),
+            business_effective_date=source_dt.date().isoformat(),
             created_by="system",
             warnings=warnings,
             diagnostics={
