@@ -54,6 +54,7 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa:
     OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
     OWN_PRODUCT_CAPITAL_SECTION_RU,
     OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU,
     OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
     OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
@@ -454,6 +455,49 @@ def _assert_metric_identities(block: OwnProductCapitalBlock) -> None:
         raise AssertionError("existing 1C metric must be preserved unchanged")
     if not any(item.section == OWN_PRODUCT_CAPITAL_SECTION_RU for item in metrics):
         raise AssertionError("own product capital section is missing")
+    wb_sku_quantity_key = own_stage_metric_key("WB", "qty")
+    wb_total_quantity_key = own_stage_total_metric_key("WB", "qty")
+    if wb_sku_quantity_key != "own_capital_WB_qty":
+        raise AssertionError(f"canonical WB SKU quantity key changed: {wb_sku_quantity_key}")
+    if wb_total_quantity_key != "total_own_capital_WB_qty":
+        raise AssertionError(f"canonical WB TOTAL quantity key changed: {wb_total_quantity_key}")
+    metric_by_key = {item.metric_key: item for item in metrics}
+    for metric_key, expected_scope in (
+        (wb_sku_quantity_key, "SKU"),
+        (wb_total_quantity_key, "TOTAL"),
+    ):
+        metric = metric_by_key.get(metric_key)
+        if metric is None:
+            raise AssertionError(f"canonical WB contour metric is missing: {metric_key}")
+        if metric.scope != expected_scope:
+            raise AssertionError(f"{metric_key} scope changed: {metric.scope}")
+        if metric.label_ru != OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU:
+            raise AssertionError(f"{metric_key} label mismatch: {metric.label_ru!r}")
+        if metric.calc_ref != wb_sku_quantity_key:
+            raise AssertionError(f"{metric_key} calculation reference changed: {metric.calc_ref!r}")
+    if any(item.label_ru == "Склад WB: Количество, шт" for item in metrics):
+        raise AssertionError("legacy ambiguous WB quantity label leaked into the active metric catalog")
+
+    stale_existing = MetricV2Item(
+        metric_key=wb_sku_quantity_key,
+        enabled=True,
+        scope="SKU",
+        label_ru="Склад WB: Количество, шт",
+        calc_type="metric",
+        calc_ref="preserved_existing_calc_ref",
+        show_in_data=True,
+        format="number",
+        display_order=999,
+        section="Товарный капитал",
+    )
+    normalized_existing = {
+        item.metric_key: item
+        for item in extend_metrics_with_own_product_capital_metrics([stale_existing])
+    }[wb_sku_quantity_key]
+    if normalized_existing.label_ru != OWN_PRODUCT_CAPITAL_WB_CONTOUR_QTY_LABEL_RU:
+        raise AssertionError("an existing active catalog row must receive the canonical WB contour label")
+    if normalized_existing.calc_ref != "preserved_existing_calc_ref":
+        raise AssertionError("label normalization must not change an existing metric calculation reference")
     configs = [_config(101, 1), _config(202, 2)]
     slot = "today_current"
     lookups = SlotLookups(
