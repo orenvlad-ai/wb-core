@@ -55,6 +55,7 @@ STATUS_HEADER = [
     "note",
 ]
 UNAVAILABLE_STALE_VALUE_METRIC_KEY = "promo_participation"
+WB_CONTOUR_METRIC_LABEL = "Склад WB: весь контур, шт"
 
 
 def main() -> None:
@@ -113,6 +114,7 @@ def main() -> None:
         "activity_surface": ready_result["activity_surface"],
         "activity_metrics_preview": ready_result["activity_metrics_preview"],
         "compact_widths": ready_result["compact_widths"],
+        "wb_contour_metric_label": ready_result["wb_contour_metric_label"],
         "percent_formatting": ready_result["percent_formatting"],
         "cost_policy_tooltip": ready_result["cost_policy_tooltip"],
         "operator_screen_layout": ready_result["operator_screen_layout"],
@@ -710,6 +712,7 @@ def run_browser_checks(
             if table_toolbar["height"] > 78:
                 raise AssertionError(f"table compact header must stay compact, got {table_toolbar}")
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
+            wb_contour_metric_label = _check_wb_contour_metric_label(page)
             sticky_section_offsets = _check_sticky_section_offsets(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
             cost_policy_tooltip = _check_cost_policy_tooltip(page)
@@ -863,6 +866,7 @@ def run_browser_checks(
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
+        "wb_contour_metric_label": wb_contour_metric_label,
         "sticky_section_offsets": sticky_section_offsets,
         "percent_formatting": percent_formatting,
         "cost_policy_tooltip": cost_policy_tooltip,
@@ -930,6 +934,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "activity_metrics_preview" in result:
         print("web_vitrina_browser_activity_metrics_preview: ok ->", result["activity_metrics_preview"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
+    if "wb_contour_metric_label" in result:
+        print("web_vitrina_browser_wb_contour_metric_label: ok ->", result["wb_contour_metric_label"])
     if "sticky_section_offsets" in result:
         print("web_vitrina_browser_sticky_section: ok ->", result["sticky_section_offsets"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
@@ -4257,6 +4263,66 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
     }
 
 
+def _check_wb_contour_metric_label(page: object) -> dict[str, object]:
+    layout = page.evaluate(
+        """(expectedLabel) => {
+          const keys = ['total_own_capital_WB_qty', 'own_capital_WB_qty'];
+          const result = {};
+          keys.forEach((metricKey) => {
+            const cells = Array.from(document.querySelectorAll(
+              'td[data-col-id="metric_label"][data-metric-key="' + metricKey + '"]'
+            ));
+            result[metricKey] = cells.map((cell) => {
+              const label = cell.querySelector('.metric-label-text');
+              const cellRect = cell.getBoundingClientRect();
+              const labelRect = label ? label.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+              const style = getComputedStyle(cell);
+              const rightInset = Number.parseFloat(style.paddingRight || '0');
+              return {
+                text: label ? (label.textContent || '').trim() : '',
+                cellClientWidth: Math.round(cell.clientWidth),
+                cellScrollWidth: Math.round(cell.scrollWidth),
+                labelWidth: Math.round(labelRect.width),
+                labelLeft: Math.round(labelRect.left),
+                labelRight: Math.round(labelRect.right),
+                contentRight: Math.round(cellRect.right - rightInset),
+                fits: !!label
+                  && (label.textContent || '').trim() === expectedLabel
+                  && cell.scrollWidth <= cell.clientWidth + 1
+                  && labelRect.left >= cellRect.left - 1
+                  && labelRect.right <= cellRect.right - rightInset + 1
+              };
+            });
+          });
+          const oldLabelCount = Array.from(document.querySelectorAll(
+            'td[data-col-id="metric_label"] .metric-label-text, .metrics-config-label'
+          )).filter((node) => (node.textContent || '').trim() === 'Склад WB: Количество, шт').length;
+          const config = Object.fromEntries(keys.map((metricKey) => {
+            const rows = Array.from(document.querySelectorAll(
+              '[data-metric-config-key="' + metricKey + '"] .metrics-config-label'
+            ));
+            return [metricKey, rows.map((node) => (node.textContent || '').trim())];
+          }));
+          return {result, config, oldLabelCount};
+        }""",
+        WB_CONTOUR_METRIC_LABEL,
+    )
+    for metric_key in ("total_own_capital_WB_qty", "own_capital_WB_qty"):
+        rows = layout["result"].get(metric_key) or []
+        if not rows or not all(bool(item.get("fits")) for item in rows):
+            raise AssertionError(
+                f"{metric_key} must render the exact WB contour label without overflow, got {rows}"
+            )
+        config_labels = layout["config"].get(metric_key) or []
+        if config_labels != [WB_CONTOUR_METRIC_LABEL]:
+            raise AssertionError(
+                f"{metric_key} must keep the exact label in its scope catalog, got {config_labels}"
+            )
+    if int(layout["oldLabelCount"]) != 0:
+        raise AssertionError(f"legacy ambiguous WB quantity label remains visible: {layout}")
+    return layout
+
+
 def _check_sticky_section_offsets(page: object) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
@@ -4801,6 +4867,8 @@ def _build_plan(
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                     [f"SKU A: WAC WB", f"SKU:{first_nm_id}|our_wb_unit_cost_rub", 100],
                     [f"SKU B: WAC WB", f"SKU:{second_nm_id}|our_wb_unit_cost_rub", 110],
+                    ["Итого: WB contour", "TOTAL|total_own_capital_WB_qty", 42],
+                    [f"SKU A: WB contour", f"SKU:{first_nm_id}|own_capital_WB_qty", 42],
                     ["Итого: Остаток WB факт", "TOTAL|total_wb_stock_fact_qty", 15],
                     ["Итого: Остаток WB инцидент", "TOTAL|total_wb_stock_incident_qty", 10],
                     ["Итого: Остаток WB effective", "TOTAL|total_wb_stock_effective_qty", 5],
@@ -4808,7 +4876,7 @@ def _build_plan(
                     [f"SKU A: Остаток WB инцидент", f"SKU:{first_nm_id}|wb_stock_incident_qty", 10],
                     [f"SKU A: Остаток WB effective", f"SKU:{first_nm_id}|wb_stock_effective_qty", 5],
                 ],
-                row_count=25,
+                row_count=27,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

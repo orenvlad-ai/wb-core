@@ -30,6 +30,7 @@ WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
 WAREHOUSE_RECOVERY_POLICY_PROFILE = "warehouse_recovery_policy_20260726"
 VITRINA_INCIDENT_PROVISIONAL_PROFILE = "vitrina_incident_provisional_20260727"
+WB_CONTOUR_METRIC_LABEL = "Склад WB: весь контур, шт"
 
 
 def _exact_canary_lifecycles(
@@ -1286,6 +1287,23 @@ def _run_warehouse_ui_flow(
             if page.locator(f'[data-metric-key="{metric_key}"]').count() == 0
         ]
         _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
+        wb_contour_label_evidence = _wb_contour_metric_label_evidence(page)
+        _assert(
+            not wb_contour_label_evidence["missing_keys"],
+            f"WB contour SKU/TOTAL metrics are rendered: {wb_contour_label_evidence}",
+        )
+        _assert(
+            not wb_contour_label_evidence["wrong_labels"],
+            f"WB contour SKU/TOTAL labels are exact: {wb_contour_label_evidence}",
+        )
+        _assert(
+            not wb_contour_label_evidence["overflowing_cells"],
+            f"WB contour SKU/TOTAL labels fit the metric cells: {wb_contour_label_evidence}",
+        )
+        _assert(
+            wb_contour_label_evidence["old_label_count"] == 0,
+            f"legacy ambiguous WB quantity label is absent: {wb_contour_label_evidence}",
+        )
         incident_metric_keys = (
             "wb_stock_incident_qty",
             "wb_stock_effective_qty",
@@ -1546,6 +1564,7 @@ def _run_warehouse_ui_flow(
             "canonical_stage_metric_keys": canonical_stage_keys,
             "incident_metric_display": incident_metric_display,
             "incident_adjusted_cells": incident_cell_evidence,
+            "wb_contour_metric_label": wb_contour_label_evidence,
             "incident_policy_badge": {
                 "expected_active": policy_currently_active,
                 "visible": vitrina_policy_badge.is_visible(),
@@ -2127,6 +2146,75 @@ def _filled_metric_cells(page: Page, *, metric_key: str, date_from: str) -> int:
         if text and text not in {"—", "-"}:
             filled += 1
     return filled
+
+
+def _wb_contour_metric_label_evidence(page: Page) -> dict[str, Any]:
+    return page.evaluate(
+        """(expectedLabel) => {
+          const keys = ['total_own_capital_WB_qty', 'own_capital_WB_qty'];
+          const missingKeys = [];
+          const wrongLabels = [];
+          const overflowingCells = [];
+          const labelsByKey = {};
+          const configLabelsByKey = {};
+          keys.forEach((metricKey) => {
+            const cells = Array.from(document.querySelectorAll(
+              'td[data-col-id="metric_label"][data-metric-key="' + metricKey + '"]'
+            ));
+            if (!cells.length) {
+              missingKeys.push(metricKey);
+            }
+            labelsByKey[metricKey] = cells.map((cell) => {
+              const label = cell.querySelector('.metric-label-text');
+              const text = label ? (label.textContent || '').trim() : '';
+              const cellRect = cell.getBoundingClientRect();
+              const labelRect = label ? label.getBoundingClientRect() : {left: 0, right: 0};
+              const paddingRight = Number.parseFloat(getComputedStyle(cell).paddingRight || '0');
+              const fits = !!label
+                && cell.scrollWidth <= cell.clientWidth + 1
+                && labelRect.left >= cellRect.left - 1
+                && labelRect.right <= cellRect.right - paddingRight + 1;
+              if (text !== expectedLabel) {
+                wrongLabels.push({metric_key: metricKey, surface: 'table', text});
+              }
+              if (!fits) {
+                overflowingCells.push({
+                  metric_key: metricKey,
+                  client_width: Math.round(cell.clientWidth),
+                  scroll_width: Math.round(cell.scrollWidth),
+                  label_right: Math.round(labelRect.right),
+                  content_right: Math.round(cellRect.right - paddingRight)
+                });
+              }
+              return text;
+            });
+            const configLabels = Array.from(document.querySelectorAll(
+              '[data-metric-config-key="' + metricKey + '"] .metrics-config-label'
+            )).map((node) => (node.textContent || '').trim());
+            configLabelsByKey[metricKey] = configLabels;
+            if (configLabels.length !== 1 || configLabels[0] !== expectedLabel) {
+              wrongLabels.push({
+                metric_key: metricKey,
+                surface: 'metric_catalog',
+                text: configLabels.join(' | ')
+              });
+            }
+          });
+          const oldLabelCount = Array.from(document.querySelectorAll(
+            'td[data-col-id="metric_label"] .metric-label-text, .metrics-config-label'
+          )).filter((node) => (node.textContent || '').trim() === 'Склад WB: Количество, шт').length;
+          return {
+            expected_label: expectedLabel,
+            labels_by_key: labelsByKey,
+            config_labels_by_key: configLabelsByKey,
+            missing_keys: missingKeys,
+            wrong_labels: wrongLabels,
+            overflowing_cells: overflowingCells,
+            old_label_count: oldLabelCount
+          };
+        }""",
+        WB_CONTOUR_METRIC_LABEL,
+    )
 
 
 def _metric_date_coverage(
