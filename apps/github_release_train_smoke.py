@@ -2376,6 +2376,60 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         ROOT / "docs" / "architecture" / "11_github_release_train.md"
     ).read_text(encoding="utf-8")
 
+    for source in (agents, execution):
+        folded = source.casefold()
+        for required in (
+            "DISPATCH_REQUEST",
+            "discussion-only",
+            "запускай/запусти задачу",
+            "передавай/отправляй в Codex",
+            "начинай/делай/реализуй по этому плану",
+            "текущей уже исполняемой Codex-задаче",
+            "exact non-terminal target",
+            "user-owned Codex task",
+            "create_thread",
+            "spawn_agent",
+            "initiating discussion thread не начинает implementation",
+        ):
+            assert required.casefold() in folded
+        assert "ACTIVE_ADDITION" in source and "ACTIVE_LOOP_RECOVERY" in source
+        assert "неоднознач" in folded and "отдельн" in folded
+        assert "subagent" in folded and "не являются dispatch" in folded
+        assert "ни одно исключение не разрешает `discussion-only` implementation" in folded
+
+    for source in (agents, execution, release_train):
+        folded = source.casefold()
+        for required in (
+            "DISPATCH_REQUEST",
+            "launch operation",
+            "TARGET_CREATE_READBACK",
+            "MONITOR_ATTACH_READBACK",
+            "create_thread",
+            "spawn_agent",
+            "wait_threads(timeoutMs: 0)",
+            "fail closed",
+            "MONITORING_CAPABILITY_LIMITATION",
+        ):
+            assert required.casefold() in folded
+        assert "target" in folded and "monitor" in folded and "readback" in folded
+        for terminal_required in (
+            "TERMINAL_MONITOR_SUMMARY",
+            "успешно завершена",
+            "2–5",
+            "Проверено:",
+            "canonical terminal state",
+            "release:done",
+            "release:production",
+            "verified user artifact",
+            "partial",
+            "terminal failure",
+            "ложн",
+            "только после",
+            "silent cleanup",
+            "не являются корректным завершением мониторинга",
+        ):
+            assert terminal_required.casefold() in folded
+
     explicit_classes = (
         "`КЛАСС ЗАДАЧИ: СТАНДАРТ`",
         "`КЛАСС ЗАДАЧИ: LOOP`",

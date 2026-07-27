@@ -79,6 +79,45 @@ Task class и task continuity определяются независимо. Mac
 
 Рабочая ветка остаётся proposed change и не подменяет актуальный `origin/main`. Старые чаты, вложения, прежние ChatGPT Project instructions и legacy artifacts могут использоваться только как migration evidence или do-not-lose constraints. Если репозиторий или обязательный источник недоступен, нельзя уверенно утверждать current state: результатом должен быть точный blocker.
 
+## Discussion-To-Codex Dispatch Boundary
+
+### `DISPATCH_REQUEST`
+
+`discussion-only` означает initiating Chat/кураторский thread, где пользователь обсуждает требования, варианты или уже согласованный план, но не дал этому thread явную роль exact исполняемой Codex-задачи. В таком контексте post-plan launch intent — «запускай/запусти задачу», «передавай/отправляй в Codex», «начинай/делай/реализуй по этому плану» и смысловые эквиваленты — всегда является `DISPATCH_REQUEST`.
+
+`DISPATCH_REQUEST` не является authorization на implementation в initiating thread. При смысловой неоднозначности initiating thread остаётся discussion/curator surface и создаёт отдельную user-owned Codex task/thread. Он не создаёт branch, не меняет файлы и не начинает реализацию плана.
+
+Исключение допустимо только при отдельной явной инструкции пользователя:
+
+1. выполнить работу прямо в текущей уже исполняемой Codex-задаче; либо
+2. продолжить exact non-terminal target, чьи identity/status доказаны fresh readback и continuity классифицирована как `ACTIVE_ADDITION` либо `ACTIVE_LOOP_RECOVERY`.
+
+Первое исключение действует только когда current thread сам является доказанной исполняемой target task. Во втором случае initiating discussion thread отправляет bounded follow-up в подтверждённый existing target, а не реализует задачу сам. Ни одно исключение не разрешает `discussion-only` implementation. Тип UI, совпадение project/repository, наличие локального checkout или прежний draft не доказывают исключение. Если exact active target не назван и не подтверждён, неоднозначность сохраняет `DISPATCH_REQUEST`.
+
+### User-Owned Target И Fail-Closed Creation
+
+Initiating thread формирует полный prompt по current protocol и вызывает supported user-owned task/thread creation capability: `create_thread` либо его актуальный эквивалент. `spawn_agent`, subagent, internal multi-agent delegation, same-thread implementation или fork без отдельной видимой user-owned target identity не являются dispatch и не удовлетворяют просьбу «запусти задачу».
+
+Первая обязательная стадия — `TARGET_CREATE_READBACK`:
+
+1. supported create-call возвращает exact target task/thread ID;
+2. prompt доставлен именно этому target;
+3. immediate bounded `wait_threads(timeoutMs: 0)` snapshot читает exact target ID/host и подтверждает фактический status/первый progress;
+4. initiating thread сохраняет exact target identity для monitor и дальнейшего отчёта.
+
+Successful create-call, client/UI-card без ready target ID, непроверенная setup-очередь или snapshot другого target не являются completion. Если capability создания недоступна, exact ID не получен, prompt delivery не подтверждена либо bounded snapshot не читает target, операция fail closed: initiating discussion thread не начинает implementation, не подменяет target subagent-ом и сообщает точный creation blocker.
+
+### Одна Launch Operation
+
+`TARGET_CREATE_READBACK` и `MONITOR_ATTACH_READBACK` ниже образуют одну `launch operation` в одном initiating turn. Monitoring нельзя откладывать до следующего turn, первого PR, инициативы target или напоминания пользователя:
+
+1. перед target create/monitor update прочитать existing initiating-thread heartbeat automations и все exact target identities;
+2. выполнить `TARGET_CREATE_READBACK`;
+3. немедленно выполнить `MONITOR_ATTACH_READBACK` по разделу `Thread Heartbeat Automation` для exact созданного target;
+4. сообщить пользователю exact target identity, create/readback evidence и monitor/readback evidence.
+
+Эта последовательность имеет два разных fail semantics. Неподтверждённый target creation останавливает dispatch fail closed и никогда не разрешает same-thread implementation. Если target уже создан и подтверждён, но recurring monitoring capability после bounded проверки действительно недоступна, отдельная target execution продолжается; initiating thread сообщает `MONITORING_CAPABILITY_LIMITATION`, не утверждает, что reporter работает, и не выдаёт silent self recovery heartbeat за monitoring. Monitoring limitation не отменяет созданный target, а creation blocker не может быть переименован в monitoring limitation.
+
 ## Phase-Local Preflight И Dependency Planning
 
 Preflight не является единым глобальным барьером. Канонические фазы из `apps/github_release_train_spec.py` упорядочиваются по зависимостям, даже если prompt перечисляет production preflight первым:
@@ -126,6 +165,8 @@ Scope должен быть явным и bounded. Не добавляй unrelat
 ## Thread Heartbeat Automation
 
 Этот protocol применяется только тогда, когда в текущем контексте фактически доступен callable automation contract для recurring heartbeat, чтения target thread state, bounded follow-up и supported stop/delete. Название macOS, Desktop, Codex, ChatGPT, IDE, CLI, project path или client version само по себе capability не доказывает. Недоступность capability не является blocker, не меняет task class/continuity/closure и не разрешает утверждать, что monitor создан.
+
+Для `DISPATCH_REQUEST` create/update/readback здесь является стадией `MONITOR_ATTACH_READBACK` той же `launch operation`, которая уже выполнила `TARGET_CREATE_READBACK`; отложенное attachment нарушает dispatch contract.
 
 ### Mutually-Exclusive Роли И Reporting Intent
 
@@ -186,6 +227,17 @@ Reporter automation остаётся `ACTIVE`, пока в list есть хот�
 
 Name/ID и progress weights для разных targets должны быть однозначны. Progress без evidence не начисляется: процент строится только по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
 
+### Terminal Summary До Cleanup
+
+Когда exact target достигает доказанного terminal result, external supervisor reporter сначала публикует в initiating/reporting thread отдельный `TERMINAL_MONITOR_SUMMARY`:
+
+- при success однозначно сообщает, что задача успешно завершена;
+- перечисляет 2–5 коротких пунктов с тем, что фактически реализовано/изменено, только по proven evidence;
+- отдельной строкой пишет `Проверено: <checks/evidence>; canonical terminal state: <release:done | release:production | verified user artifact | другой contour-specific result>.`;
+- при partial result или terminal failure вместо success называет точный незавершённый результат/blocker и не использует ложное «готово».
+
+Только после публикации этого summary reporter удаляет exact target из durable list, сохраняет остальные non-terminal targets и readback-подтверждает update. Pause/delete разрешён только при пустом list либо explicit user stop всего reporter. Одна финальная progress-line или silent cleanup без короткого итогового summary не являются корректным завершением мониторинга.
+
 ### Нормативные Примеры
 
 - **Один новый target, свободный initiating thread.** Создать один `external supervisor reporter`, destination = initiating thread, durable list = exact target; затем readback, `wait_threads(timeoutMs: 0)` и первая подписанная report line.
@@ -205,7 +257,7 @@ Target интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CON
 
 ### Cleanup И Local Availability
 
-Cleanup выполняет reporter после доказанного terminal target state или explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+Cleanup выполняет reporter только после обязательного `TERMINAL_MONITOR_SUMMARY` для доказанного terminal target state либо после explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
 
 ## Шесть Execution-Контуров
 
