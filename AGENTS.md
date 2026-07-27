@@ -36,6 +36,28 @@ Production gates являются phase-local. Разделяй `REPOSITORY_PREF
 
 Для будущей production-data mutation runner всё равно реализуется и тестируется на fixtures/mocks до максимально возможного repo-only состояния. Канонический runner обязан иметь dry-run по умолчанию, отдельный explicit apply, bounded scope, machine-readable manifest, pre-change digest, backup/evidence contract, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и mutation через архивный read-only MCP запрещены.
 
+## Discussion → отдельная Codex-задача
+
+`discussion-only` — это initiating Chat/кураторский thread, в котором пользователь обсуждает, уточняет или утверждает план, но ещё не выбрал текущий thread как exact исполняемую Codex-задачу. После такого обсуждения фразы «запускай/запусти задачу», «передавай/отправляй в Codex», «начинай/делай/реализуй по этому плану» и смысловые эквиваленты всегда классифицируются как `DISPATCH_REQUEST`. Неоднозначность разрешается в пользу отдельной user-owned Codex task/thread: команда запуска не означает implementation в initiating discussion thread и не даёт ему authority создавать branch, менять файлы или выполнять план.
+
+Допустимы только два явных исключения:
+
+- пользователь отдельно требует выполнить работу прямо в текущей уже исполняемой Codex-задаче;
+- пользователь явно продолжает exact non-terminal target, а его active identity подтверждена readback и continuity классифицирована как `ACTIVE_ADDITION` либо `ACTIVE_LOOP_RECOVERY`.
+
+Первое исключение действует только когда current thread сам является доказанной исполняемой target task. Во втором случае initiating discussion thread отправляет bounded follow-up в подтверждённый existing target, а не реализует задачу сам. Ни одно исключение не разрешает `discussion-only` implementation.
+
+При `DISPATCH_REQUEST` initiating thread останавливается на curator/dispatcher boundary, формирует полный task prompt и использует supported user-owned task/thread creation capability (`create_thread` или актуальный эквивалент). `spawn_agent`, subagent, internal multi-agent delegation, fork без отдельной user-owned task identity и реализация в initiating thread не являются dispatch.
+
+Dispatch и monitoring образуют одну неоткладываемую `launch operation` в том же turn:
+
+1. До create/update прочитать existing heartbeat automations initiating thread и все их exact target identities.
+2. `TARGET_CREATE_READBACK`: создать отдельный target, получить exact target ID и bounded `wait_threads(timeoutMs: 0)` snapshot, подтверждающий созданную task, доставку prompt и фактический target status.
+3. `MONITOR_ATTACH_READBACK`: сразу применить contract из `Thread heartbeat automation` для того же exact target — создать либо update/reuse единственный external reporter, затем readback-проверить automation и первый status report.
+4. Только после обоих этапов сообщить результат запуска с exact target identity и доказанным состоянием monitoring; successful create/automation call или UI-card без readback не являются подтверждением.
+
+Если user-owned target creation недоступен, exact ID не получен либо `TARGET_CREATE_READBACK` не подтверждает доставку, dispatch fail closed: initiating discussion thread не начинает implementation и возвращает точный blocker. Если target уже подтверждён, но recurring monitoring capability после bounded проверки действительно недоступна, target execution продолжается в отдельной задаче; инициатор явно сообщает `MONITORING_CAPABILITY_LIMITATION` и не выдаёт silent self recovery heartbeat за reporting monitor. Недоступность creation и недоступность monitoring — разные outcomes и не подменяют друг друга.
+
 ## Классы задач
 
 Каждый новый task prompt по возможности начинается ровно с одной канонической строки:
@@ -90,11 +112,15 @@ Task class и task continuity — два разных решения. Class вы
 
 На поверхности с фактически доступной thread-heartbeat capability для каждой новой нетерминальной задачи, создаваемой либо получаемой в интерфейсе, обязательна ровно одна active monitoring role для exact target task/thread identity. `external supervisor reporter` — preferred Chat → Codex role: независимый monitor с destination/attachment в инициирующем Chat/thread и bounded exact target list в durable prompt; он публикует отчёты, пока target turn active. `self recovery heartbeat` (legacy name `self-heartbeat`) прикреплён к самой target thread, только возобновляет idle target и не является reporter. Если пользователь просит «мониторинг», periodic reports каждые N минут, процент/ETA или наблюдение в исходном чате, только `external supervisor reporter` удовлетворяет запросу; silent `self recovery heartbeat` не удовлетворяет reporting intent и не может называться «мониторинг работает» без явного предупреждения об отсутствии periodic reports. Capability определяется callable contract, а не названием macOS/Desktop/CLI/IDE/пути. Если capability недоступна, задача продолжается без blocker и без ложного monitor/reporting claim.
 
+Для `DISPATCH_REQUEST` этот блок исполняется как `MONITOR_ATTACH_READBACK` той же `launch operation`, немедленно после `TARGET_CREATE_READBACK`; attachment нельзя переносить на следующий turn, первый PR, инициативу target или напоминание пользователя.
+
 Для Chat → Codex до create/update изучи existing heartbeat automations initiating thread и все exact monitored target identities. Если reporter отсутствует — создай preferred external reporter. Если initiating thread уже имеет active external reporter для другой non-terminal задачи, update/reuse эту единственную automation как multi-target supervisor с bounded exact target list, сохранив все прежние non-terminal targets; silent self fallback и duplicate reporter запрещены. Destination остаётся initiating reporting thread, а monitored targets живут в durable prompt/target list: destination thread не является target task. Если multi-target update фактически не поддерживается, честно сообщи capability limitation; допустимый mutually-exclusive `self recovery heartbeat` остаётся только silent recovery safeguard и не удовлетворяет reporting intent.
 
 Create/update выполняется только поддерживаемым automation tool без hardcoded schedule syntax. Completion требует readback: `ACTIVE`; cadence 10 минут; правильный initiating destination/monitor thread; роль reporter и каждый exact target ID в durable prompt; прежние non-terminal targets сохранены; для тех же targets нет self heartbeat/duplicate; immediate bounded `wait_threads(timeoutMs: 0)` smoke даёт первый доказанный status report в initiating chat. UI-card или successful create-call без этих проверок не completion. Supervisor при active target только читает доказанный progress и не отправляет follow-up; при idle/non-terminal отправляет ровно один bounded follow-up; при human-only boundary сообщает exact blocker.
 
 Каждый осмысленный supervisor run публикует отдельную подписанную строку на каждый наблюдаемый target: `[<target name/ID>] Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`; target names/IDs и progress weights должны быть однозначны, при внешнем ожидании используется `ETA ≈зависит от <точная внешняя зависимость>`, а progress без evidence не начисляется. Terminal target удаляется из target list после доказанного terminal result; automation останавливается/удаляется только когда active targets не осталось либо получен explicit user stop. Для PR-backed `wb-core` durable state остаётся в GitHub, а monitor не создаёт второй state machine, не заменяет 5-минутное GitHub observation и не обходит `release:needs-resume`/ownership/continuity. Для локальных файлов компьютер и Desktop должны быть запущены, а проект — оставаться доступным.
+
+Перед cleanup каждого exact terminal target external reporter обязан выполнить `TERMINAL_MONITOR_SUMMARY` в initiating/reporting thread. При доказанном success он однозначно пишет, что задача успешно завершена, затем даёт 2–5 коротких пунктов только с proven реализованными изменениями и отдельную строку `Проверено: <checks/evidence>; canonical terminal state: <release:done | release:production | verified user artifact | другой contour-specific result>.` При partial result либо terminal failure он вместо success честно называет точный незавершённый результат/blocker и не пишет ложное «готово». Только после публикации summary reporter удаляет exact target из durable list и readback-подтверждает cleanup; pause/delete допустим лишь при пустом list. Одна финальная progress-line либо silent cleanup без короткого итогового summary не являются корректным завершением мониторинга.
 
 ## Production UI-проверки
 
