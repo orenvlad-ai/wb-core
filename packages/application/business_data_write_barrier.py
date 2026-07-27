@@ -494,6 +494,119 @@ def release_barrier(
         return {**barrier_status(runtime_dir), "idempotent": False}
 
 
+def abort_barrier_acquire(
+    runtime_dir: Path,
+    *,
+    window_id: str,
+    plan_fingerprint: str,
+    actor: str,
+    reason: str,
+    restore_readback: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Release an unconfirmed window only after exact pre-hold restore."""
+
+    runtime_dir = Path(runtime_dir).resolve()
+    exact_window_id = _validate_identifier(window_id, label="window_id")
+    exact_plan = _validate_fingerprint(plan_fingerprint)
+    normalized_actor = _validate_actor(actor)
+    normalized_reason = _bounded(reason, 1000)
+    if not normalized_reason:
+        raise BusinessDataWriteBarrierError(
+            "audited acquire-abort reason is required"
+        )
+    if (
+        str(restore_readback.get("status") or "") != "restored"
+        or not bool(restore_readback.get("exact_prior_state_restored"))
+    ):
+        raise BusinessDataWriteBarrierError(
+            "write barrier acquire abort requires confirmed exact "
+            "maintenance restore"
+        )
+    with _BarrierLock(runtime_dir):
+        state = _load_state(runtime_dir)
+        if state is None:
+            raise BusinessDataWriteBarrierError(
+                "write barrier state does not exist"
+            )
+        if str(state.get("phase") or "") == "released":
+            if (
+                str(state.get("window_id") or "") == exact_window_id
+                and str(state.get("plan_fingerprint") or "") == exact_plan
+                and str(state.get("release_kind") or "")
+                == "acquire_aborted"
+            ):
+                return {**barrier_status(runtime_dir), "idempotent": True}
+            raise BusinessDataWriteBarrierError(
+                "released barrier identity/kind does not match acquire abort"
+            )
+        if (
+            str(state.get("window_id") or "") != exact_window_id
+            or str(state.get("plan_fingerprint") or "") != exact_plan
+            or bool(state.get("hold_confirmed"))
+            or str(state.get("phase") or "") != "acquiring"
+        ):
+            raise BusinessDataWriteBarrierError(
+                "only an exact unconfirmed acquiring barrier may be aborted"
+            )
+        restore_evidence = {
+            "status": "restored",
+            "captured_at": _bounded(
+                restore_readback.get("captured_at"),
+                64,
+            ),
+            "policy_revision": int(
+                (restore_readback.get("auto_updates") or {}).get(
+                    "revision"
+                )
+                or 0
+            ),
+            "master_desired": bool(
+                (restore_readback.get("auto_updates") or {}).get(
+                    "master_desired"
+                )
+            ),
+            "exact_prior_state_restored": True,
+            "control_signature": _bounded(
+                restore_readback.get("control_signature"),
+                80,
+            ),
+            "readback_fingerprint": _fingerprint(restore_readback),
+        }
+        state.update(
+            {
+                "phase": "released",
+                "active": False,
+                "released_at": _utc_now(),
+                "released_by": normalized_actor,
+                "release_reason": normalized_reason,
+                "release_kind": "acquire_aborted",
+                "restore": restore_evidence,
+            }
+        )
+        state["state_fingerprint"] = _fingerprint(
+            {
+                key: value
+                for key, value in state.items()
+                if key != "state_fingerprint"
+            }
+        )
+        _atomic_write_private_json(_state_path(runtime_dir), state)
+        _append_private_audit(
+            _audit_path(runtime_dir),
+            {
+                "event": "write_barrier_acquire_aborted",
+                "captured_at": _utc_now(),
+                "window_id": exact_window_id,
+                "plan_fingerprint": exact_plan,
+                "actor": normalized_actor,
+                "reason": normalized_reason,
+                "restore": restore_evidence,
+                "state_fingerprint": state["state_fingerprint"],
+            },
+        )
+        return {**barrier_status(runtime_dir), "idempotent": False}
+
+
 def mark_barrier_restoring(
     runtime_dir: Path,
     *,

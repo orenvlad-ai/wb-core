@@ -29,6 +29,7 @@ from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
     _read_env_file,
 )
 from packages.application.business_data_write_barrier import (  # noqa: E402
+    abort_barrier_acquire,
     acquire_barrier,
     barrier_status,
     confirm_barrier_hold,
@@ -76,6 +77,7 @@ ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for 
 WRITER_PROCESS_MARKERS = (
     "sheet_vitrina_v1_auto_refresh_tick.py",
     "sheet_vitrina_v1_closure_retry.py",
+    "sheet_vitrina_v1_temporal_closure_retry_live.py",
     "sheet_vitrina_v1_feedbacks_auto_complaints_tick.py",
     "wb_spp_tester_schedule_tick.py",
     "wb_finance_weekly.py",
@@ -180,7 +182,7 @@ class SystemdClient:
             [
                 "show",
                 unit,
-                "--property=LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,LastTriggerUSec,NextElapseUSecRealtime",
+                "--property=LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,ExecMainStartTimestamp,LastTriggerUSec,NextElapseUSecRealtime",
                 "--no-pager",
             ]
         )
@@ -1637,6 +1639,219 @@ def maintenance_control_signature(
     }
 
 
+def _parse_systemd_utc_timestamp(raw: str) -> datetime:
+    value = str(raw or "").strip()
+    try:
+        parsed = datetime.strptime(value, "%a %Y-%m-%d %H:%M:%S UTC")
+    except ValueError as exc:
+        raise RuntimeError(
+            f"cannot prove pre-hold service generation timestamp: {value!r}"
+        ) from exc
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def _pre_hold_service_continuity(
+    runtime_dir: Path,
+    *,
+    maintenance_state: Mapping[str, Any],
+    current_status: Mapping[str, Any],
+) -> dict[str, Any]:
+    phase = str(maintenance_state.get("phase") or "")
+    if phase not in {"holding", "prepared"}:
+        raise RuntimeError(
+            "pre-hold service-continuity restore requires holding/prepared state"
+        )
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+    ):
+        raise RuntimeError(
+            "pre-hold service-continuity restore requires an unconfirmed "
+            "acquiring write barrier"
+        )
+    hold_started_at = datetime.fromisoformat(
+        str(maintenance_state.get("hold_started_at") or "").replace(
+            "Z",
+            "+00:00",
+        )
+    )
+    if hold_started_at.tzinfo is None:
+        raise RuntimeError("maintenance hold timestamp is not timezone-aware")
+    baseline_services = dict(
+        (maintenance_state.get("baseline") or {}).get("services") or {}
+    )
+    continuing: list[dict[str, Any]] = []
+    stable_properties = (
+        "LoadState",
+        "UnitFileState",
+        "ActiveState",
+        "SubState",
+        "Result",
+        "ExecMainCode",
+        "ExecMainStatus",
+    )
+    for unit, current_raw in dict(
+        current_status.get("services") or {}
+    ).items():
+        current = dict(current_raw or {})
+        if str(current.get("is_active") or "") in QUIESCENT_SERVICE_STATES:
+            continue
+        baseline = dict(baseline_services.get(unit) or {})
+        if not baseline:
+            raise RuntimeError(
+                f"active service {unit} has no exact pre-hold baseline"
+            )
+        baseline_properties = dict(baseline.get("properties") or {})
+        current_properties = dict(current.get("properties") or {})
+        drift = [
+            key
+            for key in stable_properties
+            if str(current_properties.get(key) or "")
+            != str(baseline_properties.get(key) or "")
+        ]
+        if (
+            str(current.get("is_active") or "")
+            != str(baseline.get("is_active") or "")
+            or str(current.get("is_enabled") or "")
+            != str(baseline.get("is_enabled") or "")
+            or drift
+        ):
+            raise RuntimeError(
+                f"active service {unit} drifted from its exact pre-hold state"
+            )
+        main_pid = int(current_properties.get("MainPID") or 0)
+        started_at_raw = str(
+            current_properties.get("ExecMainStartTimestamp") or ""
+        )
+        baseline_main_pid = int(
+            baseline_properties.get("MainPID") or 0
+        )
+        baseline_started_at = str(
+            baseline_properties.get("ExecMainStartTimestamp") or ""
+        )
+        if baseline_main_pid and baseline_main_pid != main_pid:
+            raise RuntimeError(
+                f"active service {unit} PID changed after the hold began"
+            )
+        if baseline_started_at and baseline_started_at != started_at_raw:
+            raise RuntimeError(
+                f"active service {unit} start timestamp changed after the hold began"
+            )
+        started_at = _parse_systemd_utc_timestamp(started_at_raw)
+        if main_pid <= 0 or started_at > hold_started_at:
+            raise RuntimeError(
+                f"active service {unit} is not a proven pre-hold generation"
+            )
+        continuing.append(
+            {
+                "unit": unit,
+                "main_pid": main_pid,
+                "started_at": started_at_raw,
+                "baseline_active_state": str(
+                    baseline.get("is_active") or ""
+                ),
+            }
+        )
+    if not continuing:
+        raise RuntimeError(
+            "maintenance is not quiet and no continuing pre-hold service "
+            "generation explains it"
+        )
+    timers_quiet = all(
+        str(state.get("is_enabled") or "") == "disabled"
+        and str(state.get("is_active") or "") == "inactive"
+        for state in dict(current_status.get("timers") or {}).values()
+    )
+    runtime = dict(current_status.get("runtime_schedules") or {})
+    runtime_quiet = (
+        not bool((runtime.get("web_vitrina") or {}).get("active"))
+        and not list(
+            (runtime.get("feedback_complaints") or {}).get(
+                "active_runs"
+            )
+            or []
+        )
+        and (runtime.get("spp") or {}).get("active_job") is None
+    )
+    allowed_pids = {int(row["main_pid"]) for row in continuing}
+    unexpected_processes = [
+        dict(row)
+        for row in current_status.get("writer_processes") or []
+        if int(row.get("pid") or 0) not in allowed_pids
+    ]
+    if not timers_quiet or not runtime_quiet or unexpected_processes:
+        raise RuntimeError(
+            "pre-hold service continuity does not explain every non-quiet "
+            "business-data boundary"
+        )
+    payload = {
+        "barrier_window_id": str(barrier.get("window_id") or ""),
+        "barrier_plan_fingerprint": str(
+            barrier.get("plan_fingerprint") or ""
+        ),
+        "hold_started_at": str(
+            maintenance_state.get("hold_started_at") or ""
+        ),
+        "services": continuing,
+    }
+    return {
+        **payload,
+        "fingerprint": _stable_fingerprint(payload),
+    }
+
+
+def _verify_pre_hold_service_continuity(
+    systemd: SystemdClient,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    readback: list[dict[str, Any]] = []
+    for expected_raw in evidence.get("services") or []:
+        expected = dict(expected_raw)
+        unit = str(expected.get("unit") or "")
+        current = systemd.unit_state(unit)
+        properties = dict(current.get("properties") or {})
+        main_pid = int(properties.get("MainPID") or 0)
+        started_at = str(
+            properties.get("ExecMainStartTimestamp") or ""
+        )
+        if (
+            str(current.get("is_active") or "")
+            in QUIESCENT_SERVICE_STATES
+        ):
+            if (
+                str(properties.get("Result") or "") != "success"
+                or str(properties.get("ExecMainStatus") or "0") != "0"
+            ):
+                raise RuntimeError(
+                    f"pre-hold service {unit} ended unsuccessfully during restore"
+                )
+            outcome = "completed"
+        else:
+            if (
+                main_pid != int(expected.get("main_pid") or 0)
+                or started_at != str(expected.get("started_at") or "")
+            ):
+                raise RuntimeError(
+                    f"pre-hold service generation changed during restore: {unit}"
+                )
+            outcome = "continued"
+        readback.append(
+            {
+                "unit": unit,
+                "outcome": outcome,
+                "main_pid": main_pid,
+                "started_at": started_at,
+            }
+        )
+    payload = {"services": readback}
+    return {
+        **payload,
+        "fingerprint": _stable_fingerprint(payload),
+    }
+
+
 def maintenance_hold(
     runtime_dir: Path,
     *,
@@ -1727,6 +1942,7 @@ def maintenance_restore(
     expected_revision: int | None = None,
     warehouse_restore: Any | None = None,
     autoanswers_reconcile: Any | None = None,
+    allow_pre_hold_service_continuity: bool = False,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
     maintenance_state = _load_json_object(state_path) or {}
@@ -1751,6 +1967,7 @@ def maintenance_restore(
         *,
         policy_revision: int,
         idempotent: bool,
+        service_continuity_readback: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         control = maintenance_control_signature(
             final_status,
@@ -1771,6 +1988,9 @@ def maintenance_restore(
                 "restore_readback": dict(final_status),
                 "restore_control_signature": control,
                 "exact_prior_state_restored": True,
+                "pre_hold_service_continuity_readback": dict(
+                    service_continuity_readback or {}
+                ),
             }
         )
         _save_json_0600(state_path, updated_state)
@@ -1782,6 +2002,9 @@ def maintenance_restore(
                 "policy_revision": policy_revision,
                 "exact_prior_state_restored": True,
                 "control_signature": control["fingerprint"],
+                "pre_hold_service_continuity_readback": dict(
+                    service_continuity_readback or {}
+                ),
                 "status": dict(final_status),
             },
         )
@@ -1791,6 +2014,9 @@ def maintenance_restore(
             "idempotent": idempotent,
             "exact_prior_state_restored": True,
             "control_signature": control["fingerprint"],
+            "pre_hold_service_continuity_readback": dict(
+                service_continuity_readback or {}
+            ),
             "auto_updates": owner_policy_readback(
                 runtime_dir,
                 status=final_status,
@@ -1867,7 +2093,23 @@ def maintenance_restore(
         )
     if before["cron_entries"]:
         raise RuntimeError("cron drift blocks auto-update resume")
-    if before["writer_processes"]:
+    service_continuity: dict[str, Any] | None = None
+    if not before["quiet"] and allow_pre_hold_service_continuity:
+        service_continuity = _pre_hold_service_continuity(
+            runtime_dir,
+            maintenance_state=maintenance_state,
+            current_status=before,
+        )
+    allowed_continuing_pids = {
+        int(row.get("main_pid") or 0)
+        for row in (service_continuity or {}).get("services", [])
+    }
+    unexpected_writer_processes = [
+        dict(row)
+        for row in before["writer_processes"]
+        if int(row.get("pid") or 0) not in allowed_continuing_pids
+    ]
+    if unexpected_writer_processes:
         raise RuntimeError("writer processes are still active")
     if any(
         bool(value.get("held"))
@@ -1875,13 +2117,19 @@ def maintenance_restore(
         if key != "seller_portal"
     ) or bool((before["writer_locks"].get("seller_portal") or {}).get("busy")):
         raise RuntimeError("maintenance/shared lock is still held")
-    if not before["quiet"]:
+    if not before["quiet"] and service_continuity is None:
         raise RuntimeError("business-data maintenance is not quiet before resume")
     if not prior_master_desired:
+        continuity_readback = (
+            _verify_pre_hold_service_continuity(systemd, service_continuity)
+            if service_continuity is not None
+            else None
+        )
         return finish_exact_restore(
             before,
             policy_revision=revision,
             idempotent=True,
+            service_continuity_readback=continuity_readback,
         )
     try:
         if restore_legacy_schedule_hold:
@@ -2031,10 +2279,16 @@ def maintenance_restore(
         proc_root=proc_root,
     )
     try:
+        continuity_readback = (
+            _verify_pre_hold_service_continuity(systemd, service_continuity)
+            if service_continuity is not None
+            else None
+        )
         return finish_exact_restore(
             final,
             policy_revision=int(policy["revision"]),
             idempotent=False,
+            service_continuity_readback=continuity_readback,
         )
     except Exception:
         _set_master_policy_paused(
@@ -2175,6 +2429,7 @@ def main(argv: list[str] | None = None) -> int:
             "barrier-confirm",
             "barrier-restoring",
             "barrier-release",
+            "barrier-abort",
         ),
     )
     parser.add_argument("--runtime-dir", required=True)
@@ -2195,6 +2450,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--plan-fingerprint", default="")
     parser.add_argument("--approval-reference", default="")
+    parser.add_argument(
+        "--allow-pre-hold-service-continuity",
+        action="store_true",
+        help=(
+            "Abort an unconfirmed acquiring window while a proven service "
+            "generation that predates the hold continues unchanged."
+        ),
+    )
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir).resolve()
     if args.action == "barrier-status":
@@ -2232,7 +2495,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
-    if args.action == "barrier-release":
+    if args.action in {"barrier-release", "barrier-abort"}:
         maintenance_state = _load_json_object(runtime_dir / STATE_FILENAME) or {}
         restore_readback = dict(maintenance_state.get("restore_readback") or {})
         restore_readback.update(
@@ -2250,14 +2513,24 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             }
         )
-        result = release_barrier(
-            runtime_dir,
-            window_id=args.window_id,
-            plan_fingerprint=args.plan_fingerprint,
-            actor=args.actor,
-            reason=args.reason,
-            restore_readback=restore_readback,
-        )
+        if args.action == "barrier-abort":
+            result = abort_barrier_acquire(
+                runtime_dir,
+                window_id=args.window_id,
+                plan_fingerprint=args.plan_fingerprint,
+                actor=args.actor,
+                reason=args.reason,
+                restore_readback=restore_readback,
+            )
+        else:
+            result = release_barrier(
+                runtime_dir,
+                window_id=args.window_id,
+                plan_fingerprint=args.plan_fingerprint,
+                actor=args.actor,
+                reason=args.reason,
+                restore_readback=restore_readback,
+            )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
 
@@ -2299,6 +2572,9 @@ def main(argv: list[str] | None = None) -> int:
             actor=args.actor,
             reason=args.reason or "bounded recovery completed",
             expected_revision=args.expected_revision,
+            allow_pre_hold_service_continuity=bool(
+                args.allow_pre_hold_service_continuity
+            ),
         )
     else:
         if not args.process_key or not args.desired or args.expected_revision is None:
