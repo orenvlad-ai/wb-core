@@ -124,6 +124,22 @@ Every action is exact-fingerprint/deployed-SHA gated, audited, fsynced,
 restart-safe and non-target-digest checked. Custom-manifest, foreign,
 incomplete and corrupt families remain untouched.
 
+Long sanitation work uses
+`apps/storage_recovery_sanitation_job.py` and the fixed
+`wb-core-storage-recovery-sanitation@.service` template. A caller-known 64-hex
+job id is atomically bound to one exact plan/apply request before the detached
+unit starts. Durable mode-`0600` request/status/result files allow bounded
+read-only polling after SSH loss. The global worker lock rejects overlap; an
+exact retry can only resume the same request and the underlying sanitation
+audit. No arbitrary remote command or transient unit is accepted.
+
+The orphan scanner recognizes a post-policy archive only when the standard
+retained manifest is paired with an exact terminal sanitation audit and its
+archive size/SHA, source SHA and decompressed restore identity agree. Such
+files are shown as `sanitation_verified`. A standard-looking archive without
+that audit remains unclassified, so the recovery policy does not silently
+adopt foreign evidence.
+
 ## Operator and production acceptance
 
 The warehouse update tab loads the protected recovery API and visibly renders

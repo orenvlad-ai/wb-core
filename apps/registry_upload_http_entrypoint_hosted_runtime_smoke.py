@@ -1085,6 +1085,36 @@ def main() -> None:
             "supplier-26gn390-recovery",
         ]
     )
+    sanitation_submit_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "--target-file",
+            str(hosted_runtime.DEFAULT_TARGET_FILE),
+            "storage-recovery-sanitation-submit",
+            "--deployed-sha",
+            "a" * 40,
+            "--job-id",
+            "b" * 64,
+            "--operation",
+            "apply",
+            "--root",
+            "backup",
+            "--family",
+            "supplier-26gn527-vtb-recovery",
+            "--fingerprint",
+            "sha256:" + "c" * 64,
+        ]
+    )
+    sanitation_status_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "--target-file",
+            str(hosted_runtime.DEFAULT_TARGET_FILE),
+            "storage-recovery-sanitation-status",
+            "--deployed-sha",
+            "a" * 40,
+            "--job-id",
+            "b" * 64,
+        ]
+    )
     promo_gc_apply_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "promo-archive-gc-apply",
@@ -1099,11 +1129,67 @@ def main() -> None:
         is not hosted_runtime.run_warehouse_recovery_retention_command
         or sanitation_plan_args.handler
         is not hosted_runtime.run_storage_recovery_sanitation_command
+        or sanitation_submit_args.handler
+        is not hosted_runtime.run_storage_recovery_sanitation_job_command
+        or sanitation_submit_args.sanitation_job_action != "submit"
+        or sanitation_status_args.handler
+        is not hosted_runtime.run_storage_recovery_sanitation_job_command
+        or sanitation_status_args.sanitation_job_action != "status"
         or promo_gc_apply_args.handler
         is not hosted_runtime.run_promo_archive_gc_command
     ):
         raise AssertionError(
             "hosted runner must expose exact retention, sanitation and Promo GC"
+        )
+    completed_sanitation_job = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "contract_name": "storage_recovery_sanitation_job_v1",
+                "job_id": "b" * 64,
+                "status": "queued",
+                "terminal": False,
+            }
+        ),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed_sanitation_job,
+    ) as run_mock:
+        hosted_runtime.run_storage_recovery_sanitation_job_command(
+            sanitation_submit_args
+        )
+    detached_command = " ".join(run_mock.call_args.args[0])
+    if (
+        run_mock.call_args.kwargs.get("timeout") != 60.0
+        or "apps/storage_recovery_sanitation_job.py" not in detached_command
+        or " submit " not in detached_command
+        or "--job-id " + "b" * 64 not in detached_command
+        or "--fingerprint sha256:" + "c" * 64 not in detached_command
+    ):
+        raise AssertionError(
+            "hosted detached sanitation lost exact job/request transport"
+        )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed_sanitation_job,
+    ) as run_mock:
+        hosted_runtime.run_storage_recovery_sanitation_job_command(
+            sanitation_status_args
+        )
+    status_command = " ".join(run_mock.call_args.args[0])
+    if (
+        run_mock.call_args.kwargs.get("timeout") != 60.0
+        or " status " not in status_command
+        or "--fingerprint" in status_command
+        or "--family" in status_command
+    ):
+        raise AssertionError(
+            "hosted sanitation status is not bounded/read-only by exact job id"
         )
     finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]

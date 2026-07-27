@@ -48,6 +48,7 @@ jobs:
           python3 apps/warehouse_recovery_retention_smoke.py
           python3 apps/storage_recovery_writer_inventory_static_smoke.py
           python3 apps/storage_recovery_sanitation_smoke.py
+          python3 apps/storage_recovery_sanitation_job_smoke.py
           python3 apps/promo_campaign_archive_gc_smoke.py
           python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py

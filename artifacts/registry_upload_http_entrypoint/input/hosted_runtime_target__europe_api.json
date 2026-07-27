@@ -107,6 +107,11 @@
       "restart": false
     },
     {
+      "name": "wb-core-storage-recovery-sanitation@.service",
+      "enable": false,
+      "restart": false
+    },
+    {
       "name": "wb-core-data-mcp.service",
       "enable": true,
       "restart": true

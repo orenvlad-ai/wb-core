@@ -44,6 +44,8 @@ T2_RETENTION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 T2_RETENTION_MAX_AGE_HOURS = 24
 T2_DEGRADED_FREE_BYTES = 8 * 1024 * 1024 * 1024
 T2_HARD_STOP_FREE_BYTES = 4 * 1024 * 1024 * 1024
+SANITATION_AUDIT_DIRNAME = "storage-recovery-sanitation"
+SANITATION_CONTRACT_NAME = "storage_recovery_sanitation_v1"
 
 
 class RecoveryPolicyError(RuntimeError):
@@ -2230,11 +2232,14 @@ class WarehouseRecoveryRegistry:
         if not _path_is_below(self.legacy_recovery_root, backup_root):
             roots.append(self.legacy_recovery_root)
         legacy_managed: set[str] = set()
+        valid_lossless_archives: set[str] = set()
         if backup_root.is_dir():
             for manifest_path in backup_root.rglob(f"*{MANIFEST_SUFFIX}"):
                 try:
                     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, Mapping):
                     continue
                 archive_path = Path(str(payload.get("archive_path") or ""))
                 if (
@@ -2248,9 +2253,17 @@ class WarehouseRecoveryRegistry:
                     and int(payload.get("archive_size_bytes") or -1)
                     == archive_path.stat().st_size
                 ):
-                    legacy_managed.update(
-                        {str(manifest_path.resolve()), str(archive_path.resolve())}
-                    )
+                    pair = {
+                        str(manifest_path.resolve()),
+                        str(archive_path.resolve()),
+                    }
+                    legacy_managed.update(pair)
+                    valid_lossless_archives.update(pair)
+        sanitation_verified = _sanitation_verified_archive_paths(
+            runtime_dir=self.runtime_dir,
+            backup_root=backup_root,
+            valid_lossless_archives=valid_lossless_archives,
+        )
         for root in roots:
             if not root.is_dir():
                 continue
@@ -2277,8 +2290,10 @@ class WarehouseRecoveryRegistry:
                         or is_pre_policy_legacy
                     )
                 )
+                is_sanitation_verified = resolved_path in sanitation_verified
                 is_managed = (
                     is_registered
+                    or is_sanitation_verified
                     or is_legacy_manifest
                     or is_pre_policy_legacy
                 )
@@ -2290,6 +2305,8 @@ class WarehouseRecoveryRegistry:
                     "classification": (
                         "registered"
                         if is_registered
+                        else "sanitation_verified"
+                        if is_sanitation_verified
                         else "legacy_manifest"
                         if is_legacy_manifest
                         else "pre_policy_legacy"
@@ -2406,6 +2423,8 @@ class WarehouseRecoveryRegistry:
             "policy_activation_at": policy_activation_at,
             "pre_policy_legacy_paths": sorted(set(pre_policy_legacy)),
             "pre_policy_legacy_count": len(set(pre_policy_legacy)),
+            "sanitation_verified_paths": sorted(sanitation_verified),
+            "sanitation_verified_count": len(sanitation_verified),
             "unclassified_paths": sorted(set(unclassified)),
             "foreign_non_target_paths": sorted(set(foreign_non_target)),
             "registry_without_bytes": registry_without_bytes,
@@ -2568,6 +2587,12 @@ class WarehouseRecoveryRegistry:
                 ],
                 "pre_policy_legacy_paths": orphan[
                     "pre_policy_legacy_paths"
+                ][:20],
+                "sanitation_verified_count": orphan[
+                    "sanitation_verified_count"
+                ],
+                "sanitation_verified_paths": orphan[
+                    "sanitation_verified_paths"
                 ][:20],
                 "unclassified_paths": orphan["unclassified_paths"][:20],
                 "registry_without_bytes": orphan["registry_without_bytes"][:20],
@@ -3677,6 +3702,93 @@ def _path_is_below(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _sanitation_verified_archive_paths(
+    *,
+    runtime_dir: Path,
+    backup_root: Path,
+    valid_lossless_archives: set[str],
+) -> set[str]:
+    """Trust only exact archive pairs proven by a terminal sanitation audit."""
+
+    audit_dir = (Path(runtime_dir).resolve() / SANITATION_AUDIT_DIRNAME)
+    if audit_dir.is_symlink() or not audit_dir.is_dir():
+        return set()
+    managed: set[str] = set()
+    for audit_path in sorted(audit_dir.glob("*.json")):
+        if audit_path.is_symlink() or not audit_path.is_file():
+            continue
+        try:
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+            fingerprint = str(payload.get("fingerprint") or "")
+            if (
+                payload.get("contract_name") != SANITATION_CONTRACT_NAME
+                or payload.get("status") != "applied"
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint)
+                or audit_path.name != fingerprint.removeprefix("sha256:") + ".json"
+            ):
+                continue
+            plan = payload.get("plan")
+            result = payload.get("result")
+            if not isinstance(plan, Mapping) or not isinstance(result, Mapping):
+                continue
+            if (
+                plan.get("action") != "archive_raw_sqlite"
+                or plan.get("root") != "backup"
+                or result.get("status") != "archived"
+            ):
+                continue
+            archive = result.get("archive")
+            if not isinstance(archive, Mapping):
+                continue
+            archive_path = Path(str(archive.get("archive_path") or "")).resolve()
+            manifest_path = Path(
+                str(archive.get("manifest_path") or "")
+            ).resolve()
+            family_path = Path(str(plan.get("family_path") or "")).resolve()
+            if (
+                family_path.parent != backup_root
+                or family_path.name != str(plan.get("family") or "")
+                or archive_path.parent != family_path
+                or manifest_path.parent != family_path
+                or manifest_path
+                != archive_path.with_name(archive_path.name + MANIFEST_SUFFIX)
+                or str(archive_path) not in valid_lossless_archives
+                or str(manifest_path) not in valid_lossless_archives
+                or archive_path.is_symlink()
+                or manifest_path.is_symlink()
+                or not archive_path.is_file()
+                or not manifest_path.is_file()
+            ):
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                manifest.get("contract_name")
+                != "sqlite_backup_lossless_archive_v1"
+                or manifest.get("lifecycle_state") != "retained"
+                or manifest.get("source_removed") is not True
+                or str(manifest.get("archive_path") or "")
+                != str(archive_path)
+                or int(manifest.get("archive_size_bytes") or -1)
+                != int(archive.get("archive_size_bytes") or -2)
+                or int(archive.get("archive_size_bytes") or -1)
+                != archive_path.stat().st_size
+                or str(manifest.get("archive_sha256") or "")
+                != str(archive.get("archive_sha256") or "")
+                or str(manifest.get("source_sha256") or "")
+                != str(archive.get("source_sha256") or "")
+                or str(manifest.get("actual_decompressed_sha256") or "")
+                != str(archive.get("decompressed_sha256") or "")
+                or int(manifest.get("actual_decompressed_size_bytes") or -1)
+                != int(archive.get("decompressed_size_bytes") or -2)
+                or archive.get("restore_probe") != "verified"
+            ):
+                continue
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        managed.update({str(archive_path), str(manifest_path)})
+    return managed
 
 
 @contextmanager
