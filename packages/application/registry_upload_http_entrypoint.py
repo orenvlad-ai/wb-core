@@ -112,6 +112,7 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
 from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_PUBLIC_METRIC_KEYS,
     active_refresh_summary,
+    filter_archived_public_metrics,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
@@ -1439,10 +1440,7 @@ class RegistryUploadHttpEntrypoint:
                 include_table_data=include_table_data,
             )
 
-        incident_metric_catalog = [
-            asdict(item)
-            for item in extend_metrics_with_incident_stock_metrics([])
-        ]
+        incident_metric_catalog = _active_incident_metric_catalog()
         source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
         source_status_snapshot_id = _web_vitrina_source_status_snapshot_id(
             self.runtime,
@@ -5941,8 +5939,17 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit = log or _noop_log
         source_group = _source_group_config(source_group_id)
-        source_keys = list(source_group["source_keys"])
+        active_source_keys = _active_web_vitrina_source_keys()
+        source_keys = [
+            source_key
+            for source_key in source_group["source_keys"]
+            if source_key in active_source_keys
+        ]
         group_label = str(source_group["label_ru"])
+        if not source_keys:
+            raise ValueError(
+                f"source group {source_group_id!r} has no active web-vitrina sources"
+            )
         stage = "start"
         started_at = self.activated_at_factory()
         emit(
@@ -9259,6 +9266,7 @@ def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterabl
         if (
             metric_key
             and metric_key in allowed_metric_keys
+            and metric_key not in ARCHIVED_PUBLIC_METRIC_KEYS
             and bool(getattr(metric, "enabled", True))
             and bool(getattr(metric, "show_in_data", True))
         ):
@@ -11198,6 +11206,17 @@ def _active_web_vitrina_source_keys() -> frozenset[str]:
         for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items()
         if any(metric_key not in ARCHIVED_PUBLIC_METRIC_KEYS for metric_key in metric_keys)
     )
+
+
+def _active_incident_metric_catalog() -> list[dict[str, Any]]:
+    """Build picker-only incident catalog without retired fact duplicates."""
+
+    return [
+        asdict(item)
+        for item in filter_archived_public_metrics(
+            extend_metrics_with_incident_stock_metrics([])
+        )
+    ]
 
 
 def _normalize_available_refresh_dates(

@@ -106,7 +106,7 @@ DERIVED_OUR_WB_SOURCE_METRICS = {
 
 def main() -> None:
     _assert_group_metric_coverage()
-    _assert_other_sources_recomputes_derived_metrics()
+    _assert_other_sources_skips_archived_legacy_metrics()
     _assert_onec_sources_recomputes_derived_metrics()
 
 
@@ -203,7 +203,7 @@ def _groups_for_metric(metric_to_groups: dict[str, list[str]], metric_key: str) 
     return list(metric_to_groups.get(metric_key) or [])
 
 
-def _assert_other_sources_recomputes_derived_metrics() -> None:
+def _assert_other_sources_skips_archived_legacy_metrics() -> None:
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     with TemporaryDirectory(prefix="sheet-vitrina-group-coverage-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
@@ -240,60 +240,62 @@ def _assert_other_sources_recomputes_derived_metrics() -> None:
         job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
         if job_snapshot["status"] != "success":
             raise AssertionError(f"other_sources group refresh must succeed, got {job_snapshot}")
-        for metric_key in DERIVED_OTHER_SOURCE_METRICS:
-            if metric_key not in captured["metric_keys"]:
-                raise AssertionError(f"other_sources must include derived metric {metric_key}, got {captured}")
+        if captured["source_keys"] != ["sku_action_events"]:
+            raise AssertionError(
+                f"other_sources must exclude audit-only cost_price, got {captured}"
+            )
+        if set(captured["metric_keys"]) & ARCHIVED_PUBLIC_METRIC_KEYS:
+            raise AssertionError(
+                f"other_sources must exclude archived metrics, got {captured}"
+            )
 
         merged = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
         data_rows = {row[1]: row for row in _sheet(merged, "DATA_VITRINA").rows}
-        expected_proxy_profit = 45.6
-        expected_margin = 0.0456
-        assert_close(data_rows[f"SKU:{nm_id}|cost_price_rub"][3], 200.0, "cost price selected date")
-        assert_close(data_rows[f"SKU:{nm_id}|cost_price_rub"][2], 100.0, "cost price unselected date")
-        assert_close(data_rows[f"SKU:{nm_id}|proxy_profit_rub"][3], expected_proxy_profit, "sku proxy profit")
-        assert_close(data_rows[f"SKU:{nm_id}|proxy_profit_rub"][2], 0.0, "sku proxy profit unselected date")
-        assert_close(data_rows[f"SKU:{nm_id}|proxy_margin_pct"][3], expected_margin, "sku proxy margin")
-        assert_close(data_rows["TOTAL|total_proxy_profit_rub"][3], expected_proxy_profit, "total proxy profit")
-        assert_close(data_rows["TOTAL|proxy_margin_pct_total"][3], expected_margin, "total proxy margin")
+        expected_values = {
+            f"SKU:{nm_id}|cost_price_rub": [100, 100],
+            f"SKU:{nm_id}|proxy_profit_rub": [0, 0],
+            f"SKU:{nm_id}|proxy_margin_pct": [0, 0],
+            "TOTAL|total_proxy_profit_rub": [0, 0],
+            "TOTAL|proxy_margin_pct_total": [0, 0],
+        }
+        for row_id, expected in expected_values.items():
+            if data_rows[row_id][2:4] != expected:
+                raise AssertionError(
+                    f"archived row must remain immutable audit evidence for {row_id}: "
+                    f"{data_rows[row_id]}"
+                )
 
         metadata = dict(getattr(merged, "metadata", {}) or {})
         row_updated_at = metadata.get("row_last_updated_at_by_row_id") or {}
-        for row_id in (
-            f"SKU:{nm_id}|cost_price_rub",
-            f"SKU:{nm_id}|proxy_profit_rub",
-            f"SKU:{nm_id}|proxy_margin_pct",
-            "TOTAL|total_proxy_profit_rub",
-            "TOTAL|proxy_margin_pct_total",
-        ):
-            if row_updated_at.get(row_id) != NEW_REFRESHED_AT:
-                raise AssertionError(f"processed other_sources row timestamp must advance for {row_id}: {row_updated_at}")
+        for row_id in expected_values:
+            if row_updated_at.get(row_id) == NEW_REFRESHED_AT:
+                raise AssertionError(
+                    f"archived legacy row timestamp must not advance for {row_id}: "
+                    f"{row_updated_at}"
+                )
 
         result = job_snapshot["result"]
         updated_cells = result["merge_summary"]["updated_cells"]
-        highlighted = {(cell["row_id"], cell["as_of_date"], cell["status"]) for cell in updated_cells}
-        for row_id in (
-            f"SKU:{nm_id}|cost_price_rub",
-            f"SKU:{nm_id}|proxy_profit_rub",
-            f"SKU:{nm_id}|proxy_margin_pct",
-            "TOTAL|total_proxy_profit_rub",
-            "TOTAL|proxy_margin_pct_total",
-        ):
-            if (row_id, "2026-04-21", "updated") not in highlighted:
-                raise AssertionError(f"updated_cells must include green highlight for {row_id}, got {updated_cells}")
+        leaked_updates = {
+            str(cell["row_id"])
+            for cell in updated_cells
+            if str(cell["row_id"]) in expected_values
+        }
+        if leaked_updates:
+            raise AssertionError(
+                f"archived legacy rows must not be highlighted as refreshed: {leaked_updates}"
+            )
 
         log_text, _ = entrypoint.handle_sheet_operator_job_text_request(str(job["job_id"]))
         for expected in (
             "source_group_id=other_sources",
             "as_of_date=2026-04-21",
-            "updated_cells=5",
-            "latest_confirmed_cells=0",
         ):
             if expected not in log_text:
                 raise AssertionError(f"other_sources log missing {expected!r}: {log_text}")
         print(
-            "web_vitrina_other_sources_derived_refresh: ok ->",
-            result["merge_summary"]["updated_cell_count"],
-            sorted(DERIVED_OTHER_SOURCE_METRICS),
+            "web_vitrina_other_sources_legacy_retirement: ok ->",
+            captured,
         )
 
 

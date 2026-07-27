@@ -28,7 +28,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "Один temporal resolver обслуживает Vitrina, Finance, Partner и Proxy 3; Partner marketing single-counting меняет только expense classification и не меняет temporal cost policy."
+update_note: "Один temporal resolver обслуживает Vitrina, Finance, Partner и Proxy 3; legacy group COST_PRICE / Proxy 1 остаются audit-only и исключены из public catalog/read/UI."
 ---
 
 # 1. Canonical WB WAC
@@ -82,6 +82,12 @@ Advertising is not multiplied by buyout rate. Missing required operand remains N
 - SKU margins are never averaged.
 
 Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and their existing TOTAL keys. `our_wb_cost_confirmed_share_pct`, Proxy 2 and old inventory-return metrics are archived at both catalog/read-contract boundaries; persisted legacy rows may remain only as technical evidence and are removed by the guarded economics cutover.
+
+## 3.1 Legacy group COST_PRICE / Proxy 1 boundary
+
+`cost_price_rub` is not a warehouse WAC. Its source is the separately uploaded group-level `COST_PRICE` dataset resolved by `group + max(effective_from <= slot_date)`; `avg_cost_price_rub` aggregates those group-resolved SKU values. Proxy 1 directly consumes that value through the fixed historical coefficients `0.5096/0.91`, then feeds `proxy_margin_pct` and their TOTAL rows.
+
+The complete dependency closure — `cost_price_rub`, `avg_cost_price_rub`, `profit_proxy_rub`, `proxy_profit_rub`, `total_proxy_profit_rub`, `proxy_margin_pct`, `proxy_margin_pct_total` — is audit-only. Central catalog/read filtering excludes it from active Web Vitrina rows, filters, settings/picker, activity/source status and group refresh. Accepted COST_PRICE upload rows/current-state and previously persisted ready rows are retained for reproducibility; no production business-data cleanup is implied. Finance already uses the shared canonical WB-cost resolver and cannot fall back to this legacy family.
 
 # 4. Quality and consumers
 

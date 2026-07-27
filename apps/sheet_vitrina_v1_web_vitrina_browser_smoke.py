@@ -411,13 +411,17 @@ def run_browser_checks(
                     if collapsed_toggle.count() == 0:
                         break
                     collapsed_toggle.first.click()
+                if page.locator('[data-metric-key="wb_stock_fact_qty"]').count():
+                    raise AssertionError(
+                        "retired WB fact duplicate must not render in the public table"
+                    )
                 provisional_cell = page.locator(
-                    'td.cell-incident-provisional[data-metric-key="wb_stock_fact_qty"]'
+                    'td.cell-incident-provisional[data-metric-key="wb_stock_incident_qty"]'
                     '[data-cell-date="2026-04-20"]'
                 )
                 if provisional_cell.count() != 1:
                     raise AssertionError(
-                        "provisional incident fact fixture cell must render once"
+                        "provisional incident fixture cell must render once"
                     )
                 quality_phrase = (
                     "Рассчитано по полученному снимку, полнота WB не подтверждена"
@@ -1513,12 +1517,20 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if scope_labels[:2] != ["Итого", "SKU"]:
         raise AssertionError(f"metrics presentation must render two scope tables Итого/SKU, got {panel_state}")
     incident_metric_keys = {
-        "wb_stock_fact_qty",
         "wb_stock_incident_qty",
         "wb_stock_effective_qty",
-        "total_wb_stock_fact_qty",
         "total_wb_stock_incident_qty",
         "total_wb_stock_effective_qty",
+    }
+    retired_metric_keys = {
+        "wb_stock_fact_qty",
+        "total_wb_stock_fact_qty",
+        "cost_price_rub",
+        "avg_cost_price_rub",
+        "proxy_profit_rub",
+        "total_proxy_profit_rub",
+        "proxy_margin_pct",
+        "proxy_margin_pct_total",
     }
     metric_config_rows = {
         str(row["metricKey"]): row
@@ -1530,23 +1542,23 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     )
     if missing_incident_metric_keys:
         raise AssertionError(
-            "stable incident metrics must remain in visibility settings without "
+            "incident/effective metrics must remain in visibility settings without "
             f"period rows, missing={missing_incident_metric_keys}"
         )
-    fact_metric_keys = {
-        "wb_stock_fact_qty",
-        "total_wb_stock_fact_qty",
-    }
-    incident_effective_metric_keys = incident_metric_keys - fact_metric_keys
+    leaked_retired_metric_keys = sorted(
+        retired_metric_keys & set(metric_config_rows)
+    )
+    if leaked_retired_metric_keys:
+        raise AssertionError(
+            "retired stock/cost metrics leaked into visibility settings, "
+            f"leaked={leaked_retired_metric_keys}"
+        )
     if any(
-        str(metric_config_rows[metric_key]["status"]) != "collapsed"
-        for metric_key in fact_metric_keys
-    ) or any(
         str(metric_config_rows[metric_key]["status"]) != "shown"
-        for metric_key in incident_effective_metric_keys
+        for metric_key in incident_metric_keys
     ):
         raise AssertionError(
-            "incident/effective metrics must default shown while the factual compatibility family stays collapsed, "
+            "active incident/effective metrics must default shown, "
             f"rows={metric_config_rows}"
         )
     if int(panel_state["gridColumns"]) != 2:
