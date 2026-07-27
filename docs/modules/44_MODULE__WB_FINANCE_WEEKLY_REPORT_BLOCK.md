@@ -102,7 +102,17 @@ Every expense money cell shows amount plus only `%`, arrow and color. An increas
 
 Finance preflight and Partner consumers share `resolve_ads_snapshot_payload`. It accepts either a valid nested `result` or the persisted root envelope `{kind,snapshot_date,items}`. Invalid/missing data remains missing; a confirmed `kind=empty` is the only empty-source zero. Finance apply never writes ads rows and never materializes missing ads pairs as zero.
 
-The bounded read-only `partner-finance-diagnostic` hosted action reads immutable raw rows and indexed projections through SQLite `mode=ro`, `PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level Finance marketing, the revenue allocation coefficient, the former catch-all residual, current explicitly routed Partner categories, classifier buckets, signed versus legacy-absolute amounts, duplicate identities and negative-deduction uplift. Its exact semantic-category totals cover every retained operation group even when detailed output is truncated. It is evidence only: it cannot rebuild Finance or mutate Partner/ads state.
+The bounded read-only `partner-finance-diagnostic` hosted action pins the
+selected storage manifest and reads immutable raw rows plus indexed operational
+projections from their exact files through SQLite `mode=ro`,
+`PRAGMA query_only=ON` and a rolled-back coherent transaction. For the exact
+server-owned Partner `nmId`/weeks it reconciles ads, direct and account-level
+Finance marketing, the revenue allocation coefficient, the former catch-all
+residual, current explicitly routed Partner categories, classifier buckets,
+signed versus legacy-absolute amounts, duplicate identities and
+negative-deduction uplift. Its exact semantic-category totals cover every
+retained operation group even when detailed output is truncated. It is
+evidence only: it cannot rebuild Finance or mutate Partner/ads state.
 
 ## Production-safe all-history runner
 
@@ -135,18 +145,34 @@ Canonical-cost hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
-The separate storage-split pre-cutover contour exposes:
+The separate storage-split lifecycle exposes:
 
-- `finance-storage-split-dry-run --output <external-0600-json>`;
-- `finance-storage-split-health`;
-- later-gated `finance-storage-split-apply --plan-file ... --fingerprint ...
-  --approval-reference ...`.
+- `finance-storage-snapshot-plan|apply|integrity`;
+- `finance-storage-split-dry-run|apply|health`;
+- `finance-storage-shadow-status|activate|reconcile|verify|deactivate` and
+  `finance-storage-live-tail-apply`;
+- `finance-storage-cutover-plan|apply`;
+- `finance-storage-rollback-plan|prepare|apply`.
 
-The first two are query-only. The apply action requires an exact reviewed
-dry-run, sufficient fresh capacity, an active canonical
-`business-data-maintenance` quiet hold and the warehouse writer lock, and may
-create only an unselected candidate generation. It cannot switch canonical
-readers/writers or retire the monolith. See migration 124.
+Plan, health and status are query-only. Snapshot apply automatically acquires
+the manual HTTP/UI write barrier, captures exact writer/timer intent, drains
+known writers, copies a coherent SQLite image, restores exact prior intent and
+releases the barrier; the full integrity scan then runs on the copy outside the
+live DB. Candidate build, live-tail and soak do not keep a broad hold.
+Cutover and rollback apply require their exact held barrier and perform a fresh
+operational reconciliation before one fsynced manifest switch. Only the
+registry HTTP service is restarted. An ambiguous post-switch failure keeps
+manual and automatic writes fail closed. Original monolith and split
+generations remain retained; retirement is a different exact gate. See
+migration 124.
+
+After split cutover, weekly ingestion commits the immutable raw snapshot,
+batch-row links and outbox event to the raw store before updating operational
+reports/projections. Operational connections registry-attach raw as read-only
+and expose a connection-local current-snapshot view; the operational file
+never recreates `wb_finance_weekly_raw_rows`. Repeated unchanged source
+snapshots are no-ops, changed snapshots retain history without duplicating the
+current view, and every raw attach is generation-identity checked and observed.
 
 Apply requires a newly reviewed exact fingerprint, external plan file, approval
 reference and the retained compatibility backup-directory argument. That
@@ -177,6 +203,15 @@ Production apply is not implied by merge/deploy and remains forbidden until the 
 
 The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store.
 
+After split cutover, Finance and Partner attach the manifest-selected raw
+generation read-only and expose only the connection-local current-row
+compatibility view. A weekly raw/outbox commit is acknowledged only after the
+complete operational report/aggregate/SKU/coverage/reconciliation projection
+for the exact source hash reads back; a raw-first crash stays pending and is
+resolved by the idempotent scheduled replay. The production Partner/Finance
+diagnostic pins the same manifest and opens both selected files `mode=ro` with
+`query_only=ON`.
+
 Targeted checks:
 
 - `python3 apps/wb_finance_weekly_smoke.py`;
@@ -189,6 +224,7 @@ Targeted checks:
 - `python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated`;
 - `python3 apps/warehouse_functional_maintenance_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
+- `python3 apps/partner_finance_production_diagnostic_smoke.py`;
 - `python3 apps/partner_report_browser_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 

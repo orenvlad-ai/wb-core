@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
@@ -51,6 +52,12 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_AUTH_SECTION_REPORTS,
     WEB_AUTH_SECTION_SKU_MANAGEMENT,
     WEB_AUTH_SECTION_VITRINA,
+)
+from packages.application.business_data_write_barrier import (  # noqa: E402
+    acquire_barrier,
+    confirm_barrier_hold,
+    mark_barrier_restoring,
+    release_barrier,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
@@ -272,6 +279,150 @@ def main() -> None:
                     payload = json.loads(response.read().decode("utf-8"))
                     if response.status != 200 or payload.get("revision") != 1:
                         raise AssertionError(f"authenticated user-config POST must persist revision 1: {response.status} {payload}")
+                plan_fingerprint = "sha256:" + ("a" * 64)
+                window_id = "snapshot-smoke-001"
+                acquire_barrier(
+                    runtime_dir,
+                    window_id=window_id,
+                    window_kind="snapshot",
+                    plan_fingerprint=plan_fingerprint,
+                    approval_reference="smoke-approval-001",
+                    actor="smoke",
+                    reason="HTTP write barrier smoke",
+                )
+                barrier_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(barrier_request, timeout=5) as response:
+                    barrier_payload = json.loads(response.read().decode("utf-8"))
+                    if (
+                        response.status != 200
+                        or barrier_payload.get("active") is not True
+                        or barrier_payload.get("window_id") != window_id
+                    ):
+                        raise AssertionError(
+                            f"authenticated barrier status must expose active window: {barrier_payload}"
+                        )
+                with opener.open(settings_request, timeout=5) as response:
+                    maintenance_html = response.read().decode("utf-8")
+                    if (
+                        "wbCoreMaintenanceBarrier" not in maintenance_html
+                        or DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH not in maintenance_html
+                    ):
+                        raise AssertionError(
+                            "authenticated UI must contain automatic maintenance banner/control guard"
+                        )
+                blocked_body = json.dumps(
+                    {
+                        "base_revision": 1,
+                        "config": {
+                            "version": 2,
+                            "scopes": {},
+                            "expanded_anchors": [],
+                            "secret_marker": "must-not-enter-audit",
+                        },
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                blocked_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
+                    data=blocked_body,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "X-Request-ID": "barrier-smoke-request",
+                    },
+                    method="POST",
+                )
+                try:
+                    opener.open(blocked_request, timeout=5)
+                except urllib_error.HTTPError as exc:
+                    blocked_payload = json.loads(exc.read().decode("utf-8"))
+                    if (
+                        exc.code != 423
+                        or blocked_payload.get("code") != "business_data_maintenance"
+                        or blocked_payload.get("attempt_audited") is not True
+                    ):
+                        raise AssertionError(
+                            f"active barrier must return audited 423: {exc.code} {blocked_payload}"
+                        )
+                else:
+                    raise AssertionError("active barrier must reject authenticated POST")
+                audit_text = (
+                    runtime_dir / ".business-data-write-barrier-audit.jsonl"
+                ).read_text(encoding="utf-8")
+                if (
+                    "manual_business_write_blocked" not in audit_text
+                    or "barrier-smoke-request" not in audit_text
+                    or "must-not-enter-audit" in audit_text
+                ):
+                    raise AssertionError(
+                        "blocked attempt audit must persist identity without request body"
+                    )
+                maintenance_state = {
+                    "schema_version": "business_data_maintenance_v1",
+                    "phase": "held",
+                    "held_at": "2026-07-27T00:00:00Z",
+                    "hold_readback": {
+                        "quiet": True,
+                        "auto_updates": {"revision": 2},
+                    },
+                }
+                confirm_barrier_hold(
+                    runtime_dir,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    maintenance_state=maintenance_state,
+                )
+                mark_barrier_restoring(
+                    runtime_dir,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+                release_barrier(
+                    runtime_dir,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    actor="smoke",
+                    reason="HTTP write barrier smoke restore",
+                    restore_readback={
+                        "status": "restored",
+                        "captured_at": "2026-07-27T00:00:01Z",
+                        "exact_prior_state_restored": True,
+                        "control_signature": "sha256:" + ("b" * 64),
+                        "auto_updates": {
+                            "revision": 3,
+                            "master_desired": True,
+                        },
+                    },
+                )
+                resumed_post = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
+                    data=json.dumps(
+                        {
+                            "base_revision": 1,
+                            "config": {
+                                "version": 2,
+                                "scopes": {},
+                                "expanded_anchors": [],
+                            },
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with opener.open(resumed_post, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or payload.get("revision") != 2:
+                        raise AssertionError(
+                            f"released barrier must restore normal POST work: {payload}"
+                        )
                 schedules_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}",
                     headers={"Accept": "application/json"},

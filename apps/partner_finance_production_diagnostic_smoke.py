@@ -167,6 +167,12 @@ def main() -> None:
             or server["weeks"][0]["current_other_withholdings_rub"] != "22.0000"
         ):
             raise AssertionError(f"server-settings selection mismatch: {server}")
+        _assert_split_read_scope(
+            runtime,
+            database=database,
+            expected_source_digest=str(first["source_digest"]),
+            expected_raw_rows=int(first["scanned_finance_raw_row_count"]),
+        )
 
         env_file = runtime / "diagnostic.env"
         env_file.write_text(
@@ -225,6 +231,71 @@ def main() -> None:
         "unknown-name evidence, missing-projection raw preservation, deterministic "
         "fingerprint, SQLite unchanged"
     )
+
+
+def _assert_split_read_scope(
+    runtime: Path,
+    *,
+    database: Path,
+    expected_source_digest: str,
+    expected_raw_rows: int,
+) -> None:
+    operational = runtime / "diagnostic-operational.sqlite3"
+    finance_raw = runtime / "diagnostic-finance-raw.sqlite3"
+    with sqlite3.connect(database) as source, sqlite3.connect(operational) as destination:
+        source.backup(destination)
+        raw_rows = source.execute(
+            """SELECT seller_id,report_id,rrd_id,report_type,week_start,week_end,
+                      nm_id,vendor_code,barcode,doc_type_name,seller_oper_name,
+                      row_hash,raw_json,first_seen_at,updated_at
+                 FROM wb_finance_weekly_raw_rows"""
+        ).fetchall()
+    with sqlite3.connect(finance_raw) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE finance_raw_rows(
+                seller_id TEXT NOT NULL,report_id TEXT NOT NULL,rrd_id TEXT NOT NULL,
+                report_type INTEGER,week_start TEXT NOT NULL,week_end TEXT NOT NULL,
+                nm_id TEXT,vendor_code TEXT,barcode TEXT,doc_type_name TEXT,
+                seller_oper_name TEXT,row_hash TEXT NOT NULL,raw_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,updated_at TEXT NOT NULL
+            );
+            CREATE VIEW finance_raw_current_rows AS
+            SELECT seller_id,report_id,rrd_id,report_type,week_start,week_end,
+                   nm_id,vendor_code,barcode,doc_type_name,seller_oper_name,
+                   row_hash,raw_json,first_seen_at,updated_at
+              FROM finance_raw_rows;
+            """
+        )
+        conn.executemany(
+            """INSERT INTO finance_raw_rows VALUES(
+               ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            raw_rows,
+        )
+        conn.commit()
+    with sqlite3.connect(operational) as conn:
+        conn.execute("DROP TABLE wb_finance_weekly_raw_rows")
+        conn.commit()
+    digests_before = (_sha256(operational), _sha256(finance_raw))
+    split = run_partner_finance_diagnostic(
+        DiagnosticScope(
+            database=operational,
+            raw_database=finance_raw,
+            seller_id=SELLER,
+            nm_id=TARGET_NM,
+            weeks=(WEEK.isoformat(),),
+            max_groups=100,
+        )
+    )
+    if (
+        split["status"] != "ready"
+        or split["source_digest"] != expected_source_digest
+        or split["scanned_finance_raw_row_count"] != expected_raw_rows
+        or split["finance_raw_database_label"] != finance_raw.name
+    ):
+        raise AssertionError(f"split-store diagnostic readback mismatch: {split}")
+    if digests_before != (_sha256(operational), _sha256(finance_raw)):
+        raise AssertionError("split-store diagnostic modified a source database")
 
 
 def _seed_supporting_schema(database: Path) -> None:

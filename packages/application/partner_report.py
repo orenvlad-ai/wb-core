@@ -2886,11 +2886,33 @@ class PartnerReportBlock:
         return cleaned[:80]
 
     def _connect(self) -> sqlite3.Connection:
-        return self.store_registry.connect(
+        manifest = self.store_registry.load()
+        conn = self.store_registry.connect(
             "operational",
             mode="rw",
             operation="partner_report",
+            manifest=manifest,
         )
+        if (
+            manifest.state == "cutover"
+            and manifest.canonical_source == "split"
+        ):
+            self.store_registry.attach_readonly(
+                conn,
+                "finance_raw",
+                schema_name="finance_raw_store",
+                operation="partner_report_finance_raw_read",
+                manifest=manifest,
+            )
+            conn.execute(
+                """CREATE TEMP VIEW wb_finance_weekly_raw_rows AS
+                   SELECT seller_id,report_id,rrd_id,report_type,week_start,
+                          week_end,nm_id,vendor_code,barcode,doc_type_name,
+                          seller_oper_name,row_hash,raw_json,first_seen_at,
+                          updated_at
+                     FROM finance_raw_store.finance_raw_current_rows"""
+            )
+        return conn
 
 
 def block_from_env(runtime_dir: Path) -> PartnerReportBlock:

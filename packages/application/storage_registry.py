@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Iterator, Literal, Mapping
@@ -309,6 +310,7 @@ class StoreRegistry:
         *,
         mode: StoreMode,
         operation: str,
+        manifest: GenerationManifest | None = None,
         timeout_ms: int | None = None,
         priority: str | None = None,
         isolation_level: str | None = "",
@@ -317,8 +319,12 @@ class StoreRegistry:
         operation_name = str(operation or "").strip()
         if not operation_name:
             raise StorageRegistryError("store operation name is required")
-        manifest = self.load()
-        generation = self.generation(logical_store, manifest=manifest)
+        selected_manifest = manifest or self.load()
+        validate_manifest(selected_manifest)
+        generation = self.generation(
+            logical_store,
+            manifest=selected_manifest,
+        )
         if (
             require_schema_revision
             and generation.schema_revision != require_schema_revision
@@ -327,7 +333,7 @@ class StoreRegistry:
                 f"{logical_store} schema mismatch: expected {require_schema_revision}, "
                 f"got {generation.schema_revision}"
             )
-        path = self.resolve(logical_store, manifest=manifest)
+        path = self.resolve(logical_store, manifest=selected_manifest)
         if mode == "ro":
             if not path.is_file():
                 raise StorageRegistryError(f"{logical_store} generation file is missing")
@@ -347,16 +353,20 @@ class StoreRegistry:
             if not path.parent.is_dir():
                 raise StorageRegistryError(f"{logical_store} generation directory is missing")
             conn = connect_sqlite(
-                path,
+                f"file:{path}?mode=rwc",
                 timeout_ms=timeout_ms,
                 priority=priority,
                 isolation_level=isolation_level,
+                uri=True,
             )
         else:
             raise StorageRegistryError(f"unsupported store mode: {mode}")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        if not manifest.implicit and manifest.state != "monolith":
+        if (
+            not selected_manifest.implicit
+            and selected_manifest.state != "monolith"
+        ):
             meta_table = (
                 "finance_raw_schema_meta"
                 if logical_store == "finance_raw"
@@ -390,7 +400,7 @@ class StoreRegistry:
                 "logical_store": logical_store,
                 "generation_id": generation.generation_id,
                 "generation_epoch": generation.generation_epoch,
-                "source_fingerprint": manifest.source_fingerprint,
+                "source_fingerprint": selected_manifest.source_fingerprint,
             }
             if actual != expected:
                 conn.close()
@@ -422,6 +432,7 @@ class StoreRegistry:
         *,
         mode: StoreMode,
         operation: str,
+        manifest: GenerationManifest | None = None,
         timeout_ms: int | None = None,
         priority: str | None = None,
         isolation_level: str | None = "",
@@ -431,6 +442,7 @@ class StoreRegistry:
             logical_store,
             mode=mode,
             operation=operation,
+            manifest=manifest,
             timeout_ms=timeout_ms,
             priority=priority,
             isolation_level=isolation_level,
@@ -440,6 +452,101 @@ class StoreRegistry:
             yield conn
         finally:
             conn.close()
+
+    def attach_readonly(
+        self,
+        conn: sqlite3.Connection,
+        logical_store: StoreName,
+        *,
+        schema_name: str,
+        operation: str,
+        manifest: GenerationManifest | None = None,
+    ) -> GenerationManifest:
+        """Attach one registry-selected store read-only with identity readback."""
+
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", schema_name) is None:
+            raise StorageRegistryError("attached schema name is invalid")
+        selected_manifest = manifest or self.load(require_files=True)
+        validate_manifest(selected_manifest)
+        generation = (
+            selected_manifest.raw
+            if logical_store == "finance_raw"
+            else selected_manifest.operational
+        )
+        path = self.resolve(logical_store, manifest=selected_manifest)
+        database_rows = conn.execute("PRAGMA database_list").fetchall()
+        databases = {str(row[1]) for row in database_rows}
+        if schema_name in databases:
+            raise StorageRegistryError(
+                f"attached schema already exists: {schema_name}"
+            )
+        main_row = next(
+            (row for row in database_rows if str(row[1]) == "main"),
+            None,
+        )
+        expected_main_store: StoreName = (
+            "operational"
+            if logical_store == "finance_raw"
+            else "finance_raw"
+        )
+        expected_main_path = self.resolve(
+            expected_main_store,
+            manifest=selected_manifest,
+        )
+        actual_main_path = Path(
+            str(main_row[2] if main_row is not None else "")
+        ).resolve()
+        if actual_main_path != expected_main_path:
+            raise StorageRegistryError(
+                "primary connection does not match the pinned generation"
+            )
+        conn.execute(
+            f"ATTACH DATABASE ? AS {schema_name}",
+            (f"file:{path}?mode=ro",),
+        )
+        if (
+            not selected_manifest.implicit
+            and selected_manifest.state != "monolith"
+        ):
+            meta_table = (
+                "finance_raw_schema_meta"
+                if logical_store == "finance_raw"
+                else "finance_operational_schema_meta"
+            )
+            identity = conn.execute(
+                f"""SELECT schema_revision,logical_store,generation_id,
+                           generation_epoch,source_fingerprint
+                    FROM {schema_name}.{meta_table} WHERE singleton=1"""
+            ).fetchone()
+            expected = (
+                generation.schema_revision,
+                logical_store,
+                generation.generation_id,
+                generation.generation_epoch,
+                selected_manifest.source_fingerprint,
+            )
+            if identity is None or tuple(identity) != expected:
+                conn.execute(f"DETACH DATABASE {schema_name}")
+                raise StorageRegistryError(
+                    f"{logical_store} attached file identity mismatch"
+                )
+        observation = SQLiteOpenObservation(
+            opened_at=_utc_now(),
+            logical_store=logical_store,
+            mode="ro",
+            operation=str(operation or "registry_attach")[:160],
+            generation_id=generation.generation_id,
+            schema_revision=generation.schema_revision,
+            path_identity=_sha256(
+                {
+                    "generation_id": generation.generation_id,
+                    "relative_path": generation.relative_path,
+                }
+            ),
+        )
+        with _OBSERVATION_LOCK:
+            _OBSERVATIONS.append(observation)
+        return selected_manifest
 
     def status(self) -> dict[str, Any]:
         manifest = self.load()

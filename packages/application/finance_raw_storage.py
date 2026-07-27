@@ -30,6 +30,7 @@ RAW_SCHEMA_TABLES = frozenset(
         "finance_raw_schema_meta",
         "finance_raw_ingest_batches",
         "finance_raw_rows",
+        "finance_raw_batch_rows",
         "finance_raw_outbox",
         "finance_raw_consumer_cursors",
         "finance_raw_bridge_cursors",
@@ -106,8 +107,6 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
 
 
 def ensure_raw_schema(conn: sqlite3.Connection) -> None:
-    if RAW_SCHEMA_TABLES.issubset(_table_names(conn)):
-        return
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS finance_raw_schema_meta (
@@ -124,6 +123,9 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             source_identity TEXT NOT NULL,
             source_sha256 TEXT NOT NULL,
             report_period TEXT NOT NULL,
+            seller_id TEXT NOT NULL DEFAULT '',
+            week_start TEXT NOT NULL DEFAULT '',
+            week_end TEXT NOT NULL DEFAULT '',
             row_count INTEGER NOT NULL,
             rows_digest TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('loading','committed','failed')),
@@ -152,6 +154,17 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(batch_id,batch_sequence_no),
             UNIQUE(batch_id,seller_id,report_id,rrd_id)
         );
+        CREATE TABLE IF NOT EXISTS finance_raw_batch_rows (
+            batch_id TEXT NOT NULL,
+            batch_sequence_no INTEGER NOT NULL,
+            raw_row_id TEXT NOT NULL,
+            PRIMARY KEY(batch_id,batch_sequence_no),
+            UNIQUE(batch_id,raw_row_id),
+            FOREIGN KEY(batch_id) REFERENCES finance_raw_ingest_batches(batch_id),
+            FOREIGN KEY(raw_row_id) REFERENCES finance_raw_rows(raw_row_id)
+        );
+        CREATE INDEX IF NOT EXISTS finance_raw_batch_rows_by_raw
+        ON finance_raw_batch_rows(raw_row_id,batch_id);
         CREATE INDEX IF NOT EXISTS finance_raw_rows_by_business_identity
         ON finance_raw_rows(seller_id,report_id,rrd_id,batch_id);
         CREATE INDEX IF NOT EXISTS finance_raw_rows_by_week
@@ -195,6 +208,61 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             '{_utc_now()}'
         )
         ON CONFLICT(singleton) DO UPDATE SET schema_revision=excluded.schema_revision;
+        """
+    )
+    batch_columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_info(finance_raw_ingest_batches)"
+        ).fetchall()
+    }
+    for column in ("seller_id", "week_start", "week_end"):
+        if column not in batch_columns:
+            conn.execute(
+                f"""ALTER TABLE finance_raw_ingest_batches
+                    ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"""
+            )
+    conn.executescript(
+        """
+        DROP VIEW IF EXISTS finance_raw_current_rows;
+        CREATE VIEW finance_raw_current_rows AS
+        SELECT
+               rows.seller_id,rows.report_id,rows.rrd_id,rows.report_type,
+               rows.week_start,rows.week_end,rows.nm_id,rows.vendor_code,
+               rows.barcode,rows.doc_type_name,rows.seller_oper_name,
+               rows.row_hash,rows.raw_json,rows.first_seen_at,
+               MAX(
+                   COALESCE(batch.committed_at,rows.first_seen_at)
+               ) AS updated_at
+          FROM finance_raw_batch_rows AS links
+          JOIN finance_raw_rows AS rows
+            ON rows.raw_row_id=links.raw_row_id
+          JOIN finance_raw_ingest_batches AS batch
+            ON batch.batch_id=links.batch_id
+          LEFT JOIN finance_raw_outbox AS event
+            ON event.batch_id=batch.batch_id
+         WHERE batch.status='committed'
+           AND NOT EXISTS(
+               SELECT 1
+                 FROM finance_raw_ingest_batches AS newer
+                 LEFT JOIN finance_raw_outbox AS newer_event
+                   ON newer_event.batch_id=newer.batch_id
+                WHERE newer.status='committed'
+                  AND newer.seller_id IN ('*',rows.seller_id)
+                  AND newer.week_start=rows.week_start
+                  AND newer.week_end=rows.week_end
+                  AND (
+                      COALESCE(newer_event.sequence_no,0)
+                        > COALESCE(event.sequence_no,0)
+                      OR (
+                          COALESCE(newer_event.sequence_no,0)
+                            = COALESCE(event.sequence_no,0)
+                          AND COALESCE(newer.committed_at,newer.created_at)
+                            > COALESCE(batch.committed_at,batch.created_at)
+                      )
+                  )
+           )
+         GROUP BY rows.raw_row_id;
         """
     )
 
@@ -397,6 +465,7 @@ class FinanceRawIngestor:
         week_end: date | str,
         connection: sqlite3.Connection | None = None,
         fault_at: str = "",
+        allow_empty_snapshot: bool = False,
     ) -> IngestResult:
         period_start = (
             week_start.isoformat() if isinstance(week_start, date) else str(week_start)
@@ -411,7 +480,7 @@ class FinanceRawIngestor:
             )
             for row in rows
         ]
-        if not normalized:
+        if not normalized and not allow_empty_snapshot:
             raise FinanceStorageError("Finance raw batch must contain at least one row")
         normalized.sort(key=lambda item: (item["report_id"], item["rrd_id"], item["row_hash"]))
         rows_digest = _digest(
@@ -477,22 +546,26 @@ class FinanceRawIngestor:
             created_at = self.now_factory()
             conn.execute(
                 """INSERT INTO finance_raw_ingest_batches(
-                   batch_id,source_identity,source_sha256,report_period,row_count,
-                   rows_digest,status,created_at,committed_at
-                   ) VALUES(?,?,?,?,?,?,'loading',?,NULL)""",
+                   batch_id,source_identity,source_sha256,report_period,
+                   seller_id,week_start,week_end,row_count,rows_digest,status,
+                   created_at,committed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,'loading',?,NULL)""",
                 (
                     batch_id,
                     batch_identity["source_identity"],
                     batch_identity["source_sha256"],
                     batch_identity["report_period"],
+                    self.seller_id,
+                    period_start,
+                    period_end,
                     len(normalized),
                     rows_digest,
                     created_at,
                 ),
             )
             for index, item in enumerate(normalized, start=1):
-                conn.execute(
-                    """INSERT INTO finance_raw_rows(
+                inserted = conn.execute(
+                    """INSERT OR IGNORE INTO finance_raw_rows(
                        raw_row_id,batch_id,batch_sequence_no,seller_id,report_id,rrd_id,
                        report_type,week_start,week_end,nm_id,vendor_code,barcode,
                        doc_type_name,seller_oper_name,row_hash,raw_json,first_seen_at
@@ -516,6 +589,43 @@ class FinanceRawIngestor:
                         item["raw_json"],
                         created_at,
                     ),
+                )
+                if inserted.rowcount == 0:
+                    existing_row = conn.execute(
+                        """SELECT seller_id,report_id,rrd_id,report_type,
+                                  week_start,week_end,nm_id,vendor_code,barcode,
+                                  doc_type_name,seller_oper_name,row_hash,raw_json
+                           FROM finance_raw_rows WHERE raw_row_id=?""",
+                        (item["raw_row_id"],),
+                    ).fetchone()
+                    expected_row = (
+                        item["seller_id"],
+                        item["report_id"],
+                        item["rrd_id"],
+                        item["report_type"],
+                        item["week_start"],
+                        item["week_end"],
+                        item["nm_id"],
+                        item["vendor_code"],
+                        item["barcode"],
+                        item["doc_type_name"],
+                        item["seller_oper_name"],
+                        item["row_hash"],
+                        item["raw_json"],
+                    )
+                    if (
+                        existing_row is None
+                        or tuple(existing_row) != expected_row
+                    ):
+                        raise FinanceStorageError(
+                            "existing Finance raw row conflicts with "
+                            "immutable source identity"
+                        )
+                conn.execute(
+                    """INSERT INTO finance_raw_batch_rows(
+                       batch_id,batch_sequence_no,raw_row_id
+                       ) VALUES(?,?,?)""",
+                    (batch_id, index, item["raw_row_id"]),
                 )
             if fault_at == "after_rows_before_outbox":
                 raise InjectedFinanceStorageFault(fault_at)
@@ -864,20 +974,25 @@ class FinanceRawLiveTailBridge:
         if _digest(str(event["payload_json"])) != str(event["payload_sha256"]):
             raise FinanceStorageError("live-tail source payload digest mismatch")
         batch = source.execute(
-            """SELECT batch_id,source_identity,source_sha256,report_period,row_count,
-                      rows_digest,status,created_at,committed_at
+            """SELECT batch_id,source_identity,source_sha256,report_period,
+                      seller_id,week_start,week_end,row_count,rows_digest,
+                      status,created_at,committed_at
                FROM finance_raw_ingest_batches WHERE batch_id=?""",
             (event["batch_id"],),
         ).fetchone()
         if batch is None or str(batch["status"]) != "committed":
             raise FinanceStorageError("live-tail source batch is not committed")
         rows = source.execute(
-            """SELECT raw_row_id,batch_id,batch_sequence_no,seller_id,report_id,
+            """SELECT rows.raw_row_id,rows.batch_id,
+                      links.batch_sequence_no,rows.seller_id,rows.report_id,
                       rrd_id,report_type,week_start,week_end,nm_id,vendor_code,
                       barcode,doc_type_name,seller_oper_name,row_hash,raw_json,
                       first_seen_at
-               FROM finance_raw_rows WHERE batch_id=?
-               ORDER BY batch_sequence_no""",
+               FROM finance_raw_batch_rows AS links
+               JOIN finance_raw_rows AS rows
+                 ON rows.raw_row_id=links.raw_row_id
+               WHERE links.batch_id=?
+               ORDER BY links.batch_sequence_no""",
             (event["batch_id"],),
         ).fetchall()
         digest = _digest(
@@ -920,8 +1035,9 @@ class FinanceRawLiveTailBridge:
         if plan is None:
             return None
         batch = source.execute(
-            """SELECT batch_id,source_identity,source_sha256,report_period,row_count,
-                      rows_digest,status,created_at,committed_at
+            """SELECT batch_id,source_identity,source_sha256,report_period,
+                      seller_id,week_start,week_end,row_count,rows_digest,
+                      status,created_at,committed_at
                FROM finance_raw_ingest_batches WHERE batch_id=?""",
             (plan["batch_id"],),
         ).fetchone()
@@ -932,12 +1048,16 @@ class FinanceRawLiveTailBridge:
             (plan["event_id"],),
         ).fetchone()
         rows = source.execute(
-            """SELECT raw_row_id,batch_id,batch_sequence_no,seller_id,report_id,
+            """SELECT rows.raw_row_id,rows.batch_id,
+                      links.batch_sequence_no,rows.seller_id,rows.report_id,
                       rrd_id,report_type,week_start,week_end,nm_id,vendor_code,
                       barcode,doc_type_name,seller_oper_name,row_hash,raw_json,
                       first_seen_at
-               FROM finance_raw_rows WHERE batch_id=?
-               ORDER BY batch_sequence_no""",
+               FROM finance_raw_batch_rows AS links
+               JOIN finance_raw_rows AS rows
+                 ON rows.raw_row_id=links.raw_row_id
+               WHERE links.batch_id=?
+               ORDER BY links.batch_sequence_no""",
             (plan["batch_id"],),
         ).fetchall()
         if batch is None or event is None:
@@ -946,9 +1066,10 @@ class FinanceRawLiveTailBridge:
         try:
             destination.execute(
                 """INSERT OR IGNORE INTO finance_raw_ingest_batches(
-                   batch_id,source_identity,source_sha256,report_period,row_count,
-                   rows_digest,status,created_at,committed_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                   batch_id,source_identity,source_sha256,report_period,
+                   seller_id,week_start,week_end,row_count,rows_digest,status,
+                   created_at,committed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 tuple(batch),
             )
             for row in rows:
@@ -961,6 +1082,16 @@ class FinanceRawLiveTailBridge:
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     tuple(row),
                 )
+                destination.execute(
+                    """INSERT OR IGNORE INTO finance_raw_batch_rows(
+                       batch_id,batch_sequence_no,raw_row_id
+                       ) VALUES(?,?,?)""",
+                    (
+                        plan["batch_id"],
+                        int(row["batch_sequence_no"]),
+                        row["raw_row_id"],
+                    ),
+                )
             if fault_at == "after_rows_before_outbox":
                 raise InjectedFinanceStorageFault(fault_at)
             destination.execute(
@@ -970,12 +1101,22 @@ class FinanceRawLiveTailBridge:
                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 tuple(event),
             )
-            destination_rows = destination.execute(
-                """SELECT seller_id,report_id,rrd_id,row_hash
-                   FROM finance_raw_rows WHERE batch_id=?
-                   ORDER BY batch_sequence_no""",
-                (plan["batch_id"],),
-            ).fetchall()
+            destination_rows = []
+            for source_row in rows:
+                destination_row = destination.execute(
+                    """SELECT seller_id,report_id,rrd_id,row_hash,raw_json
+                       FROM finance_raw_rows WHERE raw_row_id=?""",
+                    (source_row["raw_row_id"],),
+                ).fetchone()
+                if (
+                    destination_row is None
+                    or str(destination_row["raw_json"])
+                    != str(source_row["raw_json"])
+                ):
+                    raise FinanceStorageError(
+                        "live-tail immutable raw row readback mismatch"
+                    )
+                destination_rows.append(destination_row)
             destination_digest = _digest(
                 [
                     [
@@ -1185,7 +1326,7 @@ def shadow_compare_week(
                     WHERE seller_id=? AND week_start=? AND week_end=?
                     ORDER BY report_id,rrd_id,row_hash"""
     shadow_sql = """SELECT report_id,rrd_id,row_hash
-                    FROM finance_raw_rows
+                    FROM finance_raw_current_rows
                     WHERE seller_id=? AND week_start=? AND week_end=?
                     ORDER BY report_id,rrd_id,row_hash"""
     params = (seller_id, week_start, week_end)
