@@ -3351,6 +3351,14 @@ def _test_guarded_publication() -> None:
         _assert(len(overview["warehouses"]) == 6, "functional HTTP exposes six warehouses")
         wb_detail = entrypoint.handle_warehouse_detail_request("wb")
         _assert((wb_detail.get("warehouse") or {}).get("wb_contour") is not None, "WB HTTP detail exposes contour")
+        _assert(
+            wb_detail.get("probe_shape")
+            == {
+                "warehouse_key": "wb",
+                "required_collections": ["balances", "documents"],
+            },
+            "warehouse detail declares its bounded probe shape before large collections",
+        )
         _assert((wb_detail.get("documents") or [])[0].get("lines"), "warehouse documents persist their own lines")
         document_line = (wb_detail.get("documents") or [])[0]["lines"][0]
         _assert(

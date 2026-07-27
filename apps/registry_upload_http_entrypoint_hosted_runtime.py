@@ -6965,16 +6965,33 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         return evaluation
 
     if route == "warehouse_ff":
+        truncated = bool(result.get("body_truncated"))
         evaluation["ok"], evaluation["detail"] = _validate_json_result(
             status,
             payload,
-            success_keys=["contract_name", "contract_version", "status", "warehouse", "balances", "documents"],
+            success_keys=(
+                ["contract_name", "contract_version", "status", "warehouse", "probe_shape"]
+                if truncated
+                else [
+                    "contract_name",
+                    "contract_version",
+                    "status",
+                    "warehouse",
+                    "balances",
+                    "documents",
+                ]
+            ),
         )
         warehouse = payload.get("warehouse")
-        if result.get("body_truncated"):
+        probe_shape = payload.get("probe_shape")
+        if truncated:
             warehouse = _object_from_truncated_json(
                 str(result.get("body_excerpt") or ""),
                 key="warehouse",
+            )
+            probe_shape = _object_from_truncated_json(
+                str(result.get("body_excerpt") or ""),
+                key="probe_shape",
             )
         warehouse_key = (
             str(warehouse.get("warehouse_key") or "")
@@ -6984,6 +7001,14 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         if evaluation["ok"] and warehouse_key != "ff":
             evaluation["ok"] = False
             evaluation["detail"] = "expected canonical FF warehouse detail"
+        if evaluation["ok"] and truncated and (
+            not isinstance(probe_shape, Mapping)
+            or str(probe_shape.get("warehouse_key") or "") != "ff"
+            or set(probe_shape.get("required_collections") or [])
+            != {"balances", "documents"}
+        ):
+            evaluation["ok"] = False
+            evaluation["detail"] = "expected bounded FF warehouse probe shape"
         return evaluation
 
     if route == "load_route":

@@ -64,6 +64,8 @@ jobs:
         run: |
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
+          python3 apps/warehouse_functional_smoke.py
+          python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 
       - name: Install Chromium for projection UI smoke
         run: python3 -m playwright install chromium
