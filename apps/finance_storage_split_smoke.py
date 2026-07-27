@@ -664,6 +664,42 @@ class OutboxSmoke(unittest.TestCase):
 
 
 class MigrationSmoke(unittest.TestCase):
+    def test_snapshot_plan_blocks_active_business_writer_service(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=1)
+            active_service = {
+                "unit": "wb-core-sheet-vitrina-closure-retry.service",
+                "return_code": 0,
+                "load_state": "loaded",
+                "active_state": "activating",
+                "sub_state": "start",
+                "unit_file_state": "static",
+                "main_pid": 4242,
+                "result": "success",
+                "exec_main_status": "0",
+                "last_trigger": "",
+                "next_trigger": "",
+            }
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[active_service],
+            ):
+                plan = FinanceStorageCoherentSnapshot(
+                    runtime,
+                    deployed_sha=DEPLOYED_SHA,
+                    repo_root=ROOT,
+                ).build_plan()
+            self.assertFalse(
+                plan["snapshot_allowed_by_machine_preflight"]
+            )
+            blocker = next(
+                row
+                for row in plan["blockers"]
+                if row["code"] == "active_business_writer_service"
+            )
+            self.assertEqual(blocker["services"], [active_service])
+
     def test_dry_run_idempotent_resume_and_non_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime"

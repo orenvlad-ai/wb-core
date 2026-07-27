@@ -146,6 +146,12 @@ manual-write barrier и quiet hold создаёт coherent SQLite backup, нем
 source-identity drift, нехватка capacity или сомнение в rollback оставляют
 mutation fail closed.
 
+До подтверждения quiet hold любой сбой acquire/drain не разрешает protected
+mutation. Repo-owned abort сначала доказывает continuity exact service
+generation, существовавшей до hold, затем восстанавливает прежний
+timer/settings control signature и только после этого снимает acquiring
+barrier. Confirmed hold через этот abort-path снять нельзя.
+
 ## GOAL Mode И Scope
 
 Задача задаётся через проверяемый конечный результат, а не избыточный микроменеджмент. Каждая change-задача фиксирует:

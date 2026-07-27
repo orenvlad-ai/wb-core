@@ -103,7 +103,12 @@ The implementation is deliberately inert on deploy:
 - `business-data-maintenance` captures the exact prior owner policy, all known
   timers/writers/settings and warehouse timer state. Unknown writers/timers
   block a hold. Release is impossible until exact restore and readback have
-  succeeded.
+  succeeded. Snapshot planning also blocks any already-active business writer
+  service instead of entering a window that cannot drain. If an unconfirmed
+  acquire fails after controls were paused, the only abort path proves the
+  same pre-hold service generation is still running, restores the exact
+  timer/settings signature and records `barrier-abort`; it cannot abort a
+  confirmed hold or any window in which protected mutation began.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
   cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/
   verify, cutover plan/apply and rollback plan/prepare/apply. Candidate build,
@@ -343,6 +348,8 @@ Canonical hosted sequence is phase-local:
 2. `finance-storage-snapshot-plan`, then the automatically held
    `finance-storage-snapshot-apply`, then
    `finance-storage-snapshot-integrity`;
+   an active pre-existing writer service blocks the plan and leaves normal
+   operation unchanged;
 3. `finance-storage-split-dry-run` against that exact verified snapshot and
    stop for approval of its exact fingerprint/generation/capacity;
 4. only after approval, `finance-storage-split-apply`, shadow activate,
