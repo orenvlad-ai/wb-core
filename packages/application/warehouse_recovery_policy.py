@@ -30,7 +30,7 @@ from packages.application.sqlite_contention import connect_sqlite
 
 
 CONTRACT_NAME = "warehouse_recovery_policy_v1"
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
 DEFAULT_OPERATIONAL_RESERVE_BYTES = 512 * 1024 * 1024
 DEFAULT_RESERVATION_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_ROLLBACK_RETENTION_DAYS = 14
@@ -38,6 +38,12 @@ RECOVERY_DIRNAME = "warehouse-recovery"
 CHECKPOINT_DIRNAME = "domain-checkpoints"
 MANIFEST_SUFFIX = ".manifest.json"
 TEMP_SUFFIX = ".tmp"
+T2_RETENTION_MIN_COUNT = 2
+T2_RETENTION_MAX_COUNT = 3
+T2_RETENTION_MAX_BYTES = 2 * 1024 * 1024 * 1024
+T2_RETENTION_MAX_AGE_HOURS = 24
+T2_DEGRADED_FREE_BYTES = 8 * 1024 * 1024 * 1024
+T2_HARD_STOP_FREE_BYTES = 4 * 1024 * 1024 * 1024
 
 
 class RecoveryPolicyError(RuntimeError):
@@ -416,10 +422,25 @@ class WarehouseRecoveryRegistry:
         clock: Callable[[], datetime] | None = None,
         fault_injector: Callable[[str, str], None] | None = None,
         operational_reserve_bytes: int = DEFAULT_OPERATIONAL_RESERVE_BYTES,
+        recovery_root: Path | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).resolve()
         self.db_path = Path(db_path).resolve()
-        self.recovery_root = self.runtime_dir / RECOVERY_DIRNAME
+        configured_recovery_root = (
+            Path(recovery_root).resolve()
+            if recovery_root is not None
+            else (self.runtime_dir / "backups" / RECOVERY_DIRNAME).resolve()
+        )
+        allowed_recovery_parent = (self.runtime_dir / "backups").resolve()
+        if not _path_is_below(configured_recovery_root, allowed_recovery_parent):
+            raise RecoveryPolicyError(
+                "warehouse recovery root must stay below the runtime backup root"
+            )
+        self.recovery_root = configured_recovery_root
+        self.legacy_recovery_root = (self.runtime_dir / RECOVERY_DIRNAME).resolve()
+        self.recovery_roots = tuple(
+            dict.fromkeys((self.recovery_root, self.legacy_recovery_root))
+        )
         self.checkpoint_root = self.recovery_root / CHECKPOINT_DIRNAME
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.fault_injector = fault_injector
@@ -1029,8 +1050,7 @@ class WarehouseRecoveryRegistry:
         """
 
         final = Path(destination).resolve()
-        recovery_root = (self.runtime_dir / RECOVERY_DIRNAME).resolve()
-        if _path_is_below(final, recovery_root):
+        if any(_path_is_below(final, root) for root in self.recovery_roots):
             raise RecoveryPolicyError(
                 "disposable planning checkpoint cannot masquerade as recovery evidence"
             )
@@ -1460,7 +1480,10 @@ class WarehouseRecoveryRegistry:
         checkpoint = Path(str(artifact.get("path") or ""))
         if (
             not checkpoint.is_file()
-            or not _path_is_below(checkpoint, self.recovery_root)
+            or not any(
+                _path_is_below(checkpoint, root)
+                for root in self.recovery_roots
+            )
             or _sha256_file(checkpoint) != str(artifact.get("digest") or "")
         ):
             self.quarantine(operation_id, "t2_checkpoint_identity_drift")
@@ -1584,70 +1607,359 @@ class WarehouseRecoveryRegistry:
             raise RecoveryPolicyError("rolled-back T2 operation disappeared")
         return result
 
-    def release_expired(
-        self,
-        *,
-        apply: bool = False,
-        plan_fingerprint: str = "",
-    ) -> dict[str, Any]:
-        now = self._now()
-        operations = [
+    def plan_retention(self) -> dict[str, Any]:
+        """Build one stable exact plan over age, count and retained bytes."""
+
+        now = self.clock()
+        now_text = _timestamp(now)
+        operations = self.list_operations(limit=1000)
+        eligible = [
             item
-            for item in self.list_operations(limit=1000)
+            for item in operations
             if item.get("lifecycle")
             in {
                 RecoveryState.RETAINED.value,
                 RecoveryState.ROLLED_BACK.value,
             }
-            and str((item.get("rollback") or {}).get("expires_at") or "")
-            and str((item.get("rollback") or {}).get("expires_at")) <= now
         ]
+        retained_t2 = sorted(
+            (
+                item
+                for item in eligible
+                if item.get("tier") == RecoveryTier.T2.value
+                and item.get("lifecycle") == RecoveryState.RETAINED.value
+            ),
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("operation_id") or ""),
+            ),
+            reverse=True,
+        )
+        protected_ids = {
+            str(item["operation_id"])
+            for item in retained_t2[:T2_RETENTION_MIN_COUNT]
+        }
+        retained_bytes = sum(
+            int(item.get("actual_bytes") or 0) for item in retained_t2
+        )
+        running_bytes = 0
+        candidates: list[dict[str, Any]] = []
+        for index, operation in enumerate(retained_t2):
+            operation_id = str(operation["operation_id"])
+            operation_bytes = int(operation.get("actual_bytes") or 0)
+            running_bytes += operation_bytes
+            if operation_id in protected_ids:
+                continue
+            reasons: list[str] = []
+            created_at = _parse_timestamp(str(operation.get("created_at") or ""))
+            age_hours = max(
+                0.0,
+                (now - created_at).total_seconds() / 3600,
+            )
+            if index >= T2_RETENTION_MAX_COUNT:
+                reasons.append("superseded_count_cap")
+            if running_bytes > T2_RETENTION_MAX_BYTES:
+                reasons.append("projected_byte_cap")
+            if age_hours >= T2_RETENTION_MAX_AGE_HOURS:
+                reasons.append("rollback_age_cap")
+            if reasons:
+                candidates.append(
+                    _retention_candidate(operation, reasons=reasons)
+                )
+
+        t2_candidate_ids = {
+            str(item["operation_id"]) for item in candidates
+        }
+        for operation in eligible:
+            operation_id = str(operation["operation_id"])
+            if operation_id in t2_candidate_ids:
+                continue
+            expires_at = str(
+                (operation.get("rollback") or {}).get("expires_at") or ""
+            )
+            if (
+                expires_at
+                and expires_at <= now_text
+                and operation_id not in protected_ids
+            ):
+                candidates.append(
+                    _retention_candidate(
+                        operation,
+                        reasons=["rollback_expired"],
+                    )
+                )
+
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("operation_id") or ""),
+            )
+        )
         material = {
             "contract_name": CONTRACT_NAME,
-            "action": "retention",
-            "operation_ids": [str(item["operation_id"]) for item in operations],
-            "artifact_paths": sorted(
-                {
-                    str(artifact.get("path") or "")
-                    for item in operations
+            "schema_version": REGISTRY_SCHEMA_VERSION,
+            "action": "bounded_retention",
+            "policy": {
+                "t2_min_count": T2_RETENTION_MIN_COUNT,
+                "t2_max_count": T2_RETENTION_MAX_COUNT,
+                "t2_max_bytes": T2_RETENTION_MAX_BYTES,
+                "t2_max_age_hours": T2_RETENTION_MAX_AGE_HOURS,
+                "protected_lifecycle_states": [
+                    RecoveryState.PLANNED.value,
+                    RecoveryState.RESERVED.value,
+                    RecoveryState.WRITING.value,
+                    RecoveryState.VERIFIED.value,
+                    RecoveryState.MUTATION_RUNNING.value,
+                    RecoveryState.FAILED_RECOVERABLE.value,
+                    RecoveryState.QUARANTINED.value,
+                ],
+            },
+            "protected_operation_ids": sorted(protected_ids),
+            "candidates": candidates,
+        }
+        fingerprint = "sha256:" + hashlib.sha256(
+            _json_bytes(material)
+        ).hexdigest()
+        projected = self._retention_projection(
+            retained_t2=retained_t2,
+            candidate_ids={
+                str(item["operation_id"]) for item in candidates
+            },
+        )
+        return {
+            **material,
+            "generated_at": now_text,
+            "status": "dry_run_ready",
+            "fingerprint": fingerprint,
+            "would_change": bool(candidates),
+            # Backward-compatible alias retained for the original
+            # release_expired contract and existing operator tooling.
+            "operation_ids": [
+                str(item["operation_id"]) for item in candidates
+            ],
+            "candidate_count": len(candidates),
+            "candidate_bytes": sum(
+                sum(
+                    int(artifact.get("size_bytes") or 0)
                     for artifact in item.get("artifacts", [])
                     if artifact.get("path")
-                }
+                )
+                for item in candidates
             ),
-            "planned_at": now,
+            "retained_t2_count": len(retained_t2),
+            "retained_t2_bytes": retained_bytes,
+            "projection": projected,
         }
-        fingerprint = "sha256:" + hashlib.sha256(_json_bytes(material)).hexdigest()
-        if not apply:
-            return {
-                **material,
-                "status": "dry_run_ready",
-                "fingerprint": fingerprint,
-                "would_change": bool(operations),
-            }
-        if plan_fingerprint != fingerprint:
+
+    def apply_retention(self, *, plan_fingerprint: str) -> dict[str, Any]:
+        """Apply or resume one audited exact retention plan."""
+
+        approved = str(plan_fingerprint or "").strip()
+        if not approved:
             raise RecoveryPolicyError("exact retention plan fingerprint is required")
-        removed: list[str] = []
-        for operation in operations:
-            operation_id = str(operation["operation_id"])
-            for artifact in operation.get("artifacts", []):
+        self.ensure_schema()
+        with _connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_recovery_retention_runs
+                WHERE plan_fingerprint=?
+                """,
+                (approved,),
+            ).fetchone()
+        stored_removed_paths: list[str] = []
+        stored_removed_bytes = 0
+        if row is None:
+            plan = self.plan_retention()
+            if approved != str(plan["fingerprint"]):
+                raise RecoveryPolicyError(
+                    "exact retention plan fingerprint is stale"
+                )
+            retention_run_id = (
+                "retention_"
+                + approved.removeprefix("sha256:")[:24]
+            )
+            now = self._now()
+            with _connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_recovery_retention_runs(
+                        retention_run_id,plan_fingerprint,plan_json,status,
+                        removed_bytes,removed_paths_json,error_json,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        retention_run_id,
+                        approved,
+                        _json(plan),
+                        "applying",
+                        0,
+                        "[]",
+                        "[]",
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+            self._fsync_registry()
+            self._inject(retention_run_id, "after_retention_audit_start")
+        else:
+            stored = dict(row)
+            stored_removed_paths = [
+                str(path)
+                for path in _json_array(
+                    stored.get("removed_paths_json") or "[]"
+                )
+            ]
+            stored_removed_bytes = int(stored.get("removed_bytes") or 0)
+            retention_run_id = str(stored["retention_run_id"])
+            plan = _json_object(stored["plan_json"])
+            if str(plan.get("fingerprint") or "") != approved:
+                raise RecoveryPolicyError("retention audit plan fingerprint drifted")
+            if str(stored.get("status") or "") == "applied":
+                return {
+                    **plan,
+                    "status": "applied",
+                    "idempotent": True,
+                    "retention_run_id": retention_run_id,
+                    "removed_bytes": int(stored.get("removed_bytes") or 0),
+                    "removed_paths": _json_array(
+                        stored.get("removed_paths_json") or "[]"
+                    ),
+                    "errors": _json_array(stored.get("error_json") or "[]"),
+                    "projection": self.plan_retention()["projection"],
+                }
+
+        removed_paths: list[str] = list(stored_removed_paths)
+        removed_bytes = stored_removed_bytes
+        errors: list[dict[str, Any]] = []
+        for candidate in plan.get("candidates", []):
+            operation_id = str(candidate.get("operation_id") or "")
+            with _connect_readonly(self.db_path) as conn:
+                operation_row = conn.execute(
+                    """
+                    SELECT lifecycle_state,state_version
+                    FROM sheet_vitrina_v1_recovery_operations
+                    WHERE operation_id=?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+            if operation_row is None:
+                errors.append(
+                    {
+                        "operation_id": operation_id,
+                        "error": "retention_operation_missing",
+                    }
+                )
+                continue
+            lifecycle = str(operation_row["lifecycle_state"])
+            if lifecycle == RecoveryState.RELEASED.value:
+                with _connect(self.db_path) as conn:
+                    conn.execute(
+                        """
+                        DELETE FROM sheet_vitrina_v1_recovery_undo_rows
+                        WHERE operation_id=?
+                        """,
+                        (operation_id,),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_recovery_artifacts
+                        SET state='released' WHERE operation_id=?
+                        """,
+                        (operation_id,),
+                    )
+                    conn.commit()
+                continue
+            if (
+                lifecycle != str(candidate.get("lifecycle") or "")
+                or int(operation_row["state_version"])
+                != int(candidate.get("state_version") or 0)
+            ):
+                errors.append(
+                    {
+                        "operation_id": operation_id,
+                        "error": "retention_operation_cas_drift",
+                        "actual_lifecycle": lifecycle,
+                        "actual_state_version": int(operation_row["state_version"]),
+                    }
+                )
+                continue
+            operation_error = False
+            for artifact in candidate.get("artifacts", []):
                 path_value = str(artifact.get("path") or "")
                 if not path_value:
                     continue
                 path = Path(path_value)
-                if not _path_is_below(path, self.recovery_root):
-                    self.quarantine(operation_id, "retention_path_outside_recovery_root")
-                    raise RecoveryPolicyError("retention artifact escaped recovery root")
+                if not any(
+                    _path_is_below(path, root) for root in self.recovery_roots
+                ):
+                    operation_error = True
+                    errors.append(
+                        {
+                            "operation_id": operation_id,
+                            "path": path_value,
+                            "error": "retention_path_outside_recovery_roots",
+                        }
+                    )
+                    if lifecycle == RecoveryState.RETAINED.value:
+                        self.quarantine(
+                            operation_id,
+                            "retention_path_outside_recovery_roots",
+                        )
+                    break
+                if not path.exists():
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    operation_error = True
+                    errors.append(
+                        {
+                            "operation_id": operation_id,
+                            "path": path_value,
+                            "error": "retention_artifact_not_regular",
+                        }
+                    )
+                    break
+                expected_size = int(artifact.get("size_bytes") or 0)
                 expected_digest = str(artifact.get("digest") or "")
-                if path.is_file():
-                    current_digest = _sha256_file(path)
-                    if expected_digest and current_digest != expected_digest:
-                        self.quarantine(operation_id, "retention_artifact_digest_drift")
-                        raise RecoveryPolicyError("retention artifact digest drifted")
-                    path.unlink()
-                    removed.append(str(path))
+                if (
+                    path.stat().st_size != expected_size
+                    or (expected_digest and _sha256_file(path) != expected_digest)
+                ):
+                    operation_error = True
+                    errors.append(
+                        {
+                            "operation_id": operation_id,
+                            "path": path_value,
+                            "error": "retention_artifact_digest_drift",
+                        }
+                    )
+                    if lifecycle == RecoveryState.RETAINED.value:
+                        self.quarantine(
+                            operation_id,
+                            "retention_artifact_digest_drift",
+                        )
+                    break
+                self._inject(retention_run_id, f"before_retention_unlink:{operation_id}")
+                path.unlink()
+                _fsync_directory(path.parent)
+                removed_paths.append(str(path))
+                removed_bytes += expected_size
+                self._inject(retention_run_id, f"after_retention_unlink:{operation_id}")
+            if operation_error:
+                continue
+            if lifecycle == RecoveryState.RETAINED.value:
+                self._transition(
+                    operation_id,
+                    expected_state=RecoveryState.RETAINED.value,
+                    next_state=RecoveryState.RELEASED.value,
+                    next_action="none",
+                )
             with _connect(self.db_path) as conn:
                 conn.execute(
-                    "DELETE FROM sheet_vitrina_v1_recovery_undo_rows WHERE operation_id=?",
+                    """
+                    DELETE FROM sheet_vitrina_v1_recovery_undo_rows
+                    WHERE operation_id=?
+                    """,
                     (operation_id,),
                 )
                 conn.execute(
@@ -1658,18 +1970,115 @@ class WarehouseRecoveryRegistry:
                     (operation_id,),
                 )
                 conn.commit()
-            if operation.get("lifecycle") == RecoveryState.RETAINED.value:
-                self._transition(
-                    operation_id,
-                    expected_state=RecoveryState.RETAINED.value,
-                    next_state=RecoveryState.RELEASED.value,
-                    next_action="none",
-                )
+
+        status = "applied" if not errors else "partial_failure"
+        with _connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_recovery_retention_runs
+                SET status=?,removed_bytes=?,
+                    removed_paths_json=?,error_json=?,updated_at=?
+                WHERE plan_fingerprint=?
+                """,
+                (
+                    status,
+                    removed_bytes,
+                    _json(sorted(set(removed_paths))),
+                    _json(errors),
+                    self._now(),
+                    approved,
+                ),
+            )
+            conn.commit()
+        self._fsync_registry()
         return {
-            **material,
-            "status": "applied",
-            "fingerprint": fingerprint,
-            "removed_paths": removed,
+            **plan,
+            "status": status,
+            "idempotent": False,
+            "retention_run_id": retention_run_id,
+            "removed_bytes": removed_bytes,
+            "removed_paths": sorted(set(removed_paths)),
+            "errors": errors,
+            "projection": self.plan_retention()["projection"],
+        }
+
+    def release_expired(
+        self,
+        *,
+        apply: bool = False,
+        plan_fingerprint: str = "",
+    ) -> dict[str, Any]:
+        """Backward-compatible entrypoint for the bounded retention policy."""
+
+        if not apply:
+            return self.plan_retention()
+        return self.apply_retention(plan_fingerprint=plan_fingerprint)
+
+    def _retention_projection(
+        self,
+        *,
+        retained_t2: Sequence[Mapping[str, Any]],
+        candidate_ids: set[str],
+    ) -> dict[str, Any]:
+        hourly = sorted(
+            (
+                item
+                for item in retained_t2
+                if item.get("operation_kind") == "hourly_warehouse_sync"
+            ),
+            key=lambda item: str(item.get("created_at") or ""),
+        )
+        deltas = [
+            max(
+                1,
+                int(
+                    (
+                        _parse_timestamp(str(after["created_at"]))
+                        - _parse_timestamp(str(before["created_at"]))
+                    ).total_seconds()
+                ),
+            )
+            for before, after in zip(hourly, hourly[1:])
+        ]
+        cadence_seconds = (
+            sorted(deltas)[len(deltas) // 2] if deltas else 3600
+        )
+        recent_checkpoint_bytes = max(
+            (int(item.get("actual_bytes") or 0) for item in hourly[-3:]),
+            default=0,
+        )
+        current_bytes = sum(
+            int(item.get("actual_bytes") or 0) for item in retained_t2
+        )
+        candidate_bytes = sum(
+            int(item.get("actual_bytes") or 0)
+            for item in retained_t2
+            if str(item.get("operation_id") or "") in candidate_ids
+        )
+        bounded_bytes_after = max(0, current_bytes - candidate_bytes)
+        capacity = self.capacity_status()
+        free_after_plan = int(capacity["free_bytes"]) + candidate_bytes
+        next_cycle_peak_available = (
+            free_after_plan - recent_checkpoint_bytes
+        )
+        return {
+            "observed_cadence_seconds": cadence_seconds,
+            "recent_checkpoint_bytes": recent_checkpoint_bytes,
+            "current_retained_bytes": current_bytes,
+            "projected_24h_without_gc_bytes": current_bytes
+            + ((24 * 3600) // cadence_seconds) * recent_checkpoint_bytes,
+            "projected_14d_without_gc_bytes": current_bytes
+            + ((14 * 24 * 3600) // cadence_seconds) * recent_checkpoint_bytes,
+            "bounded_bytes_after_plan": bounded_bytes_after,
+            "steady_state_cap_bytes": T2_RETENTION_MAX_BYTES,
+            "steady_state_count_cap": T2_RETENTION_MAX_COUNT,
+            "projected_30d_growth_bytes": 0,
+            "filesystem_free_after_plan_bytes": free_after_plan,
+            "next_cycle_peak_available_bytes": next_cycle_peak_available,
+            "thirty_day_headroom_bytes": next_cycle_peak_available
+            - T2_HARD_STOP_FREE_BYTES,
+            "hard_stop": next_cycle_peak_available < T2_HARD_STOP_FREE_BYTES,
+            "degraded": next_cycle_peak_available < T2_DEGRADED_FREE_BYTES,
         }
 
     def release_failed_canary_pre_mutations(self) -> dict[str, Any]:
@@ -1712,7 +2121,10 @@ class WarehouseRecoveryRegistry:
                     }
                 )
             for path in sorted(owned_paths):
-                if not _path_is_below(path, self.recovery_root):
+                if not any(
+                    _path_is_below(path, root)
+                    for root in self.recovery_roots
+                ):
                     self.quarantine(
                         operation_id,
                         "failed_canary_release_path_outside_recovery_root",
@@ -1813,9 +2225,11 @@ class WarehouseRecoveryRegistry:
         foreign_non_target: list[str] = []
         pre_policy_legacy: list[str] = []
         corrupt_registered: list[dict[str, Any]] = []
-        roots = [self.recovery_root, self.runtime_dir / "backups"]
+        backup_root = (self.runtime_dir / "backups").resolve()
+        roots = [backup_root]
+        if not _path_is_below(self.legacy_recovery_root, backup_root):
+            roots.append(self.legacy_recovery_root)
         legacy_managed: set[str] = set()
-        backup_root = self.runtime_dir / "backups"
         if backup_root.is_dir():
             for manifest_path in backup_root.rglob(f"*{MANIFEST_SUFFIX}"):
                 try:
@@ -1852,6 +2266,7 @@ class WarehouseRecoveryRegistry:
                 is_pre_policy_legacy = (
                     kind != "foreign"
                     and root == backup_root
+                    and not _path_is_below(path, self.recovery_root)
                     and policy_activation_epoch > 0
                     and path_stat.st_mtime <= policy_activation_epoch
                 )
@@ -2007,8 +2422,16 @@ class WarehouseRecoveryRegistry:
         }
 
     def capacity_status(self) -> dict[str, Any]:
-        filesystem_id = _filesystem_id(self.runtime_dir)
-        free_bytes = shutil.disk_usage(self.runtime_dir).free
+        capacity_root = (
+            self.checkpoint_root
+            if self.checkpoint_root.exists()
+            else self.recovery_root.parent
+            if self.recovery_root.parent.exists()
+            else self.runtime_dir
+        )
+        filesystem_id = _filesystem_id(capacity_root)
+        runtime_filesystem_id = _filesystem_id(self.runtime_dir)
+        free_bytes = shutil.disk_usage(capacity_root).free
         reserved = 0
         expired_reservation_count = 0
         if self.db_path.is_file():
@@ -2039,15 +2462,31 @@ class WarehouseRecoveryRegistry:
                         ).fetchone()[0]
                     )
         available = max(0, free_bytes - reserved)
+        t2_degraded = available < T2_DEGRADED_FREE_BYTES
+        t2_hard_stop = available < T2_HARD_STOP_FREE_BYTES
         return {
             "filesystem_id": filesystem_id,
+            "runtime_filesystem_id": runtime_filesystem_id,
+            "routed_to_distinct_filesystem": (
+                filesystem_id != runtime_filesystem_id
+            ),
             "free_bytes": int(free_bytes),
             "reserved_bytes": reserved,
             "expired_reservation_count": expired_reservation_count,
             "operational_reserve_bytes": self.operational_reserve_bytes,
+            "artifact_root": str(self.recovery_root),
+            "legacy_artifact_root": str(self.legacy_recovery_root),
+            "degraded_watermark_bytes": T2_DEGRADED_FREE_BYTES,
+            "hard_stop_watermark_bytes": T2_HARD_STOP_FREE_BYTES,
             "available_after_reservations_bytes": available,
+            # Keep the established generic capacity semantics for T1 and
+            # callers that use a custom operational reserve. T2 receives
+            # separate absolute watermarks because it is routed to the
+            # backup filesystem and needs a stronger disk-full guard.
             "degraded": available < self.operational_reserve_bytes * 2,
             "hard_stop": available < self.operational_reserve_bytes,
+            "t2_degraded": t2_degraded,
+            "t2_hard_stop": t2_hard_stop,
         }
 
     def writer_state(self) -> dict[str, Any]:
@@ -2084,6 +2523,7 @@ class WarehouseRecoveryRegistry:
         operations = self.list_operations(limit=limit)
         orphan = self.scan_orphans()
         capacity = self.capacity_status()
+        retention = self.plan_retention()
         has_failure = any(
             item.get("lifecycle")
             in {
@@ -2105,6 +2545,20 @@ class WarehouseRecoveryRegistry:
             ),
             "operations": operations,
             "capacity": capacity,
+            "retention": {
+                "status": retention["status"],
+                "fingerprint": retention["fingerprint"],
+                "would_change": retention["would_change"],
+                "candidate_count": retention["candidate_count"],
+                "candidate_bytes": retention["candidate_bytes"],
+                "retained_t2_count": retention["retained_t2_count"],
+                "retained_t2_bytes": retention["retained_t2_bytes"],
+                "protected_operation_ids": retention[
+                    "protected_operation_ids"
+                ],
+                "policy": retention["policy"],
+                "projection": retention["projection"],
+            },
             "orphan_scanner": {
                 "status": orphan["status"],
                 "orphan_count": orphan["orphan_count"],
@@ -2365,7 +2819,15 @@ class WarehouseRecoveryRegistry:
         filesystem_id = _filesystem_id(target_root)
         free_bytes = shutil.disk_usage(target_root).free
         required = max(int(required_bytes), 0)
-        operational_reserve = self.operational_reserve_bytes
+        is_t2_artifact = any(
+            _path_is_below(target_root.resolve(), root)
+            for root in self.recovery_roots
+        )
+        operational_reserve = (
+            max(self.operational_reserve_bytes, T2_HARD_STOP_FREE_BYTES)
+            if is_t2_artifact
+            else self.operational_reserve_bytes
+        )
         now = self.clock()
         expires_at = now + timedelta(seconds=DEFAULT_RESERVATION_TTL_SECONDS)
         reservation_id = f"rsv_{hashlib.sha256(operation_id.encode()).hexdigest()[:24]}"
@@ -2480,11 +2942,19 @@ class WarehouseRecoveryRegistry:
 
     def _assert_post_write_reserve(self, target_root: Path) -> None:
         free_bytes = int(shutil.disk_usage(Path(target_root)).free)
-        if free_bytes < self.operational_reserve_bytes:
+        required_reserve = (
+            max(self.operational_reserve_bytes, T2_HARD_STOP_FREE_BYTES)
+            if any(
+                _path_is_below(Path(target_root).resolve(), root)
+                for root in self.recovery_roots
+            )
+            else self.operational_reserve_bytes
+        )
+        if free_bytes < required_reserve:
             raise RecoveryPolicyError(
                 "recovery post-write reserve breached: "
                 f"free_bytes={free_bytes}, "
-                f"required_reserve_bytes={self.operational_reserve_bytes}"
+                f"required_reserve_bytes={required_reserve}"
             )
 
     def _expire_reservations(self) -> None:
@@ -2963,6 +3433,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_recovery_artifacts_by_operation
           ON sheet_vitrina_v1_recovery_artifacts(operation_id,artifact_kind,state);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_recovery_retention_runs(
+            retention_run_id TEXT PRIMARY KEY,
+            plan_fingerprint TEXT NOT NULL UNIQUE,
+            plan_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            removed_bytes INTEGER NOT NULL,
+            removed_paths_json TEXT NOT NULL,
+            error_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_recovery_undo_rows(
             operation_id TEXT NOT NULL,
             sequence_no INTEGER NOT NULL,
@@ -3106,6 +3587,51 @@ def _public_operation(
     }
 
 
+def _retention_candidate(
+    operation: Mapping[str, Any],
+    *,
+    reasons: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "operation_id": str(operation.get("operation_id") or ""),
+        "operation_kind": str(operation.get("operation_kind") or ""),
+        "tier": str(operation.get("tier") or ""),
+        "lifecycle": str(operation.get("lifecycle") or ""),
+        "state_version": int(operation.get("state_version") or 0),
+        "created_at": str(operation.get("created_at") or ""),
+        "rollback_expires_at": str(
+            (operation.get("rollback") or {}).get("expires_at") or ""
+        ),
+        "actual_bytes": int(operation.get("actual_bytes") or 0),
+        "reasons": sorted(set(str(reason) for reason in reasons)),
+        "artifacts": [
+            {
+                "artifact_id": str(artifact.get("artifact_id") or ""),
+                "artifact_kind": str(artifact.get("artifact_kind") or ""),
+                "path": str(artifact.get("path") or ""),
+                "size_bytes": int(artifact.get("size_bytes") or 0),
+                "digest": str(artifact.get("digest") or ""),
+                "state": str(artifact.get("state") or ""),
+            }
+            for artifact in operation.get("artifacts", [])
+        ],
+    }
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RecoveryPolicyError(
+            f"invalid recovery timestamp: {value!r}"
+        ) from exc
+    return (
+        parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None
+        else parsed.astimezone(timezone.utc)
+    )
+
+
 def _operation_id(mutation_kind: str, plan_fingerprint: str) -> str:
     material = f"{str(mutation_kind).strip()}:{str(plan_fingerprint).strip()}"
     return "recovery_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
@@ -3225,6 +3751,13 @@ def _json_value(value: Any) -> Any:
 def _json_object(value: Any) -> dict[str, Any]:
     parsed = _json_value(value)
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _json_array(value: Any) -> list[Any]:
+    parsed = _json_value(value)
+    if not isinstance(parsed, list):
+        raise RecoveryPolicyError("stored recovery JSON must be an array")
+    return parsed
 
 
 def _clone(value: Any) -> Any:

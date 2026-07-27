@@ -64,12 +64,18 @@ through this module; legacy invoice-specific apply entrypoints fail closed.
 Durable state is stored in the runtime SQLite recovery registry. T1 before
 images, including reversible SQLite BLOBs, and undo rows remain inside that
 registry. T2 artifacts live below
-`state/warehouse-recovery/domain-checkpoints/` as private SQLite checkpoints
+`state/backups/warehouse-recovery/domain-checkpoints/` as private SQLite checkpoints
 plus manifests; their table filter rejects `wb_finance_weekly_raw_rows` and
 their schema/capacity inventory includes table, explicit/implicit index and
 trigger closure.
 Capacity reservations, artifact identity, CAS lifecycle, rollback expiry,
 writer/timer state and orphan/quarantine status share the same registry.
+The Stage 4 authoritative retention/sanitation extension is
+`migration/125_storage_recovery_sanitation.md`: it routes T2 to the dedicated
+backup mount, runs automatic pre/post-publication age/count/byte retention and
+provides a separate exact-family legacy cleanup runner. The previous
+`state/warehouse-recovery` path remains a read/retention compatibility root
+only; new checkpoints are not written there.
 
 Operator readback is
 `GET /v1/sheet-vitrina-v1/warehouses/recovery`; the warehouse update tab renders
@@ -194,6 +200,15 @@ It is read-only by default. Any cleanup plan is exact-fingerprint gated and can
 only act on a lifecycle transition authorized by policy. Retention covers raw,
 archive, manifest, temp, undo and registry states. A corrupt or incomplete
 family is quarantined, never guessed to be disposable.
+
+Successful T2 steady state is bounded simultaneously by rollback minimum,
+count, bytes and age: protect the two newest verified points, keep at most
+three, allow at most 2 GiB for the optional third point and release superseded
+points after 24 hours. Apply runs automatically before and after the
+hourly/manual writer under its existing lock. Its stable plan excludes wall
+clock generation time but includes operation state/version and exact artifact
+identity. Failed, quarantined, corrupt, incomplete and foreign evidence is
+never selected.
 
 ### Capacity contract
 

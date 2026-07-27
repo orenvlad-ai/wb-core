@@ -5377,6 +5377,7 @@
           </div>
           <div class="warehouse-summary">
             <div class="warehouse-summary-item"><span class="warehouse-summary-label">Capacity</span><span class="warehouse-summary-value" data-warehouse-recovery-capacity>—</span></div>
+            <div class="warehouse-summary-item"><span class="warehouse-summary-label">Retention / 30 дней</span><span class="warehouse-summary-value" data-warehouse-recovery-retention>—</span></div>
             <div class="warehouse-summary-item"><span class="warehouse-summary-label">Writer / timer</span><span class="warehouse-summary-value" data-warehouse-recovery-writer>—</span></div>
             <div class="warehouse-summary-item"><span class="warehouse-summary-label">Orphan / quarantine</span><span class="warehouse-summary-value" data-warehouse-recovery-orphans>—</span></div>
             <div class="warehouse-summary-item"><span class="warehouse-summary-label">Следующее действие</span><span class="warehouse-summary-value" data-warehouse-recovery-next>—</span></div>
@@ -6273,6 +6274,7 @@
     const warehouseUpdateTechnicalNode = document.querySelector("[data-warehouse-update-technical]");
     const warehouseRecoveryStatusNode = document.querySelector("[data-warehouse-recovery-status]");
     const warehouseRecoveryCapacityNode = document.querySelector("[data-warehouse-recovery-capacity]");
+    const warehouseRecoveryRetentionNode = document.querySelector("[data-warehouse-recovery-retention]");
     const warehouseRecoveryWriterNode = document.querySelector("[data-warehouse-recovery-writer]");
     const warehouseRecoveryOrphansNode = document.querySelector("[data-warehouse-recovery-orphans]");
     const warehouseRecoveryNextNode = document.querySelector("[data-warehouse-recovery-next]");
@@ -8612,9 +8614,16 @@
       return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
     }
 
+    function warehouseRecoverySignedBytes(value) {
+      const bytes = Number(value || 0);
+      return (bytes < 0 ? "−" : "") + warehouseRecoveryBytes(Math.abs(bytes));
+    }
+
     function renderWarehouseRecoveryStatus(payload) {
       const operations = Array.isArray(payload && payload.operations) ? payload.operations : [];
       const capacity = (payload && payload.capacity) || {};
+      const retention = (payload && payload.retention) || {};
+      const projection = retention.projection || {};
       const orphan = (payload && payload.orphan_scanner) || {};
       const writer = (payload && payload.writer) || {};
       const timer = (payload && payload.timer) || {};
@@ -8632,7 +8641,16 @@
       if (warehouseRecoveryCapacityNode) {
         warehouseRecoveryCapacityNode.textContent =
           warehouseRecoveryBytes(capacity.available_after_reservations_bytes) +
-          (capacity.hard_stop ? " · hard stop" : capacity.degraded ? " · degraded" : " · available");
+          (capacity.t2_hard_stop ? " · T2 hard stop" : capacity.t2_degraded ? " · T2 degraded" : " · available") +
+          (capacity.routed_to_distinct_filesystem ? " · backup mount" : " · shared filesystem");
+      }
+      if (warehouseRecoveryRetentionNode) {
+        warehouseRecoveryRetentionNode.textContent =
+          String(Number(retention.retained_t2_count || 0)) + " / " +
+          warehouseRecoveryBytes(retention.retained_t2_bytes) + " · cap " +
+          String(Number((retention.policy || {}).t2_max_count || 0)) + " / " +
+          warehouseRecoveryBytes((retention.policy || {}).t2_max_bytes) +
+          " · headroom " + warehouseRecoverySignedBytes(projection.thirty_day_headroom_bytes);
       }
       if (warehouseRecoveryWriterNode) {
         warehouseRecoveryWriterNode.textContent =

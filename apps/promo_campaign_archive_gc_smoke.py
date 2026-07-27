@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.promo_campaign_archive_gc import (  # noqa: E402
-    apply_gc_plan,
+    apply_exact_gc_plan,
     build_gc_report,
     run_promo_campaign_archive_light_gc,
 )
@@ -67,9 +67,27 @@ def main() -> None:
         if plan_paths != expected_paths:
             raise AssertionError(f"GC dry-run must plan only debug files: expected={expected_paths}, got={plan_paths}")
 
-        apply_result = apply_gc_plan(runtime_dir=runtime_dir, plan=report["deletion_plan"])
+        deployed_sha = "b" * 40
+        deployed_sha_file = runtime_dir / "deployed-sha"
+        deployed_sha_file.write_text(deployed_sha, encoding="utf-8")
+        apply_result = apply_exact_gc_plan(
+            runtime_dir=runtime_dir,
+            report=report,
+            fingerprint=report["fingerprint"],
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_sha_file,
+        )
         if apply_result["deleted_count"] != len(removable) or apply_result["errors"]:
             raise AssertionError(f"unexpected apply result: {apply_result}")
+        repeated = apply_exact_gc_plan(
+            runtime_dir=runtime_dir,
+            report=report,
+            fingerprint=report["fingerprint"],
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_sha_file,
+        )
+        if not repeated["idempotent"] or repeated["applied"]:
+            raise AssertionError(f"exact promo GC apply must be idempotent: {repeated}")
         for path in removable:
             if path.exists():
                 raise AssertionError(f"debug file was not deleted in temp fixture: {path}")
