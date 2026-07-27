@@ -3227,6 +3227,147 @@ def _restore_finance_storage_window(
     return evidence
 
 
+def _abort_finance_storage_window_acquire(
+    target: HostedRuntimeTarget,
+    *,
+    window_id: str,
+    fingerprint: str,
+    reason: str,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    status = _run_remote_business_data_maintenance_runner(
+        target,
+        action="status",
+    )
+    evidence["pre_abort_status"] = status
+    paused_revision = int(
+        ((status.get("auto_updates") or {}).get("revision") or 0)
+    )
+    if paused_revision <= 0:
+        raise RuntimeError(
+            "Finance acquire abort lacks exact paused policy revision"
+        )
+    restore = _run_remote_business_data_maintenance_runner(
+        target,
+        action="restore",
+        expected_revision=paused_revision,
+        actor="finance_storage_window_runner",
+        reason=reason,
+        allow_pre_hold_service_continuity=True,
+    )
+    evidence["business_restore"] = restore
+    if (
+        str(restore.get("status") or "") != "restored"
+        or restore.get("exact_prior_state_restored") is not True
+    ):
+        raise RuntimeError(
+            "Finance acquire abort exact control restore is incomplete"
+        )
+    evidence["warehouse_restore"] = (
+        _run_remote_warehouse_functional_maintenance_action(
+            target,
+            action="restore",
+        )
+    )
+    evidence["barrier_abort"] = (
+        _run_remote_business_data_maintenance_runner(
+            target,
+            action="barrier-abort",
+            actor="finance_storage_window_runner",
+            reason="unconfirmed Finance window aborted after exact restore",
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+    )
+    return evidence
+
+
+def _acquire_and_confirm_finance_storage_window(
+    target: HostedRuntimeTarget,
+    *,
+    transition_evidence: dict[str, Any],
+    actor: str,
+    reason: str,
+    window_id: str,
+    window_kind: str,
+    fingerprint: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    transition_evidence["barrier_acquire"] = (
+        _run_remote_business_data_maintenance_runner(
+            target,
+            action="barrier-acquire",
+            actor=actor,
+            reason=reason,
+            window_id=window_id,
+            window_kind=window_kind,
+            plan_fingerprint=fingerprint,
+            approval_reference=approval_reference,
+        )
+    )
+    try:
+        transition_evidence["core_prepare"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="prepare",
+                actor=actor,
+                reason=reason,
+            )
+        )
+        transition_evidence["warehouse_hold"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="hold",
+                disable_timer=True,
+            )
+        )
+        hold = _run_remote_business_data_maintenance_runner(
+            target,
+            action="hold",
+            actor=actor,
+            reason=reason,
+        )
+        transition_evidence["business_hold"] = hold
+        if (
+            str(hold.get("status") or "") != "held"
+            or hold.get("quiet") is not True
+        ):
+            raise RuntimeError(
+                "Finance writer/timer hold readback is incomplete"
+            )
+    except Exception as hold_error:
+        try:
+            transition_evidence["acquire_abort"] = (
+                _abort_finance_storage_window_acquire(
+                    target,
+                    window_id=window_id,
+                    fingerprint=fingerprint,
+                    reason=(
+                        f"{reason}: drain failed before hold confirmation"
+                    ),
+                )
+            )
+        except Exception as recovery_error:
+            raise RuntimeError(
+                "Finance drain failed before hold confirmation; the barrier "
+                "remains active because exact abort restore also failed: "
+                f"hold={hold_error}; restore={recovery_error}"
+            ) from recovery_error
+        raise RuntimeError(
+            "Finance drain failed before hold confirmation; exact controls "
+            f"and barrier were restored: {hold_error}"
+        ) from hold_error
+    transition_evidence["barrier_confirm"] = (
+        _run_remote_business_data_maintenance_runner(
+            target,
+            action="barrier-confirm",
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+    )
+    return hold
+
+
 def _restart_finance_cutover_http_service(
     target: HostedRuntimeTarget,
 ) -> dict[str, Any]:
@@ -3328,54 +3469,15 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
         window_id = (
             "rollback-" + fingerprint.removeprefix("sha256:")[:20]
         )
-        transition_evidence["barrier_acquire"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="barrier-acquire",
-                actor="finance_storage_rollback_runner",
-                reason="Finance split rollback drill",
-                window_id=window_id,
-                window_kind="rollback_drill",
-                plan_fingerprint=fingerprint,
-                approval_reference=approval_reference,
-            )
-        )
-        transition_evidence["core_prepare"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="prepare",
-                actor="finance_storage_rollback_runner",
-                reason="Finance split rollback drill",
-            )
-        )
-        transition_evidence["warehouse_hold"] = (
-            _run_remote_warehouse_functional_maintenance_action(
-                target,
-                action="hold",
-                disable_timer=True,
-            )
-        )
-        hold = _run_remote_business_data_maintenance_runner(
+        hold = _acquire_and_confirm_finance_storage_window(
             target,
-            action="hold",
+            transition_evidence=transition_evidence,
             actor="finance_storage_rollback_runner",
             reason="Finance split rollback drill",
-        )
-        transition_evidence["business_hold"] = hold
-        if (
-            str(hold.get("status") or "") != "held"
-            or hold.get("quiet") is not True
-        ):
-            raise RuntimeError(
-                "Finance rollback writer/timer hold readback is incomplete"
-            )
-        transition_evidence["barrier_confirm"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="barrier-confirm",
-                window_id=window_id,
-                plan_fingerprint=fingerprint,
-            )
+            window_id=window_id,
+            window_kind="rollback_drill",
+            fingerprint=fingerprint,
+            approval_reference=approval_reference,
         )
         try:
             payload = _run_remote_finance_storage_split_action(
@@ -3460,54 +3562,15 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             "final-cutover-"
             + fingerprint.removeprefix("sha256:")[:20]
         )
-        transition_evidence["barrier_acquire"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="barrier-acquire",
-                actor="finance_storage_cutover_runner",
-                reason="atomic Finance split final cutover",
-                window_id=window_id,
-                window_kind="final_cutover",
-                plan_fingerprint=fingerprint,
-                approval_reference=approval_reference,
-            )
-        )
-        transition_evidence["core_prepare"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="prepare",
-                actor="finance_storage_cutover_runner",
-                reason="atomic Finance split final cutover",
-            )
-        )
-        transition_evidence["warehouse_hold"] = (
-            _run_remote_warehouse_functional_maintenance_action(
-                target,
-                action="hold",
-                disable_timer=True,
-            )
-        )
-        hold = _run_remote_business_data_maintenance_runner(
+        hold = _acquire_and_confirm_finance_storage_window(
             target,
-            action="hold",
+            transition_evidence=transition_evidence,
             actor="finance_storage_cutover_runner",
             reason="atomic Finance split final cutover",
-        )
-        transition_evidence["business_hold"] = hold
-        if (
-            str(hold.get("status") or "") != "held"
-            or hold.get("quiet") is not True
-        ):
-            raise RuntimeError(
-                "Finance cutover writer/timer hold readback is incomplete"
-            )
-        transition_evidence["barrier_confirm"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="barrier-confirm",
-                window_id=window_id,
-                plan_fingerprint=fingerprint,
-            )
+            window_id=window_id,
+            window_kind="final_cutover",
+            fingerprint=fingerprint,
+            approval_reference=approval_reference,
         )
         try:
             payload = _run_remote_finance_storage_split_action(
@@ -3601,35 +3664,59 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 approval_reference=approval_reference,
             )
         )
-        transition_evidence["core_prepare"] = (
-            _run_remote_business_data_maintenance_runner(
+        try:
+            transition_evidence["core_prepare"] = (
+                _run_remote_business_data_maintenance_runner(
+                    target,
+                    action="prepare",
+                    actor="finance_storage_snapshot_runner",
+                    reason="coherent Finance migration source snapshot",
+                )
+            )
+            transition_evidence["warehouse_hold"] = (
+                _run_remote_warehouse_functional_maintenance_action(
+                    target,
+                    action="hold",
+                    disable_timer=True,
+                )
+            )
+            hold = _run_remote_business_data_maintenance_runner(
                 target,
-                action="prepare",
+                action="hold",
                 actor="finance_storage_snapshot_runner",
                 reason="coherent Finance migration source snapshot",
             )
-        )
-        transition_evidence["warehouse_hold"] = (
-            _run_remote_warehouse_functional_maintenance_action(
-                target,
-                action="hold",
-                disable_timer=True,
-            )
-        )
-        hold = _run_remote_business_data_maintenance_runner(
-            target,
-            action="hold",
-            actor="finance_storage_snapshot_runner",
-            reason="coherent Finance migration source snapshot",
-        )
-        transition_evidence["business_hold"] = hold
-        if (
-            str(hold.get("status") or "") != "held"
-            or hold.get("quiet") is not True
-        ):
+            transition_evidence["business_hold"] = hold
+            if (
+                str(hold.get("status") or "") != "held"
+                or hold.get("quiet") is not True
+            ):
+                raise RuntimeError(
+                    "Finance snapshot writer/timer hold readback is incomplete"
+                )
+        except Exception as hold_error:
+            try:
+                transition_evidence["acquire_abort"] = (
+                    _abort_finance_storage_window_acquire(
+                        target,
+                        window_id=window_id,
+                        fingerprint=fingerprint,
+                        reason=(
+                            "Finance snapshot drain failed before hold "
+                            "confirmation"
+                        ),
+                    )
+                )
+            except Exception as recovery_error:
+                raise RuntimeError(
+                    "Finance snapshot drain failed before hold confirmation; "
+                    "the barrier remains active because exact abort restore "
+                    f"also failed: hold={hold_error}; restore={recovery_error}"
+                ) from recovery_error
             raise RuntimeError(
-                "Finance snapshot writer/timer hold readback is incomplete"
-            )
+                "Finance snapshot drain failed before hold confirmation; "
+                f"exact controls and barrier were restored: {hold_error}"
+            ) from hold_error
         transition_evidence["barrier_confirm"] = (
             _run_remote_business_data_maintenance_runner(
                 target,
@@ -5189,6 +5276,7 @@ def _run_remote_business_data_maintenance_runner(
     window_kind: str = "snapshot",
     plan_fingerprint: str = "",
     approval_reference: str = "",
+    allow_pre_hold_service_continuity: bool = False,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
@@ -5204,6 +5292,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-confirm",
         "barrier-restoring",
         "barrier-release",
+        "barrier-abort",
     }:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
     if action in {
@@ -5215,6 +5304,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-confirm",
         "barrier-restoring",
         "barrier-release",
+        "barrier-abort",
     }:
         _ensure_target_allows_mutation(
             target,
@@ -5254,6 +5344,8 @@ def _run_remote_business_data_maintenance_runner(
                 "business-data maintenance restore requires --expected-revision"
             )
         runner_args.extend(["--expected-revision", str(int(expected_revision))])
+        if allow_pre_hold_service_continuity:
+            runner_args.append("--allow-pre-hold-service-continuity")
     elif action == "set-process":
         if expected_revision is None or not process_key or desired not in {"on", "off"}:
             raise ValueError(
@@ -5279,6 +5371,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-confirm",
         "barrier-restoring",
         "barrier-release",
+        "barrier-abort",
     }:
         if not window_id or not plan_fingerprint:
             raise ValueError(
@@ -5311,7 +5404,7 @@ def _run_remote_business_data_maintenance_runner(
                     str(reason or "bounded maintenance window"),
                 ]
             )
-        elif action == "barrier-release":
+        elif action in {"barrier-release", "barrier-abort"}:
             runner_args.extend(
                 [
                     "--actor",
@@ -5391,6 +5484,9 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             expected_revision=int(args.expected_revision),
             actor=str(args.actor or "repo_owned_cli"),
             reason=str(args.reason or "bounded recovery completed"),
+            allow_pre_hold_service_continuity=bool(
+                args.allow_pre_hold_service_continuity
+            ),
         )
         if (
             str(result.get("status") or "") != "restored"
@@ -5457,10 +5553,11 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
                 raise RuntimeError(
                     "business-data maintenance barrier status readback is incomplete"
                 )
-        elif action == "barrier-release":
+        elif action in {"barrier-release", "barrier-abort"}:
             if result.get("active") is not False:
                 raise RuntimeError(
-                    "business-data maintenance barrier release readback is incomplete"
+                    "business-data maintenance barrier release/abort readback "
+                    "is incomplete"
                 )
         elif result.get("active") is not True:
             raise RuntimeError(
@@ -7034,6 +7131,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "barrier-confirm",
             "barrier-restoring",
             "barrier-release",
+            "barrier-abort",
         ),
     )
     business_data_maintenance.add_argument(
@@ -7082,6 +7180,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--approval-reference",
         default="",
         help="Exact human approval reference for barrier acquisition.",
+    )
+    business_data_maintenance.add_argument(
+        "--allow-pre-hold-service-continuity",
+        action="store_true",
+        help=(
+            "Restore an unconfirmed acquiring window while an exact "
+            "pre-hold service generation continues unchanged."
+        ),
     )
     business_data_maintenance.set_defaults(
         handler=run_business_data_maintenance_command,

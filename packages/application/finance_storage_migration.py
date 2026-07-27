@@ -63,12 +63,22 @@ RAW_LEGACY_OBJECTS = frozenset(
 )
 _SYSTEMD_UNITS = (
     "wb-core-registry-http.service",
-    "wb-core-finance-weekly-sync.service",
-    "wb-core-finance-weekly-sync.timer",
+    "wb-core-wb-finance-weekly.service",
+    "wb-core-wb-finance-weekly.timer",
     "wb-core-warehouse-functional-sync.service",
     "wb-core-warehouse-functional-sync.timer",
     "wb-core-sheet-vitrina-refresh.service",
     "wb-core-sheet-vitrina-refresh.timer",
+    "wb-core-sheet-vitrina-closure-retry.service",
+    "wb-core-sheet-vitrina-closure-retry.timer",
+    "wb-core-feedbacks-auto-complaints-tick.service",
+    "wb-core-feedbacks-auto-complaints-tick.timer",
+    "wb-core-spp-tester-schedule-tick.service",
+    "wb-core-spp-tester-schedule-tick.timer",
+    "wb-core-autoanswers-readonly-sync.service",
+    "wb-core-autoanswers-readonly-sync.timer",
+    "wb-core-autoanswers-worker.service",
+    "wb-core-autoanswers-worker.timer",
 )
 _GIB = 1024**3
 
@@ -854,6 +864,15 @@ class FinanceStorageCoherentSnapshot:
             systemd_units,
             hold_confirmed=False,
         )
+        active_business_services = [
+            dict(item)
+            for item in systemd_units
+            if str(item.get("unit") or "").endswith(".service")
+            and str(item.get("unit") or "")
+            != "wb-core-registry-http.service"
+            and str(item.get("active_state") or "")
+            not in {"inactive", "failed"}
+        ]
         blockers: list[dict[str, Any]] = []
         if re.fullmatch(r"[0-9a-f]{40}", self.deployed_sha) is None:
             blockers.append(
@@ -882,6 +901,13 @@ class FinanceStorageCoherentSnapshot:
                 {
                     "code": "unknown_database_writer",
                     "openers": unknown_writers,
+                }
+            )
+        if active_business_services:
+            blockers.append(
+                {
+                    "code": "active_business_writer_service",
+                    "services": active_business_services,
                 }
             )
         direct_inventory = _direct_open_inventory(self.repo_root)
@@ -947,6 +973,7 @@ class FinanceStorageCoherentSnapshot:
                 "systemd_units": systemd_units,
                 "unknown_database_openers": unknown_openers,
                 "unknown_database_writers": unknown_writers,
+                "active_business_services": active_business_services,
                 "hold_contract": [
                     "manual HTTP/API write barrier active before drain",
                     "business-data maintenance exact hold confirmed",

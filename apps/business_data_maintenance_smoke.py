@@ -183,6 +183,119 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
         assert state["runtime_schedule_baseline"]["web_vitrina"]["schedule_policy"]["mode"] == "interval"
 
 
+def _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        unit = "wb-core-sheet-vitrina-closure-retry.service"
+        systemd.service_states[unit] = {
+            "unit": unit,
+            "is_enabled": "static",
+            "is_active": "activating",
+            "properties": {
+                "LoadState": "loaded",
+                "UnitFileState": "static",
+                "ActiveState": "activating",
+                "SubState": "start",
+                "Result": "success",
+                "ExecMainCode": "0",
+                "ExecMainStatus": "0",
+                "MainPID": "4242",
+                "ExecMainStartTimestamp": "Sat 2000-01-01 00:00:00 UTC",
+            },
+        }
+        fingerprint = "sha256:" + "4" * 64
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id="snapshot-abort-smoke",
+            window_kind="snapshot",
+            plan_fingerprint=fingerprint,
+            approval_reference="smoke-approval",
+            actor="smoke",
+            reason="prove abort restore",
+        )
+        old = _with_quiet_local_boundaries()
+        try:
+            prepared = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            assert prepared["quiet"] is False
+            # The production hold that motivated this recovery was captured by
+            # the previous runner version, before MainPID/start-time evidence
+            # was part of the persisted systemd baseline.  Recovery must still
+            # prove the current generation predates the hold, while accepting
+            # that those two fields are absent from the legacy baseline.
+            state_path = runtime_dir / maintenance.STATE_FILENAME
+            legacy_state = json.loads(state_path.read_text())
+            legacy_properties = legacy_state["baseline"]["services"][unit][
+                "properties"
+            ]
+            legacy_properties.pop("MainPID")
+            legacy_properties.pop("ExecMainStartTimestamp")
+            state_path.write_text(json.dumps(legacy_state))
+            policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
+            try:
+                maintenance.maintenance_restore(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=int(policy["revision"]),
+                )
+            except RuntimeError as exc:
+                assert "not quiet before resume" in str(exc)
+            else:
+                raise AssertionError(
+                    "ordinary restore must reject a continuing service"
+                )
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now(
+                    "wb-core-warehouse-functional-sync.timer"
+                )
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                reason="abort unconfirmed hold",
+                expected_revision=int(policy["revision"]),
+                warehouse_restore=restore_warehouse,
+                allow_pre_hold_service_continuity=True,
+            )
+        finally:
+            _restore_local_boundaries(old)
+        assert restored["status"] == "restored"
+        assert restored["exact_prior_state_restored"] is True
+        continuity = restored[
+            "pre_hold_service_continuity_readback"
+        ]
+        assert continuity["services"] == [
+            {
+                "unit": unit,
+                "outcome": "continued",
+                "main_pid": 4242,
+                "started_at": "Sat 2000-01-01 00:00:00 UTC",
+            }
+        ]
+        state = json.loads(
+            (runtime_dir / maintenance.STATE_FILENAME).read_text()
+        )
+        assert state["phase"] == "restored"
+        assert state["pre_hold_service_continuity_readback"] == continuity
+        assert maintenance.barrier_status(runtime_dir)["phase"] == "acquiring"
+
+
 def _assert_unknown_timer_fails_before_mutation() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -662,6 +775,7 @@ def _assert_success_requires_persisted_runtime_readback() -> None:
 
 def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
+    _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
     _assert_unknown_timer_fails_before_mutation()
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()

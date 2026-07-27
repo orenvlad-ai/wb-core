@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from packages.application.business_data_write_barrier import (  # noqa: E402
     BusinessDataWriteBarrierError,
     STATE_FILENAME,
+    abort_barrier_acquire,
     acquire_barrier,
     audit_blocked_request,
     barrier_status,
@@ -168,9 +169,76 @@ def _assert_corrupt_state_fails_closed() -> None:
         assert "private mode 0600" in permissions["error"]
 
 
+def _assert_unconfirmed_acquire_abort_requires_exact_restore() -> None:
+    with tempfile.TemporaryDirectory(prefix="write-barrier-abort-") as raw:
+        runtime_dir = Path(raw)
+        acquire_barrier(
+            runtime_dir,
+            window_id=WINDOW,
+            window_kind="snapshot",
+            plan_fingerprint=PLAN,
+            approval_reference="approval-comment-abort",
+            actor="smoke",
+            reason="abort smoke",
+        )
+        try:
+            abort_barrier_acquire(
+                runtime_dir,
+                window_id=WINDOW,
+                plan_fingerprint=PLAN,
+                actor="smoke",
+                reason="unsafe abort",
+                restore_readback={
+                    "status": "restored",
+                    "exact_prior_state_restored": False,
+                },
+            )
+        except BusinessDataWriteBarrierError as exc:
+            assert "exact maintenance restore" in str(exc)
+        else:
+            raise AssertionError(
+                "acquiring barrier abort without exact restore must fail"
+            )
+        aborted = abort_barrier_acquire(
+            runtime_dir,
+            window_id=WINDOW,
+            plan_fingerprint=PLAN,
+            actor="smoke",
+            reason="pre-hold drain did not complete",
+            restore_readback={
+                "status": "restored",
+                "captured_at": "2026-07-27T00:00:02Z",
+                "exact_prior_state_restored": True,
+                "control_signature": "sha256:" + ("4" * 64),
+                "auto_updates": {
+                    "revision": 21,
+                    "master_desired": True,
+                },
+            },
+        )
+        assert aborted["active"] is False
+        assert aborted["phase"] == "released"
+        state = json.loads(
+            (runtime_dir / STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        assert state["release_kind"] == "acquire_aborted"
+        assert abort_barrier_acquire(
+            runtime_dir,
+            window_id=WINDOW,
+            plan_fingerprint=PLAN,
+            actor="smoke",
+            reason="idempotent abort",
+            restore_readback={
+                "status": "restored",
+                "exact_prior_state_restored": True,
+            },
+        )["idempotent"] is True
+
+
 def main() -> int:
     _assert_lifecycle_survives_process_restart()
     _assert_corrupt_state_fails_closed()
+    _assert_unconfirmed_acquire_abort_requires_exact_restore()
     print("business_data_write_barrier_smoke: OK")
     return 0
 
