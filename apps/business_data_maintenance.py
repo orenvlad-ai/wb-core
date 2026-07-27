@@ -28,6 +28,13 @@ from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
     _build_web_auth_cookie,
     _read_env_file,
 )
+from packages.application.business_data_write_barrier import (  # noqa: E402
+    acquire_barrier,
+    barrier_status,
+    confirm_barrier_hold,
+    mark_barrier_restoring,
+    release_barrier,
+)
 
 
 SCHEMA_VERSION = "business_data_maintenance_v1"
@@ -1545,6 +1552,91 @@ def maintenance_status(
     return result
 
 
+def maintenance_control_signature(
+    status: Mapping[str, Any],
+    *,
+    runtime_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Stable intended/runtime control state used for exact hold restoration."""
+
+    auto_updates = dict(status.get("auto_updates") or {})
+    process_rows = [
+        dict(item)
+        for item in auto_updates.get("processes", [])
+        if isinstance(item, Mapping)
+    ]
+    runtime = dict(status.get("runtime_schedules") or {})
+    web = dict(runtime.get("web_vitrina") or {})
+    feedback = dict(runtime.get("feedback_complaints") or {})
+    spp = dict(runtime.get("spp") or {})
+    process_desired = {
+        str(item.get("process_key") or ""): item.get("desired")
+        for item in process_rows
+    }
+    if process_desired.get("autoanswers") is None:
+        autoanswer_units = (
+            "wb-core-autoanswers-readonly-sync.timer",
+            "wb-core-autoanswers-worker.timer",
+        )
+        known_autoanswer_timers = [
+            dict((status.get("timers") or {}).get(unit) or {})
+            for unit in autoanswer_units
+        ]
+        if all(timer for timer in known_autoanswer_timers):
+            process_desired["autoanswers"] = any(
+                str(timer.get("is_enabled") or "") == "enabled"
+                and str(timer.get("is_active") or "") == "active"
+                for timer in known_autoanswer_timers
+            )
+    timer_control_intent = {
+        str(spec.get("timer") or spec.get("key") or ""): process_desired.get(
+            str(spec.get("key") or "")
+        )
+        for spec in PROCESS_SPECS
+        if spec.get("timer")
+    }
+    timer_control_intent["autoanswers"] = process_desired.get("autoanswers")
+    payload = {
+        "master_desired": auto_updates.get("master_desired"),
+        "process_desired": process_desired,
+        "timer_control_intent": timer_control_intent,
+        "runtime_schedule_intent": {
+            "web_vitrina": {
+                "schedule_count": int(web.get("schedule_count") or 0),
+                "enabled_ids": sorted(
+                    str(value) for value in web.get("enabled_ids", [])
+                ),
+                "schedule_policy": dict(web.get("schedule_policy") or {}),
+            },
+            "feedback_complaints": {
+                "schedule_count": int(feedback.get("schedule_count") or 0),
+                "enabled_ids": sorted(
+                    str(value) for value in feedback.get("enabled_ids", [])
+                ),
+            },
+            "spp": {
+                "enabled": bool(spp.get("enabled")),
+                "schedule_id": str(spp.get("schedule_id") or ""),
+            },
+        },
+        "unknown_wb_core_timers": sorted(
+            str(value) for value in status.get("unknown_wb_core_timers", [])
+        ),
+        "cron_entries": [
+            {
+                "source": str((item or {}).get("source") or ""),
+                "entry": str((item or {}).get("entry") or ""),
+            }
+            for item in status.get("cron_entries", [])
+            if isinstance(item, Mapping)
+        ],
+    }
+    return {
+        "payload": payload,
+        "fingerprint": _stable_fingerprint(payload),
+    }
+
+
 def maintenance_hold(
     runtime_dir: Path,
     *,
@@ -1636,6 +1728,75 @@ def maintenance_restore(
     warehouse_restore: Any | None = None,
     autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
+    state_path = runtime_dir / STATE_FILENAME
+    maintenance_state = _load_json_object(state_path) or {}
+    baseline = dict(maintenance_state.get("baseline") or {})
+    expected_control = dict(
+        maintenance_state.get("control_signature_before_hold") or {}
+    )
+    if not baseline or not str(expected_control.get("fingerprint") or ""):
+        raise RuntimeError(
+            "exact prior maintenance control state is missing; restore is fail-closed"
+        )
+    prior_master_desired = (baseline.get("auto_updates") or {}).get(
+        "master_desired"
+    )
+    if not isinstance(prior_master_desired, bool):
+        raise RuntimeError(
+            "prior master desired state is unknown; restore is fail-closed"
+        )
+
+    def finish_exact_restore(
+        final_status: Mapping[str, Any],
+        *,
+        policy_revision: int,
+        idempotent: bool,
+    ) -> dict[str, Any]:
+        control = maintenance_control_signature(
+            final_status,
+            runtime_dir=runtime_dir,
+        )
+        expected_fingerprint = str(expected_control.get("fingerprint") or "")
+        if control["fingerprint"] != expected_fingerprint:
+            raise RuntimeError(
+                "exact prior maintenance control state was not restored: "
+                f"expected {expected_fingerprint}, got {control['fingerprint']}"
+            )
+        updated_state = _load_json_object(state_path) or maintenance_state
+        updated_state.update(
+            {
+                "phase": "restored",
+                "restored_at": _utc_now(),
+                "restore_policy_revision": policy_revision,
+                "restore_readback": dict(final_status),
+                "restore_control_signature": control,
+                "exact_prior_state_restored": True,
+            }
+        )
+        _save_json_0600(state_path, updated_state)
+        _append_audit_0600(
+            runtime_dir / AUDIT_FILENAME,
+            {
+                "event": "hold_restored",
+                "captured_at": _utc_now(),
+                "policy_revision": policy_revision,
+                "exact_prior_state_restored": True,
+                "control_signature": control["fingerprint"],
+                "status": dict(final_status),
+            },
+        )
+        return {
+            **dict(final_status),
+            "status": "restored",
+            "idempotent": idempotent,
+            "exact_prior_state_restored": True,
+            "control_signature": control["fingerprint"],
+            "auto_updates": owner_policy_readback(
+                runtime_dir,
+                status=final_status,
+            ),
+        }
+
     raw_policy = _load_json_object(runtime_dir / POLICY_FILENAME) or {}
     restore_legacy_schedule_hold = (
         str(raw_policy.get("schema_version") or "")
@@ -1684,14 +1845,17 @@ def maintenance_restore(
         )
     before = preflight
     if bool(policy.get("master_desired")):
+        if not prior_master_desired:
+            raise RuntimeError(
+                "current master state is enabled but prior state was paused"
+            )
         readback = owner_policy_readback(runtime_dir, status=before)
         if not readback["unknown_processes"] and not readback["drift_processes"]:
-            return {
-                **before,
-                "status": "restored",
-                "idempotent": True,
-                "auto_updates": readback,
-            }
+            return finish_exact_restore(
+                before,
+                policy_revision=revision,
+                idempotent=True,
+            )
         raise RuntimeError(
             "owner policy is already resumed but desired/actual drift exists: "
             + ",".join(readback["drift_processes"] or readback["unknown_processes"])
@@ -1713,6 +1877,12 @@ def maintenance_restore(
         raise RuntimeError("maintenance/shared lock is still held")
     if not before["quiet"]:
         raise RuntimeError("business-data maintenance is not quiet before resume")
+    if not prior_master_desired:
+        return finish_exact_restore(
+            before,
+            policy_revision=revision,
+            idempotent=True,
+        )
     try:
         if restore_legacy_schedule_hold:
             schedules.restore_legacy_hold(schedule_baseline)
@@ -1860,32 +2030,37 @@ def maintenance_restore(
         schedules=schedules,
         proc_root=proc_root,
     )
-    state_path = runtime_dir / STATE_FILENAME
-    state = _load_json_object(state_path) or {}
-    state.update(
-        {
-            "phase": "restored",
-            "restored_at": _utc_now(),
-            "restore_policy_revision": policy["revision"],
-            "restore_readback": final,
-        }
-    )
-    _save_json_0600(state_path, state)
-    _append_audit_0600(
-        runtime_dir / AUDIT_FILENAME,
-        {
-            "event": "hold_restored",
-            "captured_at": _utc_now(),
-            "policy_revision": policy["revision"],
-            "status": final,
-        },
-    )
-    return {
-        **final,
-        "status": "restored",
-        "idempotent": False,
-        "auto_updates": owner_policy_readback(runtime_dir, status=final),
-    }
+    try:
+        return finish_exact_restore(
+            final,
+            policy_revision=int(policy["revision"]),
+            idempotent=False,
+        )
+    except Exception:
+        _set_master_policy_paused(
+            runtime_dir,
+            actor=actor,
+            reason="fail-closed after exact restore mismatch",
+            runtime_schedule_baseline=schedule_baseline,
+            pre_hold_readback=final,
+        )
+        for unit in CORE_TIMER_UNITS + (
+            "wb-core-warehouse-functional-sync.timer",
+        ):
+            systemd.disable_now(unit)
+        try:
+            (autoanswers_reconcile or _reconcile_autoanswers_lifecycle)(
+                runtime_dir,
+                suspended_by_master=True,
+                actor=actor,
+                reason="fail-closed after exact restore mismatch",
+                systemd=systemd,
+            )
+        except Exception:
+            systemd.disable_now("wb-core-autoanswers-worker.timer")
+            systemd.disable_now("wb-core-autoanswers-readonly-sync.timer")
+        schedules.disable_all(schedules.read_all())
+        raise
 
 
 def maintenance_prepare(
@@ -1908,8 +2083,24 @@ def maintenance_prepare(
             raise RuntimeError("business maintenance state is not a JSON object")
         if str(loaded.get("phase") or "") not in {"restored", "released"}:
             existing = loaded
+    if existing is not None and not str(
+        (existing.get("control_signature_before_hold") or {}).get(
+            "fingerprint"
+        )
+        or ""
+    ):
+        raise RuntimeError(
+            "active maintenance state predates exact control-signature "
+            "capture; prior state is unknown and mutation is fail-closed"
+        )
+    owner_policy_existed = (runtime_dir / POLICY_FILENAME).is_file()
     before_payloads = schedules.read_all()
     before = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
+    prior_auto_updates = (
+        owner_policy_readback(runtime_dir, status=before)
+        if owner_policy_existed
+        else {}
+    )
     already_quiet = bool(before["quiet"])
     if before["unknown_wb_core_timers"]:
         raise RuntimeError(f"unknown wb-core timers require explicit classification: {before['unknown_wb_core_timers']}")
@@ -1935,6 +2126,22 @@ def maintenance_prepare(
         runtime_schedule_baseline=before_payloads,
         pre_hold_readback=before,
     )
+    if not prior_auto_updates:
+        prior_auto_updates = owner_policy_readback(runtime_dir, status=before)
+        prior_auto_updates["master_desired"] = any(
+            item.get("desired") is True
+            for item in prior_auto_updates.get("processes", [])
+            if isinstance(item, Mapping)
+        )
+    baseline_with_policy = dict(before)
+    baseline_with_policy["auto_updates"] = prior_auto_updates
+    if not state.get("control_signature_before_hold"):
+        state["baseline"] = baseline_with_policy
+        state["control_signature_before_hold"] = maintenance_control_signature(
+            baseline_with_policy,
+            runtime_dir=runtime_dir,
+        )
+        _save_json_0600(state_path, state)
 
     (autoanswers_reconcile or _reconcile_autoanswers_lifecycle)(
         runtime_dir,
@@ -1957,7 +2164,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=("status", "prepare", "hold", "restore", "set-process"),
+        choices=(
+            "status",
+            "prepare",
+            "hold",
+            "restore",
+            "set-process",
+            "barrier-status",
+            "barrier-acquire",
+            "barrier-confirm",
+            "barrier-restoring",
+            "barrier-release",
+        ),
     )
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--env-file", required=True)
@@ -1969,7 +2187,80 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-revision", type=int)
     parser.add_argument("--actor", default="repo_owned_cli")
     parser.add_argument("--reason", default="")
+    parser.add_argument("--window-id", default="")
+    parser.add_argument(
+        "--window-kind",
+        choices=("snapshot", "final_cutover", "rollback_drill"),
+        default="snapshot",
+    )
+    parser.add_argument("--plan-fingerprint", default="")
+    parser.add_argument("--approval-reference", default="")
     args = parser.parse_args(argv)
+    runtime_dir = Path(args.runtime_dir).resolve()
+    if args.action == "barrier-status":
+        result = barrier_status(runtime_dir)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if args.action == "barrier-acquire":
+        result = acquire_barrier(
+            runtime_dir,
+            window_id=args.window_id,
+            window_kind=args.window_kind,
+            plan_fingerprint=args.plan_fingerprint,
+            approval_reference=args.approval_reference,
+            actor=args.actor,
+            reason=args.reason,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if args.action == "barrier-confirm":
+        result = confirm_barrier_hold(
+            runtime_dir,
+            window_id=args.window_id,
+            plan_fingerprint=args.plan_fingerprint,
+            maintenance_state=(
+                _load_json_object(runtime_dir / STATE_FILENAME) or {}
+            ),
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if args.action == "barrier-restoring":
+        result = mark_barrier_restoring(
+            runtime_dir,
+            window_id=args.window_id,
+            plan_fingerprint=args.plan_fingerprint,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if args.action == "barrier-release":
+        maintenance_state = _load_json_object(runtime_dir / STATE_FILENAME) or {}
+        restore_readback = dict(maintenance_state.get("restore_readback") or {})
+        restore_readback.update(
+            {
+                "status": str(maintenance_state.get("phase") or ""),
+                "exact_prior_state_restored": bool(
+                    maintenance_state.get("exact_prior_state_restored")
+                ),
+                "control_signature": str(
+                    (
+                        maintenance_state.get("restore_control_signature")
+                        or {}
+                    ).get("fingerprint")
+                    or ""
+                ),
+            }
+        )
+        result = release_barrier(
+            runtime_dir,
+            window_id=args.window_id,
+            plan_fingerprint=args.plan_fingerprint,
+            actor=args.actor,
+            reason=args.reason,
+            restore_readback=restore_readback,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
     env = _read_env_file(Path(args.env_file))
     base_url = (
         args.base_url
@@ -1977,12 +2268,18 @@ def main(argv: list[str] | None = None) -> int:
         or f"http://{env.get('REGISTRY_UPLOAD_HTTP_HOST', '127.0.0.1')}:{env.get('REGISTRY_UPLOAD_HTTP_PORT', '8765')}"
     )
     schedules = RuntimeScheduleClient(base_url=base_url, cookie=_build_web_auth_cookie(env))
-    runtime_dir = Path(args.runtime_dir).resolve()
     systemd = SystemdClient()
     if args.action == "status":
         result = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
     elif args.action == "prepare":
-        result = maintenance_prepare(runtime_dir, systemd=systemd, schedules=schedules)
+        result = maintenance_prepare(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            actor=args.actor,
+            reason=args.reason or "canonical cross-writer hold",
+            expected_revision=args.expected_revision,
+        )
     elif args.action == "hold":
         result = maintenance_hold(
             runtime_dir,
@@ -1990,6 +2287,9 @@ def main(argv: list[str] | None = None) -> int:
             schedules=schedules,
             wait_timeout_seconds=args.wait_timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
+            actor=args.actor,
+            reason=args.reason or "canonical cross-writer hold",
+            expected_revision=args.expected_revision,
         )
     elif args.action == "restore":
         result = maintenance_restore(

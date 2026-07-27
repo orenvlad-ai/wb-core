@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 import sqlite3
 import sys
@@ -22,12 +23,24 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
     classify_deduction,
     historical_week_bounds,
 )
+from packages.application.finance_raw_storage import (  # noqa: E402
+    FinanceRawIngestor,
+    bind_generation_identity,
+    ensure_operational_schema,
+    ensure_raw_schema,
+)
+from packages.application.storage_registry import (  # noqa: E402
+    StoreRegistry,
+    atomic_write_manifest,
+    build_manifest,
+)
 
 
 def main() -> None:
     _assert_client_contract()
     _assert_schedule_contract()
     _assert_functional_daily_cost_requires_exact_date()
+    _assert_split_storage_contract()
     with TemporaryDirectory(prefix="wb-finance-weekly-") as tmp:
         block = WbFinanceWeeklyBlock(
             Path(tmp),
@@ -293,6 +306,227 @@ def main() -> None:
         print(
             "wb_finance_weekly: ok -> pagination, 204, 429, merge, idempotency, classifications, COGS, margins, coverage"
         )
+
+
+def _assert_split_storage_contract() -> None:
+    with TemporaryDirectory(prefix="wb-finance-split-") as tmp:
+        runtime = Path(tmp)
+        bootstrap = WbFinanceWeeklyBlock(
+            runtime,
+            seller_id="seller-1",
+            now_factory=lambda: datetime(
+                2026, 7, 7, 3, 0, tzinfo=timezone.utc
+            ),
+        )
+        bootstrap.ensure_schema()
+        _seed_canonical_cost(bootstrap.db_path)
+        generation_root = runtime / "generations" / "split-smoke"
+        generation_root.mkdir(parents=True)
+        raw_path = generation_root / "finance_raw.sqlite3"
+        operational_path = generation_root / "operational.sqlite3"
+        with (
+            sqlite3.connect(bootstrap.db_path) as source,
+            sqlite3.connect(operational_path) as operational,
+        ):
+            source.backup(operational)
+            operational.execute(
+                "DROP INDEX IF EXISTS wb_finance_raw_by_week"
+            )
+            operational.execute(
+                "DROP INDEX IF EXISTS wb_finance_raw_by_sku_week"
+            )
+            operational.execute(
+                "DROP TABLE wb_finance_weekly_raw_rows"
+            )
+            operational.row_factory = sqlite3.Row
+            ensure_operational_schema(operational)
+            bind_generation_identity(
+                operational,
+                logical_store="operational",
+                generation_id="op-split-smoke",
+                generation_epoch="split-smoke",
+                source_fingerprint="sha256:" + ("a" * 64),
+            )
+            operational.commit()
+        with sqlite3.connect(raw_path) as raw:
+            raw.row_factory = sqlite3.Row
+            ensure_raw_schema(raw)
+            bind_generation_identity(
+                raw,
+                logical_store="finance_raw",
+                generation_id="raw-split-smoke",
+                generation_epoch="split-smoke",
+                source_fingerprint="sha256:" + ("a" * 64),
+            )
+            raw.commit()
+        manifest = build_manifest(
+            state="cutover",
+            canonical_source="split",
+            generation_epoch="split-smoke",
+            raw_generation_id="raw-split-smoke",
+            raw_relative_path=str(raw_path.relative_to(runtime)),
+            raw_watermark="0",
+            operational_generation_id="op-split-smoke",
+            operational_relative_path=str(
+                operational_path.relative_to(runtime)
+            ),
+            operational_watermark="fixture",
+            rollback_generation_id="monolith",
+            source_fingerprint="sha256:" + ("a" * 64),
+        )
+        atomic_write_manifest(
+            runtime / "storage_generation_manifest.json",
+            manifest,
+        )
+        block = WbFinanceWeeklyBlock(
+            runtime,
+            seller_id="seller-1",
+            now_factory=lambda: datetime(
+                2026, 7, 7, 3, 0, tzinfo=timezone.utc
+            ),
+        )
+        rows = _fixture_rows()
+        first = block.ingest_week(
+            date(2026, 6, 22),
+            date(2026, 6, 28),
+            rows,
+        )
+        if first["storage_outbox"]["status"] != "committed":
+            raise AssertionError("split Finance raw/outbox commit was not atomic")
+        second = block.ingest_week(
+            date(2026, 6, 22),
+            date(2026, 6, 28),
+            rows,
+            synced_at="2026-07-07T04:00:00Z",
+        )
+        if second["storage_outbox"]["status"] != "no_op":
+            raise AssertionError("repeated split snapshot was not idempotent")
+        block.ingest_week(
+            date(2026, 6, 22),
+            date(2026, 6, 28),
+            rows[:-1],
+            synced_at="2026-07-07T05:00:00Z",
+        )
+        recovery_rows = [
+            {
+                **row,
+                "reportId": int(row["reportId"]) + 10_000,
+                "rrdId": int(row["rrdId"]) + 10_000,
+            }
+            for row in rows
+        ]
+        recovery_hash = hashlib.sha256(
+            "\n".join(
+                sorted(block._row_hash(row) for row in recovery_rows)  # noqa: SLF001
+            ).encode("utf-8")
+        ).hexdigest()
+        recovery_event = FinanceRawIngestor(
+            StoreRegistry(runtime),
+            seller_id="seller-1",
+            now_factory=lambda: "2026-07-07T06:00:00Z",
+        ).ingest_batch(
+            recovery_rows,
+            source_identity="wb-finance-week:2026-06-29/2026-07-05",
+            source_sha256="sha256:" + recovery_hash,
+            week_start="2026-06-29",
+            week_end="2026-07-05",
+        )
+        try:
+            block._acknowledge_split_outbox(  # noqa: SLF001
+                expected_sequence=recovery_event.sequence_no,
+            )
+        except ValueError as exc:
+            if "does not match" not in str(exc):
+                raise
+        else:
+            raise AssertionError(
+                "raw-only crash window was acknowledged without projections"
+            )
+        recovered = block.ingest_week(
+            date(2026, 6, 29),
+            date(2026, 7, 5),
+            recovery_rows,
+            synced_at="2026-07-07T06:05:00Z",
+        )
+        if (
+            recovered["storage_outbox"]["status"] != "no_op"
+            or recovered["storage_outbox"]["acknowledgement"]["status"]
+            != "acknowledged"
+        ):
+            raise AssertionError(
+                "raw-first crash window did not recover idempotently"
+            )
+        with sqlite3.connect(raw_path) as raw:
+            if raw.execute(
+                "SELECT COUNT(*) FROM finance_raw_rows"
+            ).fetchone()[0] != len(rows) + len(recovery_rows):
+                raise AssertionError("immutable raw history was unexpectedly lost")
+            if raw.execute(
+                "SELECT COUNT(*) FROM finance_raw_batch_rows"
+            ).fetchone()[0] != len(rows) + len(rows[:-1]) + len(recovery_rows):
+                raise AssertionError("batch-to-row replay links are incomplete")
+            if raw.execute(
+                "SELECT COUNT(*) FROM finance_raw_current_rows"
+            ).fetchone()[0] != len(rows[:-1]) + len(recovery_rows):
+                raise AssertionError(
+                    "current raw snapshot did not supersede old rows"
+                )
+            if raw.execute(
+                """SELECT COUNT(*) FROM finance_raw_outbox
+                   WHERE published_at IS NULL"""
+            ).fetchone()[0] != 0:
+                raise AssertionError("split Finance outbox was not acknowledged")
+            if raw.execute(
+                """SELECT last_sequence_no
+                   FROM finance_raw_consumer_cursors
+                   WHERE consumer_id='finance_operational_projection_v1'"""
+            ).fetchone()[0] != 3:
+                raise AssertionError("split raw outbox cursor did not advance")
+        with sqlite3.connect(operational_path) as operational:
+            if operational.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table'
+                     AND name='wb_finance_weekly_raw_rows'"""
+            ).fetchone():
+                raise AssertionError(
+                    "split operational store retained Finance raw rows"
+                )
+            sync = operational.execute(
+                """SELECT raw_row_count FROM wb_finance_weekly_sync
+                   WHERE seller_id='seller-1'
+                     AND week_start='2026-06-22'"""
+            ).fetchone()
+            if sync is None or int(sync[0]) != len(rows[:-1]):
+                raise AssertionError(
+                    "split operational projection did not read current raw"
+                )
+            if operational.execute(
+                "SELECT COUNT(*) FROM finance_operational_receipts"
+            ).fetchone()[0] != 3:
+                raise AssertionError(
+                    "split operational outbox receipts are incomplete"
+                )
+            dead_letter = operational.execute(
+                """SELECT status FROM finance_operational_dead_letters
+                   WHERE event_id=?""",
+                (recovery_event.event_id,),
+            ).fetchone()
+            if dead_letter is None or dead_letter[0] != "resolved":
+                raise AssertionError(
+                    "recovered split event did not resolve its failure evidence"
+                )
+        observations = StoreRegistry(runtime).status()[
+            "open_observations"
+        ]
+        if not any(
+            item["logical_store"] == "finance_raw"
+            and item["mode"] == "ro"
+            and item["operation"] == "wb_finance_weekly_raw_read"
+            for item in observations
+        ):
+            raise AssertionError(
+                "split Finance raw reads bypassed registry observation"
+            )
 
 
 def _assert_client_contract() -> None:

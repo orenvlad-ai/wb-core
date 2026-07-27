@@ -136,6 +136,16 @@ Production evidence извлекается через canonical server-side read
 
 Будущий production-data runner создаётся в репозитории и до production gate тестируется на fixtures/mocks. Его обязательный contract: dry-run по умолчанию, отдельный explicit apply flag, bounded scope, machine-readable manifest, pre-change digest, backup/evidence, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и server-only drift production mutation не выполняют.
 
+Для большой live SQLite базы, особенно после любого наблюдаемого corruption
+signal, длительный full `integrity_check`/`quick_check` на writer-owned файле не
+является допустимым mutation preflight. Repo-owned runner сначала проверяет
+WAL/journal и exact writer ownership bounded-операциями, под коротким
+manual-write barrier и quiet hold создаёт coherent SQLite backup, немедленно
+восстанавливает exact prior controls, а полный integrity/foreign-key gate
+выполняет на immutable copy. Любая ошибка copy/integrity, unknown writer,
+source-identity drift, нехватка capacity или сомнение в rollback оставляют
+mutation fail closed.
+
 ## GOAL Mode И Scope
 
 Задача задаётся через проверяемый конечный результат, а не избыточный микроменеджмент. Каждая change-задача фиксирует:

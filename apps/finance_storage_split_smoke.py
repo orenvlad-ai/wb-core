@@ -33,10 +33,23 @@ from packages.application.finance_raw_storage import (
 )
 from packages.application.finance_storage_migration import (
     FinanceStorageCandidateBuilder,
+    FinanceStorageCoherentSnapshot,
+    FinanceStorageCutover,
     FinanceStorageMigrationError,
     FinanceStorageMigrationPlanner,
+    FinanceStorageRollback,
+    FinanceStorageShadowRunner,
+    FinanceStorageShadowVerifier,
     InjectedMigrationFault,
     _accessible_fd_paths,
+    _unknown_snapshot_writers,
+)
+from packages.application.partner_report import PartnerReportBlock
+from packages.application.business_data_write_barrier import (
+    acquire_barrier,
+    confirm_barrier_hold,
+    mark_barrier_restoring,
+    release_barrier,
 )
 from packages.application.storage_registry import (
     StoreRegistry,
@@ -129,7 +142,12 @@ def _create_monolith(runtime_dir: Path, *, rows: int = 5) -> Path:
         )
         for index in range(1, rows + 1):
             raw = _raw_row(10 + (index // 3), 1000 + index)
-            raw_json = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+            raw_json = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             import hashlib
 
             row_hash = hashlib.sha256(raw_json.encode()).hexdigest()
@@ -191,6 +209,72 @@ def _create_maintenance_hold(runtime_dir: Path) -> None:
         encoding="utf-8",
     )
     os.chmod(path, 0o600)
+
+
+def _create_verified_snapshot(runtime_dir: Path) -> Path:
+    snapshot = FinanceStorageCoherentSnapshot(
+        runtime_dir,
+        deployed_sha=DEPLOYED_SHA,
+        repo_root=ROOT,
+    )
+    plan = snapshot.build_plan()
+    if not plan["snapshot_allowed_by_machine_preflight"]:
+        raise AssertionError(f"snapshot fixture plan is blocked: {plan['blockers']}")
+    window_id = str(plan["target_snapshot"]["window_id"])
+    fingerprint = str(plan["fingerprint"])
+    acquire_barrier(
+        runtime_dir,
+        window_id=window_id,
+        window_kind="snapshot",
+        plan_fingerprint=fingerprint,
+        approval_reference="fixture-program-authorization",
+        actor="smoke",
+        reason="coherent snapshot fixture",
+    )
+    _create_maintenance_hold(runtime_dir)
+    maintenance_state = json.loads(
+        (runtime_dir / ".business-data-maintenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    confirm_barrier_hold(
+        runtime_dir,
+        window_id=window_id,
+        plan_fingerprint=fingerprint,
+        maintenance_state=maintenance_state,
+    )
+    created = snapshot.create(
+        reviewed_plan=plan,
+        expected_fingerprint=fingerprint,
+        approval_reference="fixture-program-authorization",
+    )
+    manifest_path = Path(str(created["snapshot_manifest_path"]))
+    mark_barrier_restoring(
+        runtime_dir,
+        window_id=window_id,
+        plan_fingerprint=fingerprint,
+    )
+    release_barrier(
+        runtime_dir,
+        window_id=window_id,
+        plan_fingerprint=fingerprint,
+        actor="smoke",
+        reason="fixture controls restored",
+        restore_readback={
+            "status": "restored",
+            "captured_at": "2026-01-01T00:00:01Z",
+            "exact_prior_state_restored": True,
+            "control_signature": "sha256:" + ("c" * 64),
+            "auto_updates": {
+                "revision": 2,
+                "master_desired": True,
+            },
+        },
+    )
+    verified = snapshot.verify_integrity(manifest_path)
+    if verified["status"] != "integrity_verified":
+        raise AssertionError("coherent snapshot fixture integrity did not verify")
+    return manifest_path
 
 
 class StoreRegistrySmoke(unittest.TestCase):
@@ -538,6 +622,45 @@ class OutboxSmoke(unittest.TestCase):
                     ).fetchone()[0],
                     ingested.sequence_no,
                 )
+                repeated = FinanceRawIngestor(registry).ingest_batch(
+                    [_raw_row(30, 3001), _raw_row(30, 3002)],
+                    source_identity="fixture:tail-2-same-rows",
+                    source_sha256="sha256:" + "1" * 64,
+                    week_start="2026-02-02",
+                    week_end="2026-02-08",
+                )
+                with registry.session(
+                    "finance_raw",
+                    mode="ro",
+                    operation="live_tail_reused_rows_smoke",
+                ) as source:
+                    replay = bridge.apply_next(
+                        source=source,
+                        destination=destination,
+                    )
+                    self.assertIsNotNone(replay)
+                    self.assertEqual(
+                        replay["sequence_no"],
+                        repeated.sequence_no,
+                    )
+                self.assertEqual(
+                    destination.execute(
+                        "SELECT COUNT(*) FROM finance_raw_rows"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    destination.execute(
+                        "SELECT COUNT(*) FROM finance_raw_batch_rows"
+                    ).fetchone()[0],
+                    4,
+                )
+                self.assertEqual(
+                    destination.execute(
+                        "SELECT COUNT(*) FROM finance_raw_current_rows"
+                    ).fetchone()[0],
+                    2,
+                )
 
 
 class MigrationSmoke(unittest.TestCase):
@@ -587,7 +710,7 @@ class MigrationSmoke(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 FinanceStorageMigrationError,
-                "maintenance hold",
+                "verified immutable coherent snapshot",
             ):
                 FinanceStorageCandidateBuilder(
                     planner,
@@ -595,7 +718,26 @@ class MigrationSmoke(unittest.TestCase):
                     approval_reference="fixture-human-gate",
                 ).apply()
             self.assertFalse((runtime / "generations").exists())
-            _create_maintenance_hold(runtime)
+            snapshot_manifest = _create_verified_snapshot(runtime)
+            planner = FinanceStorageMigrationPlanner(
+                runtime,
+                chunk_size=2,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+                require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
+            )
+            first = planner.build_plan()
+            second = planner.build_plan()
+            self.assertEqual(first["fingerprint"], second["fingerprint"])
+            self.assertEqual(
+                first["source"]["logical_store"],
+                "coherent_snapshot",
+            )
+            self.assertEqual(
+                first["source"]["full_integrity_check"]["status"],
+                "ok",
+            )
 
             with self.assertRaises(InjectedMigrationFault):
                 FinanceStorageCandidateBuilder(
@@ -611,11 +753,15 @@ class MigrationSmoke(unittest.TestCase):
             ).apply()
             self.assertEqual(result["status"], "candidate_ready")
             self.assertFalse(result["global_manifest_switched"])
-            self.assertTrue(result["old_monolith_unchanged"])
+            self.assertTrue(result["old_monolith_retained"])
+            self.assertFalse(
+                result["business_data_maintenance_hold_required_for_backfill"]
+            )
             self.assertEqual(source.read_bytes(), before)
             self.assertFalse((runtime / "storage_generation_manifest.json").exists())
+            candidate_manifest_path = Path(result["candidate_manifest_path"])
             candidate_manifest = parse_manifest(
-                json.loads(Path(result["candidate_manifest_path"]).read_text())
+                json.loads(candidate_manifest_path.read_text())
             )
             self.assertEqual(candidate_manifest.state, "shadow")
             self.assertEqual(candidate_manifest.canonical_source, "monolith")
@@ -663,6 +809,46 @@ class MigrationSmoke(unittest.TestCase):
                 self.assertEqual(comparison["shadow_row_count"], 5)
                 self.assertTrue(comparison["source_query_plan"])
                 self.assertTrue(comparison["shadow_query_plan"])
+            shadow_runner = FinanceStorageShadowRunner(
+                runtime,
+                candidate_manifest_path=candidate_manifest_path,
+                plan_fingerprint=first["fingerprint"],
+                approval_reference="fixture-human-gate",
+            )
+            activated = shadow_runner.activate()
+            self.assertTrue(activated["enabled"])
+            reconciled = shadow_runner.reconcile_legacy_current(
+                chunk_size=2
+            )
+            self.assertEqual(reconciled["missing_current_rows"], 0)
+            self.assertEqual(reconciled["source_row_count"], 5)
+            self.assertEqual(reconciled["reused_count"], 5)
+            event = FinanceRawIngestor(StoreRegistry(runtime)).ingest_batch(
+                [_raw_row(31, 3101)],
+                source_identity="fixture:shadow-tail",
+                source_sha256="sha256:" + "7" * 64,
+                week_start="2026-02-09",
+                week_end="2026-02-15",
+            )
+            tail = shadow_runner.apply_live_tail(max_events=10)
+            self.assertEqual(tail["status"], "caught_up")
+            self.assertEqual(tail["destination_cursor"], event.sequence_no)
+            self.assertEqual(tail["lag_events"], 0)
+            self.assertEqual(tail["duplicate_event_ids"], 0)
+            self.assertEqual(tail["duplicate_sequences"], 0)
+            retry_tail = shadow_runner.apply_live_tail(max_events=10)
+            self.assertEqual(retry_tail["applied_events"], 0)
+            with closing(sqlite3.connect(raw_path)) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM finance_raw_rows"
+                    ).fetchone()[0],
+                    6,
+                )
+            deactivated = shadow_runner.deactivate(
+                reason="shadow smoke completed"
+            )
+            self.assertFalse(deactivated["enabled"])
             with closing(sqlite3.connect(raw_path)) as conn:
                 conn.execute(
                     "DELETE FROM finance_raw_rows WHERE batch_sequence_no=1"
@@ -710,15 +896,16 @@ class MigrationSmoke(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime"
             _create_monolith(runtime, rows=2)
+            snapshot_manifest = _create_verified_snapshot(runtime)
             planner = FinanceStorageMigrationPlanner(
                 runtime,
                 chunk_size=1,
                 deployed_sha=DEPLOYED_SHA,
                 repo_root=ROOT,
                 require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
             )
             real = planner.build_plan()
-            _create_maintenance_hold(runtime)
             race_plan = planner.build_plan()
             real_vfs = os.statvfs(runtime)
             fake_vfs = type(
@@ -761,16 +948,372 @@ class MigrationSmoke(unittest.TestCase):
                        SET raw_json='{"source":"drift"}' WHERE rowid=1"""
                 )
                 conn.commit()
+            after_live_drift = planner.build_plan()
+            self.assertEqual(
+                after_live_drift["fingerprint"],
+                real["fingerprint"],
+            )
+            snapshot_database = Path(
+                json.loads(snapshot_manifest.read_text(encoding="utf-8"))[
+                    "database_path"
+                ]
+            )
+            with closing(sqlite3.connect(snapshot_database)) as conn:
+                conn.execute(
+                    """UPDATE wb_finance_weekly_raw_rows
+                       SET raw_json='{"snapshot":"drift"}' WHERE rowid=1"""
+                )
+                conn.commit()
             with self.assertRaisesRegex(
                 FinanceStorageMigrationError,
-                "reviewed Finance storage plan is stale",
+                "verified immutable coherent snapshot",
             ):
-                FinanceStorageCandidateBuilder(
-                    planner,
-                    expected_fingerprint=real["fingerprint"],
-                    approval_reference="fixture-human-gate",
-                ).apply()
+                planner.build_plan()
             self.assertFalse((runtime / "generations").exists())
+
+    def test_final_cutover_recopy_outbox_and_idempotency(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            source_path = _create_monolith(runtime, rows=2)
+            snapshot_manifest = _create_verified_snapshot(runtime)
+            planner = FinanceStorageMigrationPlanner(
+                runtime,
+                chunk_size=1,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+                require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
+            )
+            candidate_plan = planner.build_plan()
+            candidate_result = FinanceStorageCandidateBuilder(
+                planner,
+                expected_fingerprint=candidate_plan["fingerprint"],
+                approval_reference="fixture-human-gate",
+            ).apply()
+            candidate_manifest_path = Path(
+                candidate_result["candidate_manifest_path"]
+            )
+            candidate_manifest = parse_manifest(
+                json.loads(candidate_manifest_path.read_text())
+            )
+            shadow = FinanceStorageShadowRunner(
+                runtime,
+                candidate_manifest_path=candidate_manifest_path,
+                plan_fingerprint=candidate_plan["fingerprint"],
+                approval_reference="fixture-human-gate",
+            )
+            shadow.activate()
+            shadow.reconcile_legacy_current(chunk_size=1)
+            event = FinanceRawIngestor(StoreRegistry(runtime)).ingest_batch(
+                [_raw_row(10, 1001), _raw_row(10, 1002)],
+                source_identity="fixture:cutover-tail",
+                source_sha256="sha256:" + "6" * 64,
+                week_start="2026-01-05",
+                week_end="2026-01-11",
+            )
+            self.assertEqual(
+                shadow.apply_live_tail(max_events=10)["destination_cursor"],
+                event.sequence_no,
+            )
+            verification = FinanceStorageShadowVerifier(
+                runtime,
+                candidate_manifest_path=candidate_manifest_path,
+                candidate_plan_fingerprint=candidate_plan["fingerprint"],
+                minimum_observation_seconds=0,
+            ).verify()
+            self.assertEqual(
+                verification["status"],
+                "ready",
+                verification,
+            )
+            self.assertEqual(verification["mismatch_count"], 0)
+            cutover = FinanceStorageCutover(
+                runtime,
+                candidate_manifest_path=candidate_manifest_path,
+                candidate_plan_fingerprint=candidate_plan["fingerprint"],
+                deployed_sha=DEPLOYED_SHA,
+            )
+            generous_vfs = type(
+                "GenerousVfs",
+                (),
+                {"f_bavail": 10 * 1024 * 1024, "f_frsize": 4096},
+            )()
+            with mock.patch(
+                "packages.application.finance_storage_migration.os.statvfs",
+                return_value=generous_vfs,
+            ):
+                cutover_plan = cutover.build_plan()
+            self.assertTrue(
+                cutover_plan["apply_allowed_by_machine_preflight"],
+                cutover_plan["blockers"],
+            )
+            tampered_plan = json.loads(json.dumps(cutover_plan))
+            tampered_plan["candidate"]["bridge_cursor"] = 999
+            with self.assertRaisesRegex(
+                FinanceStorageMigrationError,
+                "reviewed Finance cutover plan",
+            ):
+                cutover.apply(
+                    reviewed_plan=tampered_plan,
+                    expected_fingerprint=cutover_plan["fingerprint"],
+                    approval_reference="fixture-human-gate",
+                )
+            fingerprint = str(cutover_plan["fingerprint"])
+            window_id = (
+                "final-cutover-"
+                + fingerprint.removeprefix("sha256:")[:20]
+            )
+            acquire_barrier(
+                runtime,
+                window_id=window_id,
+                window_kind="final_cutover",
+                plan_fingerprint=fingerprint,
+                approval_reference="fixture-human-gate",
+                actor="smoke",
+                reason="final cutover smoke",
+            )
+            _create_maintenance_hold(runtime)
+            maintenance_state = json.loads(
+                (runtime / ".business-data-maintenance.json").read_text()
+            )
+            confirm_barrier_hold(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+                maintenance_state=maintenance_state,
+            )
+            cutover_result = cutover.apply(
+                reviewed_plan=cutover_plan,
+                expected_fingerprint=fingerprint,
+                approval_reference="fixture-human-gate",
+            )
+            self.assertTrue(cutover_result["global_manifest_switched"])
+            self.assertTrue(cutover_result["old_monolith_retained"])
+            self.assertEqual(
+                cutover_result["outbox_reconciliation"]["lag_events"],
+                0,
+            )
+            retry = cutover.apply(
+                reviewed_plan=cutover_plan,
+                expected_fingerprint=fingerprint,
+                approval_reference="fixture-human-gate",
+            )
+            self.assertTrue(retry["idempotent"])
+            selected = StoreRegistry(runtime)
+            manifest = selected.load(require_files=True)
+            self.assertEqual(manifest.state, "cutover")
+            self.assertEqual(manifest.canonical_source, "split")
+            self.assertTrue(source_path.is_file())
+            with selected.session(
+                "finance_raw",
+                mode="ro",
+                operation="cutover_raw_readback",
+            ) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM finance_raw_rows"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM finance_raw_outbox"
+                    ).fetchone()[0],
+                    1,
+                )
+            with selected.session(
+                "operational",
+                mode="ro",
+                operation="cutover_operational_readback",
+            ) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        """SELECT payload FROM unrelated_runtime_state
+                           WHERE state_key='keep'"""
+                    ).fetchone()[0],
+                    b"\x00\x01do-not-change",
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM finance_operational_receipts"
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertIsNone(
+                    conn.execute(
+                        """SELECT 1 FROM sqlite_master
+                           WHERE type='table'
+                             AND name='wb_finance_weekly_raw_rows'"""
+                    ).fetchone()
+                )
+            partner = PartnerReportBlock(
+                runtime,
+                seller_id="seller-1",
+            )
+            with partner._connect() as conn:  # noqa: SLF001
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM wb_finance_weekly_raw_rows"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        """SELECT COUNT(*) FROM finance_raw_store.finance_raw_rows"""
+                    ).fetchone()[0],
+                    2,
+                )
+            mark_barrier_restoring(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+            release_barrier(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+                actor="smoke",
+                reason="fixture controls restored",
+                restore_readback={
+                    "status": "restored",
+                    "captured_at": "2026-01-01T00:00:02Z",
+                    "exact_prior_state_restored": True,
+                    "control_signature": "sha256:" + ("d" * 64),
+                    "auto_updates": {
+                        "revision": 3,
+                        "master_desired": True,
+                    },
+                },
+            )
+            rollback = FinanceStorageRollback(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+            )
+            with mock.patch(
+                "packages.application.finance_storage_migration.os.statvfs",
+                return_value=generous_vfs,
+            ):
+                rollback_plan = rollback.build_plan()
+            self.assertTrue(
+                rollback_plan["prepare_allowed_by_machine_preflight"],
+                rollback_plan["blockers"],
+            )
+            rollback_candidate = rollback.prepare(
+                reviewed_plan=rollback_plan,
+                expected_fingerprint=rollback_plan["fingerprint"],
+                approval_reference="fixture-human-gate",
+            )
+            post_cutover = FinanceRawIngestor(
+                StoreRegistry(runtime)
+            ).ingest_batch(
+                [_raw_row(50, 5001)],
+                source_identity="fixture:post-cutover-write",
+                source_sha256="sha256:" + "5" * 64,
+                week_start="2026-03-02",
+                week_end="2026-03-08",
+            )
+            self.assertEqual(post_cutover.sequence_no, 2)
+            with selected.session(
+                "operational",
+                mode="rw",
+                operation="post_cutover_operational_mutation",
+            ) as conn:
+                conn.execute(
+                    """UPDATE unrelated_runtime_state
+                       SET payload=? WHERE state_key='keep'""",
+                    (sqlite3.Binary(b"\x02post-cutover"),),
+                )
+                conn.commit()
+            rollback_fingerprint = str(
+                rollback_plan["fingerprint"]
+            )
+            rollback_window = (
+                "rollback-"
+                + rollback_fingerprint.removeprefix("sha256:")[:20]
+            )
+            acquire_barrier(
+                runtime,
+                window_id=rollback_window,
+                window_kind="rollback_drill",
+                plan_fingerprint=rollback_fingerprint,
+                approval_reference="fixture-human-gate",
+                actor="smoke",
+                reason="rollback drill smoke",
+            )
+            _create_maintenance_hold(runtime)
+            confirm_barrier_hold(
+                runtime,
+                window_id=rollback_window,
+                plan_fingerprint=rollback_fingerprint,
+                maintenance_state=json.loads(
+                    (
+                        runtime / ".business-data-maintenance.json"
+                    ).read_text()
+                ),
+            )
+            rollback_result = rollback.apply(
+                reviewed_plan=rollback_plan,
+                expected_fingerprint=rollback_fingerprint,
+                approval_reference="fixture-human-gate",
+                candidate_evidence_path=Path(
+                    rollback_candidate["candidate_evidence_path"]
+                ),
+            )
+            self.assertEqual(
+                rollback_result["status"],
+                "rollback_complete",
+            )
+            self.assertEqual(
+                rollback_result["raw_replay"]["latest_sequence"],
+                2,
+            )
+            rolled_back = StoreRegistry(runtime)
+            rollback_manifest = rolled_back.load(require_files=True)
+            self.assertEqual(rollback_manifest.state, "monolith")
+            self.assertEqual(
+                rollback_manifest.raw.relative_path,
+                rollback_manifest.operational.relative_path,
+            )
+            with rolled_back.session(
+                "operational",
+                mode="ro",
+                operation="rollback_readback",
+            ) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM wb_finance_weekly_raw_rows"
+                    ).fetchone()[0],
+                    3,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        """SELECT payload FROM unrelated_runtime_state
+                           WHERE state_key='keep'"""
+                    ).fetchone()[0],
+                    b"\x02post-cutover",
+                )
+            mark_barrier_restoring(
+                runtime,
+                window_id=rollback_window,
+                plan_fingerprint=rollback_fingerprint,
+            )
+            release_barrier(
+                runtime,
+                window_id=rollback_window,
+                plan_fingerprint=rollback_fingerprint,
+                actor="smoke",
+                reason="rollback controls restored",
+                restore_readback={
+                    "status": "restored",
+                    "captured_at": "2026-01-01T00:00:03Z",
+                    "exact_prior_state_restored": True,
+                    "control_signature": "sha256:" + ("e" * 64),
+                    "auto_updates": {
+                        "revision": 4,
+                        "master_desired": True,
+                    },
+                },
+            )
 
 
 class InventorySmoke(unittest.TestCase):
@@ -787,6 +1330,40 @@ class InventorySmoke(unittest.TestCase):
                 raise PermissionError("fixture denied")
 
         self.assertEqual(_accessible_fd_paths(DeniedFdDirectory()), [])
+
+    def test_snapshot_writer_ownership_is_fail_closed(self) -> None:
+        openers = [
+            {"pid": 100, "fd": 5, "access_mode": "read_write", "comm": "http"},
+            {"pid": 200, "fd": 7, "access_mode": "read_write", "comm": "sync"},
+            {"pid": 300, "fd": 9, "access_mode": "read_write", "comm": "unknown"},
+            {"pid": 400, "fd": 11, "access_mode": "read_only", "comm": "reader"},
+        ]
+        units = [
+            {"unit": "wb-core-registry-http.service", "main_pid": 100},
+            {"unit": "wb-core-finance-weekly-sync.service", "main_pid": 200},
+        ]
+        self.assertEqual(
+            [
+                item["pid"]
+                for item in _unknown_snapshot_writers(
+                    openers,
+                    units,
+                    hold_confirmed=False,
+                )
+            ],
+            [300],
+        )
+        self.assertEqual(
+            [
+                item["pid"]
+                for item in _unknown_snapshot_writers(
+                    openers,
+                    units,
+                    hold_confirmed=True,
+                )
+            ],
+            [200, 300],
+        )
 
 
 if __name__ == "__main__":

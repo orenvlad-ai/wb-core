@@ -24,7 +24,12 @@ if str(ROOT) not in sys.path:
 from packages.application.finance_raw_storage import shadow_compare_week, storage_health
 from packages.application.finance_storage_migration import (
     FinanceStorageCandidateBuilder,
+    FinanceStorageCoherentSnapshot,
+    FinanceStorageCutover,
     FinanceStorageMigrationPlanner,
+    FinanceStorageRollback,
+    FinanceStorageShadowRunner,
+    FinanceStorageShadowVerifier,
 )
 from packages.application.storage_registry import parse_manifest
 
@@ -131,7 +136,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "action",
         nargs="?",
-        choices=("dry-run", "apply", "health", "shadow-read"),
+        choices=(
+            "dry-run",
+            "apply",
+            "health",
+            "shadow-read",
+            "snapshot-plan",
+            "snapshot-create",
+            "snapshot-integrity",
+            "shadow-status",
+            "shadow-activate",
+            "shadow-reconcile",
+            "shadow-verify",
+            "live-tail-apply",
+            "shadow-deactivate",
+            "cutover-plan",
+            "cutover-apply",
+            "rollback-plan",
+            "rollback-prepare",
+            "rollback-apply",
+        ),
         default="dry-run",
     )
     parser.add_argument("--runtime-dir", type=Path, required=True)
@@ -144,7 +168,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approval-reference", default="")
     parser.add_argument("--fault-after-chunks", type=int, default=0)
     parser.add_argument("--candidate-manifest", type=Path)
+    parser.add_argument("--snapshot-plan-file", type=Path)
+    parser.add_argument("--cutover-plan-file", type=Path)
+    parser.add_argument("--rollback-plan-file", type=Path)
+    parser.add_argument("--rollback-candidate-evidence", type=Path)
+    parser.add_argument("--source-snapshot-manifest", type=Path)
+    parser.add_argument("--candidate-plan-fingerprint", default="")
     parser.add_argument("--seller-id", default="canonical")
+    parser.add_argument("--max-events", type=int, default=100_000)
+    parser.add_argument(
+        "--minimum-observation-seconds",
+        type=int,
+        default=3600,
+    )
+    parser.add_argument("--reason", default="")
     return parser
 
 
@@ -157,7 +194,167 @@ def main(argv: list[str] | None = None) -> int:
         if deployed_sha and deployed_sha != file_sha:
             raise SystemExit("--deployed-sha and --deployed-sha-file disagree")
         deployed_sha = file_sha
-    if args.action == "health":
+    if args.action.startswith("rollback-"):
+        rollback = FinanceStorageRollback(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+        )
+        if args.action == "rollback-plan":
+            payload = rollback.build_plan()
+        else:
+            if args.rollback_plan_file is None:
+                raise SystemExit(
+                    "--rollback-plan-file is required for rollback mutations"
+                )
+            reviewed_plan = json.loads(
+                args.rollback_plan_file.expanduser().read_text(
+                    encoding="utf-8"
+                )
+            )
+            if not isinstance(reviewed_plan, dict):
+                raise SystemExit(
+                    "--rollback-plan-file must contain a JSON object"
+                )
+            if args.action == "rollback-prepare":
+                payload = rollback.prepare(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                    approval_reference=args.approval_reference,
+                )
+            else:
+                if args.rollback_candidate_evidence is None:
+                    raise SystemExit(
+                        "--rollback-candidate-evidence is required for "
+                        "rollback-apply"
+                    )
+                payload = rollback.apply(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                    approval_reference=args.approval_reference,
+                    candidate_evidence_path=(
+                        args.rollback_candidate_evidence.expanduser().resolve()
+                    ),
+                )
+    elif args.action.startswith("cutover-"):
+        if args.candidate_manifest is None:
+            raise SystemExit(
+                "--candidate-manifest is required for cutover actions"
+            )
+        if not str(args.candidate_plan_fingerprint or "").startswith(
+            "sha256:"
+        ):
+            raise SystemExit(
+                "--candidate-plan-fingerprint is required for cutover actions"
+            )
+        cutover = FinanceStorageCutover(
+            runtime_dir,
+            candidate_manifest_path=(
+                args.candidate_manifest.expanduser().resolve()
+            ),
+            candidate_plan_fingerprint=args.candidate_plan_fingerprint,
+            deployed_sha=deployed_sha,
+        )
+        if args.action == "cutover-plan":
+            payload = cutover.build_plan()
+        else:
+            if args.cutover_plan_file is None:
+                raise SystemExit(
+                    "--cutover-plan-file is required for cutover-apply"
+                )
+            reviewed_plan = json.loads(
+                args.cutover_plan_file.expanduser().read_text(
+                    encoding="utf-8"
+                )
+            )
+            if not isinstance(reviewed_plan, dict):
+                raise SystemExit(
+                    "--cutover-plan-file must contain a JSON object"
+                )
+            payload = cutover.apply(
+                reviewed_plan=reviewed_plan,
+                expected_fingerprint=args.confirm_fingerprint,
+                approval_reference=args.approval_reference,
+            )
+    elif args.action.startswith("shadow-") or args.action == "live-tail-apply":
+        if args.candidate_manifest is None:
+            raise SystemExit(
+                "--candidate-manifest is required for shadow actions"
+            )
+        if args.action == "shadow-verify":
+            payload = FinanceStorageShadowVerifier(
+                runtime_dir,
+                candidate_manifest_path=(
+                    args.candidate_manifest.expanduser().resolve()
+                ),
+                candidate_plan_fingerprint=args.confirm_fingerprint,
+                minimum_observation_seconds=(
+                    args.minimum_observation_seconds
+                ),
+            ).verify()
+            _emit(payload, args.output)
+            return 0
+        shadow = FinanceStorageShadowRunner(
+            runtime_dir,
+            candidate_manifest_path=(
+                args.candidate_manifest.expanduser().resolve()
+            ),
+            plan_fingerprint=args.confirm_fingerprint,
+            approval_reference=args.approval_reference,
+        )
+        if args.action == "shadow-status":
+            payload = shadow.status()
+        elif args.action == "shadow-activate":
+            payload = shadow.activate()
+        elif args.action == "shadow-reconcile":
+            payload = shadow.reconcile_legacy_current(
+                chunk_size=args.chunk_size
+            )
+        elif args.action == "live-tail-apply":
+            payload = shadow.apply_live_tail(
+                max_events=args.max_events
+            )
+        else:
+            payload = shadow.deactivate(
+                reason=args.reason or "shadow lifecycle completed"
+            )
+    elif args.action == "snapshot-plan":
+        payload = FinanceStorageCoherentSnapshot(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).build_plan()
+    elif args.action == "snapshot-create":
+        if args.snapshot_plan_file is None:
+            raise SystemExit(
+                "--snapshot-plan-file is required for snapshot-create"
+            )
+        reviewed_plan = json.loads(
+            args.snapshot_plan_file.expanduser().read_text(encoding="utf-8")
+        )
+        if not isinstance(reviewed_plan, dict):
+            raise SystemExit("--snapshot-plan-file must contain a JSON object")
+        payload = FinanceStorageCoherentSnapshot(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).create(
+            reviewed_plan=reviewed_plan,
+            expected_fingerprint=args.confirm_fingerprint,
+            approval_reference=args.approval_reference,
+        )
+    elif args.action == "snapshot-integrity":
+        if args.source_snapshot_manifest is None:
+            raise SystemExit(
+                "--source-snapshot-manifest is required for snapshot-integrity"
+            )
+        payload = FinanceStorageCoherentSnapshot(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).verify_integrity(
+            args.source_snapshot_manifest.expanduser().resolve()
+        )
+    elif args.action == "health":
         payload = storage_health(
             FinanceStorageMigrationPlanner(
                 runtime_dir,
@@ -180,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             chunk_size=args.chunk_size,
             deployed_sha=deployed_sha,
             repo_root=args.repo_root,
+            source_snapshot_manifest=args.source_snapshot_manifest,
         )
         if args.action == "apply":
             payload = FinanceStorageCandidateBuilder(
