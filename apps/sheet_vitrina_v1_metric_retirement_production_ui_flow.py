@@ -65,15 +65,48 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--target-file",
+        help=(
+            "Optional canonical hosted-runtime target used to create a "
+            "short-lived app-session cookie without printing it."
+        ),
+    )
     parser.add_argument("--ignore-https-errors", action="store_true")
     args = parser.parse_args()
+
+    base_url = args.base_url.rstrip("/")
+    auth_cookie: str | None = None
+    if args.target_file:
+        from apps.registry_upload_http_entrypoint_hosted_runtime import (
+            _build_probe_auth_cookie,
+            _ensure_active_hosted_runtime_target,
+            load_hosted_runtime_target,
+        )
+
+        target = load_hosted_runtime_target(Path(args.target_file).resolve())
+        _ensure_active_hosted_runtime_target(
+            target,
+            action="metric-retirement-production-ui-flow",
+        )
+        if str(target.public_base_url or "").rstrip("/") != base_url:
+            raise ValueError(
+                "production UI base URL must match the canonical hosted-runtime target"
+            )
+        auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=30.0)
+        if not auth_cookie:
+            raise RuntimeError(
+                "production metric-retirement UI flow requires safely available "
+                "app-session auth"
+            )
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     result = run_flow(
-        base_url=args.base_url.rstrip("/"),
+        base_url=base_url,
         output_dir=output_dir,
         ignore_https_errors=bool(args.ignore_https_errors),
+        auth_cookie=auth_cookie,
     )
     evidence_path = output_dir / "metric-retirement-ui-evidence.json"
     encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode(
@@ -98,6 +131,7 @@ def run_flow(
     base_url: str,
     output_dir: Path,
     ignore_https_errors: bool,
+    auth_cookie: str | None = None,
 ) -> dict[str, Any]:
     requested_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     read_url = base_url + DEFAULT_SHEET_WEB_VITRINA_READ_PATH
@@ -110,6 +144,11 @@ def run_flow(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         context = browser.new_context(ignore_https_errors=ignore_https_errors)
+        _add_auth_cookie(
+            context,
+            base_url=base_url,
+            auth_cookie=auth_cookie,
+        )
         page = context.new_page()
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.on(
@@ -231,12 +270,40 @@ def run_flow(
         "page_errors": page_errors,
         "console_errors": console_errors,
         "server_errors": server_errors,
+        "auth": {
+            "mode": "app_session_cookie" if auth_cookie else "none",
+            "cookie_configured": bool(auth_cookie),
+        },
         "retired_keys_absent_from": ["public_read", "table", "settings", "picker"],
         "preserved_incident_key_count": len(PRESERVED_INCIDENT_KEYS),
         "preserved_canonical_keys": sorted(PRESERVED_CANONICAL_KEYS),
         "screenshot_path": str(screenshot_path),
         "screenshot_sha256": hashlib.sha256(screenshot_path.read_bytes()).hexdigest(),
     }
+
+
+def _add_auth_cookie(
+    context: Any,
+    *,
+    base_url: str,
+    auth_cookie: str | None,
+) -> None:
+    if not auth_cookie:
+        return
+    cookie_name, separator, cookie_value = auth_cookie.partition("=")
+    if separator != "=" or cookie_name != "wb_core_web_session" or not cookie_value:
+        raise ValueError("invalid app-session cookie supplied to metric-retirement UI flow")
+    context.add_cookies(
+        [
+            {
+                "name": cookie_name,
+                "value": cookie_value,
+                "url": base_url,
+                "httpOnly": True,
+                "sameSite": "Lax",
+            }
+        ]
+    )
 
 
 def _collect_metric_keys(value: Any) -> set[str]:
