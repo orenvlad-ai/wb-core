@@ -30,6 +30,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Keep the audited hold restorable while making the timer disabled as well as inactive.",
     )
+    parser.add_argument(
+        "--allow-outer-hold-recovery",
+        action="store_true",
+        help=(
+            "Reapply the exact original timer baseline only when an "
+            "unconfirmed outer business-data hold demonstrably rolled back "
+            "a previously completed warehouse restore."
+        ),
+    )
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir).resolve()
     if args.action == "status":
@@ -42,7 +51,12 @@ def main(argv: list[str] | None = None) -> int:
             disable_timer=bool(args.disable_timer),
         )
     else:
-        result = maintenance_restore(runtime_dir)
+        result = maintenance_restore(
+            runtime_dir,
+            allow_outer_hold_recovery=bool(
+                args.allow_outer_hold_recovery
+            ),
+        )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 

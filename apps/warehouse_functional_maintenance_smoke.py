@@ -27,6 +27,7 @@ from packages.application.warehouse_functional_maintenance import (
     maintenance_restore,
     maintenance_status,
 )
+from packages.application.business_data_write_barrier import acquire_barrier
 
 
 class FakeSystemd:
@@ -227,6 +228,87 @@ def _assert_durable_hold_disables_and_remains_restorable() -> None:
         restored = maintenance_restore(runtime_dir, client=systemd, proc_root=proc_root)
         assert restored["units"]["timer"]["is_enabled"] == "enabled"
         assert restored["units"]["timer"]["is_active"] == "active"
+
+
+def _assert_outer_fail_closed_rollback_is_exactly_recoverable() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd()
+        maintenance_hold(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            disable_timer=True,
+        )
+        maintenance_restore(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+        )
+        # The outer business-data restore may still fail after the nested
+        # warehouse restore and must then disable every timer again.
+        systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        systemd.mutate("disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        mutations_before_recovery = list(systemd.mutations)
+        try:
+            maintenance_restore(
+                runtime_dir,
+                client=systemd,
+                proc_root=proc_root,
+            )
+        except RuntimeError as exc:
+            assert "drifted from their recorded state" in str(exc)
+        else:
+            raise AssertionError(
+                "ordinary repeated restore must reject outer rollback drift"
+            )
+        assert systemd.mutations == mutations_before_recovery
+
+        (runtime_dir / ".business-data-maintenance.json").write_text(
+            json.dumps(
+                {
+                    "phase": "holding",
+                    "exact_prior_state_restored": False,
+                }
+            )
+        )
+        acquire_barrier(
+            runtime_dir,
+            window_id="snapshot-outer-restore",
+            window_kind="snapshot",
+            plan_fingerprint="sha256:" + ("6" * 64),
+            approval_reference="outer-restore-smoke",
+            actor="smoke",
+            reason="prove nested recovery",
+        )
+        recovered = maintenance_restore(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            allow_outer_hold_recovery=True,
+        )
+        assert recovered["status"] == "restored"
+        assert recovered["units"]["timer"]["is_enabled"] == "enabled"
+        assert recovered["units"]["timer"]["is_active"] == "active"
+        state = json.loads(
+            (
+                runtime_dir
+                / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME
+            ).read_text()
+        )
+        assert state["phase"] == "restored"
+        assert state["outer_hold_recovery"]["outer_phase"] == "holding"
+        assert (
+            state["outer_hold_recovery"]["barrier_window_id"]
+            == "snapshot-outer-restore"
+        )
+        audit = (
+            runtime_dir / WAREHOUSE_FUNCTIONAL_MAINTENANCE_AUDIT_FILENAME
+        ).read_text()
+        assert "outer_hold_restore_recovery_started" in audit
 
 
 def _assert_failed_oneshot_is_quiescent_evidence() -> None:
@@ -484,6 +566,7 @@ def main() -> int:
     _assert_maintenance_lifecycle()
     _assert_finance_process_blocks_hold()
     _assert_durable_hold_disables_and_remains_restorable()
+    _assert_outer_fail_closed_rollback_is_exactly_recoverable()
     _assert_failed_oneshot_is_quiescent_evidence()
     _assert_timed_out_hold_preserves_original_baseline()
     _assert_exact_deployed_service_refresh_is_restorable()

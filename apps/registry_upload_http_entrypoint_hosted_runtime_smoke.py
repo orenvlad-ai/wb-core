@@ -74,6 +74,53 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    maintenance_probe = {
+        "route": "web_vitrina_group_refresh_missing_group",
+        "method": "POST",
+        "url": (
+            "http://127.0.0.1:8765"
+            + hosted_runtime.DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH
+        ),
+        "http_status": 423,
+        "content_type": "application/json; charset=utf-8",
+        "body_excerpt": "",
+        "body_truncated": False,
+        "body_bytes_read": 0,
+        "json_body": {
+            "contract_name": "wb_core_business_data_write_barrier_v1",
+            "status": "blocked",
+            "active": True,
+            "phase": "acquiring",
+            "window_id": "snapshot-probe-smoke",
+            "code": "business_data_maintenance",
+            "retryable": True,
+            "attempt_audited": True,
+        },
+        "network_error": None,
+    }
+    maintenance_evaluation = hosted_runtime._evaluate_route_result(
+        maintenance_probe,
+        route_paths=active_target.route_paths,
+    )
+    if maintenance_evaluation["ok"] is not True:
+        raise AssertionError(
+            "exact audited maintenance 423 must be a healthy POST probe "
+            "result"
+        )
+    unaudited_probe = {
+        **maintenance_probe,
+        "json_body": {
+            **maintenance_probe["json_body"],
+            "attempt_audited": False,
+        },
+    }
+    if hosted_runtime._evaluate_route_result(
+        unaudited_probe,
+        route_paths=active_target.route_paths,
+    )["ok"] is not False:
+        raise AssertionError(
+            "incomplete maintenance 423 evidence must fail deploy verification"
+        )
     with TemporaryDirectory(
         prefix="vitrina-incident-hosted-smoke-"
     ) as incident_temp_dir:

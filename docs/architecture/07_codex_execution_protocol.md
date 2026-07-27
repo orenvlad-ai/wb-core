@@ -150,7 +150,12 @@ mutation fail closed.
 mutation. Repo-owned abort сначала доказывает continuity exact service
 generation, существовавшей до hold, затем восстанавливает прежний
 timer/settings control signature и только после этого снимает acquiring
-barrier. Confirmed hold через этот abort-path снять нельзя.
+barrier. Если nested warehouse restore уже завершился, но последующий outer
+restore fail-closed снова выключил timers, retry может повторно применить
+только исходный warehouse baseline при exact unconfirmed barrier, прежнем
+outer hold, совпадающих unit digests, quiescent service и свободных locks;
+произвольный restored-state drift остаётся blocker. Confirmed hold через этот
+abort-path снять нельзя.
 
 ## GOAL Mode И Scope
 
