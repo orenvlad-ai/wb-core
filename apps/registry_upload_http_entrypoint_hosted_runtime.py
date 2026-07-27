@@ -88,6 +88,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
@@ -648,6 +649,16 @@ def collect_public_surface(
             name="web_vitrina_user_config",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="web_vitrina_business_projection_status",
+            method="GET",
+            url=(
+                f"{base_url}"
+                f"{DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH}"
+            ),
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -7781,6 +7792,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route in {
         "web_vitrina_page_composition",
         "web_vitrina_user_config",
+        "web_vitrina_business_projection_status",
         "factory_order_template_stock_ff",
         "factory_order_template_inbound_factory",
         "factory_order_template_inbound_ff_to_wb",
@@ -7816,6 +7828,33 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "web-vitrina user config route ok"
                 if evaluation["ok"]
                 else "expected 200 JSON user config payload"
+            )
+            return evaluation
+        if route == "web_vitrina_business_projection_status":
+            json_body = result.get("json_body") or {}
+            required_keys = {
+                "contract_name",
+                "contract_version",
+                "status",
+                "revision_no",
+                "revision_id",
+                "queue_counts",
+                "outbox_counts",
+                "updating",
+                "latest_failure",
+            }
+            evaluation["ok"] = (
+                status == 200
+                and "application/json" in content_type
+                and json_body.get("contract_name")
+                == "warehouse_business_projection"
+                and json_body.get("contract_version") == 1
+                and not (required_keys - set(json_body))
+            )
+            evaluation["detail"] = (
+                "web-vitrina business projection status route ok"
+                if evaluation["ok"]
+                else "expected 200 JSON business projection status payload"
             )
             return evaluation
         evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
@@ -8691,6 +8730,7 @@ results = [
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
     _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}}})),
     _collect("web_vitrina_user_config", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH!r}),
+    _collect("web_vitrina_business_projection_status", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH!r}),
     _collect("web_vitrina_group_refresh_missing_group", "POST", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH!r}, {{}}),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),

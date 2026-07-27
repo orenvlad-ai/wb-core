@@ -962,9 +962,12 @@ rollback action.
 
 Authenticated GET
 `/v1/sheet-vitrina-v1/web-vitrina/business-projection/status` is the narrow
-read seam for the current warehouse/product-capital projection revision,
-durable outbox state and latest bounded failure. It does not start a full
-Vitrina refresh or an external producer fetch. Source mutation handlers keep
-their existing business response and may additionally return the terminal
-`business_projection` result; supplier factual-date Apply still owns its
-durable background job and exact terminal readback.
+repo-owned, publicly published GET route for visible-tab revision checks. The
+hosted deploy contract probes its exact bounded JSON shape, so an nginx
+allowlist omission fails deployment instead of silently disabling automatic
+table rereads. It is the read seam for the current warehouse/product-capital
+projection revision, durable outbox state and latest bounded failure. It does
+not start a full Vitrina refresh or an external producer fetch. Source mutation
+handlers keep their existing business response and may additionally return the
+terminal `business_projection` result; supplier factual-date Apply still owns
+its durable background job and exact terminal readback.

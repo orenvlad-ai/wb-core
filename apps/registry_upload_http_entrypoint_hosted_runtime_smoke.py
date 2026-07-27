@@ -2427,6 +2427,10 @@ def main() -> None:
                 raise AssertionError("web-vitrina read route with seeded snapshot must be publicly readable")
             if route_map["web_vitrina_page_composition"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page composition surface must be publicly readable")
+            if route_map["web_vitrina_business_projection_status"]["http_status"] != 200:
+                raise AssertionError(
+                    "business projection status route must be publicly readable"
+                )
             if route_map["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must be publicly readable")
             if route_map["stock_report"]["http_status"] != 200:
@@ -2493,6 +2497,15 @@ def main() -> None:
                 raise AssertionError("operator reports embedded panel must stay 200")
             if loopback_routes["web_vitrina_page_composition"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page composition surface must stay 200")
+            if (
+                loopback_routes["web_vitrina_business_projection_status"][
+                    "http_status"
+                ]
+                != 200
+            ):
+                raise AssertionError(
+                    "business projection status loopback route must stay 200"
+                )
             if loopback_routes["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must stay 200")
             if loopback_routes["stock_report"]["http_status"] != 200:
