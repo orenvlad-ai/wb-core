@@ -112,6 +112,11 @@
       "restart": false
     },
     {
+      "name": "wb-core-business-data-maintenance-restore@.service",
+      "enable": false,
+      "restart": false
+    },
+    {
       "name": "wb-core-data-mcp.service",
       "enable": true,
       "restart": true

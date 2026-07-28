@@ -113,6 +113,20 @@ The implementation is deliberately inert on deploy:
   every timer again, the retry reuses the original warehouse baseline only
   for the exact audited unconfirmed-barrier rollback footprint; it never
   treats arbitrary restored-state drift as recoverable.
+- `business-data-maintenance-restore-submit|status` is the transport-independent
+  recovery path for a long exact restore of an unconfirmed acquiring window.
+  The submit request is bound to one caller-known job id, deployed SHA, policy
+  revision, window/fingerprint, actor/reason and a freshly recaptured exact
+  service-continuity fingerprint containing unit/PID/start evidence. A fixed
+  repo-owned systemd template persists request, continuity evidence, status,
+  result and append-only audit, survives SSH disconnect/restart, rejects a
+  concurrent foreground or detached restore, and resumes only from exact
+  maintenance/policy evidence; successful completion of that same bound service
+  generation is accepted without guessing another writer. A bounded deadline and
+  durable heartbeat classify stale, ambiguous and lost workers fail closed;
+  status never starts another restore. Barrier abort remains a separate exact
+  transition after terminal restore and independent
+  timer/writer/policy/non-target readback.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
   cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/
   verify, cutover plan/apply and rollback plan/prepare/apply. Candidate build,
