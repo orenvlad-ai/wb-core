@@ -147,6 +147,13 @@ The implementation is deliberately inert on deploy:
   to the paused boundary.
   Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
+- A repeated business-maintenance `prepare` while the same boundary is already
+  `prepared` or `held` and quiet is an audited no-op only when the paused
+  owner-policy revision/fingerprint, original control signature and current
+  desired timer/schedule/control intent match exactly. Any non-quiet state or
+  drift remains fail-closed. The no-op never replays the feature lifecycle, so
+  a freshly read deployment lease can reach the snapshot byte boundary inside
+  its bounded freshness interval.
 - The GitHub Release Train owns one global
   `finance:migration-deploy-lease` on a proven terminal production anchor PR.
   A paired `finance:migration-deploy-lease-audit` guard makes loss of either the

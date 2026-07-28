@@ -2751,6 +2751,110 @@ def maintenance_prepare(
         raise RuntimeError(f"unknown wb-core timers require explicit classification: {before['unknown_wb_core_timers']}")
     if before["cron_entries"]:
         raise RuntimeError("repo-owned business cron entries exist outside the systemd maintenance boundary")
+    if existing is not None and str(existing.get("phase") or "") in {
+        "prepared",
+        "held",
+    }:
+        active_phase = str(existing.get("phase") or "")
+        if not before["quiet"]:
+            raise RuntimeError(
+                "active maintenance hold is no longer quiet and cannot be reused"
+            )
+        current_auto_updates = dict(before.get("auto_updates") or {})
+        if (
+            not owner_policy_existed
+            or current_auto_updates.get("master_desired") is not False
+            or current_auto_updates.get("unknown_processes")
+            or current_auto_updates.get("drift_processes")
+        ):
+            raise RuntimeError(
+                "active maintenance hold owner policy drifted and cannot be reused"
+            )
+        current_revision = int(current_auto_updates.get("revision") or 0)
+        if expected_revision is not None and current_revision != int(
+            expected_revision
+        ):
+            raise RuntimeError(
+                f"stale policy revision: expected {expected_revision}, "
+                f"current {current_revision}"
+            )
+        persisted_readback = dict(
+            (
+                existing.get("hold_readback")
+                if active_phase == "held"
+                else existing.get("prepare_readback")
+            )
+            or {}
+        )
+        persisted_auto_updates = dict(
+            persisted_readback.get("auto_updates") or {}
+        )
+        if (
+            current_revision <= 0
+            or current_revision
+            != int(persisted_auto_updates.get("revision") or 0)
+            or str(current_auto_updates.get("policy_fingerprint") or "")
+            != str(
+                persisted_auto_updates.get("policy_fingerprint") or ""
+            )
+        ):
+            raise RuntimeError(
+                "active maintenance hold paused-policy identity drifted"
+            )
+        baseline = dict(existing.get("baseline") or {})
+        persisted_signature = dict(
+            existing.get("control_signature_before_hold") or {}
+        )
+        recomputed_signature = maintenance_control_signature(
+            baseline,
+            runtime_dir=runtime_dir,
+        )
+        if (
+            not str(persisted_signature.get("fingerprint") or "")
+            or persisted_signature != recomputed_signature
+        ):
+            raise RuntimeError(
+                "active maintenance hold baseline signature drifted"
+            )
+        current_signature = maintenance_control_signature(
+            before,
+            runtime_dir=runtime_dir,
+        )
+        baseline_payload = dict(recomputed_signature.get("payload") or {})
+        current_payload = dict(current_signature.get("payload") or {})
+        intent_fields = (
+            "process_desired",
+            "timer_control_intent",
+            "runtime_schedule_intent",
+            "unknown_wb_core_timers",
+            "cron_entries",
+        )
+        if any(
+            current_payload.get(field) != baseline_payload.get(field)
+            for field in intent_fields
+        ):
+            raise RuntimeError(
+                "active maintenance hold control intent drifted"
+            )
+        _append_audit_0600(
+            audit_path,
+            {
+                "event": "prepare_reused",
+                "captured_at": _utc_now(),
+                "phase": active_phase,
+                "paused_policy_revision": current_revision,
+                "paused_policy_fingerprint": str(
+                    current_auto_updates.get("policy_fingerprint") or ""
+                ),
+                "control_signature_before_hold": persisted_signature,
+            },
+        )
+        return {
+            **before,
+            "status": "prepared",
+            "idempotent": True,
+            "reused_phase": active_phase,
+        }
     state = dict(existing or {})
     state.update(
         {
