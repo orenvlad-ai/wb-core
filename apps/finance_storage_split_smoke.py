@@ -52,6 +52,12 @@ from packages.application.finance_storage_recovery_contract import (
     recovery_contract,
     validate_recovery_preflight,
 )
+from packages.application.finance_storage_snapshot_retention import (
+    ARCHIVE_MANIFEST_FILENAME,
+    FinanceStorageSnapshotRetention,
+    FinanceStorageSnapshotRetentionError,
+    TRANSACTION_FILENAME,
+)
 from packages.application.partner_report import PartnerReportBlock
 from packages.application.business_data_write_barrier import (
     acquire_barrier,
@@ -70,6 +76,56 @@ from packages.application.storage_registry import (
 
 
 DEPLOYED_SHA = "a" * 40
+
+
+def _digest_json(value: object) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _create_retention_snapshot(
+    runtime_dir: Path,
+    *,
+    snapshot_id: str,
+    deployed_sha: str,
+    status: str = "integrity_verified",
+) -> Path:
+    root = (
+        runtime_dir
+        / "finance-storage-split-snapshots"
+        / snapshot_id
+    )
+    root.mkdir(parents=True)
+    database = root / "monolith.sqlite3"
+    database.write_bytes((snapshot_id + "\n").encode("utf-8") * 32)
+    os.chmod(database, 0o600)
+    manifest = {
+        "contract_version": (
+            "wb_core_finance_storage_coherent_snapshot_v1"
+        ),
+        "status": status,
+        "snapshot_id": snapshot_id,
+        "deployed_sha": deployed_sha,
+        "approval_reference": "retention-smoke",
+        "database_path": str(database),
+        "candidate_build_allowed": status == "integrity_verified",
+    }
+    manifest["evidence_fingerprint"] = _digest_json(manifest)
+    manifest_path = root / "snapshot_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.chmod(manifest_path, 0o600)
+    return root
 
 
 def _raw_row(report: int, rrd: int, *, week: int = 1) -> dict[str, object]:
@@ -818,8 +874,8 @@ class MigrationSmoke(unittest.TestCase):
         transitions = [
             str(item["transition"]) for item in contract["transitions"]
         ]
-        self.assertEqual(len(transitions), 18)
-        self.assertEqual(len(set(transitions)), 18)
+        self.assertEqual(len(transitions), 20)
+        self.assertEqual(len(set(transitions)), 20)
         self.assertTrue(contract["fail_closed_default"])
         self.assertFalse(contract["second_restore_job_allowed"])
         self.assertTrue(
@@ -948,6 +1004,240 @@ class MigrationSmoke(unittest.TestCase):
                 restoring["boundary_classification"],
                 "exact_restore_release_resume",
             )
+
+    def test_snapshot_retention_archive_first_crash_resume_and_readback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=2)
+            backup_root = (
+                runtime
+                / "backups"
+                / "finance-storage-split-snapshots"
+            )
+            backup_root.parent.mkdir(parents=True)
+            stale_id = "finance-split-" + ("1" * 20)
+            current_id = "finance-split-" + ("2" * 20)
+            stale = _create_retention_snapshot(
+                runtime,
+                snapshot_id=stale_id,
+                deployed_sha="b" * 40,
+            )
+            current = _create_retention_snapshot(
+                runtime,
+                snapshot_id=current_id,
+                deployed_sha=DEPLOYED_SHA,
+            )
+            retention = FinanceStorageSnapshotRetention(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                backup_root=backup_root,
+                backup_reserve_bytes=0,
+                minimum_root_free_bytes=0,
+                require_distinct_device=False,
+            )
+            plan = retention.build_plan()
+            self.assertTrue(plan["apply_allowed_by_machine_preflight"])
+            self.assertEqual(
+                [
+                    item["snapshot_id"]
+                    for item in plan["selected_snapshots"]
+                ],
+                [stale_id],
+            )
+            self.assertEqual(
+                [
+                    item["snapshot_id"]
+                    for item in plan["protected_snapshots"]
+                ],
+                [current_id],
+            )
+            recovery = validate_recovery_preflight(
+                runtime,
+                action="snapshot-retention-apply",
+                phase="pre_barrier",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="retention-crash-smoke",
+                expected_fingerprint=str(plan["fingerprint"]),
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=self._recovery_capabilities(),
+                reviewed_plan=plan,
+            )
+            self.assertEqual(recovery["boundary_classification"], "not_required")
+            self.assertEqual(
+                recovery["relevant_transitions"],
+                [
+                    "snapshot_retention.archive",
+                    "snapshot_retention.release",
+                ],
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected fault after archive verification",
+            ):
+                retention.apply(
+                    reviewed_plan=plan,
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    approval_reference="retention-crash-smoke",
+                    fault_after_archive_verified=True,
+                )
+            archive = backup_root / stale_id
+            self.assertTrue(stale.is_dir())
+            self.assertTrue(
+                (archive / ARCHIVE_MANIFEST_FILENAME).is_file()
+            )
+            transaction = json.loads(
+                (archive / TRANSACTION_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(transaction["phase"], "archive_verified")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected fault after source removal",
+            ):
+                retention.apply(
+                    reviewed_plan=plan,
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    approval_reference="retention-crash-smoke",
+                    fault_after_source_removed=True,
+                )
+            self.assertFalse(stale.exists())
+            transaction = json.loads(
+                (archive / TRANSACTION_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(transaction["phase"], "partial_source_release")
+            result = retention.apply(
+                reviewed_plan=plan,
+                expected_fingerprint=str(plan["fingerprint"]),
+                approval_reference="retention-crash-smoke",
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["archived_snapshot_count"], 1)
+            self.assertEqual(
+                result["snapshots"][0]["continuity"],
+                "post_source_removal_finalized",
+            )
+            self.assertFalse(stale.exists())
+            self.assertTrue(current.is_dir())
+            self.assertTrue(
+                (
+                    runtime / "registry_upload_runtime.sqlite3"
+                ).is_file()
+            )
+            readback = retention.readback(
+                reviewed_plan=plan,
+                expected_fingerprint=str(plan["fingerprint"]),
+            )
+            self.assertEqual(readback["status"], "readback_verified")
+            self.assertTrue(readback["capacity_sufficient"])
+            self.assertFalse(readback["live_monolith_touched"])
+            self.assertFalse(readback["split_generation_touched"])
+            transaction = json.loads(
+                (archive / TRANSACTION_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(transaction["phase"], "source_released")
+            repeated = retention.apply(
+                reviewed_plan=plan,
+                expected_fingerprint=str(plan["fingerprint"]),
+                approval_reference="retention-crash-smoke",
+            )
+            self.assertTrue(repeated["snapshots"][0]["idempotent"])
+            self.assertFalse(stale.exists())
+            self.assertTrue(retention.audit_path.is_file())
+
+    def test_snapshot_retention_blocks_unknown_files_and_same_device(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=1)
+            backup_root = (
+                runtime
+                / "backups"
+                / "finance-storage-split-snapshots"
+            )
+            backup_root.parent.mkdir(parents=True)
+            snapshot = _create_retention_snapshot(
+                runtime,
+                snapshot_id="finance-split-" + ("3" * 20),
+                deployed_sha="b" * 40,
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageSnapshotRetentionError,
+                "distinct backup device",
+            ):
+                FinanceStorageSnapshotRetention(
+                    runtime,
+                    deployed_sha=DEPLOYED_SHA,
+                    backup_root=backup_root,
+                ).build_plan()
+            (snapshot / "unexpected.bin").write_bytes(b"unsafe")
+            retention = FinanceStorageSnapshotRetention(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                backup_root=backup_root,
+                backup_reserve_bytes=0,
+                minimum_root_free_bytes=0,
+                require_distinct_device=False,
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageSnapshotRetentionError,
+                "unknown files",
+            ):
+                retention.build_plan()
+
+    def test_snapshot_retention_blocks_post_plan_unknown_file_before_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=1)
+            backup_root = (
+                runtime
+                / "backups"
+                / "finance-storage-split-snapshots"
+            )
+            backup_root.parent.mkdir(parents=True)
+            snapshot = _create_retention_snapshot(
+                runtime,
+                snapshot_id="finance-split-" + ("4" * 20),
+                deployed_sha="b" * 40,
+            )
+            retention = FinanceStorageSnapshotRetention(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                backup_root=backup_root,
+                backup_reserve_bytes=0,
+                minimum_root_free_bytes=0,
+                require_distinct_device=False,
+            )
+            plan = retention.build_plan()
+            (snapshot / "appeared-after-plan.bin").write_bytes(b"unsafe")
+            with self.assertRaisesRegex(
+                FinanceStorageSnapshotRetentionError,
+                "unknown files before release",
+            ):
+                retention.apply(
+                    reviewed_plan=plan,
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    approval_reference="retention-post-plan-drift-smoke",
+                )
+            self.assertTrue(snapshot.is_dir())
+            self.assertTrue(
+                (snapshot / "snapshot_manifest.json").is_file()
+            )
+            self.assertTrue((snapshot / "monolith.sqlite3").is_file())
 
     def test_snapshot_recaptures_bounded_data_drift_after_plan(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

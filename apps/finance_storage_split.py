@@ -56,6 +56,11 @@ from packages.application.finance_storage_stale_writer_recovery import (
     PLAN_CONTRACT as STALE_WRITER_PLAN_CONTRACT,
     RESULT_CONTRACT as STALE_WRITER_RESULT_CONTRACT,
 )
+from packages.application.finance_storage_snapshot_retention import (
+    FinanceStorageSnapshotRetention,
+    PLAN_CONTRACT as SNAPSHOT_RETENTION_PLAN_CONTRACT,
+    RESULT_CONTRACT as SNAPSHOT_RETENTION_RESULT_CONTRACT,
+)
 from packages.application.storage_registry import parse_manifest
 from apps.business_data_maintenance_restore_job import (
     CONTRACT_NAME as RESTORE_JOB_CONTRACT,
@@ -77,6 +82,8 @@ RUNNER_CONTRACTS = {
     "rollback_result": ROLLBACK_RESULT_CONTRACT,
     "stale_writer_plan": STALE_WRITER_PLAN_CONTRACT,
     "stale_writer_result": STALE_WRITER_RESULT_CONTRACT,
+    "snapshot_retention_plan": SNAPSHOT_RETENTION_PLAN_CONTRACT,
+    "snapshot_retention_result": SNAPSHOT_RETENTION_RESULT_CONTRACT,
 }
 
 
@@ -235,6 +242,9 @@ def build_parser() -> argparse.ArgumentParser:
             "snapshot-status",
             "snapshot-create",
             "snapshot-integrity",
+            "snapshot-retention-plan",
+            "snapshot-retention-apply",
+            "snapshot-retention-readback",
             "stale-writer-plan",
             "stale-writer-stop",
             "shadow-status",
@@ -264,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fault-after-chunks", type=int, default=0)
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--snapshot-plan-file", type=Path)
+    parser.add_argument("--snapshot-retention-plan-file", type=Path)
     parser.add_argument("--stale-writer-plan-file", type=Path)
     parser.add_argument("--cutover-plan-file", type=Path)
     parser.add_argument("--rollback-plan-file", type=Path)
@@ -311,6 +322,8 @@ def _reviewed_plan_for_recovery_preflight(
     path: Path | None = None
     if action == "snapshot-create":
         path = args.snapshot_plan_file
+    elif action == "snapshot-retention-apply":
+        path = args.snapshot_retention_plan_file
     elif action == "stale-writer-stop":
         path = args.stale_writer_plan_file
     elif action == "cutover-apply":
@@ -641,6 +654,38 @@ def main(argv: list[str] | None = None) -> int:
         ).verify_integrity(
             args.source_snapshot_manifest.expanduser().resolve()
         )
+    elif args.action.startswith("snapshot-retention-"):
+        retention = FinanceStorageSnapshotRetention(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+        )
+        if args.action == "snapshot-retention-plan":
+            payload = retention.build_plan()
+        else:
+            if args.snapshot_retention_plan_file is None:
+                raise SystemExit(
+                    "--snapshot-retention-plan-file is required for "
+                    "snapshot retention apply/readback"
+                )
+            reviewed_plan = _reviewed_plan_for_recovery_preflight(
+                args,
+                action="snapshot-retention-apply",
+            )
+            if not isinstance(reviewed_plan, dict):
+                raise SystemExit(
+                    "--snapshot-retention-plan-file must contain a JSON object"
+                )
+            if args.action == "snapshot-retention-apply":
+                payload = retention.apply(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                    approval_reference=args.approval_reference,
+                )
+            else:
+                payload = retention.readback(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                )
     elif args.action == "stale-writer-plan":
         payload = FinanceStorageStaleWriterRecovery(
             runtime_dir,

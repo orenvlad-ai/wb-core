@@ -203,6 +203,23 @@ The implementation is deliberately inert on deploy:
   normal operation, then replays only post-prepare raw scopes and recopies
   operational state under its short hold. Original monolith and split files
   remain retained.
+- `finance-storage-snapshot-retention-plan|apply|readback` is the only
+  pre-candidate capacity recovery for stale coherent migration snapshots.
+  It runs only while the monolith is canonical, the manual barrier is
+  inactive, no split generation exists and the global Finance deploy lease is
+  bound to the exact deployed SHA. Plan hashes every allowlisted snapshot
+  file and proves the `backups` path is a different mounted device with a
+  2 GiB reserve. Apply takes one non-blocking retention lock, copies only
+  snapshots captured by an older deployed SHA, fsyncs and independently
+  hashes every archive byte, then persists a crash-resumable transaction and
+  archive manifest before removing the root-filesystem source files
+  (snapshot manifest last). Disconnect/crash before archive verification
+  leaves every source byte; after verification an exact repeat resumes only
+  the bounded source release. Unknown files/openers, a new snapshot or
+  generation, device/capacity/SHA/lease/barrier drift, or incomplete readback
+  fail closed. The live monolith, candidate/split generations and business
+  rows are never opened for write or removed; the archived snapshots remain
+  byte-exact recovery evidence on the dedicated backup device.
 - A pre-snapshot `finance-storage-stale-writer-plan|stop` recovery is limited
   to the exact closure-retry oneshot generation. The service has a 30-minute
   start bound; recovery additionally requires at least one hour of continuous
@@ -526,26 +543,31 @@ Canonical hosted sequence is phase-local:
 3. independently read back the rebound global Finance migration deploy lease
    on the exact current deployed SHA; any pre-acquire/rebind deploy or
    SHA/schema drift invalidates prior baseline/plan/fingerprint evidence;
-4. `finance-storage-snapshot-plan`, then the automatically held
+4. if the fresh capacity preflight is blocked by stale coherent snapshots,
+   run the exact lease-bound
+   `finance-storage-snapshot-retention-plan|apply|readback`; any recovery
+   deploy invalidates the prior snapshot evidence, so archive only
+   older-SHA snapshots and restart this sequence from a fresh lease readback;
+5. `finance-storage-snapshot-plan`, then the automatically held
    `finance-storage-snapshot-apply`, then
    `finance-storage-snapshot-integrity`;
    an active pre-existing writer service blocks the plan and leaves normal
    operation unchanged; a proven stale closure-retry generation uses the
    separately reviewed lease-bound recovery above before a completely fresh
    snapshot plan;
-5. `finance-storage-split-dry-run` against that exact verified snapshot and
+6. `finance-storage-split-dry-run` against that exact verified snapshot and
    stop for approval of its exact fingerprint/generation/capacity;
-6. only after approval, `finance-storage-split-apply`, shadow activate,
+7. only after approval, `finance-storage-split-apply`, shadow activate,
    legacy reconcile, bounded live-tail applies and repeated shadow verify until
    the minimum soak becomes `ready`;
-7. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
+8. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
    restart;
-8. production readback/UI observation, rollback plan/prepare and rollback
+9. production readback/UI observation, rollback plan/prepare and rollback
    apply drill if the approved program calls for it;
-9. release the global deploy lease only after exact abort or post-cutover
+10. release the global deploy lease only after exact abort or post-cutover
    reconciliation plus full SHA/writer/timer/policy/barrier/non-target
    readback;
-10. never retire any retained generation in this lifecycle.
+11. never retire any retained canonical/split generation in this lifecycle.
 
 Every evidence/plan file is private and outside Git. A new plan fingerprint is
 not normalized into an old approval. The initial program authorization permits

@@ -40,6 +40,12 @@ EXPECTED_RUNNER_CONTRACTS = {
     "stale_writer_result": (
         "wb_core_finance_storage_stale_writer_recovery_result_v1"
     ),
+    "snapshot_retention_plan": (
+        "wb_core_finance_storage_snapshot_retention_plan_v1"
+    ),
+    "snapshot_retention_result": (
+        "wb_core_finance_storage_snapshot_retention_result_v1"
+    ),
 }
 
 MUTATION_ACTIONS = frozenset(
@@ -47,6 +53,7 @@ MUTATION_ACTIONS = frozenset(
         "apply",
         "snapshot-create",
         "snapshot-integrity",
+        "snapshot-retention-apply",
         "stale-writer-stop",
         "shadow-activate",
         "shadow-reconcile",
@@ -62,6 +69,7 @@ EXPLICIT_APPROVAL_ACTIONS = frozenset(
     {
         "apply",
         "snapshot-create",
+        "snapshot-retention-apply",
         "stale-writer-stop",
         "shadow-activate",
         "shadow-reconcile",
@@ -124,6 +132,28 @@ _TRANSITIONS = (
         "to": ("released",),
         "recovery": "exact_restore_readback_idempotent_release",
         "command": "business-data-maintenance barrier-release",
+    },
+    {
+        "transition": "snapshot_retention.archive",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/<id>/"
+            "retention_transaction.json"
+        ),
+        "from": ("absent", "copying"),
+        "to": ("archive_verified",),
+        "recovery": "exact_plan_hash_bound_copy_resume",
+        "command": "finance-storage-snapshot-retention-apply",
+    },
+    {
+        "transition": "snapshot_retention.release",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/<id>/"
+            "archive_manifest.json"
+        ),
+        "from": ("archive_verified", "partial_source_release"),
+        "to": ("source_released",),
+        "recovery": "verified_archive_idempotent_source_release",
+        "command": "finance-storage-snapshot-retention-apply",
     },
     {
         "transition": "candidate.backfill",
@@ -499,6 +529,11 @@ def validate_recovery_preflight(
                 "stale_writer_recovery_dry_run",
                 "stop_allowed_by_machine_preflight",
             ),
+            "snapshot-retention-apply": (
+                EXPECTED_RUNNER_CONTRACTS["snapshot_retention_plan"],
+                "snapshot_retention_dry_run",
+                "apply_allowed_by_machine_preflight",
+            ),
             "cutover-apply": (
                 EXPECTED_RUNNER_CONTRACTS["cutover_plan"],
                 "cutover_dry_run",
@@ -526,6 +561,7 @@ def validate_recovery_preflight(
             )
     elif exact_action in {
         "snapshot-create",
+        "snapshot-retention-apply",
         "stale-writer-stop",
         "cutover-apply",
         "rollback-prepare",
@@ -755,6 +791,11 @@ def validate_recovery_preflight(
             raise FinanceStorageRecoveryContractError(
                 f"{exact_action} requires the canonical monolith"
             )
+    if exact_action == "snapshot-retention-apply":
+        if active.state != "monolith" or active.canonical_source != "monolith":
+            raise FinanceStorageRecoveryContractError(
+                "snapshot-retention-apply requires the canonical monolith"
+            )
     if exact_action == "apply" and snapshot is None:
         raise FinanceStorageRecoveryContractError(
             "candidate apply requires a verified coherent snapshot"
@@ -948,6 +989,7 @@ def validate_recovery_preflight(
     transition_prefix = {
         "snapshot-create": "snapshot.",
         "snapshot-integrity": "snapshot.",
+        "snapshot-retention-apply": "snapshot_retention.",
         "apply": "candidate.",
         "shadow-activate": "shadow.",
         "shadow-reconcile": "shadow.",

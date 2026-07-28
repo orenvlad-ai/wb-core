@@ -3974,6 +3974,8 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
         in {
             "apply",
             "snapshot-create",
+            "snapshot-retention-apply",
+            "snapshot-retention-readback",
             "stale-writer-stop",
             "cutover-apply",
             "rollback-prepare",
@@ -4655,6 +4657,9 @@ def _run_remote_finance_storage_split_action(
         "snapshot-status",
         "snapshot-create",
         "snapshot-integrity",
+        "snapshot-retention-plan",
+        "snapshot-retention-apply",
+        "snapshot-retention-readback",
         "stale-writer-plan",
         "stale-writer-stop",
         "shadow-status",
@@ -4825,6 +4830,52 @@ def _run_remote_finance_storage_split_action(
                 "Finance storage snapshot-integrity requires "
                 "--source-snapshot-manifest"
             )
+    elif effective_action in {
+        "snapshot-retention-apply",
+        "snapshot-retention-readback",
+    }:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                f"Finance storage {effective_action} requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_snapshot_retention_plan_v1"
+            or str(plan.get("mode") or "")
+            != "snapshot_retention_dry_run"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not bool(plan.get("apply_allowed_by_machine_preflight"))
+            or list(plan.get("blockers") or [])
+        ):
+            raise ValueError(
+                "Finance snapshot retention reviewed plan is invalid"
+            )
+        if (
+            effective_action == "snapshot-retention-apply"
+            and not approval_reference.strip()
+        ):
+            raise ValueError(
+                "Finance snapshot retention apply requires "
+                "--approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--snapshot-retention-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+            ]
+        )
+        if effective_action == "snapshot-retention-apply":
+            runner_args.extend(
+                [
+                    "--approval-reference",
+                    approval_reference.strip(),
+                ]
+            )
     elif effective_action == "stale-writer-stop":
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
@@ -4987,6 +5038,9 @@ def _run_remote_finance_storage_split_action(
             if action in {
                 "apply",
                 "snapshot-create",
+                "snapshot-retention-plan",
+                "snapshot-retention-apply",
+                "snapshot-retention-readback",
                 "stale-writer-stop",
                 "shadow-reconcile",
                 "shadow-verify",
@@ -5019,6 +5073,8 @@ def _run_remote_finance_storage_split_action(
         "dry-run",
         "health",
         "snapshot-plan",
+        "snapshot-retention-plan",
+        "snapshot-retention-readback",
         "stale-writer-plan",
         "recovery-contract",
         "recovery-preflight",
@@ -5040,6 +5096,32 @@ def _run_remote_finance_storage_split_action(
         ):
             raise RuntimeError(
                 "Finance stale-writer plan did not prove zero business/data mutation"
+            )
+        if action == "snapshot-retention-plan" and (
+            payload.get("query_only_contract", {}).get(
+                "business_data_mutation_count"
+            )
+            != 0
+            or payload.get("query_only_contract", {}).get(
+                "snapshot_byte_mutation_count"
+            )
+            != 0
+            or payload.get("query_only_contract", {}).get(
+                "archive_byte_mutation_count"
+            )
+            != 0
+        ):
+            raise RuntimeError(
+                "Finance snapshot retention plan did not prove zero mutation"
+            )
+        if action == "snapshot-retention-readback" and (
+            payload.get("status") != "readback_verified"
+            or payload.get("capacity_sufficient") is not True
+            or payload.get("live_monolith_touched") is not False
+            or payload.get("split_generation_touched") is not False
+        ):
+            raise RuntimeError(
+                "Finance snapshot retention readback is incomplete"
             )
         if action == "recovery-contract" and (
             payload.get("status") != "ready"
@@ -5073,6 +5155,15 @@ def _run_remote_finance_storage_split_action(
     ):
         raise RuntimeError(
             "Finance stale-writer stop lacks exact terminal readback"
+        )
+    elif action == "snapshot-retention-apply" and (
+        str(payload.get("status") or "") != "completed"
+        or int(payload.get("archived_snapshot_count") or 0) <= 0
+        or payload.get("live_monolith_touched") is not False
+        or payload.get("split_generation_touched") is not False
+    ):
+        raise RuntimeError(
+            "Finance snapshot retention apply lacks exact terminal readback"
         )
     elif action == "apply" and bool(payload.get("global_manifest_switched")):
         raise RuntimeError("candidate builder unexpectedly switched the global manifest")
@@ -7389,6 +7480,94 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_snapshot_integrity.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="snapshot-integrity",
+    )
+
+    finance_storage_snapshot_retention_plan = subparsers.add_parser(
+        "finance-storage-snapshot-retention-plan",
+        help=(
+            "Plan exact archive-first release of stale Finance coherent "
+            "snapshots to the dedicated backup device without mutation."
+        ),
+    )
+    finance_storage_snapshot_retention_plan.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_snapshot_retention_plan.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_retention_plan
+    )
+    finance_storage_snapshot_retention_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-retention-plan",
+    )
+
+    finance_storage_snapshot_retention_apply = subparsers.add_parser(
+        "finance-storage-snapshot-retention-apply",
+        help=(
+            "Archive exact stale Finance snapshots, verify bytes and durable "
+            "audit, then release only their root-filesystem copies."
+        ),
+    )
+    finance_storage_snapshot_retention_apply.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_snapshot_retention_apply.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_snapshot_retention_apply.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_snapshot_retention_apply.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_retention_apply
+    )
+    finance_storage_snapshot_retention_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-retention-apply",
+    )
+
+    finance_storage_snapshot_retention_readback = subparsers.add_parser(
+        "finance-storage-snapshot-retention-readback",
+        help=(
+            "Independently verify archived stale snapshot bytes, terminal "
+            "transactions, released source copies and recovered capacity."
+        ),
+    )
+    finance_storage_snapshot_retention_readback.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_snapshot_retention_readback.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_snapshot_retention_readback.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_snapshot_retention_readback.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_retention_readback
+    )
+    finance_storage_snapshot_retention_readback.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-retention-readback",
     )
 
     finance_storage_stale_writer_plan = subparsers.add_parser(
