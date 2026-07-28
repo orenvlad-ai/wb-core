@@ -288,6 +288,7 @@ def recovery_contract(
         "maintenance_restore",
         "barrier_release",
         "durable_restore_submit_status",
+        "durable_restore_inventory",
         "durable_restore_resume",
         "restore_systemd_template",
     )
@@ -896,15 +897,22 @@ def validate_recovery_preflight(
                     raise FinanceStorageRecoveryContractError(
                         "a different or ambiguous write barrier is active"
                     )
-                if str(barrier.get("phase") or "") not in {
-                    "acquiring",
-                    "held",
-                }:
+                barrier_phase = str(barrier.get("phase") or "")
+                if (
+                    exact_action == "snapshot-create"
+                    and barrier_phase == "restoring"
+                    and barrier.get("hold_confirmed") is True
+                ):
+                    boundary_classification = (
+                        "exact_restore_release_resume"
+                    )
+                elif barrier_phase not in {"acquiring", "held"}:
                     raise FinanceStorageRecoveryContractError(
                         "write barrier is already restoring; finish exact "
                         "restore/release before re-dispatch"
                     )
-                boundary_classification = "exact_idempotent_resume"
+                else:
+                    boundary_classification = "exact_idempotent_resume"
             else:
                 boundary_classification = "fresh_acquire"
         else:

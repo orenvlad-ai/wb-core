@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_NAME = "business_data_maintenance_restore_job_v1"
+INVENTORY_CONTRACT_NAME = "business_data_maintenance_restore_inventory_v1"
 JOB_DIRECTORY_NAME = "business-data-maintenance-restore-jobs"
 SYSTEMD_UNIT_TEMPLATE = "wb-core-business-data-maintenance-restore@.service"
 RESUME_BINDING_FILENAME = "resume.json"
@@ -86,6 +87,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read one durable restore request/status/result without mutation.",
     )
     _add_job_identity_arguments(status)
+    status.add_argument(
+        "--allow-absent",
+        action="store_true",
+        help=(
+            "Return an explicit fail-closed absent classification for an "
+            "exact job id instead of failing."
+        ),
+    )
+
+    subparsers.add_parser(
+        "inventory",
+        help=(
+            "Read every durable job and global restore lock before a new "
+            "maintenance boundary."
+        ),
+    )
 
     resume = subparsers.add_parser(
         "resume",
@@ -778,15 +795,119 @@ def job_status(
     job_id: str,
     deployed_sha: str,
     include_systemd: bool = True,
+    allow_absent: bool = False,
 ) -> dict[str, Any]:
     """Read one exact job without creating or changing state."""
 
+    canonical_runtime = _canonical_directory(runtime_dir, label="runtime")
+    exact_job_id = _require_job_id(job_id)
+    exact_deployed_sha = _require_deployed_sha(deployed_sha)
+    jobs_root = canonical_runtime / JOB_DIRECTORY_NAME
+    job_candidate = jobs_root / exact_job_id
+    if jobs_root.is_symlink() or job_candidate.is_symlink():
+        raise MaintenanceRestoreJobError(
+            "restore job durable path must not be a symlink"
+        )
+    if allow_absent and not job_candidate.exists():
+        if jobs_root.exists() and not jobs_root.is_dir():
+            raise MaintenanceRestoreJobError(
+                "restore jobs path is not a directory"
+            )
+        return {
+            "contract_name": CONTRACT_NAME,
+            "job_id": exact_job_id,
+            "deployed_sha": exact_deployed_sha,
+            "status": "absent",
+            "terminal": False,
+            "status_read_only": True,
+            "worker_observation": {
+                "captured_at": _now(),
+                "classification": "job_absent",
+                "fail_closed": True,
+                "status_read_only": True,
+                "second_restore_auto_start_allowed": False,
+                "barrier_abort_candidate": False,
+                "worker_active": False,
+            },
+        }
     return _status_report(
-        runtime_dir=_canonical_directory(runtime_dir, label="runtime"),
-        job_id=_require_job_id(job_id),
-        expected_deployed_sha=_require_deployed_sha(deployed_sha),
+        runtime_dir=canonical_runtime,
+        job_id=exact_job_id,
+        expected_deployed_sha=exact_deployed_sha,
         include_systemd=include_systemd,
     )
+
+
+def restore_job_inventory(*, runtime_dir: Path) -> dict[str, Any]:
+    """Read all durable restore jobs and locks without creating state."""
+
+    canonical_runtime = _canonical_directory(runtime_dir, label="runtime")
+    jobs_root = canonical_runtime / JOB_DIRECTORY_NAME
+    if jobs_root.is_symlink():
+        raise MaintenanceRestoreJobError(
+            "restore jobs directory must not be a symlink"
+        )
+    jobs: list[dict[str, Any]] = []
+    if jobs_root.exists():
+        if not jobs_root.is_dir():
+            raise MaintenanceRestoreJobError(
+                "restore jobs path is not a directory"
+            )
+        for candidate in sorted(jobs_root.iterdir()):
+            if candidate.name in {"submit.lock", "worker.lock"}:
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise MaintenanceRestoreJobError(
+                    "restore jobs root contains an unclassified entry"
+                )
+            request = _read_request(candidate)
+            binding = _effective_deployment_binding(
+                candidate,
+                request=request,
+            )
+            report = _status_report(
+                runtime_dir=canonical_runtime,
+                job_id=_require_job_id(candidate.name),
+                expected_deployed_sha=str(binding["deployed_sha"]),
+                include_systemd=True,
+            )
+            jobs.append(report)
+    locks = {
+        "submit": _read_lock_observation(jobs_root / "submit.lock"),
+        "worker": _read_lock_observation(jobs_root / "worker.lock"),
+        "maintenance_restore": _read_lock_observation(
+            canonical_runtime / ".business-data-maintenance-restore.lock"
+        ),
+    }
+    nonterminal = [
+        {
+            "job_id": str(item.get("job_id") or ""),
+            "status": str(item.get("status") or ""),
+            "worker_observation": dict(
+                item.get("worker_observation") or {}
+            ),
+        }
+        for item in jobs
+        if item.get("terminal") is not True
+    ]
+    locks_free = all(
+        observation.get("active") is False
+        for observation in locks.values()
+    )
+    return {
+        "contract_name": INVENTORY_CONTRACT_NAME,
+        "status": "ready",
+        "status_read_only": True,
+        "jobs": jobs,
+        "job_count": len(jobs),
+        "nonterminal_jobs": nonterminal,
+        "nonterminal_job_count": len(nonterminal),
+        "locks": locks,
+        "locks_free": locks_free,
+        "new_restore_submit_allowed": not nonterminal and locks_free,
+        "second_restore_auto_start_allowed": False,
+        "captured_at": _now(),
+    }
 
 
 def run_worker(
@@ -2096,6 +2217,34 @@ def _prove_lock_free(path: Path, *, label: str) -> None:
         handle.close()
 
 
+def _read_lock_observation(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise MaintenanceRestoreJobError(
+            "restore inventory lock must not be a symlink"
+        )
+    if not path.exists():
+        return {"path": str(path), "exists": False, "active": False}
+    if not path.is_file():
+        raise MaintenanceRestoreJobError(
+            "restore inventory lock path is not a file"
+        )
+    handle = path.open("rb")
+    try:
+        try:
+            fcntl.flock(
+                handle.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            active = True
+        else:
+            active = False
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    return {"path": str(path), "exists": True, "active": active}
+
+
 def _systemd_unit_status(job_id: str) -> dict[str, Any]:
     unit_name = _systemd_unit_name(job_id)
     try:
@@ -2438,7 +2587,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             runtime_dir=runtime_dir,
             job_id=str(args.job_id),
             deployed_sha=str(args.deployed_sha),
+            allow_absent=bool(args.allow_absent),
         )
+    if args.command == "inventory":
+        return restore_job_inventory(runtime_dir=runtime_dir)
     if args.command == "resume":
         return resume_failed_job(
             runtime_dir=runtime_dir,

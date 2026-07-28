@@ -140,7 +140,10 @@ The implementation is deliberately inert on deploy:
   maintenance/policy evidence; successful completion of that same bound service
   generation is accepted without guessing another writer. A bounded deadline and
   durable heartbeat classify stale, ambiguous and lost workers fail closed;
-  status never starts another restore. A terminal failure is not resubmittable
+  status never starts another restore. Query-only inventory classifies every
+  durable job plus the submit/worker/foreground restore locks; a fresh
+  snapshot boundary is forbidden unless it proves zero non-terminal jobs and
+  every global restore lock free. A terminal failure is not resubmittable
   through the original submit path. Only a reviewed recovery deploy may
   explicitly append the next binding and resume that same job, with the exact
   preceding-failure digest, unchanged original continuity boundary, archived
@@ -217,9 +220,13 @@ The implementation is deliberately inert on deploy:
   phase-local wrappers around the same repo-owned runner. Plan, health and
   status actions are read-only; every mutation action checks the active target,
   reviewed external evidence and exact approval. All migration actions other
-  than health also require a fresh private GitHub lease readback outside Git,
+  than health, recovery-contract and exact query-only post-restore
+  snapshot-status require a fresh private GitHub lease readback outside Git,
   no older than five minutes; the remote runner rebinds it to the canonical
-  `.wb-core-runtime-sha`. Deployment invokes none of them.
+  `.wb-core-runtime-sha`. Snapshot-status instead binds the reviewed plan,
+  capture intent and persisted manifest directly to that canonical deployed
+  SHA, so a long already-authorized hold/restore cannot fail only because the
+  original readback aged. Deployment invokes none of them.
 - `finance-storage-recovery-contract` is the query-only deployed capability
   readback. Before **every** Finance storage mutation the hosted wrapper runs
   `recovery-preflight` remotely before barrier acquisition or destination
@@ -230,6 +237,24 @@ The implementation is deliberately inert on deploy:
   identities, runner contract versions and all downstream durable
   restore/release capabilities. Missing, stale, unsupported or ambiguous
   evidence creates no barrier and fails closed.
+- The snapshot plan is intentionally query-only while ordinary writers remain
+  active. After the exact quiet hold, capture therefore re-reads the source
+  identity and may bind ordinary data/mtime/page-count/freelist drift only when
+  path, filesystem device, inode, page size, schema digest, journal mode and
+  query-only contract are unchanged and fresh free space still covers the
+  actual held allocation plus the reviewed reserve. The planned and actual
+  identities and fresh capacity calculation are both persisted in the capture
+  intent/manifest. Path/inode/schema/device/journal drift or insufficient
+  headroom remains fail closed.
+- Snapshot restore uses a deterministic job id derived from deployed SHA,
+  barrier window and reviewed plan fingerprint. The outer hosted wrapper first
+  proves global restore inventory, submits that one repo-owned systemd job and
+  observes only durable status. If the client/SSH disappears, exact
+  re-dispatch from the same `restoring` barrier skips barrier acquisition,
+  writer hold and snapshot copy, observes the same job, restores the nested
+  warehouse boundary and releases only after terminal exact restore readback.
+  Missing snapshot manifest after restore is reported only after controls are
+  safely released and cannot cause the reviewed plan to replay.
 
 ### Durable recovery-continuity matrix
 
@@ -240,8 +265,8 @@ documented classifications are:
 |---|---|---|
 | snapshot acquire | write-barrier `absent/released → acquiring` | same window/kind/fingerprint resumes; other identity fails closed |
 | snapshot hold | maintenance `preparing/holding → held` | exact control signature resumes as a no-op |
-| snapshot copy | partial/final database and snapshot manifest | exact partial is rebuilt; structurally exact final-without-manifest is bound and published; dual/sidecar/drift is ambiguous |
-| snapshot restore | maintenance plus one durable restore job | only the same digest-bound job may resume |
+| snapshot copy | partial/final database and snapshot manifest | bounded held-source data drift is recaptured with stable identity/capacity proof; exact partial is rebuilt; structurally exact final-without-manifest is bound and published; dual/sidecar/stable-identity drift is ambiguous |
+| snapshot restore | maintenance plus one deterministic durable restore job and global inventory | only the same digest-bound job may continue; re-dispatch observes it without replaying the snapshot |
 | snapshot release | barrier `held/restoring → released` | exact restore readback is mandatory |
 | candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped |
 | candidate manifest | candidate bytes → shadow manifest | exact manifest readback is idempotent |

@@ -787,6 +787,7 @@ def main() -> None:
             ]
         )
         maintenance_actions: list[str] = []
+        continuity_fingerprint = "sha256:" + ("c" * 64)
 
         def maintenance_result(
             _target: object,
@@ -801,14 +802,124 @@ def main() -> None:
                     "quiet": True,
                     "auto_updates": {"revision": 19},
                 }
+            if action == "restore-continuity-status":
+                return {
+                    "status": "ready",
+                    "maintenance": {
+                        "status": "quiet",
+                        "quiet": True,
+                        "auto_updates": {"revision": 19},
+                    },
+                    "service_continuity": {
+                        "fingerprint": continuity_fingerprint,
+                    },
+                }
             if action == "restore":
                 return {
                     "status": "restored",
                     "exact_prior_state_restored": True,
                 }
+            if action == "status":
+                return {
+                    "status": "not_quiet",
+                    "auto_updates": {
+                        "master_desired": True,
+                        "revision": 20,
+                        "unknown_processes": [],
+                        "drift_processes": [],
+                    },
+                    "unknown_wb_core_timers": [],
+                    "writer_locks": {},
+                }
             if action == "barrier-release":
                 return {"status": "inactive", "active": False}
             return {"status": "active", "active": True}
+
+        def finance_snapshot_result(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if action == "recovery-preflight":
+                return {
+                    "status": "ready",
+                    "phase": "pre_barrier",
+                    "action": "snapshot-create",
+                    "fail_closed": True,
+                    "boundary_classification": "fresh_acquire",
+                }
+            if action in {"snapshot-create", "snapshot-status"}:
+                return {
+                    "status": "captured_unverified",
+                    "snapshot_manifest_path": (
+                        "/opt/wb-core-runtime/state/finance-storage-split-"
+                        "snapshots/fixture/snapshot_manifest.json"
+                    ),
+                }
+            raise AssertionError(f"unexpected Finance action: {action}")
+
+        def durable_restore_result(
+            _target: object,
+            *,
+            job_action: str,
+            deployed_sha: str,
+            job_id: str = "",
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if job_action == "inventory":
+                return {
+                    "contract_name": (
+                        "business_data_maintenance_restore_inventory_v1"
+                    ),
+                    "status": "ready",
+                    "nonterminal_job_count": 0,
+                    "locks_free": True,
+                    "new_restore_submit_allowed": True,
+                }
+            if job_action == "status":
+                return {
+                    "contract_name": (
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    "job_id": job_id,
+                    "deployed_sha": deployed_sha,
+                    "status": "absent",
+                    "terminal": False,
+                    "worker_observation": {
+                        "classification": "job_absent",
+                    },
+                }
+            if job_action == "submit":
+                return {
+                    "contract_name": (
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    "job_id": job_id,
+                    "status": "succeeded",
+                    "terminal": True,
+                    "request": {"job_id": job_id},
+                    "deployment_binding": {
+                        "deployed_sha": deployed_sha,
+                    },
+                    "result": {
+                        "status": "restored",
+                        "readback": {
+                            "maintenance_phase": "restored",
+                            "exact_prior_state_restored": True,
+                            "master_desired": True,
+                            "policy_revision": 20,
+                            "barrier_active": True,
+                            "barrier_phase": "restoring",
+                        },
+                    },
+                    "worker_observation": {
+                        "classification": "terminal_succeeded",
+                    },
+                }
+            raise AssertionError(
+                f"unexpected durable restore action: {job_action}"
+            )
 
         with (
             mock.patch.object(
@@ -824,13 +935,12 @@ def main() -> None:
             mock.patch.object(
                 hosted_runtime,
                 "_run_remote_finance_storage_split_action",
-                return_value={
-                    "status": "captured_unverified",
-                    "snapshot_manifest_path": (
-                        "/opt/wb-core-runtime/state/finance-storage-split-"
-                        "snapshots/fixture/snapshot_manifest.json"
-                    ),
-                },
+                side_effect=finance_snapshot_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_restore_job",
+                side_effect=durable_restore_result,
             ),
             mock.patch.object(hosted_runtime, "_print_json"),
         ):
@@ -841,7 +951,8 @@ def main() -> None:
             "hold",
             "barrier-confirm",
             "barrier-restoring",
-            "restore",
+            "restore-continuity-status",
+            "status",
             "barrier-release",
         ]:
             raise AssertionError(
@@ -893,6 +1004,7 @@ def main() -> None:
                     "phase": "pre_barrier",
                     "action": "snapshot-create",
                     "fail_closed": True,
+                    "boundary_classification": "fresh_acquire",
                 }
             if action == "snapshot-create":
                 raise RuntimeError("synthetic snapshot failure")
@@ -914,6 +1026,11 @@ def main() -> None:
                 "_run_remote_finance_storage_split_action",
                 side_effect=failed_snapshot_after_preflight,
             ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_restore_job",
+                side_effect=durable_restore_result,
+            ),
             mock.patch.object(hosted_runtime, "_print_json"),
         ):
             try:
@@ -923,15 +1040,233 @@ def main() -> None:
                     raise
             else:
                 raise AssertionError("synthetic snapshot failure must propagate")
-        if maintenance_actions[-3:] != [
+        if maintenance_actions[-4:] != [
             "barrier-restoring",
-            "restore",
+            "restore-continuity-status",
+            "status",
             "barrier-release",
         ]:
             raise AssertionError(
                 "snapshot failure must still exactly restore controls before "
                 f"propagating: {maintenance_actions}"
             )
+
+        maintenance_actions.clear()
+        disconnected_finance_actions: list[str] = []
+
+        def disconnected_finance_result(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            disconnected_finance_actions.append(action)
+            if action == "recovery-preflight":
+                return {
+                    "status": "ready",
+                    "phase": "pre_barrier",
+                    "action": "snapshot-create",
+                    "fail_closed": True,
+                    "boundary_classification": "fresh_acquire",
+                }
+            if action == "snapshot-create":
+                return {
+                    "status": "captured_unverified",
+                    "snapshot_manifest_path": (
+                        "/opt/wb-core-runtime/state/finance-storage-split-"
+                        "snapshots/fixture/snapshot_manifest.json"
+                    ),
+                }
+            raise AssertionError(f"unexpected Finance action: {action}")
+
+        def disconnected_durable_result(
+            _target: object,
+            *,
+            job_action: str,
+            deployed_sha: str,
+            job_id: str = "",
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if job_action in {"inventory", "status"}:
+                return durable_restore_result(
+                    _target,
+                    job_action=job_action,
+                    deployed_sha=deployed_sha,
+                    job_id=job_id,
+                )
+            if job_action == "submit":
+                raise RuntimeError(
+                    "synthetic SSH disconnect after durable systemd submit"
+                )
+            raise AssertionError(
+                f"unexpected durable restore action: {job_action}"
+            )
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                return_value={"status": "held"},
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                side_effect=disconnected_finance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_restore_job",
+                side_effect=disconnected_durable_result,
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            try:
+                hosted_runtime.run_finance_storage_split_command(
+                    snapshot_args
+                )
+            except RuntimeError as exc:
+                if "disconnect after durable systemd submit" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    "synthetic submitting-client disconnect must propagate"
+                )
+        if maintenance_actions[-2:] != [
+            "barrier-restoring",
+            "restore-continuity-status",
+        ]:
+            raise AssertionError(
+                "disconnect must leave the exact restoring boundary active"
+            )
+        if "barrier-release" in maintenance_actions:
+            raise AssertionError(
+                "disconnect before durable terminal readback must not release "
+                "the barrier"
+            )
+
+        maintenance_actions.clear()
+        resumed_finance_actions: list[str] = []
+        resumed_durable_actions: list[str] = []
+
+        def resumed_finance_result(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            resumed_finance_actions.append(action)
+            if action == "recovery-preflight":
+                return {
+                    "status": "ready",
+                    "phase": "pre_barrier",
+                    "action": "snapshot-create",
+                    "fail_closed": True,
+                    "boundary_classification": (
+                        "exact_restore_release_resume"
+                    ),
+                }
+            if action == "snapshot-status":
+                return {
+                    "status": "captured_unverified",
+                    "snapshot_manifest_path": (
+                        "/opt/wb-core-runtime/state/finance-storage-split-"
+                        "snapshots/fixture/snapshot_manifest.json"
+                    ),
+                }
+            raise AssertionError(f"unexpected Finance action: {action}")
+
+        def resumed_durable_result(
+            _target: object,
+            *,
+            job_action: str,
+            deployed_sha: str,
+            job_id: str = "",
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            resumed_durable_actions.append(job_action)
+            if job_action == "inventory":
+                return durable_restore_result(
+                    _target,
+                    job_action=job_action,
+                    deployed_sha=deployed_sha,
+                    job_id=job_id,
+                )
+            if job_action == "status":
+                terminal = durable_restore_result(
+                    _target,
+                    job_action="submit",
+                    deployed_sha=deployed_sha,
+                    job_id=job_id,
+                )
+                terminal["result_record"] = {
+                    "result_digest": "sha256:" + ("d" * 64),
+                }
+                terminal["audit"] = {
+                    "events": [
+                        "queued",
+                        "worker_started",
+                        "succeeded",
+                    ],
+                    "sha256": "sha256:" + ("e" * 64),
+                }
+                return terminal
+            raise AssertionError(
+                "outer resume must never submit a second restore job"
+            )
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_maintenance_action",
+                return_value={"status": "restored"},
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                side_effect=resumed_finance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_restore_job",
+                side_effect=resumed_durable_result,
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_finance_storage_split_command(snapshot_args)
+        if resumed_finance_actions != [
+            "recovery-preflight",
+            "snapshot-status",
+        ]:
+            raise AssertionError(
+                "outer resume must not replay snapshot mutation: "
+                f"{resumed_finance_actions}"
+            )
+        if resumed_durable_actions != [
+            "inventory",
+            "status",
+            "status",
+            "inventory",
+        ]:
+            raise AssertionError(
+                "outer resume must observe one exact durable job only: "
+                f"{resumed_durable_actions}"
+            )
+        if maintenance_actions != ["status", "barrier-release"]:
+            raise AssertionError(
+                "outer resume must only release after terminal restore "
+                f"readback: {maintenance_actions}"
+            )
+
         cutover_plan_path = Path(finance_temp_dir) / "cutover-plan.json"
         cutover_fingerprint = "sha256:" + ("8" * 64)
         candidate_fingerprint = "sha256:" + ("7" * 64)

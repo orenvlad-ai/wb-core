@@ -3087,6 +3087,344 @@ def run_business_data_maintenance_restore_job_command(
     return 0
 
 
+def _run_remote_business_data_maintenance_restore_job(
+    target: HostedRuntimeTarget,
+    *,
+    job_action: str,
+    deployed_sha: str,
+    job_id: str = "",
+    expected_revision: int | None = None,
+    window_id: str = "",
+    plan_fingerprint: str = "",
+    service_continuity_fingerprint: str = "",
+    actor: str = "",
+    reason: str = "",
+    allow_absent: bool = False,
+) -> dict[str, Any]:
+    """Submit or inspect one exact durable restore for a hosted workflow."""
+
+    action = f"business-data-maintenance-restore-{job_action}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if job_action == "submit":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    if job_action not in {"inventory", "submit", "status"}:
+        raise ValueError(
+            "internal durable restore helper supports only inventory/submit/status"
+        )
+    if "wb-core-business-data-maintenance-restore@.service" not in {
+        unit.name for unit in target.managed_systemd_units
+    }:
+        raise ValueError(
+            "detached maintenance restore requires the repo-owned managed "
+            "systemd template"
+        )
+    exact_sha = str(deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", exact_sha):
+        raise ValueError(
+            "detached maintenance restore requires an exact deployed SHA"
+        )
+    exact_job_id = str(job_id or "").strip().lower()
+    if (
+        job_action != "inventory"
+        and not re.fullmatch(r"[0-9a-f]{64}", exact_job_id)
+    ):
+        raise ValueError(
+            "detached maintenance restore requires an exact 64-hex job id"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "detached maintenance restore requires the canonical runtime dir"
+        )
+    if target.environment_file != "/opt/wb-ai/.env":
+        raise ValueError(
+            "detached maintenance restore requires the canonical environment file"
+        )
+    runner_args = [
+        "python3",
+        "apps/business_data_maintenance_restore_job.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--app-dir",
+        target.target_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha-file",
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+        job_action,
+    ]
+    if job_action != "inventory":
+        runner_args.extend(
+            [
+                "--job-id",
+                exact_job_id,
+                "--deployed-sha",
+                exact_sha,
+            ]
+        )
+    if job_action == "status":
+        if allow_absent:
+            runner_args.append("--allow-absent")
+    else:
+        if expected_revision is None or int(expected_revision) < 0:
+            raise ValueError(
+                "detached maintenance restore requires an exact policy revision"
+            )
+        exact_fingerprint = str(plan_fingerprint or "").strip().lower()
+        exact_continuity = str(
+            service_continuity_fingerprint or ""
+        ).strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", exact_fingerprint):
+            raise ValueError(
+                "detached maintenance restore requires an exact plan fingerprint"
+            )
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", exact_continuity):
+            raise ValueError(
+                "detached maintenance restore requires an exact service "
+                "continuity fingerprint"
+            )
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+            str(window_id or ""),
+        ):
+            raise ValueError(
+                "detached maintenance restore requires an exact window id"
+            )
+        exact_actor = str(actor or "").strip()
+        exact_reason = str(reason or "").strip()
+        if not exact_actor or not exact_reason:
+            raise ValueError(
+                "detached maintenance restore requires audited actor and reason"
+            )
+        runner_args.extend(
+            [
+                "--expected-revision",
+                str(int(expected_revision)),
+                "--window-id",
+                str(window_id),
+                "--plan-fingerprint",
+                exact_fingerprint,
+                "--service-continuity-fingerprint",
+                exact_continuity,
+                "--actor",
+                exact_actor,
+                "--reason",
+                exact_reason,
+                "--allow-pre-hold-service-continuity",
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(exact_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=60.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "detached maintenance restore returned invalid JSON"
+        ) from exc
+    expected_contract = (
+        "business_data_maintenance_restore_inventory_v1"
+        if job_action == "inventory"
+        else "business_data_maintenance_restore_job_v1"
+    )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract_name") != expected_contract
+        or (
+            job_action != "inventory"
+            and str(payload.get("job_id") or "") != exact_job_id
+        )
+    ):
+        raise RuntimeError(
+            "detached maintenance restore returned an invalid identity"
+        )
+    return payload
+
+
+def _finance_snapshot_restore_job_id(
+    *,
+    deployed_sha: str,
+    window_id: str,
+    plan_fingerprint: str,
+) -> str:
+    material = "\n".join(
+        [
+            "wb_core_finance_snapshot_restore_job_v1",
+            str(deployed_sha).strip().lower(),
+            str(window_id).strip(),
+            str(plan_fingerprint).strip().lower(),
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _wait_for_finance_snapshot_restore_job(
+    target: HostedRuntimeTarget,
+    *,
+    deployed_sha: str,
+    job_id: str,
+    initial_status: Mapping[str, Any],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 10_800.0
+    current = dict(initial_status)
+    while True:
+        observation = dict(current.get("worker_observation") or {})
+        classification = str(observation.get("classification") or "")
+        if (
+            str(current.get("status") or "") == "succeeded"
+            and current.get("terminal") is True
+            and classification == "terminal_succeeded"
+        ):
+            request = dict(current.get("request") or {})
+            binding = dict(current.get("deployment_binding") or {})
+            result = dict(current.get("result") or {})
+            readback = dict(result.get("readback") or {})
+            if (
+                str(request.get("job_id") or "") != job_id
+                or str(binding.get("deployed_sha") or "") != deployed_sha
+                or str(result.get("status") or "") != "restored"
+                or readback.get("exact_prior_state_restored") is not True
+                or str(readback.get("maintenance_phase") or "")
+                != "restored"
+                or readback.get("master_desired") is not True
+                or readback.get("barrier_active") is not True
+                or str(readback.get("barrier_phase") or "")
+                != "restoring"
+            ):
+                raise RuntimeError(
+                    "Finance snapshot durable restore terminal readback is incomplete"
+                )
+            return current
+        if (
+            str(current.get("status") or "") in {
+                "failed",
+                "start_failed",
+                "absent",
+            }
+            or classification
+            not in {"active_worker", "awaiting_systemd_start"}
+        ):
+            raise RuntimeError(
+                "Finance snapshot durable restore is fail-closed: "
+                f"status={current.get('status')}; "
+                f"classification={classification}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Finance snapshot durable restore observation deadline expired"
+            )
+        time.sleep(5.0)
+        current = _run_remote_business_data_maintenance_restore_job(
+            target,
+            job_action="status",
+            deployed_sha=deployed_sha,
+            job_id=job_id,
+        )
+
+
+def _restore_finance_snapshot_window_durably(
+    target: HostedRuntimeTarget,
+    *,
+    transition_evidence: dict[str, Any],
+    deployed_sha: str,
+    window_id: str,
+    plan_fingerprint: str,
+) -> dict[str, Any]:
+    job_id = _finance_snapshot_restore_job_id(
+        deployed_sha=deployed_sha,
+        window_id=window_id,
+        plan_fingerprint=plan_fingerprint,
+    )
+    initial = _run_remote_business_data_maintenance_restore_job(
+        target,
+        job_action="status",
+        deployed_sha=deployed_sha,
+        job_id=job_id,
+        allow_absent=True,
+    )
+    transition_evidence["business_restore_job_initial_status"] = initial
+    if str(initial.get("status") or "") == "absent":
+        continuity = _run_remote_business_data_maintenance_runner(
+            target,
+            action="restore-continuity-status",
+        )
+        transition_evidence["business_restore_continuity"] = continuity
+        maintenance = dict(continuity.get("maintenance") or {})
+        service_continuity = dict(
+            continuity.get("service_continuity") or {}
+        )
+        expected_revision = int(
+            (maintenance.get("auto_updates") or {}).get("revision") or -1
+        )
+        continuity_fingerprint = str(
+            service_continuity.get("fingerprint") or ""
+        )
+        if (
+            str(continuity.get("status") or "") != "ready"
+            or str(maintenance.get("status") or "") != "quiet"
+            or maintenance.get("quiet") is not True
+            or expected_revision < 0
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                continuity_fingerprint,
+            )
+        ):
+            raise RuntimeError(
+                "Finance snapshot durable restore continuity is incomplete"
+            )
+        initial = _run_remote_business_data_maintenance_restore_job(
+            target,
+            job_action="submit",
+            deployed_sha=deployed_sha,
+            job_id=job_id,
+            expected_revision=expected_revision,
+            window_id=window_id,
+            plan_fingerprint=plan_fingerprint,
+            service_continuity_fingerprint=continuity_fingerprint,
+            actor="finance_storage_snapshot_runner",
+            reason="coherent Finance snapshot completed",
+        )
+        transition_evidence["business_restore_job_submit"] = initial
+    terminal = _wait_for_finance_snapshot_restore_job(
+        target,
+        deployed_sha=deployed_sha,
+        job_id=job_id,
+        initial_status=initial,
+    )
+    transition_evidence["business_restore_job_terminal"] = terminal
+    return terminal
+
+
 def run_promo_archive_gc_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -3668,7 +4006,11 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     deploy_lease_path = str(
         getattr(args, "finance_deploy_lease_evidence", "") or ""
     ).strip()
-    if action not in {"health", "recovery-contract"}:
+    if action not in {
+        "health",
+        "recovery-contract",
+        "snapshot-status",
+    }:
         if not deploy_lease_path:
             raise ValueError(
                 "Finance storage migration requires a fresh "
@@ -3921,84 +4263,306 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             (reviewed_plan.get("target_snapshot") or {}).get("window_id")
             or ""
         )
-        transition_evidence["barrier_acquire"] = (
-            _run_remote_business_data_maintenance_runner(
+        lease_sha = str(
+            ((deploy_lease or {}).get("lease") or {}).get(
+                "deployed_sha"
+            )
+            or ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{40}", lease_sha):
+            raise RuntimeError(
+                "Finance snapshot deploy lease lacks the exact deployed SHA"
+            )
+        boundary_classification = str(
+            (
+                transition_evidence.get("recovery_preflight") or {}
+            ).get("boundary_classification")
+            or ""
+        )
+        restore_job_id = _finance_snapshot_restore_job_id(
+            deployed_sha=lease_sha,
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+        restore_inventory = (
+            _run_remote_business_data_maintenance_restore_job(
                 target,
-                action="barrier-acquire",
-                actor="finance_storage_snapshot_runner",
-                reason="coherent Finance migration source snapshot",
-                window_id=window_id,
-                window_kind="snapshot",
-                plan_fingerprint=fingerprint,
-                approval_reference=approval_reference,
+                job_action="inventory",
+                deployed_sha=lease_sha,
             )
         )
-        try:
-            transition_evidence["core_prepare"] = (
+        transition_evidence["business_restore_job_inventory"] = (
+            restore_inventory
+        )
+        exact_restore_status = (
+            _run_remote_business_data_maintenance_restore_job(
+                target,
+                job_action="status",
+                deployed_sha=lease_sha,
+                job_id=restore_job_id,
+                allow_absent=True,
+            )
+        )
+        transition_evidence["business_restore_job_preflight"] = (
+            exact_restore_status
+        )
+        if boundary_classification == "fresh_acquire":
+            if (
+                int(restore_inventory.get("nonterminal_job_count") or 0)
+                != 0
+                or restore_inventory.get("locks_free") is not True
+                or restore_inventory.get("new_restore_submit_allowed")
+                is not True
+            ):
+                raise RuntimeError(
+                    "Finance snapshot pre-barrier restore inventory is not "
+                    "quiescent"
+                )
+            if str(exact_restore_status.get("status") or "") != "absent":
+                raise RuntimeError(
+                    "Finance snapshot exact restore job already exists after "
+                    "barrier release; the reviewed plan cannot be replayed"
+                )
+        elif boundary_classification == "exact_restore_release_resume":
+            if str(exact_restore_status.get("status") or "") == "absent":
+                if (
+                    int(
+                        restore_inventory.get(
+                            "nonterminal_job_count"
+                        )
+                        or 0
+                    )
+                    != 0
+                    or restore_inventory.get("locks_free") is not True
+                    or restore_inventory.get(
+                        "new_restore_submit_allowed"
+                    )
+                    is not True
+                ):
+                    raise RuntimeError(
+                        "Finance snapshot exact restoring boundary has an "
+                        "ambiguous restore inventory"
+                    )
+        elif boundary_classification == "exact_idempotent_resume":
+            if (
+                str(exact_restore_status.get("status") or "") != "absent"
+                or int(
+                    restore_inventory.get("nonterminal_job_count") or 0
+                )
+                != 0
+                or restore_inventory.get("locks_free") is not True
+                or restore_inventory.get("new_restore_submit_allowed")
+                is not True
+            ):
+                raise RuntimeError(
+                    "Finance snapshot held/acquiring resume has an ambiguous "
+                    "restore inventory"
+                )
+        else:
+            raise RuntimeError(
+                "Finance snapshot recovery boundary classification is unsupported"
+            )
+
+        snapshot_error: Exception | None = None
+        payload: dict[str, Any] = {}
+        if boundary_classification != "exact_restore_release_resume":
+            transition_evidence["barrier_acquire"] = (
                 _run_remote_business_data_maintenance_runner(
                     target,
-                    action="prepare",
+                    action="barrier-acquire",
+                    actor="finance_storage_snapshot_runner",
+                    reason="coherent Finance migration source snapshot",
+                    window_id=window_id,
+                    window_kind="snapshot",
+                    plan_fingerprint=fingerprint,
+                    approval_reference=approval_reference,
+                )
+            )
+            try:
+                transition_evidence["core_prepare"] = (
+                    _run_remote_business_data_maintenance_runner(
+                        target,
+                        action="prepare",
+                        actor="finance_storage_snapshot_runner",
+                        reason="coherent Finance migration source snapshot",
+                    )
+                )
+                transition_evidence["warehouse_hold"] = (
+                    _run_remote_warehouse_functional_maintenance_action(
+                        target,
+                        action="hold",
+                        disable_timer=True,
+                    )
+                )
+                hold = _run_remote_business_data_maintenance_runner(
+                    target,
+                    action="hold",
                     actor="finance_storage_snapshot_runner",
                     reason="coherent Finance migration source snapshot",
                 )
-            )
-            transition_evidence["warehouse_hold"] = (
-                _run_remote_warehouse_functional_maintenance_action(
-                    target,
-                    action="hold",
-                    disable_timer=True,
-                )
-            )
-            hold = _run_remote_business_data_maintenance_runner(
-                target,
-                action="hold",
-                actor="finance_storage_snapshot_runner",
-                reason="coherent Finance migration source snapshot",
-            )
-            transition_evidence["business_hold"] = hold
-            if (
-                str(hold.get("status") or "") != "held"
-                or hold.get("quiet") is not True
-            ):
-                raise RuntimeError(
-                    "Finance snapshot writer/timer hold readback is incomplete"
-                )
-        except Exception as hold_error:
-            try:
-                transition_evidence["acquire_abort"] = (
-                    _abort_finance_storage_window_acquire(
-                        target,
-                        window_id=window_id,
-                        fingerprint=fingerprint,
-                        reason=(
-                            "Finance snapshot drain failed before hold "
-                            "confirmation"
-                        ),
+                transition_evidence["business_hold"] = hold
+                if (
+                    str(hold.get("status") or "") != "held"
+                    or hold.get("quiet") is not True
+                ):
+                    raise RuntimeError(
+                        "Finance snapshot writer/timer hold readback is incomplete"
                     )
-                )
-            except Exception as recovery_error:
+            except Exception as hold_error:
+                try:
+                    transition_evidence["acquire_abort"] = (
+                        _abort_finance_storage_window_acquire(
+                            target,
+                            window_id=window_id,
+                            fingerprint=fingerprint,
+                            reason=(
+                                "Finance snapshot drain failed before hold "
+                                "confirmation"
+                            ),
+                        )
+                    )
+                except Exception as recovery_error:
+                    raise RuntimeError(
+                        "Finance snapshot drain failed before hold confirmation; "
+                        "the barrier remains active because exact abort restore "
+                        f"also failed: hold={hold_error}; "
+                        f"restore={recovery_error}"
+                    ) from recovery_error
                 raise RuntimeError(
                     "Finance snapshot drain failed before hold confirmation; "
-                    "the barrier remains active because exact abort restore "
-                    f"also failed: hold={hold_error}; restore={recovery_error}"
-                ) from recovery_error
-            raise RuntimeError(
-                "Finance snapshot drain failed before hold confirmation; "
-                f"exact controls and barrier were restored: {hold_error}"
-            ) from hold_error
-        transition_evidence["barrier_confirm"] = (
-            _run_remote_business_data_maintenance_runner(
+                    f"exact controls and barrier were restored: {hold_error}"
+                ) from hold_error
+            transition_evidence["barrier_confirm"] = (
+                _run_remote_business_data_maintenance_runner(
+                    target,
+                    action="barrier-confirm",
+                    window_id=window_id,
+                    plan_fingerprint=fingerprint,
+                )
+            )
+            try:
+                payload = _run_remote_finance_storage_split_action(
+                    target,
+                    action=action,
+                    plan_path=plan_path,
+                    fingerprint=fingerprint,
+                    approval_reference=approval_reference,
+                    chunk_size=int(
+                        getattr(args, "chunk_size", 10_000) or 10_000
+                    ),
+                    source_snapshot_manifest=source_snapshot_manifest,
+                    candidate_manifest=candidate_manifest,
+                    candidate_plan_fingerprint=candidate_plan_fingerprint,
+                    minimum_observation_seconds=minimum_observation_seconds,
+                    deploy_lease=deploy_lease,
+                )
+            except Exception as exc:
+                snapshot_error = exc
+            transition_evidence["barrier_restoring"] = (
+                _run_remote_business_data_maintenance_runner(
+                    target,
+                    action="barrier-restoring",
+                    window_id=window_id,
+                    plan_fingerprint=fingerprint,
+                )
+            )
+        else:
+            transition_evidence["outer_resume"] = {
+                "classification": "exact_restore_release_resume",
+                "barrier_acquire_replayed": False,
+                "writer_hold_replayed": False,
+                "snapshot_create_replayed": False,
+                "restore_job_id": restore_job_id,
+            }
+
+        terminal_restore = _restore_finance_snapshot_window_durably(
+            target,
+            transition_evidence=transition_evidence,
+            deployed_sha=lease_sha,
+            window_id=window_id,
+            plan_fingerprint=fingerprint,
+        )
+        post_restore_inventory = (
+            _run_remote_business_data_maintenance_restore_job(
                 target,
-                action="barrier-confirm",
-                window_id=window_id,
-                plan_fingerprint=fingerprint,
+                job_action="inventory",
+                deployed_sha=lease_sha,
             )
         )
-        snapshot_error: Exception | None = None
+        transition_evidence["business_restore_job_post_terminal_inventory"] = (
+            post_restore_inventory
+        )
+        if (
+            int(
+                post_restore_inventory.get("nonterminal_job_count")
+                or 0
+            )
+            != 0
+            or post_restore_inventory.get("locks_free") is not True
+        ):
+            raise RuntimeError(
+                "Finance snapshot restore terminal inventory is not quiescent"
+            )
+        post_restore_status = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="status",
+            )
+        )
+        transition_evidence["business_restore_independent_readback"] = (
+            post_restore_status
+        )
+        terminal_policy_revision = int(
+            (
+                (
+                    terminal_restore.get("result") or {}
+                ).get("readback")
+                or {}
+            ).get("policy_revision")
+            or -1
+        )
+        current_policy = dict(
+            post_restore_status.get("auto_updates") or {}
+        )
+        writer_locks = dict(
+            post_restore_status.get("writer_locks") or {}
+        )
+        locks_busy = any(
+            (
+                bool((value or {}).get("busy"))
+                if key == "seller_portal"
+                else bool((value or {}).get("held"))
+            )
+            for key, value in writer_locks.items()
+            if isinstance(value, Mapping)
+        )
+        if (
+            current_policy.get("master_desired") is not True
+            or int(current_policy.get("revision") or -1)
+            != terminal_policy_revision
+            or list(
+                current_policy.get("unknown_processes") or []
+            )
+            or list(current_policy.get("drift_processes") or [])
+            or list(
+                post_restore_status.get("unknown_wb_core_timers") or []
+            )
+            or locks_busy
+        ):
+            raise RuntimeError(
+                "Finance snapshot independent writer/timer/policy readback "
+                "is incomplete"
+            )
+        transition_evidence["warehouse_restore"] = (
+            _run_remote_warehouse_functional_maintenance_action(
+                target,
+                action="restore",
+            )
+        )
         try:
             payload = _run_remote_finance_storage_split_action(
                 target,
-                action=action,
+                action="snapshot-status",
                 plan_path=plan_path,
                 fingerprint=fingerprint,
                 approval_reference=approval_reference,
@@ -4012,44 +4576,8 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 deploy_lease=deploy_lease,
             )
         except Exception as exc:
-            snapshot_error = exc
-            payload = {}
-        transition_evidence["barrier_restoring"] = (
-            _run_remote_business_data_maintenance_runner(
-                target,
-                action="barrier-restoring",
-                window_id=window_id,
-                plan_fingerprint=fingerprint,
-            )
-        )
-        paused_revision = int(
-            ((hold.get("auto_updates") or {}).get("revision") or 0)
-        )
-        if paused_revision <= 0:
-            raise RuntimeError(
-                "Finance snapshot hold lacks exact paused policy revision"
-            )
-        restore = _run_remote_business_data_maintenance_runner(
-            target,
-            action="restore",
-            expected_revision=paused_revision,
-            actor="finance_storage_snapshot_runner",
-            reason="coherent Finance snapshot completed",
-        )
-        transition_evidence["business_restore"] = restore
-        if (
-            str(restore.get("status") or "") != "restored"
-            or restore.get("exact_prior_state_restored") is not True
-        ):
-            raise RuntimeError(
-                "Finance snapshot exact writer/timer restore is incomplete"
-            )
-        transition_evidence["warehouse_restore"] = (
-            _run_remote_warehouse_functional_maintenance_action(
-                target,
-                action="restore",
-            )
-        )
+            if snapshot_error is None:
+                snapshot_error = exc
         transition_evidence["barrier_release"] = (
             _run_remote_business_data_maintenance_runner(
                 target,
@@ -4124,6 +4652,7 @@ def _run_remote_finance_storage_split_action(
         "health",
         "apply",
         "snapshot-plan",
+        "snapshot-status",
         "snapshot-create",
         "snapshot-integrity",
         "stale-writer-plan",
@@ -4176,7 +4705,11 @@ def _run_remote_finance_storage_split_action(
     ]
     if action == "recovery-preflight":
         runner_args.extend(["--recovery-action", effective_action])
-    if action not in {"health", "recovery-contract"}:
+    if action not in {
+        "health",
+        "recovery-contract",
+        "snapshot-status",
+    }:
         if not isinstance(deploy_lease, Mapping):
             raise ValueError(
                 "canonical Finance migration execution requires active "
@@ -4252,10 +4785,11 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-    elif effective_action == "snapshot-create":
+    elif effective_action in {"snapshot-create", "snapshot-status"}:
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
-                "Finance storage snapshot-create requires an existing --plan-file"
+                f"Finance storage {effective_action} requires an existing "
+                "--plan-file"
             )
         reviewed_plan_json = plan_path.read_text(encoding="utf-8")
         plan = json.loads(reviewed_plan_json)
@@ -4272,7 +4806,8 @@ def _run_remote_finance_storage_split_action(
             )
         if not approval_reference.strip():
             raise ValueError(
-                "Finance storage snapshot-create requires --approval-reference"
+                f"Finance storage {effective_action} requires "
+                "--approval-reference"
             )
         runner_args.extend(
             [
