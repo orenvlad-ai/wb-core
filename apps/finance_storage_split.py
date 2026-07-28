@@ -304,6 +304,10 @@ def _reviewed_plan_for_recovery_preflight(
     *,
     action: str,
 ) -> dict[str, Any] | None:
+    cached = getattr(args, "_reviewed_plan_cache", None)
+    if isinstance(cached, dict) and action in cached:
+        payload = cached[action]
+        return payload if isinstance(payload, dict) else None
     path: Path | None = None
     if action == "snapshot-create":
         path = args.snapshot_plan_file
@@ -327,6 +331,10 @@ def _reviewed_plan_for_recovery_preflight(
         raise SystemExit(
             f"{action} reviewed plan must contain a JSON object"
         )
+    if not isinstance(cached, dict):
+        cached = {}
+        setattr(args, "_reviewed_plan_cache", cached)
+    cached[action] = payload
     return payload
 
 
@@ -455,10 +463,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(
                     "--rollback-plan-file is required for rollback mutations"
                 )
-            reviewed_plan = json.loads(
-                args.rollback_plan_file.expanduser().read_text(
-                    encoding="utf-8"
-                )
+            reviewed_plan = _reviewed_plan_for_recovery_preflight(
+                args,
+                action=args.action,
             )
             if not isinstance(reviewed_plan, dict):
                 raise SystemExit(
@@ -510,10 +517,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(
                     "--cutover-plan-file is required for cutover-apply"
                 )
-            reviewed_plan = json.loads(
-                args.cutover_plan_file.expanduser().read_text(
-                    encoding="utf-8"
-                )
+            reviewed_plan = _reviewed_plan_for_recovery_preflight(
+                args,
+                action=args.action,
             )
             if not isinstance(reviewed_plan, dict):
                 raise SystemExit(
@@ -588,8 +594,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "--snapshot-plan-file is required for snapshot-status"
             )
-        reviewed_plan = json.loads(
-            args.snapshot_plan_file.expanduser().read_text(encoding="utf-8")
+        reviewed_plan = _reviewed_plan_for_recovery_preflight(
+            args,
+            action="snapshot-create",
         )
         if not isinstance(reviewed_plan, dict):
             raise SystemExit("--snapshot-plan-file must contain a JSON object")
@@ -607,8 +614,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "--snapshot-plan-file is required for snapshot-create"
             )
-        reviewed_plan = json.loads(
-            args.snapshot_plan_file.expanduser().read_text(encoding="utf-8")
+        reviewed_plan = _reviewed_plan_for_recovery_preflight(
+            args,
+            action=args.action,
         )
         if not isinstance(reviewed_plan, dict):
             raise SystemExit("--snapshot-plan-file must contain a JSON object")
@@ -644,10 +652,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "--stale-writer-plan-file is required for stale-writer-stop"
             )
-        reviewed_plan = json.loads(
-            args.stale_writer_plan_file.expanduser().read_text(
-                encoding="utf-8"
-            )
+        reviewed_plan = _reviewed_plan_for_recovery_preflight(
+            args,
+            action=args.action,
         )
         if not isinstance(reviewed_plan, dict):
             raise SystemExit(
