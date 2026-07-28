@@ -1039,6 +1039,7 @@ class MigrationSmoke(unittest.TestCase):
             )
             plan = retention.build_plan()
             self.assertTrue(plan["apply_allowed_by_machine_preflight"])
+            plan["deploy_lease"] = self._recovery_lease()
             self.assertEqual(
                 [
                     item["snapshot_id"]
@@ -1053,6 +1054,17 @@ class MigrationSmoke(unittest.TestCase):
                 ],
                 [current_id],
             )
+            tampered_plan = json.loads(json.dumps(plan))
+            tampered_plan["unreviewed_transport"] = {"accepted": False}
+            with self.assertRaisesRegex(
+                FinanceStorageSnapshotRetentionError,
+                "fingerprint is stale",
+            ):
+                retention.apply(
+                    reviewed_plan=tampered_plan,
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    approval_reference="retention-crash-smoke",
+                )
             recovery = validate_recovery_preflight(
                 runtime,
                 action="snapshot-retention-apply",
@@ -2166,6 +2178,7 @@ class MigrationSmoke(unittest.TestCase):
                 return_value=generous_vfs,
             ):
                 cutover_plan = cutover.build_plan()
+            cutover_plan["deploy_lease"] = self._recovery_lease()
             self.assertTrue(
                 cutover_plan["apply_allowed_by_machine_preflight"],
                 cutover_plan["blockers"],
@@ -2360,10 +2373,26 @@ class MigrationSmoke(unittest.TestCase):
                 return_value=generous_vfs,
             ):
                 rollback_plan = rollback.build_plan()
+            rollback_plan["deploy_lease"] = self._recovery_lease()
             self.assertTrue(
                 rollback_plan["prepare_allowed_by_machine_preflight"],
                 rollback_plan["blockers"],
             )
+            tampered_rollback_plan = json.loads(
+                json.dumps(rollback_plan)
+            )
+            tampered_rollback_plan["unreviewed_transport"] = {
+                "accepted": False
+            }
+            with self.assertRaisesRegex(
+                FinanceStorageMigrationError,
+                "reviewed Finance rollback plan",
+            ):
+                rollback.prepare(
+                    reviewed_plan=tampered_rollback_plan,
+                    expected_fingerprint=rollback_plan["fingerprint"],
+                    approval_reference="fixture-human-gate",
+                )
             rollback_prepare_preflight = validate_recovery_preflight(
                 runtime,
                 action="rollback-prepare",

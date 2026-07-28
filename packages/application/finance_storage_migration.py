@@ -3582,6 +3582,7 @@ class FinanceStorageCutover:
         stable = json.loads(_canonical_json(plan))
         stable.pop("fingerprint", None)
         stable.pop("created_at", None)
+        stable.pop("deploy_lease", None)
         capacity = stable.get("capacity", {})
         for key in (
             "available_bytes",
@@ -4351,6 +4352,7 @@ class FinanceStorageRollback:
         stable = json.loads(_canonical_json(plan))
         stable.pop("fingerprint", None)
         stable.pop("created_at", None)
+        stable.pop("deploy_lease", None)
         capacity = stable.get("capacity", {})
         for key in (
             "available_bytes",
