@@ -80,6 +80,12 @@ _SYSTEMD_UNITS = (
     "wb-core-autoanswers-worker.service",
     "wb-core-autoanswers-worker.timer",
 )
+_SNAPSHOT_DRAINABLE_ONESHOTS = {
+    "wb-core-autoanswers-readonly-sync.service": (
+        "wb-core-autoanswers-readonly-sync.timer"
+    ),
+    "wb-core-autoanswers-worker.service": "wb-core-autoanswers-worker.timer",
+}
 _GIB = 1024**3
 
 
@@ -664,6 +670,57 @@ def _unknown_snapshot_writers(
     return unknown
 
 
+def _snapshot_drainable_active_services(
+    systemd_units: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return exact running oneshots that the maintenance lifecycle can drain.
+
+    Snapshot apply places the HTTP barrier first, disables each paired timer
+    through the feature-owned Autoanswers lifecycle, and waits for the current
+    oneshot without killing it. Any missing/mismatched timer or service
+    identity remains outside this allowlist and therefore blocks the plan.
+    """
+
+    by_unit = {
+        str(item.get("unit") or ""): item
+        for item in systemd_units
+        if str(item.get("unit") or "")
+    }
+    drainable: list[dict[str, Any]] = []
+    for service_name, timer_name in _SNAPSHOT_DRAINABLE_ONESHOTS.items():
+        service = by_unit.get(service_name)
+        timer = by_unit.get(timer_name)
+        if service is None or timer is None:
+            continue
+        if (
+            int(service.get("return_code") or 0) != 0
+            or str(service.get("load_state") or "") != "loaded"
+            or str(service.get("unit_file_state") or "") != "static"
+            or str(service.get("active_state") or "") != "activating"
+            or str(service.get("sub_state") or "") != "start"
+            or int(service.get("main_pid") or 0) <= 0
+            or int(timer.get("return_code") or 0) != 0
+            or str(timer.get("load_state") or "") != "loaded"
+            or str(timer.get("unit_file_state") or "") != "enabled"
+            or str(timer.get("active_state") or "") != "active"
+            or str(timer.get("sub_state") or "") not in {"running", "waiting"}
+        ):
+            continue
+        item = dict(service)
+        item["paired_timer"] = {
+            "unit": timer_name,
+            "active_state": str(timer.get("active_state") or ""),
+            "sub_state": str(timer.get("sub_state") or ""),
+            "unit_file_state": str(timer.get("unit_file_state") or ""),
+        }
+        item["drain_contract"] = (
+            "barrier-first; disable paired timer; wait bounded current PID; "
+            "never kill; exact restore/abort on failure"
+        )
+        drainable.append(item)
+    return drainable
+
+
 def _source_identity(path: Path, conn: sqlite3.Connection) -> dict[str, Any]:
     stat = path.stat()
     page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
@@ -890,6 +947,18 @@ class FinanceStorageCoherentSnapshot:
             and str(item.get("active_state") or "")
             not in {"inactive", "failed"}
         ]
+        drainable_active_services = _snapshot_drainable_active_services(
+            systemd_units
+        )
+        drainable_units = {
+            str(item.get("unit") or "")
+            for item in drainable_active_services
+        }
+        blocking_active_services = [
+            item
+            for item in active_business_services
+            if str(item.get("unit") or "") not in drainable_units
+        ]
         blockers: list[dict[str, Any]] = []
         if re.fullmatch(r"[0-9a-f]{40}", self.deployed_sha) is None:
             blockers.append(
@@ -920,11 +989,11 @@ class FinanceStorageCoherentSnapshot:
                     "openers": unknown_writers,
                 }
             )
-        if active_business_services:
+        if blocking_active_services:
             blockers.append(
                 {
                     "code": "active_business_writer_service",
-                    "services": active_business_services,
+                    "services": blocking_active_services,
                 }
             )
         direct_inventory = _direct_open_inventory(self.repo_root)
@@ -991,10 +1060,17 @@ class FinanceStorageCoherentSnapshot:
                 "unknown_database_openers": unknown_openers,
                 "unknown_database_writers": unknown_writers,
                 "active_business_services": active_business_services,
+                "drainable_active_services": drainable_active_services,
+                "blocking_active_services": blocking_active_services,
                 "hold_contract": [
                     "manual HTTP/API write barrier active before drain",
                     "business-data maintenance exact hold confirmed",
                     "warehouse and Finance writers quiescent",
+                    (
+                        "exact allowlisted Autoanswers oneshots may already be "
+                        "running only with their enabled paired timers; apply "
+                        "disables retrigger and waits for the current PID"
+                    ),
                     "unrelated services remain available for reads",
                 ],
             },

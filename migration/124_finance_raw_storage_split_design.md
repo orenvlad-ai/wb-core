@@ -107,12 +107,17 @@ The implementation is deliberately inert on deploy:
 - `business-data-maintenance` captures the exact prior owner policy, all known
   timers/writers/settings and warehouse timer state. Unknown writers/timers
   block a hold. Release is impossible until exact restore and readback have
-  succeeded. Snapshot planning also blocks any already-active business writer
-  service instead of entering a window that cannot drain. If an unconfirmed
-  acquire fails after controls were paused, the only abort path proves the
-  same pre-hold service generation is still running, restores the exact
-  timer/settings signature and records `barrier-abort`; it cannot abort a
-  confirmed hold or any window in which protected mutation began. If a nested
+  succeeded. Snapshot planning blocks any already-active business writer
+  except the two exact Autoanswers oneshots whose loaded/static service,
+  positive PID and enabled/active paired timer prove the existing
+  feature-lifecycle drain contract. For only those services, snapshot apply
+  places the HTTP barrier first, disables timer retrigger, waits boundedly for
+  the current PID without killing it, and still requires the same quiet-hold
+  readback; missing/mismatched timer or service evidence remains a blocker. If
+  an unconfirmed acquire fails after controls were paused, the only abort path
+  proves the same pre-hold service generation is still running, restores the
+  exact timer/settings signature and records `barrier-abort`; it cannot abort
+  a confirmed hold or any window in which protected mutation began. If a nested
   warehouse restore completed before a later outer restore failure disabled
   every timer again, the retry reuses the original warehouse baseline only
   for the exact audited unconfirmed-barrier rollback footprint; it never
@@ -497,6 +502,9 @@ Closure requires:
   restart.
 - Candidate-plan fingerprint stability across transient systemd execution
   transitions, with unit identity/load/enablement drift still rejected.
+- Snapshot planning admits only exact drainable Autoanswers oneshots with
+  their enabled active paired timers; mismatched timer/service identity and
+  every other active writer remain fail-closed.
 - Exact stale-writer generation drift, runtime FD/socket/child-process
   rejection, stop failure without retry, timer/policy preservation and
   idempotent terminal audit.
