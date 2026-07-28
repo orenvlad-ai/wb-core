@@ -69,6 +69,106 @@ jobs:
           --actor "$LOOP_ACTOR"
           --association "$LOOP_ASSOCIATION"
 
+  finance_lease_command:
+    name: Apply global Finance migration deploy lease command
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/wb-core finance-lease ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+      WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+      FINANCE_LEASE_COMMAND: ${{ github.event.comment.body }}
+      FINANCE_LEASE_ACTOR: ${{ github.event.comment.user.login }}
+      FINANCE_LEASE_ASSOCIATION: ${{ github.event.comment.author_association }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Ensure Finance lease labels
+        run: python3 apps/github_release_train.py setup-labels
+
+      - name: Validate exact Finance lease identity and transition
+        id: preflight
+        run: >-
+          python3 apps/github_release_train.py preflight-finance-lease
+          --pr "${{ github.event.issue.number }}"
+          --command "$FINANCE_LEASE_COMMAND"
+          --actor "$FINANCE_LEASE_ACTOR"
+          --association "$FINANCE_LEASE_ASSOCIATION"
+          --output-path "$GITHUB_OUTPUT"
+
+      - name: Configure canonical production SSH
+        if: steps.preflight.outputs.needs_deploy_readback == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/wb-core-release-key"
+          known_hosts_file="$RUNNER_TEMP/wb-core-known-hosts"
+          install -m 600 /dev/null "$key_file"
+          printf '%s\n' "$WB_CORE_DEPLOY_SSH_KEY" > "$key_file"
+          install -m 600 /dev/null "$known_hosts_file"
+          printf '%s\n' "$WB_CORE_DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
+          install -d -m 700 "$HOME/.ssh"
+          target_file="artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
+          target_host="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["host_ip"])' "$target_file")"
+          target_alias="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ssh_destination"])' "$target_file")"
+          config_file="$HOME/.ssh/config"
+          install -m 600 /dev/null "$config_file"
+          printf 'Host %s\n  HostName %s\n  User root\n  IdentityFile %s\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile %s\n' \
+            "$target_alias" "$target_host" "$key_file" "$known_hosts_file" > "$config_file"
+
+      - name: Install deployment readback dependencies
+        if: steps.preflight.outputs.needs_deploy_readback == 'true'
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Read canonical deployed SHA
+        if: steps.preflight.outputs.needs_deploy_readback == 'true'
+        run: >-
+          python3 apps/hosted_runtime_transport_reconcile.py
+          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
+          --expected-sha "${{ steps.preflight.outputs.deployed_sha }}"
+          --pr "${{ github.event.issue.number }}"
+          --head "${{ steps.preflight.outputs.head_sha }}"
+          --merge "${{ steps.preflight.outputs.deployed_sha }}"
+          --failed-stage readback
+          --read-only
+          --output "$RUNNER_TEMP/wb-core-finance-lease-deploy.json"
+
+      - name: Apply Actions-owned Finance lease transition
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            python3 apps/github_release_train.py handle-finance-lease
+            --pr "${{ github.event.issue.number }}"
+            --command "$FINANCE_LEASE_COMMAND"
+            --actor "$FINANCE_LEASE_ACTOR"
+            --association "$FINANCE_LEASE_ASSOCIATION"
+          )
+          if [[ "${{ steps.preflight.outputs.needs_deploy_readback }}" == "true" ]]; then
+            args+=(--deploy-evidence-file "$RUNNER_TEMP/wb-core-finance-lease-deploy.json")
+          fi
+          "${args[@]}"
+
+      - name: Remove temporary Finance lease material
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/wb-core-release-key" "$RUNNER_TEMP/wb-core-known-hosts" \
+            "$RUNNER_TEMP/wb-core-finance-lease-deploy.json" "$HOME/.ssh/config"
+
   production_mutation_command:
     name: Validate human-gated production-mutation terminalization
     if: >-

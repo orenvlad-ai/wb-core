@@ -637,7 +637,8 @@ CRITICAL_TRANSITIONS = frozenset(
 CANONICAL_MONITOR_QUERY = (
     'is:pr -label:release:superseded '
     'label:"release:ready,release:running,release:awaiting-agent,release:awaiting-ui,'
-    'release:needs-resume,release:blocked,release:halted" sort:created-asc'
+    'release:needs-resume,release:blocked,release:halted,'
+    'finance:migration-deploy-lease" sort:created-asc'
 )
 CANONICAL_MONITOR_URL = (
     "https://github.com/orenvlad-ai/wb-core/pulls?q=" + quote_plus(CANONICAL_MONITOR_QUERY)
@@ -651,6 +652,15 @@ RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
 PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER = (
     "wb-core-production-mutation-completion-proof"
+)
+FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER = (
+    "wb-core-finance-migration-deploy-lease-binding"
+)
+FINANCE_DEPLOY_LEASE_RECOVERY_PROOF_MARKER = (
+    "wb-core-finance-migration-deploy-lease-recovery"
+)
+FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER = (
+    "wb-core-finance-migration-deploy-lease-terminal"
 )
 HALT_PROOF_MARKER = "wb-core-release-halt-proof"
 RETRY_PROOF_MARKER = "wb-core-release-retry-proof"

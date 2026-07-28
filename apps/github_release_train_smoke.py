@@ -23,6 +23,10 @@ from apps.github_release_train import (  # noqa: E402
     Candidate,
     complete_production_mutation_release,
     DONE_LABEL,
+    FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+    FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
+    FINANCE_DEPLOY_LEASE_LABEL,
+    FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
     HALTED_LABEL,
     LIVE_RUNTIME_LABEL,
     LOOP_ACK_PREFIX,
@@ -39,12 +43,15 @@ from apps.github_release_train import (  # noqa: E402
     ReleaseClassificationBlocked,
     ReleaseTrainError,
     accept_loop_ui,
+    acquire_finance_deploy_lease,
     acknowledge_loop_agent,
+    authorize_finance_deploy_lease_recovery,
     complete_standard_release,
     correct_loop_identity_to_new,
     enqueue_loop_new,
     enqueue_loop_recovery,
     handle_loop_comment,
+    finance_deploy_lease_state,
     loop_ack_label,
     loop_root_label,
     loop_root_from_labels,
@@ -54,9 +61,11 @@ from apps.github_release_train import (  # noqa: E402
     merge_candidate,
     prepare_candidate,
     parse_production_mutation_terminalization_command,
+    parse_finance_deploy_lease_command,
     production_mutation_terminal_state_proven,
     production_mutation_terminalization_preflight,
     request_loop_agent,
+    rebind_finance_deploy_lease,
     resume_halted_release,
     resume_loop_owner,
     retry_blocked_release,
@@ -65,6 +74,7 @@ from apps.github_release_train import (  # noqa: E402
     select_candidate,
     set_release_state,
     task_class_from_labels,
+    terminalize_finance_deploy_lease,
     transition_label_set,
     upsert_status_comment,
 )
@@ -1252,6 +1262,363 @@ def _assert_production_mutation_terminalization() -> None:
     print(f"production_mutation_terminalization: {len(completed)}/10 ok")
 
 
+def _assert_finance_global_deploy_lease() -> None:
+    api = FakeApi()
+    anchor_pr = 850
+    recovery_pr = 851
+    unrelated_pr = 852
+    task_id = "019fa739-505c-74b1-9f24-02a2c1f9bf1b"
+    lease_id = "finance-split-019fa739"
+    anchor = _pull(
+        anchor_pr,
+        labels=[PRODUCTION_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-28T10:00:00Z",
+        sha=SHA_A,
+    )
+    anchor.update(
+        state="closed",
+        merged=True,
+        merge_commit_sha=SHA_B,
+        merged_at="2026-07-28T10:30:00Z",
+    )
+    api.pulls[anchor_pr] = anchor
+    api.add_comment(
+        anchor_pr,
+        "<!-- wb-core-release-completion-proof "
+        f"contour=production-verified merge={SHA_B} pr={anchor_pr} -->",
+    )
+    api.comparisons = [{"status": "identical", "behind_by": 0}]
+    api.pulls[unrelated_pr] = _pull(
+        unrelated_pr,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-07-28T11:00:00Z",
+        sha=SHA_C,
+    )
+    deploy_evidence = {
+        "status": "reconciled",
+        "healthy": True,
+        "pr": anchor_pr,
+        "head": SHA_A,
+        "merge": SHA_B,
+        "expected_sha": SHA_B,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "read_only": True,
+        "repairs_applied": False,
+    }
+    acquire_text = (
+        f"/wb-core finance-lease acquire {anchor_pr} head {SHA_A} "
+        f"deployed {SHA_B} task {task_id} lease {lease_id} "
+        "window pre-snapshot-1 phase pre-snapshot ttl-minutes 120"
+    )
+    acquire = parse_finance_deploy_lease_command(acquire_text)
+    observed = datetime.now(timezone.utc).timestamp()
+    api.pulls[849] = _pull(
+        849,
+        labels=[
+            READY_LABEL,
+            RUNNING_LABEL,
+            STANDARD_TASK_LABEL,
+            LIVE_RUNTIME_LABEL,
+        ],
+        created_at="2026-07-28T09:55:00Z",
+        sha=SHA_C,
+    )
+    try:
+        acquire_finance_deploy_lease(
+            api,
+            acquire,
+            deploy_evidence,
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+            now=observed,
+        )
+    except ReleaseBlocked as exc:
+        assert "requires no running" in str(exc)
+    else:
+        raise AssertionError("Finance lease acquired during an active deploy")
+    del api.pulls[849]
+
+    original_add_comment = api.add_comment
+    interrupted_once = False
+
+    def interrupt_after_global_label(number: int, body: str) -> None:
+        nonlocal interrupted_once
+        if (
+            not interrupted_once
+            and FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER in body
+        ):
+            interrupted_once = True
+            assert FINANCE_DEPLOY_LEASE_LABEL in _labels(api.pulls[number])
+            assert FINANCE_DEPLOY_LEASE_AUDIT_LABEL in _labels(
+                api.pulls[number]
+            )
+            raise RuntimeError("simulated client disconnect after fail-closed label")
+        original_add_comment(number, body)
+
+    api.add_comment = interrupt_after_global_label  # type: ignore[method-assign]
+    try:
+        acquire_finance_deploy_lease(
+            api,
+            acquire,
+            deploy_evidence,
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+            now=observed,
+        )
+    except RuntimeError as exc:
+        assert "simulated client disconnect" in str(exc)
+    else:
+        raise AssertionError("fault injection must interrupt acquire")
+    interrupted = finance_deploy_lease_state(api, now=observed + 1)
+    assert interrupted["status"] == "ambiguous"
+    assert interrupted["global_release_blocked"] is True
+    assert interrupted["allows_finance_migration"] is False
+    api.add_comment = original_add_comment  # type: ignore[method-assign]
+
+    assert acquire_finance_deploy_lease(
+        api,
+        acquire,
+        deploy_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+        now=observed,
+    ) == "acquired"
+    assert acquire_finance_deploy_lease(
+        api,
+        acquire,
+        deploy_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+        now=observed + 5,
+    ) == "already-acquired"
+    state = finance_deploy_lease_state(api, now=observed + 10)
+    assert state["status"] == "active"
+    assert state["allows_finance_migration"] is True
+    assert state["lease"]["revision"] == 1
+    assert state["lease"]["deployed_sha"] == SHA_B
+    api.remove_label(anchor_pr, FINANCE_DEPLOY_LEASE_LABEL)
+    lost_hold = finance_deploy_lease_state(api, now=observed + 10)
+    assert lost_hold["status"] == "ambiguous"
+    assert lost_hold["global_release_blocked"] is True
+    api.add_labels(anchor_pr, [FINANCE_DEPLOY_LEASE_LABEL])
+    api.remove_label(anchor_pr, FINANCE_DEPLOY_LEASE_AUDIT_LABEL)
+    lost_audit = finance_deploy_lease_state(api, now=observed + 10)
+    assert lost_audit["status"] == "ambiguous"
+    assert lost_audit["global_release_blocked"] is True
+    api.add_labels(anchor_pr, [FINANCE_DEPLOY_LEASE_AUDIT_LABEL])
+    blocked = select_candidate(api, now=observed + 10)
+    assert blocked["status"] == "finance-deploy-lease"
+    assert not blocked["found"]
+    stale = finance_deploy_lease_state(
+        api,
+        now=observed + 121 * 60,
+    )
+    assert stale["status"] == "stale"
+    assert stale["global_release_blocked"] is True
+    assert stale["allows_finance_migration"] is False
+    stale_selection = select_candidate(
+        api,
+        now=observed + 121 * 60,
+    )
+    assert stale_selection["status"] == "finance-deploy-lease-fail-closed"
+    api.add_labels(unrelated_pr, [FINANCE_DEPLOY_LEASE_LABEL])
+    ambiguous = finance_deploy_lease_state(api, now=observed + 10)
+    assert ambiguous["status"] == "ambiguous"
+    assert ambiguous["global_release_blocked"] is True
+    api.remove_label(unrelated_pr, FINANCE_DEPLOY_LEASE_LABEL)
+
+    recovery = _pull(
+        recovery_pr,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-07-28T11:05:00Z",
+        sha=SHA_C,
+    )
+    api.pulls[recovery_pr] = recovery
+    api.checks = [
+        {
+            "id": recovery_pr,
+            "name": "baseline",
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
+    authorize = parse_finance_deploy_lease_command(
+        f"/wb-core finance-lease authorize-recovery {anchor_pr} "
+        f"task {task_id} lease {lease_id} revision 1 "
+        f"recovery-pr {recovery_pr} head {SHA_C}"
+    )
+    assert authorize_finance_deploy_lease_recovery(
+        api,
+        authorize,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "authorized"
+    assert FINANCE_DEPLOY_LEASE_RECOVERY_LABEL in _labels(recovery)
+    recovery_pending = finance_deploy_lease_state(api, now=observed + 20)
+    assert recovery_pending["status"] == "active"
+    assert recovery_pending["recovery_pending"] is True
+    assert recovery_pending["allows_finance_migration"] is False
+    selected = select_candidate(api, now=observed + 20)
+    assert selected["found"] and selected["pr_number"] == recovery_pr
+
+    _set_labels(
+        recovery,
+        [
+            PRODUCTION_LABEL,
+            STANDARD_TASK_LABEL,
+            LIVE_RUNTIME_LABEL,
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+        ],
+    )
+    recovery.update(
+        state="closed",
+        merged=True,
+        merge_commit_sha=SHA_C,
+        merged_at="2026-07-28T11:30:00Z",
+    )
+    api.add_comment(
+        recovery_pr,
+        "<!-- wb-core-release-completion-proof "
+        f"contour=production-verified merge={SHA_C} pr={recovery_pr} -->",
+    )
+    rebind_evidence = {
+        **deploy_evidence,
+        "merge": SHA_C,
+        "expected_sha": SHA_C,
+    }
+    rebind = parse_finance_deploy_lease_command(
+        f"/wb-core finance-lease rebind {anchor_pr} deployed {SHA_C} "
+        f"task {task_id} lease {lease_id} revision 1 "
+        f"window pre-snapshot-2 phase pre-snapshot "
+        f"recovery-pr {recovery_pr} ttl-minutes 120"
+    )
+    original_remove_label = api.remove_label
+    interrupted_rebind_once = False
+
+    def interrupt_rebind_cleanup(number: int, label: str) -> None:
+        nonlocal interrupted_rebind_once
+        if (
+            not interrupted_rebind_once
+            and number == recovery_pr
+            and label == FINANCE_DEPLOY_LEASE_RECOVERY_LABEL
+        ):
+            interrupted_rebind_once = True
+            raise RuntimeError("simulated disconnect before recovery-label cleanup")
+        original_remove_label(number, label)
+
+    api.remove_label = interrupt_rebind_cleanup  # type: ignore[method-assign]
+    try:
+        rebind_finance_deploy_lease(
+            api,
+            rebind,
+            rebind_evidence,
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+            now=observed + 30,
+        )
+    except RuntimeError as exc:
+        assert "simulated disconnect" in str(exc)
+    else:
+        raise AssertionError("fault injection must interrupt rebind cleanup")
+    interrupted_rebind = finance_deploy_lease_state(
+        api,
+        now=observed + 35,
+    )
+    assert interrupted_rebind["status"] == "active"
+    assert interrupted_rebind["recovery_pending"] is True
+    assert interrupted_rebind["allows_finance_migration"] is False
+    api.remove_label = original_remove_label  # type: ignore[method-assign]
+    assert rebind_finance_deploy_lease(
+        api,
+        rebind,
+        rebind_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+        now=observed + 36,
+    ) == "already-rebound"
+    rebound = finance_deploy_lease_state(api, now=observed + 40)
+    assert rebound["status"] == "active"
+    assert rebound["lease"]["revision"] == 2
+    assert rebound["lease"]["deployed_sha"] == SHA_C
+    assert (
+        rebound["lease"]["baseline_invalidation_epoch"]
+        != state["lease"]["baseline_invalidation_epoch"]
+    )
+    assert FINANCE_DEPLOY_LEASE_RECOVERY_LABEL not in _labels(recovery)
+
+    resume = parse_finance_deploy_lease_command(
+        f"/wb-core finance-lease resume {anchor_pr} deployed {SHA_C} "
+        f"task {task_id} lease {lease_id} revision 2 "
+        "window pre-snapshot-3 phase pre-snapshot ttl-minutes 120"
+    )
+    assert rebind_finance_deploy_lease(
+        api,
+        resume,
+        rebind_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+        now=observed + 50,
+    ) == "rebound"
+    assert rebind_finance_deploy_lease(
+        api,
+        resume,
+        rebind_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+        now=observed + 55,
+    ) == "already-rebound"
+    resumed = finance_deploy_lease_state(api, now=observed + 60)
+    assert resumed["status"] == "active"
+    assert resumed["lease"]["revision"] == 3
+    assert resumed["lease"]["deployed_sha"] == SHA_C
+    assert (
+        resumed["lease"]["baseline_invalidation_epoch"]
+        != rebound["lease"]["baseline_invalidation_epoch"]
+    )
+
+    reconciliation_body = (
+        f"Finance lease reconciliation task={task_id} lease={lease_id} "
+        f"revision=3 deployed={SHA_C} evidence={EVIDENCE} "
+        "migration_abort=complete canonical_source=monolith "
+        "manual_barrier=released writers=restored timers=restored "
+        "policy=restored non_target=unchanged sha_readback=exact"
+    )
+    reconciliation_id = api.add_external_comment(
+        anchor_pr,
+        reconciliation_body,
+        created_at="2026-07-28T12:00:00Z",
+    )
+    terminal = parse_finance_deploy_lease_command(
+        f"/wb-core finance-lease abort {anchor_pr} task {task_id} "
+        f"lease {lease_id} revision 3 deployed {SHA_C} "
+        f"reconciliation {reconciliation_id} "
+        f"reconciliation-digest {_body_fingerprint(reconciliation_body)} "
+        f"evidence {EVIDENCE}"
+    )
+    assert terminalize_finance_deploy_lease(
+        api,
+        terminal,
+        rebind_evidence,
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "aborted"
+    assert FINANCE_DEPLOY_LEASE_LABEL not in _labels(anchor)
+    assert FINANCE_DEPLOY_LEASE_AUDIT_LABEL not in _labels(anchor)
+    assert finance_deploy_lease_state(api)["status"] == "absent"
+    assert select_candidate(api)["pr_number"] == unrelated_pr
+    print("finance_global_deploy_lease: 33/33 ok")
+
+
 def _assert_ack_invalidated_by_head_change() -> None:
     api = FakeApi()
     loop = _pull(
@@ -2334,13 +2701,19 @@ def _assert_workflow_contract() -> None:
         "preflight-production-mutation",
         "/wb-core production-mutation complete",
         "wb-core-production-mutation-completion-proof",
+        "/wb-core finance-lease ",
+        "preflight-finance-lease",
+        "handle-finance-lease",
+        "finance:migration-deploy-lease",
+        "finance:migration-deploy-lease-audit",
+        "wb-core-finance-migration-deploy-lease-binding",
         "--read-only",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",
     ):
         assert required in release or required in implementation
     assert release.count("group: wb-core-production-release") == 1
-    assert release.count("environment: production") == 3
+    assert release.count("environment: production") == 4
     assert "reconcile_halted:" in release
     assert "resume-halted" in release
 
@@ -2560,7 +2933,9 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     assert "sort:created-asc" in tokens
     label_tokens = [token for token in tokens if token.startswith("label:")]
     assert len(label_tokens) == 1
-    assert set(label_tokens[0].removeprefix("label:").split(",")) == MONITORED_RELEASE_LABELS
+    assert set(label_tokens[0].removeprefix("label:").split(",")) == (
+        MONITORED_RELEASE_LABELS | {FINANCE_DEPLOY_LEASE_LABEL}
+    )
     assert DONE_LABEL not in MONITORED_RELEASE_LABELS
     assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
 
@@ -3449,6 +3824,7 @@ def main() -> int:
     _assert_superseded_normalization_is_root_bounded()
     _assert_blocked_halted_and_production_mutation()
     _assert_production_mutation_terminalization()
+    _assert_finance_global_deploy_lease()
     _assert_ack_invalidated_by_head_change()
     _assert_waiter_contract()
     _assert_goal_shepherd_regressions()

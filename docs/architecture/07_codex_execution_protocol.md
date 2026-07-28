@@ -430,6 +430,7 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 - для STANDARD наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
 - для уже human-gated, merged, deployed и reconciled production-mutation STANDARD использовать только exact terminalization command выше; не снимать `release:blocked` вручную и не создавать marker локальным token;
 - для LOOP подтвердить exact-head `release:awaiting-agent`, продолжить на `release:awaiting-ui`, выполнить production UI Flow и закрыть gate GitHub-native acceptance-командой;
+- при активной Finance storage migration использовать только Actions-owned global deploy lease из Release Train: stale/ambiguous/lost lease не снимать вручную, unrelated deploy не обходить, owner-bound recovery после deploy обязательно rebind-ить до нового snapshot/plan/fingerprint;
 - считать gate другой LOOP-цепочки штатным waiting независимо от числа polls, goal-turns и продолжительности: не называть его blocker, не снимать/обходить/перехватывать и не завершать task handoff-сообщением;
 - не разрешать Release Train автоматически выполнять production data mutation/backfill.
 
@@ -439,7 +440,7 @@ Codex CLI наблюдает очередь без AI polling loop:
 
 `python3 apps/github_release_train_wait.py <PR>`
 
-Waiter ведёт один обновляемый status/heartbeat comment на активном PR и не создаёт повторяющиеся comments. Для LOOP он при own `release:awaiting-agent` заново читает actual head и публикует `/wb-core loop ack-agent <PR> head <HEAD_SHA>`; handler создаёт repo-owned proof, поэтому manually added `loop:ack-*` label не открывает merge. Чужие `ready/running/awaiting-agent/awaiting-ui/halted` — normal waiting без terminal timeout. Код `3` означает own UI Flow, `4` — owner resume без ack, `2` — own blocker или conflicting invariant, `130` — interrupt.
+Waiter ведёт один обновляемый status/heartbeat comment на активном PR и не создаёт повторяющиеся comments. Для LOOP он при own `release:awaiting-agent` заново читает actual head и публикует `/wb-core loop ack-agent <PR> head <HEAD_SHA>`; handler создаёт repo-owned proof, поэтому manually added `loop:ack-*` label не открывает merge. Чужие `ready/running/awaiting-agent/awaiting-ui/halted` и `finance:migration-deploy-lease` — normal waiting без terminal timeout. Код `3` означает own UI Flow, `4` — owner resume без ack, `2` — own blocker или conflicting invariant, `130` — interrupt.
 
 Goal Mode обязан использовать канонический queue shepherd перед любым blocked handoff:
 

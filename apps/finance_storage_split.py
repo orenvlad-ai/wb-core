@@ -22,6 +22,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.finance_raw_storage import shadow_compare_week, storage_health
+from packages.application.finance_migration_deploy_lease import (
+    validate_finance_migration_deploy_lease,
+)
 from packages.application.finance_storage_migration import (
     FinanceStorageCandidateBuilder,
     FinanceStorageCoherentSnapshot,
@@ -182,6 +185,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=3600,
     )
     parser.add_argument("--reason", default="")
+    parser.add_argument(
+        "--deploy-lease-json",
+        default="",
+        help=(
+            "Fresh GitHub Release Train Finance migration deploy-lease "
+            "readback. Canonical hosted execution requires it for every "
+            "migration phase except health."
+        ),
+    )
     return parser
 
 
@@ -194,6 +206,18 @@ def main(argv: list[str] | None = None) -> int:
         if deployed_sha and deployed_sha != file_sha:
             raise SystemExit("--deployed-sha and --deployed-sha-file disagree")
         deployed_sha = file_sha
+    deploy_lease: dict[str, Any] | None = None
+    if args.deploy_lease_json:
+        try:
+            lease_payload = json.loads(args.deploy_lease_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("--deploy-lease-json must contain valid JSON") from exc
+        if not isinstance(lease_payload, dict):
+            raise SystemExit("--deploy-lease-json must contain a JSON object")
+        deploy_lease = validate_finance_migration_deploy_lease(
+            lease_payload,
+            deployed_sha=deployed_sha,
+        )
     if args.action.startswith("rollback-"):
         rollback = FinanceStorageRollback(
             runtime_dir,
@@ -388,6 +412,13 @@ def main(argv: list[str] | None = None) -> int:
             ).apply()
         else:
             payload = planner.build_plan()
+    if deploy_lease is not None:
+        payload["deploy_lease"] = {
+            "contract_version": deploy_lease["contract_version"],
+            "policy": deploy_lease["policy"],
+            "lease": deploy_lease["lease"],
+            "fingerprint": deploy_lease["fingerprint"],
+        }
     _emit(payload, args.output)
     return 0
 

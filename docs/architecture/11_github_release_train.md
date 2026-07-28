@@ -20,7 +20,7 @@ Task class и task continuity независимы. `TaskContinuity` в `apps/gi
 ## Repo-Owned Артефакты
 
 - `.github/workflows/baseline-ci.yml` — обязательный check `baseline`;
-- `.github/workflows/release-train.yml` — один repository-wide queue worker, GitHub-native LOOP handler и two-stage trusted-main production-mutation terminalizer;
+- `.github/workflows/release-train.yml` — один repository-wide queue worker, GitHub-native LOOP handler, Actions-owned global Finance migration deploy lease и two-stage trusted-main production-mutation terminalizer;
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
 - `apps/github_release_train_wait.py` — bounded CLI waiter и канонический Goal queue shepherd для Codex;
 - `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
@@ -55,6 +55,15 @@ LOOP дополнительно требует exact-head repo-owned registratio
 Active states: `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
 
 Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query, marker names и Goal disposition contract. Runtime, waiter/shepherd и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance, halted recovery и production-mutation completion требуют repo-owned marker и exact PR/head/gate/merge/deployed/evidence.
+
+`finance:migration-deploy-lease` — отдельный global fail-closed lease label на
+уже terminal production anchor PR. Он не меняет terminal release identity, но
+пока присутствует, блокирует selection/merge/deploy всех unrelated PR. Ручной
+label без contiguous Actions-owned binding history считается ambiguous и
+также блокирует очередь; он не разрешает ни одной Finance migration action.
+`finance:migration-lease-recovery` допускается только на одном exact
+owner-bound STANDARD live-runtime recovery PR и действует лишь вместе с
+bot-owned proof текущих anchor/task/lease/revision/head.
 
 Goal disposition является отдельной интерпретацией durable state, а не новым transition graph:
 
@@ -135,6 +144,103 @@ Two-stage workflow разделяет authority:
 3. Trusted-main handler повторно проверяет immutable GitHub evidence, связывает canonical deploy evidence digest с PR/head/merge/deployed SHA, gate identity/actor/association/digest, reconciliation identity/actor/association/digest и evidence fingerprint. Только GitHub Actions создаёт `wb-core-production-mutation-completion-proof`, атомарно заменяет stale active/failure/overlay state на `release:production` и dispatch-ит queue observation.
 
 Повтор exact command после proven terminal state возвращает `already-completed` без новых comments/labels и безопасно re-dispatch-ит queue observation. Stale head/SHA/comment digest, missing gate/deploy/reconciliation/evidence, unauthorized actor, wrong PR/task/scope, non-ancestor deployed SHA, forged owner marker или local invocation fail closed. Terminal proof readback повторно проверяет current source-comment digests и bot-owned marker; ручной `release:production` не даёт `TERMINAL_SUCCESS`.
+
+## Global Finance Migration Deploy Lease
+
+Finance raw/operational migration использует отдельный GitHub-owned lease до
+любого нового snapshot plan, coherent snapshot, capacity/fingerprint,
+candidate/backfill, live-tail, cutover или rollback action. Durable authority
+остаётся в PR labels и Actions-owned comments; private readback JSON является
+только свежим переносимым доказательством для hosted runner.
+
+Acquire выполняется comment на terminal deployed anchor PR:
+
+```text
+/wb-core finance-lease acquire <ANCHOR_PR> head <HEAD_SHA> deployed <DEPLOYED_SHA> task <TASK_ID> lease <LEASE_ID> window <WINDOW_ID> phase <PHASE> ttl-minutes <30..4320>
+```
+
+Тот же repository-wide `wb-core-production-release` concurrency сериализует
+command с Release Train. Trusted-main handler требует `OWNER`/`MEMBER`,
+proven terminal anchor, exact head, current canonical deployed SHA readback,
+anchor merge/descendant relation, bounded ttl и полное отсутствие
+`release:running`, `release:awaiting-agent`, `release:awaiting-ui` и
+`release:halted`. Сначала ставятся audit guard
+`finance:migration-deploy-lease-audit` и active global hold
+`finance:migration-deploy-lease`, затем создаётся bot-owned binding proof.
+Если transition прервался после labels, lease readback остаётся `ambiguous`, а
+очередь уже удерживается fail-closed; если labels не были созданы, GitHub state
+не изменился. Потеря только hold либо только audit label при нетерминальном
+binding также остаётся `ambiguous`. Повтор той же command механически завершает
+тот же acquire и не создаёт второй lease.
+
+Lease не auto-releases при истечении ttl. После `expires_at` status становится
+`stale`, `allows_finance_migration=false`, но global label и deploy hold
+остаются. Любой missing revision, duplicate anchor, conflicting proof, lost
+owner или invalid terminal anchor также даёт `ambiguous` без silent-open.
+Fresh private status:
+
+```bash
+python3 apps/github_release_train.py finance-lease-status \
+  --require-active --output /private/path/finance-deploy-lease.json
+```
+
+Readback имеет contract
+`wb_core_finance_migration_deploy_lease_readback_v1`, exact
+task/anchor/head/deployed SHA, lease/window/phase/revision, acquired/expiry
+timestamps, recovery policy и `baseline_invalidation_epoch`. Hosted Finance
+commands требуют этот файл вне Git, не старше пяти минут; remote
+`apps/finance_storage_split.py` повторно сверяет его с canonical
+`.wb-core-runtime-sha`. Поэтому любой pre-acquire deploy, later SHA drift,
+revision change или expired/lost lease инвалидирует старые
+baseline/snapshot/plan/fingerprint evidence до записи Finance destination
+bytes.
+
+При необходимости code recovery сначала авторизуется единственный exact PR:
+
+```text
+/wb-core finance-lease authorize-recovery <ANCHOR_PR> task <TASK_ID> lease <LEASE_ID> revision <REVISION> recovery-pr <RECOVERY_PR> head <RECOVERY_HEAD_SHA>
+```
+
+Требуются open non-draft `task:standard + scope:live-runtime` и successful
+exact-head `baseline`. Пока lease активен, selection, prepare и merge повторно
+разрешают только этот PR; все unrelated ready PR остаются held. После recovery
+deploy старый lease SHA больше не разрешает migration. Точное rebind
+обязательно:
+
+```text
+/wb-core finance-lease rebind <ANCHOR_PR> deployed <RECOVERY_MERGE_SHA> task <TASK_ID> lease <LEASE_ID> revision <CURRENT_REVISION> window <NEW_WINDOW_ID> phase <PHASE> recovery-pr <RECOVERY_PR> ttl-minutes <30..4320>
+```
+
+Lost/stale owner без deploy использует тот же fail-closed revalidation через
+`resume` без `recovery-pr`; он создаёт следующую revision даже при том же SHA.
+Каждый rebind/resume меняет `baseline_invalidation_epoch`, поэтому никакой
+старый plan/fingerprint не переносится через recovery/re-dispatch.
+
+```text
+/wb-core finance-lease resume <ANCHOR_PR> deployed <CURRENT_DEPLOYED_SHA> task <TASK_ID> lease <LEASE_ID> revision <CURRENT_REVISION> window <NEW_WINDOW_ID> phase <PHASE> ttl-minutes <30..4320>
+```
+
+Lease terminalization никогда не выводится из elapsed time или отсутствия
+owner. После exact migration abort либо post-cutover reconciliation owner
+оставляет отдельный structured reconciliation comment с exact
+`task/lease/revision/deployed/evidence` и всеми machine tokens:
+`manual_barrier=released`, `writers=restored`, `timers=restored`,
+`policy=restored`, `non_target=unchanged`, `sha_readback=exact`; abort
+дополнительно требует `migration_abort=complete canonical_source=monolith`, а
+normal release —
+`post_cutover_reconciliation=complete canonical_source=split`. Затем:
+
+```text
+/wb-core finance-lease <abort|release> <ANCHOR_PR> task <TASK_ID> lease <LEASE_ID> revision <REVISION> deployed <DEPLOYED_SHA> reconciliation <COMMENT_ID> reconciliation-digest sha256:<COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>
+```
+
+Production-environment job снова независимо читает canonical deployed SHA,
+проверяет exact comment identity/digest и только Actions-owned terminal marker
+может снять active global label и audit guard. Bot-owned terminal marker
+остаётся на PR как история закрытого lease.
+Marker-before-label-removal и repeated exact command делают
+disconnect/re-dispatch recoverable: partial terminalization остаётся blocked,
+но не требует повторять migration mutation.
 
 ## LOOP Pre-Deploy Handshake
 
@@ -271,6 +377,7 @@ Classifier сам выводит `blocked_phase`: при непустом `safe_
 - repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
 - repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
 - repeated production-mutation completion сохраняет один Actions-owned exact-evidence marker и terminal label без новых comments/labels и безопасно re-dispatch-ит queue observation; partial label/marker state лечится только повторной полной проверкой canonical deploy evidence.
+- Finance deploy lease никогда не auto-opens: repeated acquire/recovery/rebind/terminal commands идемпотентны; stale/duplicate/partial state блокирует unrelated release, а exact recovery deploy требует следующей SHA-bound revision до продолжения migration;
 - repeated enqueue/correction events не дублируют proof и не меняют другие roots.
 
 Исправленный own технический pre-merge blocker повторно входит в очередь только через trusted comment `/wb-core loop retry-blocked <PR> head <HEAD_SHA>`; underlying runner остаётся `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`, но task owner не запускает его локальным user token. New/recovery enrollment не может снять technical blocker. Command требует open non-draft PR, exact head, `OWNER`/`MEMBER`/`COLLABORATOR` association и successful `baseline`, сохраняет task class/scope/root и не удаляет LOOP labels. Если fix изменил LOOP head, command выпускает новый exact-head marker только при наличии prior repo-owned proof той же identity; для recovery дополнительно остаются обязательны тот же active gate/root и отсутствие terminal member. Classification provenance остаётся unresolved через любое число последующих head changes, поэтому generic retry отклоняется, пока более поздний trusted new/recovery/correction proof явно не разрешит identity. Codex waiter не выполняет classification mutations: он только сообщает mismatch и завершается fail-closed, оставляя durable transition trusted workflow.
@@ -292,13 +399,13 @@ halted только после healthy exact PR/head/merge/target JSON evidence;
 
 ## Канонический Мониторинг
 
-[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%22+sort%3Acreated-asc) намеренно не использует `is:open`: merged PR имеет GitHub state `closed`, но LOOP с `release:awaiting-ui` остаётся active global gate и обязан быть видимым. Comma-OR qualifier включает `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked` и `release:halted`; `-label:release:superseded` исключает доказанно заменённые итерации. Terminal `release:production` и `release:done` не включаются, а `sort:created-asc` сохраняет queue order. PR-specific evidence по-прежнему исследуется по точной ссылке, comments и workflow runs.
+[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%2Cfinance%3Amigration-deploy-lease%22+sort%3Acreated-asc) намеренно не использует `is:open`: merged PR имеет GitHub state `closed`, но LOOP с `release:awaiting-ui` и terminal anchor с `finance:migration-deploy-lease` остаются active global gates и обязаны быть видимыми. Comma-OR qualifier включает active release labels и Finance lease; `-label:release:superseded` исключает доказанно заменённые итерации. Terminal `release:production` и `release:done` без отдельного global lease не включаются, а `sort:created-asc` сохраняет queue order. PR-specific evidence по-прежнему исследуется по точной ссылке, comments и workflow runs.
 
 ## Baseline И Security Boundary
 
 `baseline-ci.yml` выполняет `compileall`, `git diff --check` и `apps/github_release_train_smoke.py`. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
 
-`pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP и production-mutation commands проходят exact parsing и association checks. Production-mutation command preflight работает без production secrets; SSH material получает только следующий job с GitHub Environment `production` после успешного immutable-evidence preflight. Required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Production-mutation terminalizer выполняет только `--read-only` deploy readback и GitHub terminal state transition; Release Train не выполняет WB writes, backfill или production business mutation.
+`pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP, Finance lease и production-mutation commands проходят exact parsing и association checks. Finance lease workflow использует production secrets только для `--read-only` exact deployed-SHA readback; acquire/rebind/release меняют лишь GitHub durable state и не запускают Finance runner. Production-mutation command preflight работает без production secrets; SSH material получает только следующий job с GitHub Environment `production` после успешного immutable-evidence preflight. Required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Production-mutation terminalizer выполняет только `--read-only` deploy readback и GitHub terminal state transition; Release Train не выполняет WB writes, backfill или production business mutation.
 
 ## Проверенный LOOP Canary
 

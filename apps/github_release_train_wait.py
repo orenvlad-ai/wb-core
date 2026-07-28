@@ -166,7 +166,15 @@ def evaluate_release(
     target_root = loop_root_from_labels(labels) if task_class == LOOP_TASK_LABEL else None
     queue_root = int(queue.get("loop_root") or 0)
     foreign_gate = (
-        queue_status in {"ready", "running", "awaiting-agent", "awaiting-ui", "halted"}
+        queue_status
+        in {
+            "ready",
+            "running",
+            "awaiting-agent",
+            "awaiting-ui",
+            "halted",
+            "finance-deploy-lease",
+        }
         and queue_pr != pr_number
         and not (queue_status == "awaiting-ui" and target_root == queue_root and queue_root > 0)
     )
