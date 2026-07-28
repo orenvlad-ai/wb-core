@@ -523,6 +523,140 @@ def main() -> None:
             raise AssertionError(
                 "Finance storage reviewed evidence must be written mode 0600"
             )
+        stale_writer_fingerprint = "sha256:" + ("5" * 64)
+        stale_writer_plan_path = (
+            Path(finance_temp_dir) / "stale-writer-plan.json"
+        )
+        stale_writer_plan = {
+            "contract_version": (
+                "wb_core_finance_storage_stale_writer_recovery_plan_v1"
+            ),
+            "mode": "stale_writer_recovery_dry_run",
+            "fingerprint": stale_writer_fingerprint,
+            "stop_allowed_by_machine_preflight": True,
+            "action": {
+                "business_data_mutation_count": 0,
+                "finance_storage_mutation_count": 0,
+            },
+        }
+        stale_writer_plan_path.write_text(
+            json.dumps(stale_writer_plan),
+            encoding="utf-8",
+        )
+        stale_plan_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-stale-writer-plan",
+                "--output",
+                str(
+                    Path(finance_temp_dir)
+                    / "stale-writer-plan-output.json"
+                ),
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
+            ]
+        )
+        stale_stop_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "finance-storage-stale-writer-stop",
+                "--plan-file",
+                str(stale_writer_plan_path),
+                "--fingerprint",
+                stale_writer_fingerprint,
+                "--approval-reference",
+                "canonical-finance-task-stale-writer-recovery",
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
+            ]
+        )
+        if (
+            stale_plan_args.finance_storage_split_action
+            != "stale-writer-plan"
+            or stale_stop_args.finance_storage_split_action
+            != "stale-writer-stop"
+        ):
+            raise AssertionError(
+                "hosted runner must expose stale-writer plan/stop"
+            )
+        stale_payloads = {
+            "stale-writer-plan": stale_writer_plan,
+            "stale-writer-stop": {
+                "contract_version": (
+                    "wb_core_finance_storage_stale_writer_recovery_result_v1"
+                ),
+                "status": "stopped",
+                "fingerprint": stale_writer_fingerprint,
+                "stop_count": 1,
+            },
+        }
+        for action in ("stale-writer-plan", "stale-writer-stop"):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(stale_payloads[action]),
+                stderr="",
+            )
+            with mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                hosted_runtime._run_remote_finance_storage_split_action(
+                    active_target,
+                    action=action,
+                    plan_path=(
+                        stale_writer_plan_path
+                        if action == "stale-writer-stop"
+                        else None
+                    ),
+                    fingerprint=(
+                        stale_writer_fingerprint
+                        if action == "stale-writer-stop"
+                        else ""
+                    ),
+                    approval_reference=(
+                        "canonical-finance-task-stale-writer-recovery"
+                        if action == "stale-writer-stop"
+                        else ""
+                    ),
+                    chunk_size=10_000,
+                    deploy_lease=deploy_lease,
+                )
+            expected_timeout = (
+                hosted_runtime.FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS
+                if action == "stale-writer-stop"
+                else hosted_runtime.FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS
+            )
+            if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
+                raise AssertionError(
+                    f"stale-writer {action} lost bounded timeout"
+                )
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if "--deploy-lease-json" not in remote_command:
+                raise AssertionError(
+                    f"stale-writer {action} lost deploy-lease binding"
+                )
+            if action == "stale-writer-stop":
+                for token in (
+                    "--stale-writer-plan-file",
+                    "/dev/stdin",
+                    "--confirm-fingerprint",
+                    stale_writer_fingerprint,
+                    "--approval-reference",
+                ):
+                    if token not in remote_command:
+                        raise AssertionError(
+                            f"stale-writer stop lost {token}"
+                        )
+                if run_mock.call_args.kwargs.get("input") != (
+                    stale_writer_plan_path.read_text(encoding="utf-8")
+                ):
+                    raise AssertionError(
+                        "stale-writer reviewed plan was not streamed exactly"
+                    )
+            elif "--confirm-fingerprint" in remote_command:
+                raise AssertionError(
+                    "stale-writer plan unexpectedly enabled mutation"
+                )
         snapshot_plan_path = Path(finance_temp_dir) / "snapshot-plan.json"
         snapshot_fingerprint = "sha256:" + ("9" * 64)
         snapshot_plan_path.write_text(

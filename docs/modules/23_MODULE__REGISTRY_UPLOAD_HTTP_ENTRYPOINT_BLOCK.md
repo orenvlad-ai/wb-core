@@ -914,6 +914,9 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - former `auto_load=true` / load bridge / live Google Sheets write step is archived and rejected;
   - runtime/status surface не должна маскировать refresh-only или semantic warning/error под sheet-complete/green success.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
+  - oneshot ограничен `TimeoutStartSec=1800`; Finance migration может
+    остановить только доказанно stale exact generation через отдельный
+    lease/fingerprint/audit-bound recovery, не меняющий timer/owner intent;
   - timer не делает tight loop и может запускаться чаще, чем real retry cadence, потому что due/backoff decision already lives in persisted runtime state;
   - retry runner дожимает due `yesterday_closed` для всей historical/date-period matrix и same-day `today_current` only for current-snapshot-only group;
   - manual operator refresh в этот persisted runner path не попадает и не должен создавать due states.

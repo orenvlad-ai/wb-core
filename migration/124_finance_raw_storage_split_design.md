@@ -176,6 +176,16 @@ The implementation is deliberately inert on deploy:
   normal operation, then replays only post-prepare raw scopes and recopies
   operational state under its short hold. Original monolith and split files
   remain retained.
+- A pre-snapshot `finance-storage-stale-writer-plan|stop` recovery is limited
+  to the exact closure-retry oneshot generation. The service has a 30-minute
+  start bound; recovery additionally requires at least one hour of continuous
+  exact PID/start/cgroup identity, byte-equal deployed unit, active preserved
+  timer/owner intent, released barrier, restored maintenance state, no
+  runtime-store file descriptor, no internet socket and only the allowlisted
+  Playwright children. Apply is fingerprint/approval/lease bound, writes a
+  private append-only audit, calls one exact `systemctl stop`, preserves timer
+  and policy, and never retries automatically. It cannot stop a current,
+  unknown, connected or data-owning writer.
 - `apps/finance_storage_sqlite_open_inventory.py --check-migrated` inventories
   every Python SQLite open and rejects registry bypasses in migrated Finance
   and Partner runtime modules.
@@ -412,7 +422,9 @@ Canonical hosted sequence is phase-local:
    `finance-storage-snapshot-apply`, then
    `finance-storage-snapshot-integrity`;
    an active pre-existing writer service blocks the plan and leaves normal
-   operation unchanged;
+   operation unchanged; a proven stale closure-retry generation uses the
+   separately reviewed lease-bound recovery above before a completely fresh
+   snapshot plan;
 4. `finance-storage-split-dry-run` against that exact verified snapshot and
    stop for approval of its exact fingerprint/generation/capacity;
 5. only after approval, `finance-storage-split-apply`, shadow activate,
@@ -473,6 +485,9 @@ Closure requires:
 - Query-plan/index parity and bounded lock/performance tests.
 - Capacity shortfall before any destination bytes, reservation races and
   restart.
+- Exact stale-writer generation drift, runtime FD/socket/child-process
+  rejection, stop failure without retry, timer/policy preservation and
+  idempotent terminal audit.
 - Durable HTTP/UI barrier restart, invalid-state fail-closed behavior, blocked
   request audit and exact release only after control restore.
 - Coherent snapshot capture under a short hold and full offline integrity gate;

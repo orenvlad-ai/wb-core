@@ -148,6 +148,8 @@ Canonical-cost hosted operations expose only:
 The separate storage-split lifecycle exposes:
 
 - `finance-storage-snapshot-plan|apply|integrity`;
+- `finance-storage-stale-writer-plan|stop` for one exact audited stale
+  closure-retry generation before a completely fresh snapshot plan;
 - `finance-storage-split-dry-run|apply|health`;
 - `finance-storage-shadow-status|activate|reconcile|verify|deactivate` and
   `finance-storage-live-tail-apply`;
@@ -221,6 +223,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
 - `python3 apps/finance_storage_split_smoke.py`;
+- `python3 apps/finance_storage_stale_writer_recovery_smoke.py`;
 - `python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated`;
 - `python3 apps/warehouse_functional_maintenance_smoke.py`;
 - `python3 apps/partner_report_smoke.py`;
