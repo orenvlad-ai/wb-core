@@ -296,6 +296,113 @@ def _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation() -> No
         assert maintenance.barrier_status(runtime_dir)["phase"] == "acquiring"
 
 
+def _assert_persisted_service_continuity_accepts_exact_completion() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        unit = "wb-core-sheet-vitrina-closure-retry.service"
+        systemd.service_states[unit] = {
+            "unit": unit,
+            "is_enabled": "static",
+            "is_active": "activating",
+            "properties": {
+                "LoadState": "loaded",
+                "UnitFileState": "static",
+                "ActiveState": "activating",
+                "SubState": "start",
+                "Result": "success",
+                "ExecMainCode": "0",
+                "ExecMainStatus": "0",
+                "MainPID": "4242",
+                "ExecMainStartTimestamp": (
+                    "Sat 2000-01-01 00:00:00 UTC"
+                ),
+            },
+        }
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id="snapshot-completed-service-smoke",
+            window_kind="snapshot",
+            plan_fingerprint="sha256:" + "5" * 64,
+            approval_reference="smoke-approval",
+            actor="smoke",
+            reason="prove detached completion recovery",
+        )
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            maintenance_state = json.loads(
+                (runtime_dir / maintenance.STATE_FILENAME).read_text()
+            )
+            current = maintenance.maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            continuity = maintenance._pre_hold_service_continuity(
+                runtime_dir,
+                maintenance_state=maintenance_state,
+                current_status=current,
+            )
+            policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
+            systemd.service_states[unit].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {
+                        "LoadState": "loaded",
+                        "UnitFileState": "static",
+                        "ActiveState": "inactive",
+                        "SubState": "dead",
+                        "Result": "success",
+                        "ExecMainCode": "1",
+                        "ExecMainStatus": "0",
+                        "MainPID": "0",
+                        "ExecMainStartTimestamp": "",
+                    },
+                }
+            )
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now(
+                    "wb-core-warehouse-functional-sync.timer"
+                )
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                reason="restore after exact service completion",
+                expected_revision=int(policy["revision"]),
+                warehouse_restore=restore_warehouse,
+                allow_pre_hold_service_continuity=True,
+                pre_hold_service_continuity_evidence=continuity,
+            )
+        finally:
+            _restore_local_boundaries(old)
+        assert restored["status"] == "restored"
+        assert restored["pre_hold_service_continuity_readback"]["services"] == [
+            {
+                "unit": unit,
+                "outcome": "completed",
+                "main_pid": 0,
+                "started_at": "",
+            }
+        ]
+
+
 def _assert_unknown_timer_fails_before_mutation() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -773,9 +880,23 @@ def _assert_success_requires_persisted_runtime_readback() -> None:
         raise AssertionError("no-op mutation must not return success")
 
 
+def _assert_restore_lock_rejects_overlap() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        with maintenance._ExclusiveRestoreLock(runtime_dir):
+            try:
+                with maintenance._ExclusiveRestoreLock(runtime_dir):
+                    raise AssertionError("overlapping restore lock was acquired")
+            except RuntimeError as exc:
+                assert "another business-data maintenance restore" in str(exc)
+        with maintenance._ExclusiveRestoreLock(runtime_dir):
+            pass
+
+
 def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
+    _assert_persisted_service_continuity_accepts_exact_completion()
     _assert_unknown_timer_fails_before_mutation()
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()
@@ -785,6 +906,7 @@ def main() -> int:
     _assert_unsupported_enable_and_noop_are_preflighted()
     _assert_failed_resume_stays_paused_and_audited()
     _assert_success_requires_persisted_runtime_readback()
+    _assert_restore_lock_rejects_overlap()
     print("business data maintenance smoke: ok")
     return 0
 

@@ -78,6 +78,7 @@ jobs:
           python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated
           python3 apps/business_data_write_barrier_smoke.py
           python3 apps/business_data_maintenance_smoke.py
+          python3 apps/business_data_maintenance_restore_job_smoke.py
           python3 apps/registry_upload_http_entrypoint_auth_smoke.py
           python3 apps/finance_storage_split_smoke.py
           python3 apps/wb_finance_weekly_smoke.py

@@ -45,6 +45,7 @@ POLICY_SCHEMA_VERSION = "auto_updates_owner_policy_v2"
 POLICY_FILENAME = ".auto-updates-policy.json"
 POLICY_AUDIT_FILENAME = ".auto-updates-policy-audit.jsonl"
 WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
+RESTORE_LOCK_FILENAME = ".business-data-maintenance-restore.lock"
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -73,6 +74,45 @@ FORCE_OFF_TIMER_UNITS = (
 )
 ALL_BUSINESS_TIMER_UNITS = CORE_TIMER_UNITS + FORCE_OFF_TIMER_UNITS
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
+
+
+class _ExclusiveRestoreLock:
+    """Reject overlapping foreground or detached maintenance restores."""
+
+    def __init__(self, runtime_dir: Path) -> None:
+        self.path = Path(runtime_dir).resolve() / RESTORE_LOCK_FILENAME
+        self.handle: Any | None = None
+
+    def __enter__(self) -> "_ExclusiveRestoreLock":
+        if self.path.is_symlink():
+            raise RuntimeError(
+                "business-data maintenance restore lock must not be a symlink"
+            )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+b")
+        os.chmod(self.path, 0o600)
+        try:
+            fcntl.flock(
+                self.handle.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError as exc:
+            self.handle.close()
+            self.handle = None
+            raise RuntimeError(
+                "another business-data maintenance restore is active"
+            ) from exc
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        if self.handle is None:
+            return
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+
 
 WRITER_PROCESS_MARKERS = (
     "sheet_vitrina_v1_auto_refresh_tick.py",
@@ -1812,6 +1852,103 @@ def _pre_hold_service_continuity(
     }
 
 
+def _validated_pre_hold_service_continuity_evidence(
+    runtime_dir: Path,
+    *,
+    maintenance_state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate = dict(evidence or {})
+    if str(maintenance_state.get("phase") or "") not in {
+        "holding",
+        "prepared",
+    }:
+        raise RuntimeError(
+            "persisted pre-hold service continuity requires holding/prepared state"
+        )
+    services = [
+        dict(item)
+        for item in candidate.get("services") or []
+        if isinstance(item, Mapping)
+    ]
+    payload = {
+        "barrier_window_id": str(
+            candidate.get("barrier_window_id") or ""
+        ),
+        "barrier_plan_fingerprint": str(
+            candidate.get("barrier_plan_fingerprint") or ""
+        ),
+        "hold_started_at": str(candidate.get("hold_started_at") or ""),
+        "services": services,
+    }
+    if (
+        not services
+        or str(candidate.get("fingerprint") or "")
+        != _stable_fingerprint(payload)
+    ):
+        raise RuntimeError(
+            "persisted pre-hold service continuity fingerprint is invalid"
+        )
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+        or payload["barrier_window_id"]
+        != str(barrier.get("window_id") or "")
+        or payload["barrier_plan_fingerprint"]
+        != str(barrier.get("plan_fingerprint") or "")
+        or payload["hold_started_at"]
+        != str(maintenance_state.get("hold_started_at") or "")
+    ):
+        raise RuntimeError(
+            "persisted pre-hold service continuity boundary drifted"
+        )
+    baseline_services = dict(
+        (maintenance_state.get("baseline") or {}).get("services") or {}
+    )
+    hold_started_at = datetime.fromisoformat(
+        payload["hold_started_at"].replace("Z", "+00:00")
+    )
+    if hold_started_at.tzinfo is None:
+        raise RuntimeError("maintenance hold timestamp is not timezone-aware")
+    seen: set[str] = set()
+    for service in services:
+        unit = str(service.get("unit") or "")
+        if unit in seen or unit not in ALL_BUSINESS_SERVICE_UNITS:
+            raise RuntimeError(
+                "persisted pre-hold service continuity unit is invalid"
+            )
+        seen.add(unit)
+        main_pid = int(service.get("main_pid") or 0)
+        started_at_raw = str(service.get("started_at") or "")
+        started_at = _parse_systemd_utc_timestamp(started_at_raw)
+        baseline = dict(baseline_services.get(unit) or {})
+        baseline_properties = dict(baseline.get("properties") or {})
+        baseline_pid = int(baseline_properties.get("MainPID") or 0)
+        baseline_started_at = str(
+            baseline_properties.get("ExecMainStartTimestamp") or ""
+        )
+        if (
+            main_pid <= 0
+            or started_at > hold_started_at
+            or str(service.get("baseline_active_state") or "")
+            != str(baseline.get("is_active") or "")
+            or (baseline_pid and baseline_pid != main_pid)
+            or (
+                baseline_started_at
+                and baseline_started_at != started_at_raw
+            )
+        ):
+            raise RuntimeError(
+                "persisted pre-hold service generation does not match baseline"
+            )
+    return {
+        **payload,
+        "fingerprint": str(candidate["fingerprint"]),
+    }
+
+
 def _verify_pre_hold_service_continuity(
     systemd: SystemdClient,
     evidence: Mapping[str, Any],
@@ -1953,6 +2090,7 @@ def maintenance_restore(
     warehouse_restore: Any | None = None,
     autoanswers_reconcile: Any | None = None,
     allow_pre_hold_service_continuity: bool = False,
+    pre_hold_service_continuity_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
     maintenance_state = _load_json_object(state_path) or {}
@@ -2104,7 +2242,32 @@ def maintenance_restore(
     if before["cron_entries"]:
         raise RuntimeError("cron drift blocks auto-update resume")
     service_continuity: dict[str, Any] | None = None
-    if not before["quiet"] and allow_pre_hold_service_continuity:
+    if pre_hold_service_continuity_evidence:
+        if not allow_pre_hold_service_continuity:
+            raise RuntimeError(
+                "persisted pre-hold service continuity requires explicit permission"
+            )
+        service_continuity = (
+            _validated_pre_hold_service_continuity_evidence(
+                runtime_dir,
+                maintenance_state=maintenance_state,
+                evidence=pre_hold_service_continuity_evidence,
+            )
+        )
+        if not before["quiet"]:
+            current_continuity = _pre_hold_service_continuity(
+                runtime_dir,
+                maintenance_state=maintenance_state,
+                current_status=before,
+            )
+            if (
+                current_continuity["fingerprint"]
+                != service_continuity["fingerprint"]
+            ):
+                raise RuntimeError(
+                    "pre-hold service generation drifted after restore submit"
+                )
+    elif not before["quiet"] and allow_pre_hold_service_continuity:
         service_continuity = _pre_hold_service_continuity(
             runtime_dir,
             maintenance_state=maintenance_state,
@@ -2437,6 +2600,7 @@ def main(argv: list[str] | None = None) -> int:
             "prepare",
             "hold",
             "restore",
+            "restore-continuity-status",
             "set-process",
             "barrier-status",
             "barrier-acquire",
@@ -2471,6 +2635,19 @@ def main(argv: list[str] | None = None) -> int:
             "Abort an unconfirmed acquiring window while a proven service "
             "generation that predates the hold continues unchanged."
         ),
+    )
+    parser.add_argument(
+        "--pre-hold-service-continuity-file",
+        default="",
+        help=(
+            "Private exact continuity evidence persisted by the detached "
+            "restore job."
+        ),
+    )
+    parser.add_argument(
+        "--expected-pre-hold-service-continuity-fingerprint",
+        default="",
+        help="Exact fingerprint bound by the detached restore request.",
     )
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir).resolve()
@@ -2556,7 +2733,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     schedules = RuntimeScheduleClient(base_url=base_url, cookie=_build_web_auth_cookie(env))
     systemd = SystemdClient()
-    if args.action == "status":
+    if args.action == "restore-continuity-status":
+        status = maintenance_status(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+        )
+        maintenance_state = (
+            _load_json_object(runtime_dir / STATE_FILENAME) or {}
+        )
+        result = {
+            "status": "ready",
+            "maintenance": status,
+            "service_continuity": _pre_hold_service_continuity(
+                runtime_dir,
+                maintenance_state=maintenance_state,
+                current_status=status,
+            ),
+        }
+    elif args.action == "status":
         result = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
     elif args.action == "prepare":
         result = maintenance_prepare(
@@ -2579,17 +2774,47 @@ def main(argv: list[str] | None = None) -> int:
             expected_revision=args.expected_revision,
         )
     elif args.action == "restore":
-        result = maintenance_restore(
-            runtime_dir,
-            systemd=systemd,
-            schedules=schedules,
-            actor=args.actor,
-            reason=args.reason or "bounded recovery completed",
-            expected_revision=args.expected_revision,
-            allow_pre_hold_service_continuity=bool(
-                args.allow_pre_hold_service_continuity
-            ),
-        )
+        continuity_evidence: dict[str, Any] | None = None
+        if args.pre_hold_service_continuity_file:
+            continuity_path = Path(
+                str(args.pre_hold_service_continuity_file)
+            )
+            if continuity_path.is_symlink() or not continuity_path.is_file():
+                raise RuntimeError(
+                    "pre-hold service continuity evidence is unavailable"
+                )
+            loaded_continuity = json.loads(
+                continuity_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(loaded_continuity, dict):
+                raise RuntimeError(
+                    "pre-hold service continuity evidence must be an object"
+                )
+            if (
+                args.expected_pre_hold_service_continuity_fingerprint
+                and str(loaded_continuity.get("fingerprint") or "")
+                != str(
+                    args.expected_pre_hold_service_continuity_fingerprint
+                )
+            ):
+                raise RuntimeError(
+                    "pre-hold service continuity fingerprint drifted from "
+                    "the detached request"
+                )
+            continuity_evidence = loaded_continuity
+        with _ExclusiveRestoreLock(runtime_dir):
+            result = maintenance_restore(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                actor=args.actor,
+                reason=args.reason or "bounded recovery completed",
+                expected_revision=args.expected_revision,
+                allow_pre_hold_service_continuity=bool(
+                    args.allow_pre_hold_service_continuity
+                ),
+                pre_hold_service_continuity_evidence=continuity_evidence,
+            )
     else:
         if not args.process_key or not args.desired or args.expected_revision is None:
             raise ValueError(

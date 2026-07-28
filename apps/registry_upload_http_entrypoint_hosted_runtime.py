@@ -2870,6 +2870,179 @@ def run_storage_recovery_sanitation_job_command(
     return 0
 
 
+def run_business_data_maintenance_restore_job_command(
+    args: argparse.Namespace,
+) -> int:
+    """Submit or read one exact detached business-data restore."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    job_action = str(args.maintenance_restore_job_action)
+    action = f"business-data-maintenance-restore-{job_action}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if job_action == "submit":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    if "wb-core-business-data-maintenance-restore@.service" not in {
+        unit.name for unit in target.managed_systemd_units
+    }:
+        raise ValueError(
+            "detached maintenance restore requires the repo-owned managed "
+            "systemd template"
+        )
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError(
+            "detached maintenance restore requires an exact deployed SHA"
+        )
+    job_id = str(args.job_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", job_id):
+        raise ValueError(
+            "detached maintenance restore requires an exact 64-hex job id"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "detached maintenance restore requires the canonical runtime dir"
+        )
+    if target.environment_file != "/opt/wb-ai/.env":
+        raise ValueError(
+            "detached maintenance restore requires the canonical environment file"
+        )
+    runner_args = [
+        "python3",
+        "apps/business_data_maintenance_restore_job.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--app-dir",
+        target.target_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha-file",
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
+        job_action,
+        "--job-id",
+        job_id,
+        "--deployed-sha",
+        deployed_sha,
+    ]
+    if job_action == "submit":
+        if args.expected_revision is None or int(args.expected_revision) < 0:
+            raise ValueError(
+                "detached maintenance restore requires an exact policy revision"
+            )
+        fingerprint = str(args.plan_fingerprint or "").strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+            raise ValueError(
+                "detached maintenance restore requires an exact plan fingerprint"
+            )
+        continuity_fingerprint = str(
+            args.service_continuity_fingerprint or ""
+        ).strip().lower()
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            continuity_fingerprint,
+        ):
+            raise ValueError(
+                "detached maintenance restore requires an exact service "
+                "continuity fingerprint"
+            )
+        window_id = str(args.window_id or "").strip()
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+            window_id,
+        ):
+            raise ValueError(
+                "detached maintenance restore requires an exact window id"
+            )
+        if not bool(args.allow_pre_hold_service_continuity):
+            raise ValueError(
+                "detached maintenance restore requires explicit pre-hold "
+                "service continuity"
+            )
+        actor = str(args.actor or "").strip()
+        reason = str(args.reason or "").strip()
+        if not actor or not reason:
+            raise ValueError(
+                "detached maintenance restore requires audited actor and reason"
+            )
+        runner_args.extend(
+            [
+                "--expected-revision",
+                str(int(args.expected_revision)),
+                "--window-id",
+                window_id,
+                "--plan-fingerprint",
+                fingerprint,
+                "--service-continuity-fingerprint",
+                continuity_fingerprint,
+                "--actor",
+                actor,
+                "--reason",
+                reason,
+                "--allow-pre-hold-service-continuity",
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(
+                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+                )
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=60.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "detached maintenance restore returned invalid JSON"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract_name")
+        != "business_data_maintenance_restore_job_v1"
+        or str(payload.get("job_id") or "") != job_id
+    ):
+        raise RuntimeError(
+            "detached maintenance restore returned an invalid identity"
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "job_id": job_id,
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_promo_archive_gc_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -5292,6 +5465,7 @@ def _run_remote_business_data_maintenance_runner(
         "prepare",
         "hold",
         "restore",
+        "restore-continuity-status",
         "set-process",
         "barrier-status",
         "barrier-acquire",
@@ -5511,6 +5685,23 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             target,
             action="status",
         )
+    elif action == "restore-continuity-status":
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action=action,
+        )
+        continuity = dict(result.get("service_continuity") or {})
+        if (
+            str(result.get("status") or "") != "ready"
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(continuity.get("fingerprint") or ""),
+            )
+            or not list(continuity.get("services") or [])
+        ):
+            raise RuntimeError(
+                "business-data restore continuity readback is incomplete"
+            )
     elif action == "set-process":
         if args.expected_revision is None:
             raise ValueError(
@@ -7139,6 +7330,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "status",
             "hold",
             "restore",
+            "restore-continuity-status",
             "set-process",
             "barrier-status",
             "barrier-acquire",
@@ -7205,6 +7397,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     business_data_maintenance.set_defaults(
         handler=run_business_data_maintenance_command,
+    )
+
+    maintenance_restore_submit = subparsers.add_parser(
+        "business-data-maintenance-restore-submit",
+        help=(
+            "Persist and start one exact restore in the fixed detached "
+            "maintenance worker."
+        ),
+    )
+    maintenance_restore_submit.add_argument("--deployed-sha", required=True)
+    maintenance_restore_submit.add_argument("--job-id", required=True)
+    maintenance_restore_submit.add_argument(
+        "--expected-revision",
+        type=int,
+        required=True,
+    )
+    maintenance_restore_submit.add_argument("--window-id", required=True)
+    maintenance_restore_submit.add_argument(
+        "--plan-fingerprint",
+        required=True,
+    )
+    maintenance_restore_submit.add_argument(
+        "--service-continuity-fingerprint",
+        required=True,
+    )
+    maintenance_restore_submit.add_argument("--actor", required=True)
+    maintenance_restore_submit.add_argument("--reason", required=True)
+    maintenance_restore_submit.add_argument(
+        "--allow-pre-hold-service-continuity",
+        action="store_true",
+        help=(
+            "Allow only the exact audited pre-hold service generation "
+            "during this unconfirmed-window restore."
+        ),
+    )
+    maintenance_restore_submit.set_defaults(
+        handler=run_business_data_maintenance_restore_job_command,
+        maintenance_restore_job_action="submit",
+    )
+
+    maintenance_restore_status = subparsers.add_parser(
+        "business-data-maintenance-restore-status",
+        help=(
+            "Read one exact durable maintenance restore result without "
+            "changing production."
+        ),
+    )
+    maintenance_restore_status.add_argument("--deployed-sha", required=True)
+    maintenance_restore_status.add_argument("--job-id", required=True)
+    maintenance_restore_status.set_defaults(
+        handler=run_business_data_maintenance_restore_job_command,
+        maintenance_restore_job_action="status",
     )
 
     functional_emergency_dry_run = subparsers.add_parser(

@@ -1166,6 +1166,58 @@ def main() -> None:
         raise AssertionError(
             "business-data restore must expose exact optimistic policy revision"
         )
+    business_continuity_args = (
+        hosted_runtime.build_arg_parser().parse_args(
+            [
+                "business-data-maintenance",
+                "restore-continuity-status",
+            ]
+        )
+    )
+    if business_continuity_args.action != "restore-continuity-status":
+        raise AssertionError(
+            "hosted runner must expose read-only restore continuity preflight"
+        )
+    continuity_payload = {
+        "status": "ready",
+        "service_continuity": {
+            "fingerprint": "sha256:" + "9" * 64,
+            "services": [
+                {
+                    "unit": (
+                        "wb-core-sheet-vitrina-closure-retry.service"
+                    ),
+                    "main_pid": 4242,
+                    "started_at": "fixture",
+                }
+            ],
+        },
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(continuity_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed,
+    ) as run_mock:
+        captured_continuity = (
+            hosted_runtime._run_remote_business_data_maintenance_runner(
+                active_target,
+                action="restore-continuity-status",
+            )
+        )
+    if (
+        captured_continuity != continuity_payload
+        or "restore-continuity-status"
+        not in " ".join(run_mock.call_args.args[0])
+    ):
+        raise AssertionError(
+            "hosted restore continuity preflight lost read-only transport"
+        )
     business_barrier_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "business-data-maintenance",
@@ -1624,6 +1676,45 @@ def main() -> None:
             "b" * 64,
         ]
     )
+    maintenance_restore_submit_args = (
+        hosted_runtime.build_arg_parser().parse_args(
+            [
+                "--target-file",
+                str(hosted_runtime.DEFAULT_TARGET_FILE),
+                "business-data-maintenance-restore-submit",
+                "--deployed-sha",
+                "a" * 40,
+                "--job-id",
+                "d" * 64,
+                "--expected-revision",
+                "19",
+                "--window-id",
+                "snapshot-fixture",
+                "--plan-fingerprint",
+                "sha256:" + "e" * 64,
+                "--service-continuity-fingerprint",
+                "sha256:" + "f" * 64,
+                "--actor",
+                "fixture_replacement_task",
+                "--reason",
+                "restore exact prior state",
+                "--allow-pre-hold-service-continuity",
+            ]
+        )
+    )
+    maintenance_restore_status_args = (
+        hosted_runtime.build_arg_parser().parse_args(
+            [
+                "--target-file",
+                str(hosted_runtime.DEFAULT_TARGET_FILE),
+                "business-data-maintenance-restore-status",
+                "--deployed-sha",
+                "a" * 40,
+                "--job-id",
+                "d" * 64,
+            ]
+        )
+    )
     promo_gc_apply_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "promo-archive-gc-apply",
@@ -1644,11 +1735,24 @@ def main() -> None:
         or sanitation_status_args.handler
         is not hosted_runtime.run_storage_recovery_sanitation_job_command
         or sanitation_status_args.sanitation_job_action != "status"
+        or maintenance_restore_submit_args.handler
+        is not (
+            hosted_runtime.run_business_data_maintenance_restore_job_command
+        )
+        or maintenance_restore_submit_args.maintenance_restore_job_action
+        != "submit"
+        or maintenance_restore_status_args.handler
+        is not (
+            hosted_runtime.run_business_data_maintenance_restore_job_command
+        )
+        or maintenance_restore_status_args.maintenance_restore_job_action
+        != "status"
         or promo_gc_apply_args.handler
         is not hosted_runtime.run_promo_archive_gc_command
     ):
         raise AssertionError(
-            "hosted runner must expose exact retention, sanitation and Promo GC"
+            "hosted runner must expose exact retention, sanitation, detached "
+            "maintenance restore and Promo GC"
         )
     completed_sanitation_job = subprocess.CompletedProcess(
         args=[],
@@ -1699,6 +1803,69 @@ def main() -> None:
     ):
         raise AssertionError(
             "hosted sanitation status is not bounded/read-only by exact job id"
+        )
+    completed_restore_job = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "contract_name": (
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                "job_id": "d" * 64,
+                "status": "queued",
+                "terminal": False,
+            }
+        ),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed_restore_job,
+    ) as run_mock:
+        hosted_runtime.run_business_data_maintenance_restore_job_command(
+            maintenance_restore_submit_args
+        )
+    restore_submit_command = " ".join(run_mock.call_args.args[0])
+    if (
+        run_mock.call_args.kwargs.get("timeout") != 60.0
+        or "apps/business_data_maintenance_restore_job.py"
+        not in restore_submit_command
+        or " submit " not in restore_submit_command
+        or "--job-id " + "d" * 64 not in restore_submit_command
+        or "--expected-revision 19" not in restore_submit_command
+        or "--window-id snapshot-fixture" not in restore_submit_command
+        or "--plan-fingerprint sha256:" + "e" * 64
+        not in restore_submit_command
+        or "--service-continuity-fingerprint sha256:" + "f" * 64
+        not in restore_submit_command
+        or "--allow-pre-hold-service-continuity"
+        not in restore_submit_command
+    ):
+        raise AssertionError(
+            "hosted detached maintenance restore lost exact request transport"
+        )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed_restore_job,
+    ) as run_mock:
+        hosted_runtime.run_business_data_maintenance_restore_job_command(
+            maintenance_restore_status_args
+        )
+    restore_status_command = " ".join(run_mock.call_args.args[0])
+    if (
+        run_mock.call_args.kwargs.get("timeout") != 60.0
+        or " status " not in restore_status_command
+        or "--expected-revision" in restore_status_command
+        or "--window-id" in restore_status_command
+        or "--plan-fingerprint" in restore_status_command
+        or "--allow-pre-hold-service-continuity"
+        in restore_status_command
+    ):
+        raise AssertionError(
+            "hosted maintenance restore status is not exact/read-only"
         )
     finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]

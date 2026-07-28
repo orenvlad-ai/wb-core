@@ -1,0 +1,22 @@
+[Unit]
+Description=WB Core exact detached business-data maintenance restore %i
+After=local-fs.target wb-core-registry-http.service
+RequiresMountsFor=/opt/wb-core-runtime/state
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/business_data_maintenance_restore_job.py --runtime-dir /opt/wb-core-runtime/state --app-dir /opt/wb-core-runtime/app --env-file /opt/wb-ai/.env --deployed-sha-file /opt/wb-core-runtime/app/.wb-core-runtime-sha worker --job-id %i
+TimeoutStartSec=3h
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/wb-core-runtime/state
