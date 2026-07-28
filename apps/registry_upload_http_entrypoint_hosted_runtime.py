@@ -4006,7 +4006,11 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     deploy_lease_path = str(
         getattr(args, "finance_deploy_lease_evidence", "") or ""
     ).strip()
-    if action not in {"health", "recovery-contract"}:
+    if action not in {
+        "health",
+        "recovery-contract",
+        "snapshot-status",
+    }:
         if not deploy_lease_path:
             raise ValueError(
                 "Finance storage migration requires a fresh "
@@ -4701,7 +4705,11 @@ def _run_remote_finance_storage_split_action(
     ]
     if action == "recovery-preflight":
         runner_args.extend(["--recovery-action", effective_action])
-    if action not in {"health", "recovery-contract"}:
+    if action not in {
+        "health",
+        "recovery-contract",
+        "snapshot-status",
+    }:
         if not isinstance(deploy_lease, Mapping):
             raise ValueError(
                 "canonical Finance migration execution requires active "

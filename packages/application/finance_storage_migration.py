@@ -1151,6 +1151,8 @@ class FinanceStorageCoherentSnapshot:
             or str(reviewed_plan.get("mode") or "") != "snapshot_dry_run"
             or str(reviewed_plan.get("fingerprint") or "")
             != str(expected_fingerprint or "")
+            or str(reviewed_plan.get("deployed_sha") or "")
+            != self.deployed_sha
             or not bool(
                 reviewed_plan.get("snapshot_allowed_by_machine_preflight")
             )

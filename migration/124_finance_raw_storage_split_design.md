@@ -220,9 +220,13 @@ The implementation is deliberately inert on deploy:
   phase-local wrappers around the same repo-owned runner. Plan, health and
   status actions are read-only; every mutation action checks the active target,
   reviewed external evidence and exact approval. All migration actions other
-  than health also require a fresh private GitHub lease readback outside Git,
+  than health, recovery-contract and exact query-only post-restore
+  snapshot-status require a fresh private GitHub lease readback outside Git,
   no older than five minutes; the remote runner rebinds it to the canonical
-  `.wb-core-runtime-sha`. Deployment invokes none of them.
+  `.wb-core-runtime-sha`. Snapshot-status instead binds the reviewed plan,
+  capture intent and persisted manifest directly to that canonical deployed
+  SHA, so a long already-authorized hold/restore cannot fail only because the
+  original readback aged. Deployment invokes none of them.
 - `finance-storage-recovery-contract` is the query-only deployed capability
   readback. Before **every** Finance storage mutation the hosted wrapper runs
   `recovery-preflight` remotely before barrier acquisition or destination
