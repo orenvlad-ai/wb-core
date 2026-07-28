@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from typing import Any
@@ -26,6 +27,8 @@ from packages.application.finance_migration_deploy_lease import (
     validate_finance_migration_deploy_lease,
 )
 from packages.application.finance_storage_migration import (
+    CUTOVER_PLAN_CONTRACT,
+    CUTOVER_RESULT_CONTRACT,
     FinanceStorageCandidateBuilder,
     FinanceStorageCoherentSnapshot,
     FinanceStorageCutover,
@@ -33,11 +36,89 @@ from packages.application.finance_storage_migration import (
     FinanceStorageRollback,
     FinanceStorageShadowRunner,
     FinanceStorageShadowVerifier,
+    MIGRATION_CONTRACT,
+    PLAN_CONTRACT,
+    ROLLBACK_CANDIDATE_CONTRACT,
+    ROLLBACK_PLAN_CONTRACT,
+    ROLLBACK_RESULT_CONTRACT,
+    SHADOW_STATE_CONTRACT,
+    SHADOW_VERIFICATION_CONTRACT,
+    SNAPSHOT_CONTRACT,
+    SNAPSHOT_PLAN_CONTRACT,
+)
+from packages.application.finance_storage_recovery_contract import (
+    MUTATION_ACTIONS,
+    recovery_contract,
+    validate_recovery_preflight,
 )
 from packages.application.finance_storage_stale_writer_recovery import (
     FinanceStorageStaleWriterRecovery,
+    PLAN_CONTRACT as STALE_WRITER_PLAN_CONTRACT,
+    RESULT_CONTRACT as STALE_WRITER_RESULT_CONTRACT,
 )
 from packages.application.storage_registry import parse_manifest
+from apps.business_data_maintenance_restore_job import (
+    CONTRACT_NAME as RESTORE_JOB_CONTRACT,
+    MAX_RESUME_SEQUENCE as RESTORE_MAX_RESUME_SEQUENCE,
+)
+
+
+RUNNER_CONTRACTS = {
+    "snapshot_plan": SNAPSHOT_PLAN_CONTRACT,
+    "snapshot": SNAPSHOT_CONTRACT,
+    "candidate_plan": PLAN_CONTRACT,
+    "candidate": MIGRATION_CONTRACT,
+    "shadow": SHADOW_STATE_CONTRACT,
+    "shadow_verification": SHADOW_VERIFICATION_CONTRACT,
+    "cutover_plan": CUTOVER_PLAN_CONTRACT,
+    "cutover_result": CUTOVER_RESULT_CONTRACT,
+    "rollback_plan": ROLLBACK_PLAN_CONTRACT,
+    "rollback_candidate": ROLLBACK_CANDIDATE_CONTRACT,
+    "rollback_result": ROLLBACK_RESULT_CONTRACT,
+    "stale_writer_plan": STALE_WRITER_PLAN_CONTRACT,
+    "stale_writer_result": STALE_WRITER_RESULT_CONTRACT,
+}
+
+
+def _downstream_recovery_capabilities() -> dict[str, bool]:
+    repo_restore_template = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "systemd"
+        / "wb-core-business-data-maintenance-restore@.service"
+    )
+    installed_restore_template = (
+        Path("/etc/systemd/system")
+        / "wb-core-business-data-maintenance-restore@.service"
+    )
+    restore_template_exact = False
+    try:
+        restore_template_exact = (
+            repo_restore_template.is_file()
+            and installed_restore_template.is_file()
+            and not installed_restore_template.is_symlink()
+            and repo_restore_template.read_bytes()
+            == installed_restore_template.read_bytes()
+        )
+    except OSError:
+        restore_template_exact = False
+    return {
+        "maintenance_restore": (
+            ROOT / "apps" / "business_data_maintenance.py"
+        ).is_file(),
+        "barrier_release": (
+            ROOT
+            / "packages"
+            / "application"
+            / "business_data_write_barrier.py"
+        ).is_file(),
+        "durable_restore_submit_status": (
+            ROOT / "apps" / "business_data_maintenance_restore_job.py"
+        ).is_file(),
+        "durable_restore_resume": RESTORE_MAX_RESUME_SEQUENCE >= 1,
+        "restore_systemd_template": restore_template_exact,
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -163,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
             "rollback-plan",
             "rollback-prepare",
             "rollback-apply",
+            "recovery-contract",
+            "recovery-preflight",
         ),
         default="dry-run",
     )
@@ -192,6 +275,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reason", default="")
     parser.add_argument(
+        "--recovery-action",
+        choices=tuple(sorted(MUTATION_ACTIONS)),
+        default="",
+        help=(
+            "Mutation action whose complete recovery capability is validated "
+            "query-only before any barrier acquisition."
+        ),
+    )
+    parser.add_argument(
         "--deploy-lease-json",
         default="",
         help=(
@@ -201,6 +293,80 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _reviewed_plan_for_recovery_preflight(
+    args: argparse.Namespace,
+    *,
+    action: str,
+) -> dict[str, Any] | None:
+    path: Path | None = None
+    if action == "snapshot-create":
+        path = args.snapshot_plan_file
+    elif action == "stale-writer-stop":
+        path = args.stale_writer_plan_file
+    elif action == "cutover-apply":
+        path = args.cutover_plan_file
+    elif action in {"rollback-prepare", "rollback-apply"}:
+        path = args.rollback_plan_file
+    if path is None:
+        return None
+    try:
+        payload = json.loads(
+            path.expanduser().read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"{action} reviewed plan is unreadable"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            f"{action} reviewed plan must contain a JSON object"
+        )
+    return payload
+
+
+def _run_recovery_preflight(
+    args: argparse.Namespace,
+    *,
+    runtime_dir: Path,
+    action: str,
+    phase: str,
+    deployed_sha: str,
+    deploy_lease: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return validate_recovery_preflight(
+        runtime_dir,
+        action=action,
+        phase=phase,
+        deployed_sha=deployed_sha,
+        approval_reference=args.approval_reference,
+        expected_fingerprint=args.confirm_fingerprint,
+        deploy_lease=deploy_lease,
+        runner_contracts=RUNNER_CONTRACTS,
+        restore_job_contract=RESTORE_JOB_CONTRACT,
+        restore_max_resume_sequence=RESTORE_MAX_RESUME_SEQUENCE,
+        downstream_capabilities=_downstream_recovery_capabilities(),
+        reviewed_plan=_reviewed_plan_for_recovery_preflight(
+            args,
+            action=action,
+        ),
+        source_snapshot_manifest=(
+            args.source_snapshot_manifest.expanduser()
+            if args.source_snapshot_manifest is not None
+            else None
+        ),
+        candidate_manifest_path=(
+            args.candidate_manifest.expanduser()
+            if args.candidate_manifest is not None
+            else None
+        ),
+        rollback_candidate_evidence_path=(
+            args.rollback_candidate_evidence.expanduser()
+            if args.rollback_candidate_evidence is not None
+            else None
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,6 +389,55 @@ def main(argv: list[str] | None = None) -> int:
         deploy_lease = validate_finance_migration_deploy_lease(
             lease_payload,
             deployed_sha=deployed_sha,
+        )
+    if args.action == "recovery-contract":
+        if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
+            raise SystemExit(
+                "recovery-contract requires the exact deployed SHA marker"
+            )
+        contract = recovery_contract(
+            runner_contracts=RUNNER_CONTRACTS,
+            restore_job_contract=RESTORE_JOB_CONTRACT,
+            restore_max_resume_sequence=(
+                RESTORE_MAX_RESUME_SEQUENCE
+            ),
+            downstream_capabilities=(
+                _downstream_recovery_capabilities()
+            ),
+        )
+        contract["status"] = "ready"
+        contract["deployed_sha"] = deployed_sha
+        _emit(
+            contract,
+            args.output,
+        )
+        return 0
+    if args.action == "recovery-preflight":
+        if not args.recovery_action:
+            raise SystemExit(
+                "--recovery-action is required for recovery-preflight"
+            )
+        _emit(
+            _run_recovery_preflight(
+                args,
+                runtime_dir=runtime_dir,
+                action=args.recovery_action,
+                phase="pre_barrier",
+                deployed_sha=deployed_sha,
+                deploy_lease=deploy_lease,
+            ),
+            args.output,
+        )
+        return 0
+    recovery_preflight: dict[str, Any] | None = None
+    if args.action in MUTATION_ACTIONS:
+        recovery_preflight = _run_recovery_preflight(
+            args,
+            runtime_dir=runtime_dir,
+            action=args.action,
+            phase="mutation",
+            deployed_sha=deployed_sha,
+            deploy_lease=deploy_lease,
         )
     if args.action.startswith("rollback-"):
         rollback = FinanceStorageRollback(
@@ -321,6 +536,17 @@ def main(argv: list[str] | None = None) -> int:
                     args.minimum_observation_seconds
                 ),
             ).verify()
+            if deploy_lease is not None:
+                payload["deploy_lease"] = {
+                    "contract_version": deploy_lease[
+                        "contract_version"
+                    ],
+                    "policy": deploy_lease["policy"],
+                    "lease": deploy_lease["lease"],
+                    "fingerprint": deploy_lease["fingerprint"],
+                }
+            if recovery_preflight is not None:
+                payload["recovery_preflight"] = recovery_preflight
             _emit(payload, args.output)
             return 0
         shadow = FinanceStorageShadowRunner(
@@ -454,6 +680,8 @@ def main(argv: list[str] | None = None) -> int:
             "lease": deploy_lease["lease"],
             "fingerprint": deploy_lease["fingerprint"],
         }
+    if recovery_preflight is not None:
+        payload["recovery_preflight"] = recovery_preflight
     _emit(payload, args.output)
     return 0
 

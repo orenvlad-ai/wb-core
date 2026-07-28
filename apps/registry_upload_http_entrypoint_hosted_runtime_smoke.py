@@ -465,6 +465,104 @@ def main() -> None:
                 raise AssertionError(
                     "Finance storage read-only command unexpectedly enables apply"
                 )
+        recovery_contract_payload = {
+            "contract_version": (
+                "wb_core_finance_storage_recovery_contract_v1"
+            ),
+            "status": "ready",
+            "deployed_sha": "a" * 40,
+            "fail_closed_default": True,
+            "second_restore_job_allowed": False,
+            "fingerprint": "sha256:" + ("4" * 64),
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(recovery_contract_payload),
+                stderr="",
+            ),
+        ) as recovery_contract_run:
+            hosted_runtime._run_remote_finance_storage_split_action(
+                active_target,
+                action="recovery-contract",
+                plan_path=None,
+                fingerprint="",
+                approval_reference="",
+                chunk_size=10_000,
+            )
+        recovery_contract_command = " ".join(
+            recovery_contract_run.call_args.args[0]
+        )
+        if (
+            " recovery-contract " not in recovery_contract_command
+            or "--deploy-lease-json" in recovery_contract_command
+        ):
+            raise AssertionError(
+                "Finance recovery contract must be query-only and "
+                "lease-independent"
+            )
+        recovery_preflight_payload = {
+            "status": "ready",
+            "action": "apply",
+            "phase": "pre_barrier",
+            "fail_closed": True,
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(recovery_preflight_payload),
+                stderr="",
+            ),
+        ) as recovery_preflight_run:
+            hosted_runtime._run_remote_finance_storage_split_action(
+                active_target,
+                action="recovery-preflight",
+                recovery_action="apply",
+                plan_path=storage_plan_path,
+                fingerprint="sha256:storage-reviewed",
+                approval_reference="human-gate-storage-123",
+                chunk_size=10_000,
+                source_snapshot_manifest=(
+                    "/opt/wb-core-runtime/state/finance-storage-split-"
+                    "snapshots/fixture/snapshot_manifest.json"
+                ),
+                deploy_lease=deploy_lease,
+            )
+        recovery_preflight_command = " ".join(
+            recovery_preflight_run.call_args.args[0]
+        )
+        for token in (
+            " recovery-preflight ",
+            "--recovery-action",
+            "apply",
+            "--deploy-lease-json",
+            "--confirm-fingerprint",
+            "--approval-reference",
+        ):
+            if token not in recovery_preflight_command:
+                raise AssertionError(
+                    f"Finance recovery preflight lost {token}"
+                )
+        recovery_contract_args = (
+            hosted_runtime.build_arg_parser().parse_args(
+                ["finance-storage-recovery-contract"]
+            )
+        )
+        if (
+            recovery_contract_args.handler
+            is not hosted_runtime.run_finance_storage_split_command
+            or recovery_contract_args.finance_storage_split_action
+            != "recovery-contract"
+        ):
+            raise AssertionError(
+                "hosted runner must expose Finance recovery contract readback"
+            )
         storage_dry_args = hosted_runtime.build_arg_parser().parse_args(
             [
                 "finance-storage-split-dry-run",
@@ -759,13 +857,62 @@ def main() -> None:
             ),
             mock.patch.object(
                 hosted_runtime,
+                "_run_remote_finance_storage_split_action",
+                side_effect=RuntimeError(
+                    "synthetic recovery preflight failure"
+                ),
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            try:
+                hosted_runtime.run_finance_storage_split_command(
+                    snapshot_args
+                )
+            except RuntimeError as exc:
+                if "recovery preflight" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    "failed Finance recovery preflight must propagate"
+                )
+        if maintenance_actions:
+            raise AssertionError(
+                "Finance recovery preflight must run before any barrier "
+                f"or writer mutation: {maintenance_actions}"
+            )
+
+        def failed_snapshot_after_preflight(
+            _target: object,
+            *,
+            action: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if action == "recovery-preflight":
+                return {
+                    "status": "ready",
+                    "phase": "pre_barrier",
+                    "action": "snapshot-create",
+                    "fail_closed": True,
+                }
+            if action == "snapshot-create":
+                raise RuntimeError("synthetic snapshot failure")
+            raise AssertionError(f"unexpected Finance action: {action}")
+
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_business_data_maintenance_runner",
+                side_effect=maintenance_result,
+            ),
+            mock.patch.object(
+                hosted_runtime,
                 "_run_remote_warehouse_functional_maintenance_action",
                 return_value={"status": "held"},
             ),
             mock.patch.object(
                 hosted_runtime,
                 "_run_remote_finance_storage_split_action",
-                side_effect=RuntimeError("synthetic snapshot failure"),
+                side_effect=failed_snapshot_after_preflight,
             ),
             mock.patch.object(hosted_runtime, "_print_json"),
         ):
@@ -914,6 +1061,13 @@ def main() -> None:
             action: str,
             **_kwargs: object,
         ) -> dict[str, object]:
+            if action == "recovery-preflight":
+                return {
+                    "status": "ready",
+                    "phase": "pre_barrier",
+                    "action": "cutover-apply",
+                    "fail_closed": True,
+                }
             if action == "cutover-apply":
                 raise RuntimeError("synthetic pre-switch cutover failure")
             if action == "health":
