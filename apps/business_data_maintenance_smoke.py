@@ -354,6 +354,10 @@ def _assert_persisted_service_continuity_accepts_exact_completion() -> None:
                 maintenance_state=maintenance_state,
                 current_status=current,
             )
+            assert (
+                continuity["barrier_plan_fingerprint"]
+                == "sha256:" + "5" * 64
+            )
             policy = maintenance.load_or_initialize_owner_policy(runtime_dir)
             systemd.service_states[unit].update(
                 {

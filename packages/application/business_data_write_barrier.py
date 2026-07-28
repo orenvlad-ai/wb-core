@@ -203,6 +203,7 @@ def barrier_status(runtime_dir: Path) -> dict[str, Any]:
             "phase": "invalid",
             "window_id": "",
             "window_kind": "unknown",
+            "plan_fingerprint": "",
             "hold_confirmed": False,
             "message": (
                 "Техническое обслуживание: изменения временно заблокированы, "
@@ -219,6 +220,7 @@ def barrier_status(runtime_dir: Path) -> dict[str, Any]:
             "phase": "inactive",
             "window_id": "",
             "window_kind": "",
+            "plan_fingerprint": "",
             "hold_confirmed": False,
             "message": "",
             "state_path": str(path),
@@ -232,6 +234,7 @@ def barrier_status(runtime_dir: Path) -> dict[str, Any]:
         "phase": phase,
         "window_id": _bounded(state.get("window_id"), 160),
         "window_kind": _bounded(state.get("window_kind"), 40),
+        "plan_fingerprint": _bounded(state.get("plan_fingerprint"), 80),
         "hold_confirmed": bool(state.get("hold_confirmed")),
         "started_at": _bounded(state.get("started_at"), 64),
         "confirmed_at": _bounded(state.get("confirmed_at"), 64),
