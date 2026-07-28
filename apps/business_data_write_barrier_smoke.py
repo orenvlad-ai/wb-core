@@ -64,6 +64,7 @@ def _assert_lifecycle_survives_process_restart() -> None:
         restarted = barrier_status(Path(str(runtime_dir)))
         assert restarted["active"] is True
         assert restarted["window_id"] == WINDOW
+        assert restarted["plan_fingerprint"] == PLAN
         assert acquire_barrier(
             runtime_dir,
             window_id=WINDOW,
