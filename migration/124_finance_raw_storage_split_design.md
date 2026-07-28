@@ -129,15 +129,21 @@ The implementation is deliberately inert on deploy:
   explicitly append the next binding and resume that same job, with the exact
   preceding-failure digest, unchanged original continuity boundary, archived
   attempt result, zero restore locks and no additional writer. The current
-  incident contract admits at most two immutable contiguous recovery bindings
-  (`resume.json`, then `resume-2.json`) and therefore at most attempts 2 and 3;
-  it never creates a second job or automatically retries, and any third binding
-  is rejected fail closed. Timer/service state and the freshness clock used for
-  Autoanswers reconciliation share one observation timestamp taken before the
-  feature-store readback, so a slow SQLite query cannot falsely expire a stale
-  systemd snapshot. An actively running bounded Autoanswers oneshot remains
-  truthful `starting` evidence until its successful completion/fresh tick,
-  while an inactive stale worker observed after the grace still blocks.
+  incident contract admits at most three immutable contiguous recovery bindings
+  (`resume.json`, `resume-2.json`, then `resume-3.json`) and therefore at most
+  attempts 2, 3 and 4; it never creates a second job or automatically retries,
+  and any fourth binding is rejected fail closed. Timer/service state and the
+  freshness clock used for Autoanswers reconciliation share one observation
+  timestamp taken before the feature-store readback, so a slow SQLite query
+  cannot falsely expire a stale systemd snapshot. Restore acceptance binds
+  Autoanswers to the successful feature-owned lifecycle reconcile readback plus
+  a later outer systemd snapshot: lifecycle contract, desired mode, policy
+  epoch, transition run, component timers, service results and observation
+  order must all match. A redundant later feature-store
+  `worker_unavailable` view cannot override that already bound `starting`
+  evidence, while any lifecycle block, identity/component drift, failed
+  service or inactive outer timer still blocks and returns the whole restore
+  to the paused boundary.
   Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions

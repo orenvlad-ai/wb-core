@@ -143,6 +143,154 @@ def _restore_local_boundaries(old: tuple[Any, Any]) -> None:
     maintenance._cron_entries, maintenance._lock_summary = old
 
 
+def _autoanswers_restore_fixture() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    components: dict[str, Any] = {}
+    timers: dict[str, Any] = {}
+    services: dict[str, Any] = {}
+    spec = next(
+        item
+        for item in maintenance.PROCESS_SPECS
+        if item["key"] == "autoanswers"
+    )
+    for component_key, timer_unit in spec["components"].items():
+        service_unit = timer_unit.removesuffix(".timer") + ".service"
+        timer = {
+            "unit": timer_unit,
+            "is_enabled": "enabled",
+            "is_active": "active",
+            "properties": {},
+        }
+        service = {
+            "unit": service_unit,
+            "is_enabled": "static",
+            "is_active": (
+                "activating" if component_key == "worker" else "inactive"
+            ),
+            "properties": {"Result": "success"},
+        }
+        timers[timer_unit] = timer
+        services[service_unit] = service
+        components[component_key] = {
+            "component_key": component_key,
+            "desired": True,
+            "actual": True,
+            "drift_status": "matched",
+            "timer": timer,
+            "service": service,
+            "last_error": "",
+        }
+    preflight = {
+        "process_key": "autoanswers",
+        "desired": True,
+        "business_mode": "auto_safe",
+        "runtime_schedule": {
+            "policy_epoch": 17,
+            "transition_run_id": "autoanswers-transition-17",
+        },
+    }
+    lifecycle = {
+        "contract": "wb_autoanswers_lifecycle_v1",
+        "process_key": "autoanswers",
+        "desired": True,
+        "business_mode": "auto_safe",
+        "actual": False,
+        "lifecycle_state": "starting",
+        "drift_status": "matched",
+        "suspended_by_master": False,
+        "stop_reason": "",
+        "last_error": "",
+        "requested_at": "2026-07-28T08:55:28Z",
+        "readback_captured_at": "2026-07-28T08:57:00Z",
+        "policy_epoch": 17,
+        "transition_run_id": "autoanswers-transition-17",
+        "runtime_schedule": {
+            "policy_epoch": 17,
+            "transition_run_id": "autoanswers-transition-17",
+        },
+        "components": components,
+    }
+    status = {
+        "captured_at": "2026-07-28T08:57:01Z",
+        "timers": timers,
+        "services": services,
+        # This is the redundant, later feature-store view that triggered the
+        # production false negative. It is deliberately not authoritative for
+        # a restore already confirmed by the feature-owned reconcile call.
+        "auto_updates": {
+            "processes": [
+                {
+                    "process_key": "autoanswers",
+                    "drift_status": "blocked",
+                    "stop_reason": "worker_unavailable",
+                }
+            ]
+        },
+    }
+    return dict(spec), preflight, lifecycle, status
+
+
+def _assert_autoanswers_restore_uses_bound_lifecycle_readback() -> None:
+    spec, preflight, lifecycle, status = _autoanswers_restore_fixture()
+    accepted = maintenance._validated_autoanswers_restore_readback(
+        lifecycle_readback=lifecycle,
+        preflight_state=preflight,
+        status=status,
+        spec=spec,
+    )
+    assert accepted["drift_status"] == "matched"
+    assert accepted["lifecycle_state"] == "starting"
+    assert accepted["post_resume_validation"]["accepted"] is True
+    assert accepted["post_resume_validation"]["fingerprint"].startswith(
+        "sha256:"
+    )
+
+    for label, mutate in (
+        (
+            "feature lifecycle block",
+            lambda candidate, _outer: candidate.update(
+                {
+                    "drift_status": "blocked",
+                    "stop_reason": "worker_unavailable",
+                }
+            ),
+        ),
+        (
+            "feature identity drift",
+            lambda candidate, _outer: candidate.update(
+                {"transition_run_id": "different-run"}
+            ),
+        ),
+        (
+            "outer timer drift",
+            lambda _candidate, outer: outer["timers"][
+                "wb-core-autoanswers-worker.timer"
+            ].update(
+                {
+                    "is_enabled": "disabled",
+                    "is_active": "inactive",
+                }
+            ),
+        ),
+    ):
+        candidate = copy.deepcopy(lifecycle)
+        outer = copy.deepcopy(status)
+        mutate(candidate, outer)
+        rejected = maintenance._validated_autoanswers_restore_readback(
+            lifecycle_readback=candidate,
+            preflight_state=preflight,
+            status=outer,
+            spec=spec,
+        )
+        assert rejected["drift_status"] == "unknown", label
+        assert rejected["post_resume_validation"]["accepted"] is False, label
+        assert rejected["post_resume_validation"]["failures"], label
+
+
 def _assert_hold_disables_every_boundary_without_killing_service() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -554,6 +702,21 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
             assert rows["spp_test"]["actual"] is False
             assert rows["autoanswers"]["actual"] is False
             assert rows["autoanswers"]["component_states"]["readonly_sync"]["actual"] is True
+            persisted_policy = json.loads(
+                (
+                    runtime_dir / maintenance.POLICY_FILENAME
+                ).read_text()
+            )
+            autoanswers_validation = dict(
+                (
+                    persisted_policy.get("post_resume_readback") or {}
+                ).get("autoanswers_validation")
+                or {}
+            )
+            assert autoanswers_validation["accepted"] is True
+            assert autoanswers_validation["source"] == (
+                "feature_lifecycle_reconcile+outer_systemd"
+            )
             repeated = maintenance.maintenance_restore(
                 runtime_dir,
                 systemd=systemd,
@@ -898,6 +1061,7 @@ def _assert_restore_lock_rejects_overlap() -> None:
 
 
 def main() -> int:
+    _assert_autoanswers_restore_uses_bound_lifecycle_readback()
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
     _assert_persisted_service_continuity_accepts_exact_completion()
