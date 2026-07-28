@@ -1427,6 +1427,59 @@ def main() -> None:
         raise AssertionError(
             "hosted restore continuity preflight lost read-only transport"
         )
+    quiet_continuity_payload = {
+        "status": "ready",
+        "service_continuity": {
+            "boundary_kind": "quiet_confirmed_hold",
+            "fingerprint": "sha256:" + "8" * 64,
+            "services": [],
+        },
+    }
+    with (
+        mock.patch.object(
+            hosted_runtime,
+            "load_hosted_runtime_target",
+            return_value=active_target,
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_business_data_maintenance_runner",
+            return_value=quiet_continuity_payload,
+        ),
+        mock.patch.object(hosted_runtime, "_print_json"),
+    ):
+        hosted_runtime.run_business_data_maintenance_command(
+            business_continuity_args
+        )
+    with (
+        mock.patch.object(
+            hosted_runtime,
+            "load_hosted_runtime_target",
+            return_value=active_target,
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_business_data_maintenance_runner",
+            return_value={
+                "status": "ready",
+                "service_continuity": {
+                    "fingerprint": "sha256:" + "7" * 64,
+                    "services": [],
+                },
+            },
+        ),
+    ):
+        try:
+            hosted_runtime.run_business_data_maintenance_command(
+                business_continuity_args
+            )
+        except RuntimeError as exc:
+            if "continuity readback is incomplete" not in str(exc):
+                raise
+        else:
+            raise AssertionError(
+                "hosted restore continuity accepted an empty legacy boundary"
+            )
     business_barrier_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "business-data-maintenance",

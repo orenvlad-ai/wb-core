@@ -5847,13 +5847,20 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             action=action,
         )
         continuity = dict(result.get("service_continuity") or {})
+        boundary_kind = str(continuity.get("boundary_kind") or "")
+        services = list(continuity.get("services") or [])
+        supported_boundary = (
+            not boundary_kind and bool(services)
+        ) or (
+            boundary_kind == "quiet_confirmed_hold" and not services
+        )
         if (
             str(result.get("status") or "") != "ready"
             or not re.fullmatch(
                 r"sha256:[0-9a-f]{64}",
                 str(continuity.get("fingerprint") or ""),
             )
-            or not list(continuity.get("services") or [])
+            or not supported_boundary
         ):
             raise RuntimeError(
                 "business-data restore continuity readback is incomplete"
@@ -7671,8 +7678,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--allow-pre-hold-service-continuity",
         action="store_true",
         help=(
-            "Allow only the exact audited pre-hold service generation "
-            "during this unconfirmed-window restore."
+            "Allow only the exact audited pre-hold service generation or "
+            "quiet confirmed-hold boundary during this restore."
         ),
     )
     maintenance_restore_submit.set_defaults(
