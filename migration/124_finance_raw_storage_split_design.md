@@ -3,7 +3,8 @@
 Status: **repository implementation complete through the inert maintenance
 barrier, coherent-copy integrity gate, candidate/shadow/soak, atomic cutover and
 reconciled rollback-drill capabilities, including a global fail-closed Finance
-migration deploy lease**. The canonical production source
+migration deploy lease and an explicit recovery-continuity contract**. The
+canonical production source
 remains the monolith until the staged runner is deployed and a fresh exact
 fingerprint receives separate human approval. Old-generation retirement is not
 implemented by this runner and remains a later independent gate.
@@ -219,6 +220,57 @@ The implementation is deliberately inert on deploy:
   than health also require a fresh private GitHub lease readback outside Git,
   no older than five minutes; the remote runner rebinds it to the canonical
   `.wb-core-runtime-sha`. Deployment invokes none of them.
+- `finance-storage-recovery-contract` is the query-only deployed capability
+  readback. Before **every** Finance storage mutation the hosted wrapper runs
+  `recovery-preflight` remotely before barrier acquisition or destination
+  mutation. The remote mutation runner repeats the same validation after an
+  exact quiet hold for snapshot/cutover/rollback. The validator binds deployed
+  SHA, lease task/id/revision/window/phase, approval reference, reviewed
+  fingerprint, active generation, snapshot/candidate/rollback paths and
+  identities, runner contract versions and all downstream durable
+  restore/release capabilities. Missing, stale, unsupported or ambiguous
+  evidence creates no barrier and fails closed.
+
+### Durable recovery-continuity matrix
+
+The matrix is emitted machine-readably by the deployed recovery contract. Its
+documented classifications are:
+
+| Persisted transition | Durable state | Exact restart behavior |
+|---|---|---|
+| snapshot acquire | write-barrier `absent/released → acquiring` | same window/kind/fingerprint resumes; other identity fails closed |
+| snapshot hold | maintenance `preparing/holding → held` | exact control signature resumes as a no-op |
+| snapshot copy | partial/final database and snapshot manifest | exact partial is rebuilt; structurally exact final-without-manifest is bound and published; dual/sidecar/drift is ambiguous |
+| snapshot restore | maintenance plus one durable restore job | only the same digest-bound job may resume |
+| snapshot release | barrier `held/restoring → released` | exact restore readback is mandatory |
+| candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped |
+| candidate manifest | candidate bytes → shadow manifest | exact manifest readback is idempotent |
+| shadow activate | durable shadow state | exact candidate activation is a no-op |
+| shadow reconcile | immutable raw batch/link rows | source identity and committed chunks resume idempotently |
+| shadow live-tail | outbox event plus bridge cursor | event/sequence commit resumes without duplicate apply |
+| shadow soak | verification evidence | observations append/reverify; readiness is never guessed |
+| cutover pre-manifest | held monolith plus candidate | monolith remains canonical or exact retry continues |
+| cutover post-manifest | atomic global split manifest | exact selected split is terminal/idempotent even after client loss |
+| cutover release | restored controls plus barrier | restore first, then exact idempotent release |
+| rollback prepare | partial/candidate evidence | exact candidate rebuild/readback only |
+| rollback pre-manifest | held split plus rollback candidate | split remains canonical or exact retry continues |
+| rollback post-manifest | atomic global monolith manifest | exact selected rollback generation recreates/reads terminal evidence without replay |
+| rollback release | restored controls plus barrier | restore first, then exact idempotent release |
+
+There is no “unknown means retry” branch. A restoring barrier, mismatched
+generation, unknown writer, missing retained generation, stale result, unsafe
+path, concurrent restore or unsupported runner version remains held/fail-closed
+and never starts another restore or guesses a manifest.
+
+The offline production-shaped rehearsal covers the complete
+snapshot→restore→release and
+candidate→shadow→cutover→post-manifest-restart→rollback→post-manifest-restart
+control-plane paths. It injects disconnect/crash boundaries around partial
+snapshot copy, database-before-manifest, candidate chunks, raw/outbox commits,
+live-tail cursor acknowledgement and both atomic manifest switches. The
+durable detached restore suite separately kills the submitting client and
+proves system-owned continuation, bounded heartbeat/deadline classification,
+result/audit persistence and the prohibition on a second job.
 
 The private `.finance-storage-shadow-ingest.json` state defaults absent/off.
 If a later reviewed stage enables it while the implicit monolith is selected,
@@ -437,30 +489,34 @@ boundary.
 
 Canonical hosted sequence is phase-local:
 
-1. deploy inert code;
-2. atomically acquire and independently read back the global Finance migration
-   deploy lease on the exact current deployed SHA; any pre-acquire deploy or
+1. after any recovery incident, first prove the manual barrier released and
+   exact writers/timers/policy/non-target state restored;
+2. deploy and read back the inert recovery-continuity contract, then rebind the
+   owner-bound lease to that exact SHA; this recovery deploy invalidates every
+   earlier snapshot/plan/fingerprint;
+3. independently read back the rebound global Finance migration deploy lease
+   on the exact current deployed SHA; any pre-acquire/rebind deploy or
    SHA/schema drift invalidates prior baseline/plan/fingerprint evidence;
-3. `finance-storage-snapshot-plan`, then the automatically held
+4. `finance-storage-snapshot-plan`, then the automatically held
    `finance-storage-snapshot-apply`, then
    `finance-storage-snapshot-integrity`;
    an active pre-existing writer service blocks the plan and leaves normal
    operation unchanged; a proven stale closure-retry generation uses the
    separately reviewed lease-bound recovery above before a completely fresh
    snapshot plan;
-4. `finance-storage-split-dry-run` against that exact verified snapshot and
+5. `finance-storage-split-dry-run` against that exact verified snapshot and
    stop for approval of its exact fingerprint/generation/capacity;
-5. only after approval, `finance-storage-split-apply`, shadow activate,
+6. only after approval, `finance-storage-split-apply`, shadow activate,
    legacy reconcile, bounded live-tail applies and repeated shadow verify until
    the minimum soak becomes `ready`;
-6. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
+7. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
    restart;
-7. production readback/UI observation, rollback plan/prepare and rollback
+8. production readback/UI observation, rollback plan/prepare and rollback
    apply drill if the approved program calls for it;
-8. release the global deploy lease only after exact abort or post-cutover
+9. release the global deploy lease only after exact abort or post-cutover
    reconciliation plus full SHA/writer/timer/policy/barrier/non-target
    readback;
-9. never retire any retained generation in this lifecycle.
+10. never retire any retained generation in this lifecycle.
 
 Every evidence/plan file is private and outside Git. A new plan fingerprint is
 not normalized into an old approval. The initial program authorization permits
@@ -518,6 +574,12 @@ Closure requires:
   idempotent terminal audit.
 - Durable HTTP/UI barrier restart, invalid-state fail-closed behavior, blocked
   request audit and exact release only after control restore.
+- Recovery-contract transition completeness and stable fingerprint; preflight
+  must reject missing lease/approval/downstream capability before creating a
+  barrier or destination byte.
+- Disconnect/crash rehearsal at each persisted transition, including snapshot
+  partial/final-without-manifest, cutover post-manifest and rollback
+  post-manifest exact resume; ambiguous variants must remain fail closed.
 - Coherent snapshot capture under a short hold and full offline integrity gate;
   live monolith never receives a long full-database scan.
 - Cutover atomic manifest switch, process restart and tail catch-up.

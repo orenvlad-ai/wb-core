@@ -1166,15 +1166,42 @@ class FinanceStorageCoherentSnapshot:
         snapshot_root = Path(str(target["snapshot_root"])).resolve()
         database_path = Path(str(target["database_path"])).resolve()
         manifest_path = Path(str(target["manifest_path"])).resolve()
+        try:
+            snapshot_root.relative_to(self.runtime_dir)
+            database_path.relative_to(snapshot_root)
+            manifest_path.relative_to(snapshot_root)
+        except ValueError as exc:
+            raise FinanceStorageMigrationError(
+                "coherent snapshot target escapes the canonical runtime"
+            ) from exc
+        if (
+            database_path.parent != snapshot_root
+            or manifest_path.parent != snapshot_root
+        ):
+            raise FinanceStorageMigrationError(
+                "coherent snapshot target paths are not exact"
+            )
         if manifest_path.is_file():
             existing = _load_private_json(
                 manifest_path,
                 label="coherent snapshot manifest",
             )
             if (
-                str(existing.get("snapshot_plan_fingerprint") or "")
+                str(existing.get("contract_version") or "")
+                == SNAPSHOT_CONTRACT
+                and str(existing.get("snapshot_plan_fingerprint") or "")
                 == str(expected_fingerprint)
+                and str(existing.get("snapshot_id") or "")
+                == str(target["snapshot_id"])
+                and str(existing.get("deployed_sha") or "")
+                == self.deployed_sha
+                and str(existing.get("approval_reference") or "")
+                == str(approval_reference).strip()
+                and Path(str(existing.get("database_path") or "")).resolve()
+                == database_path
                 and Path(str(existing.get("database_path") or "")).is_file()
+                and existing.get("snapshot_identity")
+                == _destination_path_identity(database_path)
             ):
                 return {
                     "contract_version": SNAPSHOT_CONTRACT,
@@ -1197,9 +1224,10 @@ class FinanceStorageCoherentSnapshot:
             str(current_plan["source"]["identity"]["path"])
         ).resolve()
         temporary = snapshot_root / ".monolith.sqlite3.partial"
-        if temporary.exists() or database_path.exists():
+        intent_path = snapshot_root / "snapshot_capture_intent.json"
+        if temporary.is_symlink() or database_path.is_symlink():
             raise FinanceStorageMigrationError(
-                "snapshot destination already exists without matching manifest"
+                "snapshot destination collision is unsafe"
             )
         source = sqlite3.connect(
             f"file:{source_path}?mode=ro",
@@ -1207,15 +1235,11 @@ class FinanceStorageCoherentSnapshot:
             timeout=60,
             isolation_level=None,
         )
-        destination = sqlite3.connect(
-            temporary,
-            timeout=60,
-            isolation_level=None,
-        )
         started = time.monotonic()
+        continuity_classification = "fresh_capture"
+        destination_identity: dict[str, Any]
         try:
             source.row_factory = sqlite3.Row
-            destination.row_factory = sqlite3.Row
             source.execute("PRAGMA query_only=ON")
             source_before = _source_identity(source_path, source)
             if source_before != current_plan["source"]["identity"]:
@@ -1234,9 +1258,107 @@ class FinanceStorageCoherentSnapshot:
                     "unknown or undrained database writer appeared before "
                     f"coherent snapshot: {unknown_writers}"
                 )
-            source.backup(destination, pages=16_384, sleep=0.01)
-            destination.commit()
-            destination_identity = _source_identity(temporary, destination)
+            expected_intent: dict[str, Any] = {
+                "contract_version": (
+                    "wb_core_finance_storage_snapshot_capture_intent_v1"
+                ),
+                "snapshot_plan_fingerprint": str(
+                    expected_fingerprint
+                ),
+                "snapshot_id": str(target["snapshot_id"]),
+                "deployed_sha": self.deployed_sha,
+                "approval_reference": str(
+                    approval_reference
+                ).strip(),
+                "source_identity": current_plan["source"]["identity"],
+                "database_path": str(database_path),
+                "manifest_path": str(manifest_path),
+                "maintenance_state_fingerprint": str(
+                    hold_evidence["maintenance_state_fingerprint"]
+                ),
+            }
+            expected_intent["fingerprint"] = _digest(expected_intent)
+            if intent_path.is_file():
+                persisted_intent = _load_private_json(
+                    intent_path,
+                    label="coherent snapshot capture intent",
+                )
+                if persisted_intent != expected_intent:
+                    raise FinanceStorageMigrationError(
+                        "snapshot capture intent is stale or ambiguous"
+                    )
+            else:
+                if temporary.exists() or database_path.exists():
+                    raise FinanceStorageMigrationError(
+                        "snapshot bytes exist without exact durable capture "
+                        "intent"
+                    )
+                _atomic_write_json(intent_path, expected_intent)
+            if temporary.exists() and database_path.exists():
+                raise FinanceStorageMigrationError(
+                    "snapshot copy state is ambiguous: partial and final "
+                    "databases both exist"
+                )
+            if temporary.exists():
+                temporary.unlink()
+                continuity_classification = "partial_rebuilt"
+            if database_path.exists():
+                sidecars = _destination_path_identity(database_path)[
+                    "sidecars"
+                ]
+                if sidecars:
+                    raise FinanceStorageMigrationError(
+                        "snapshot database without manifest has SQLite "
+                        "sidecars and is ambiguous"
+                    )
+                destination = sqlite3.connect(
+                    f"file:{database_path}?mode=ro",
+                    uri=True,
+                    timeout=60,
+                    isolation_level=None,
+                )
+                try:
+                    destination.row_factory = sqlite3.Row
+                    destination.execute("PRAGMA query_only=ON")
+                    destination_identity = _source_identity(
+                        database_path,
+                        destination,
+                    )
+                finally:
+                    destination.close()
+                continuity_classification = (
+                    "database_without_manifest_validated"
+                )
+            else:
+                destination = sqlite3.connect(
+                    temporary,
+                    timeout=60,
+                    isolation_level=None,
+                )
+                try:
+                    destination.row_factory = sqlite3.Row
+                    source.backup(
+                        destination,
+                        pages=16_384,
+                        sleep=0.01,
+                    )
+                    destination.commit()
+                    destination_identity = _source_identity(
+                        temporary,
+                        destination,
+                    )
+                finally:
+                    destination.close()
+                descriptor = os.open(temporary, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.replace(temporary, database_path)
+                destination_identity = {
+                    **destination_identity,
+                    "path": str(database_path),
+                }
             source_after = _source_identity(source_path, source)
             if source_after != source_before:
                 raise FinanceStorageMigrationError(
@@ -1247,6 +1369,8 @@ class FinanceStorageCoherentSnapshot:
                 != int(source_before["page_count"])
                 or int(destination_identity["page_size"])
                 != int(source_before["page_size"])
+                or int(destination_identity["freelist_count"])
+                != int(source_before["freelist_count"])
                 or str(destination_identity["schema_digest"])
                 != str(source_before["schema_digest"])
             ):
@@ -1254,14 +1378,7 @@ class FinanceStorageCoherentSnapshot:
                     "coherent snapshot structural readback mismatch"
                 )
         finally:
-            destination.close()
             source.close()
-        descriptor = os.open(temporary, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, database_path)
         snapshot_manifest: dict[str, Any] = {
             "contract_version": SNAPSHOT_CONTRACT,
             "status": "captured_unverified",
@@ -1273,8 +1390,17 @@ class FinanceStorageCoherentSnapshot:
             "source_identity": current_plan["source"]["identity"],
             "snapshot_identity": _destination_path_identity(database_path),
             "hold_evidence": hold_evidence,
+            "capture_intent": {
+                "path": str(intent_path),
+                "fingerprint": str(expected_intent["fingerprint"]),
+            },
             "captured_at": _utc_now(),
             "capture_duration_seconds": round(time.monotonic() - started, 3),
+            "continuity": {
+                "classification": continuity_classification,
+                "resume_is_idempotent": True,
+                "ambiguous_state_fails_closed": True,
+            },
             "full_integrity_check": {
                 "status": "pending",
                 "runs_outside_maintenance_hold": True,
@@ -3903,10 +4029,17 @@ class FinanceStorageCutover:
         if active.state != "monolith" or active.canonical_source != "monolith":
             if (
                 active.state == "cutover"
+                and active.canonical_source == "split"
+                and active.generation_epoch
+                == candidate.generation_epoch
                 and active.raw.generation_id
                 == candidate.raw.generation_id
+                and active.raw.relative_path
+                == candidate.raw.relative_path
                 and active.operational.generation_id
                 == candidate.operational.generation_id
+                and active.operational.relative_path
+                == candidate.operational.relative_path
                 and active.source_fingerprint
                 == candidate.source_fingerprint
             ):
@@ -3914,7 +4047,16 @@ class FinanceStorageCutover:
                     "contract_version": CUTOVER_RESULT_CONTRACT,
                     "status": "cutover_complete",
                     "idempotent": True,
+                    "continuity_classification": (
+                        "exact_post_manifest_readback"
+                    ),
                     "manifest": manifest_payload(active),
+                    "global_manifest_switched": True,
+                    "canonical_source": "split",
+                    "old_monolith_retained": (
+                        self.runtime_dir / MONOLITH_FILENAME
+                    ).is_file(),
+                    "retirement_authorized": False,
                 }
             raise FinanceStorageMigrationError(
                 "canonical generation changed before cutover"
@@ -3990,14 +4132,26 @@ class FinanceStorageCutover:
             source_fingerprint=candidate.source_fingerprint,
             created_at=_utc_now(),
         )
+        manifest_write_continuity = "fresh_atomic_switch"
         try:
             atomic_write_manifest(
                 self.registry.manifest_path,
                 target_manifest,
             )
         except Exception:
-            shadow.activate()
-            raise
+            uncertain_readback = self.registry.load(
+                require_files=True
+            )
+            if (
+                uncertain_readback.manifest_sha256
+                == target_manifest.manifest_sha256
+            ):
+                manifest_write_continuity = (
+                    "post_manifest_exception_recovered"
+                )
+            else:
+                shadow.activate()
+                raise
         readback = self.registry.load(require_files=True)
         if readback.manifest_sha256 != target_manifest.manifest_sha256:
             raise FinanceStorageMigrationError(
@@ -4007,6 +4161,7 @@ class FinanceStorageCutover:
             "contract_version": CUTOVER_RESULT_CONTRACT,
             "status": "cutover_complete",
             "idempotent": False,
+            "continuity_classification": manifest_write_continuity,
             "plan_fingerprint": str(expected_fingerprint),
             "approval_reference": str(approval_reference).strip(),
             "hold_evidence": hold_evidence,
@@ -4619,6 +4774,120 @@ class FinanceStorageRollback:
                 "exact quiet writer/timer hold is required for rollback"
             )
         active = self.registry.load(require_files=True)
+        target = dict(reviewed_plan.get("target") or {})
+        reviewed_active = dict(
+            reviewed_plan.get("active_manifest") or {}
+        )
+        expected_source_fingerprint = _digest(
+            {
+                "split_manifest": str(
+                    evidence.get("active_manifest_sha256") or ""
+                ),
+                "rollback_candidate": str(
+                    evidence.get("candidate_fingerprint") or ""
+                ),
+            }
+        )
+        exact_post_manifest = bool(
+            active.state == "monolith"
+            and active.canonical_source == "monolith"
+            and active.generation_epoch
+            == str(target.get("generation_epoch") or "")
+            and active.raw.generation_id
+            == str(target.get("generation_id") or "")
+            and active.operational.generation_id
+            == str(target.get("generation_id") or "")
+            and active.raw.relative_path
+            == str(target.get("relative_path") or "")
+            and active.operational.relative_path
+            == str(target.get("relative_path") or "")
+            and active.rollback_generation_id
+            == str(reviewed_active.get("generation_epoch") or "")
+            and active.source_fingerprint
+            == expected_source_fingerprint
+        )
+        if exact_post_manifest:
+            split_raw_path = Path(
+                str((reviewed_plan.get("raw") or {}).get("path") or "")
+            ).resolve()
+            split_operational_path = Path(
+                str(
+                    (reviewed_plan.get("operational") or {}).get(
+                        "path"
+                    )
+                    or ""
+                )
+            ).resolve()
+            for split_path in (split_raw_path, split_operational_path):
+                try:
+                    split_path.relative_to(self.runtime_dir)
+                except ValueError as exc:
+                    raise FinanceStorageMigrationError(
+                        "reviewed retained split path escapes runtime"
+                    ) from exc
+                if not split_path.is_file():
+                    raise FinanceStorageMigrationError(
+                        "exact post-manifest rollback lost retained split "
+                        "generation"
+                    )
+            candidate_path = Path(
+                str(evidence.get("candidate_path") or "")
+            ).resolve()
+            candidate_path.relative_to(self.runtime_dir)
+            result_path = candidate_path.parent / "rollback_evidence.json"
+            if result_path.is_file():
+                existing = _load_private_json(
+                    result_path,
+                    label="rollback result evidence",
+                )
+                if (
+                    str(existing.get("contract_version") or "")
+                    == ROLLBACK_RESULT_CONTRACT
+                    and str(existing.get("status") or "")
+                    == "rollback_complete"
+                    and str(existing.get("plan_fingerprint") or "")
+                    == exact
+                    and str(
+                        (existing.get("manifest") or {}).get(
+                            "manifest_sha256"
+                        )
+                        or ""
+                    )
+                    == active.manifest_sha256
+                ):
+                    return {
+                        **existing,
+                        "idempotent": True,
+                        "continuity_classification": (
+                            "exact_post_manifest_result_readback"
+                        ),
+                        "evidence_path": str(result_path),
+                    }
+                raise FinanceStorageMigrationError(
+                    "rollback result evidence is stale or ambiguous"
+                )
+            result = {
+                "contract_version": ROLLBACK_RESULT_CONTRACT,
+                "status": "rollback_complete",
+                "idempotent": True,
+                "continuity_classification": (
+                    "exact_post_manifest_result_recovered"
+                ),
+                "plan_fingerprint": exact,
+                "approval_reference": str(approval_reference).strip(),
+                "manifest": manifest_payload(active),
+                "global_manifest_switched": True,
+                "canonical_source": "monolith",
+                "restart_required": ["wb-core-registry-http.service"],
+                "original_monolith_retained": (
+                    self.runtime_dir / MONOLITH_FILENAME
+                ).is_file(),
+                "split_generation_retained": True,
+                "retirement_authorized": False,
+            }
+            result["evidence_fingerprint"] = _digest(result)
+            _atomic_write_json(result_path, result)
+            return {**result, "evidence_path": str(result_path)}
         if active.manifest_sha256 != str(
             evidence.get("active_manifest_sha256") or ""
         ):

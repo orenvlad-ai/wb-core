@@ -41,8 +41,15 @@ from packages.application.finance_storage_migration import (
     FinanceStorageShadowRunner,
     FinanceStorageShadowVerifier,
     InjectedMigrationFault,
+    _atomic_write_json,
     _accessible_fd_paths,
     _unknown_snapshot_writers,
+)
+from packages.application.finance_storage_recovery_contract import (
+    EXPECTED_RUNNER_CONTRACTS,
+    FinanceStorageRecoveryContractError,
+    recovery_contract,
+    validate_recovery_preflight,
 )
 from packages.application.partner_report import PartnerReportBlock
 from packages.application.business_data_write_barrier import (
@@ -664,6 +671,291 @@ class OutboxSmoke(unittest.TestCase):
 
 
 class MigrationSmoke(unittest.TestCase):
+    @staticmethod
+    def _recovery_lease() -> dict[str, object]:
+        return {
+            "lease": {
+                "lease_id": "finance-split-recovery-smoke",
+                "task_id": "finance-recovery-hardening-smoke",
+                "deployed_sha": DEPLOYED_SHA,
+                "window_id": "finance-recovery-hardening-window",
+                "phase": "offline-rehearsal",
+                "revision": 1,
+            }
+        }
+
+    @staticmethod
+    def _recovery_capabilities() -> dict[str, bool]:
+        return {
+            "maintenance_restore": True,
+            "barrier_release": True,
+            "durable_restore_submit_status": True,
+            "durable_restore_resume": True,
+            "restore_systemd_template": True,
+        }
+
+    def test_recovery_contract_and_pre_barrier_fail_closed_matrix(
+        self,
+    ) -> None:
+        contract = recovery_contract(
+            runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+            restore_job_contract=(
+                "business_data_maintenance_restore_job_v1"
+            ),
+            restore_max_resume_sequence=3,
+            downstream_capabilities=self._recovery_capabilities(),
+        )
+        transitions = [
+            str(item["transition"]) for item in contract["transitions"]
+        ]
+        self.assertEqual(len(transitions), 18)
+        self.assertEqual(len(set(transitions)), 18)
+        self.assertTrue(contract["fail_closed_default"])
+        self.assertFalse(contract["second_restore_job_allowed"])
+        self.assertTrue(
+            str(contract["fingerprint"]).startswith("sha256:")
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=2)
+            snapshot = FinanceStorageCoherentSnapshot(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+            )
+            plan = snapshot.build_plan()
+            barrier_path = runtime / ".business-data-write-barrier.json"
+            common = {
+                "runtime_dir": runtime,
+                "action": "snapshot-create",
+                "phase": "pre_barrier",
+                "deployed_sha": DEPLOYED_SHA,
+                "approval_reference": "program-authorization-smoke",
+                "expected_fingerprint": str(plan["fingerprint"]),
+                "runner_contracts": EXPECTED_RUNNER_CONTRACTS,
+                "restore_job_contract": (
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                "restore_max_resume_sequence": 3,
+                "reviewed_plan": plan,
+            }
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deploy lease",
+            ):
+                validate_recovery_preflight(
+                    **common,
+                    deploy_lease=None,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                )
+            missing = self._recovery_capabilities()
+            missing["durable_restore_resume"] = False
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "durable_restore_resume",
+            ):
+                validate_recovery_preflight(
+                    **common,
+                    deploy_lease=self._recovery_lease(),
+                    downstream_capabilities=missing,
+                )
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "approval reference",
+            ):
+                validate_recovery_preflight(
+                    **{**common, "approval_reference": ""},
+                    deploy_lease=self._recovery_lease(),
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                )
+            self.assertFalse(barrier_path.exists())
+            fresh = validate_recovery_preflight(
+                **common,
+                deploy_lease=self._recovery_lease(),
+                downstream_capabilities=self._recovery_capabilities(),
+            )
+            self.assertEqual(
+                fresh["boundary_classification"],
+                "fresh_acquire",
+            )
+            self.assertFalse(barrier_path.exists())
+            window_id = str(plan["target_snapshot"]["window_id"])
+            acquire_barrier(
+                runtime,
+                window_id=window_id,
+                window_kind="snapshot",
+                plan_fingerprint=str(plan["fingerprint"]),
+                approval_reference="program-authorization-smoke",
+                actor="smoke",
+                reason="preflight continuity matrix",
+            )
+            acquiring = validate_recovery_preflight(
+                **common,
+                deploy_lease=self._recovery_lease(),
+                downstream_capabilities=self._recovery_capabilities(),
+            )
+            self.assertEqual(
+                acquiring["boundary_classification"],
+                "exact_idempotent_resume",
+            )
+            _create_maintenance_hold(runtime)
+            confirm_barrier_hold(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=str(plan["fingerprint"]),
+                maintenance_state=json.loads(
+                    (
+                        runtime / ".business-data-maintenance.json"
+                    ).read_text()
+                ),
+            )
+            held = validate_recovery_preflight(
+                **{**common, "phase": "mutation"},
+                deploy_lease=self._recovery_lease(),
+                downstream_capabilities=self._recovery_capabilities(),
+            )
+            self.assertEqual(
+                held["boundary_classification"],
+                "held_and_recoverable",
+            )
+            mark_barrier_restoring(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=str(plan["fingerprint"]),
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "already restoring",
+            ):
+                validate_recovery_preflight(
+                    **common,
+                    deploy_lease=self._recovery_lease(),
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                )
+
+    def test_snapshot_copy_crash_continuity(self) -> None:
+        for fault_boundary in (
+            "partial_copy",
+            "database_without_manifest",
+        ):
+            with self.subTest(
+                fault_boundary=fault_boundary
+            ), tempfile.TemporaryDirectory() as raw:
+                runtime = Path(raw) / "runtime"
+                _create_monolith(runtime, rows=2)
+                snapshot = FinanceStorageCoherentSnapshot(
+                    runtime,
+                    deployed_sha=DEPLOYED_SHA,
+                    repo_root=ROOT,
+                )
+                plan = snapshot.build_plan()
+                fingerprint = str(plan["fingerprint"])
+                window_id = str(
+                    plan["target_snapshot"]["window_id"]
+                )
+                acquire_barrier(
+                    runtime,
+                    window_id=window_id,
+                    window_kind="snapshot",
+                    plan_fingerprint=fingerprint,
+                    approval_reference="program-authorization-smoke",
+                    actor="smoke",
+                    reason="snapshot copy crash rehearsal",
+                )
+                _create_maintenance_hold(runtime)
+                confirm_barrier_hold(
+                    runtime,
+                    window_id=window_id,
+                    plan_fingerprint=fingerprint,
+                    maintenance_state=json.loads(
+                        (
+                            runtime
+                            / ".business-data-maintenance.json"
+                        ).read_text()
+                    ),
+                )
+                if fault_boundary == "partial_copy":
+                    real_replace = os.replace
+
+                    def fault_side_effect(
+                        source: object,
+                        destination: object,
+                    ) -> None:
+                        if Path(destination).name == "monolith.sqlite3":
+                            raise InjectedMigrationFault(
+                                "disconnect at partial_copy"
+                            )
+                        real_replace(source, destination)
+
+                    patch_target = (
+                        "packages.application.finance_storage_migration."
+                        "os.replace"
+                    )
+                else:
+
+                    def fault_side_effect(
+                        destination: object,
+                        payload: object,
+                    ) -> None:
+                        if (
+                            Path(destination).name
+                            == "snapshot_manifest.json"
+                        ):
+                            raise InjectedMigrationFault(
+                                "disconnect at database_without_manifest"
+                            )
+                        _atomic_write_json(destination, payload)
+
+                    patch_target = (
+                        "packages.application.finance_storage_migration."
+                        "_atomic_write_json"
+                    )
+                with mock.patch(
+                    patch_target,
+                    side_effect=fault_side_effect,
+                ):
+                    with self.assertRaises(InjectedMigrationFault):
+                        snapshot.create(
+                            reviewed_plan=plan,
+                            expected_fingerprint=fingerprint,
+                            approval_reference=(
+                                "program-authorization-smoke"
+                            ),
+                        )
+                resumed = snapshot.create(
+                    reviewed_plan=plan,
+                    expected_fingerprint=fingerprint,
+                    approval_reference="program-authorization-smoke",
+                )
+                self.assertEqual(
+                    (
+                        resumed["snapshot"].get("continuity") or {}
+                    ).get("classification"),
+                    (
+                        "partial_rebuilt"
+                        if fault_boundary == "partial_copy"
+                        else "database_without_manifest_validated"
+                    ),
+                )
+                self.assertFalse(
+                    (
+                        Path(
+                            str(
+                                plan["target_snapshot"][
+                                    "snapshot_root"
+                                ]
+                            )
+                        )
+                        / ".monolith.sqlite3.partial"
+                    ).exists()
+                )
+
     def test_snapshot_plan_blocks_active_business_writer_service(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime"
@@ -1203,11 +1495,48 @@ class MigrationSmoke(unittest.TestCase):
                 source_snapshot_manifest=snapshot_manifest,
             )
             candidate_plan = planner.build_plan()
-            candidate_result = FinanceStorageCandidateBuilder(
+            candidate_preflight = validate_recovery_preflight(
+                runtime,
+                action="apply",
+                phase="mutation",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="fixture-human-gate",
+                expected_fingerprint=candidate_plan["fingerprint"],
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                source_snapshot_manifest=snapshot_manifest,
+            )
+            self.assertEqual(candidate_preflight["status"], "ready")
+            candidate_builder = FinanceStorageCandidateBuilder(
                 planner,
                 expected_fingerprint=candidate_plan["fingerprint"],
                 approval_reference="fixture-human-gate",
-            ).apply()
+            )
+
+            def candidate_manifest_then_disconnect(
+                path: Path,
+                manifest: object,
+            ) -> None:
+                atomic_write_manifest(path, manifest)
+                raise KeyboardInterrupt(
+                    "candidate client disconnected after manifest"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "atomic_write_manifest",
+                side_effect=candidate_manifest_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    candidate_builder.apply()
+            candidate_result = candidate_builder.apply()
             candidate_manifest_path = Path(
                 candidate_result["candidate_manifest_path"]
             )
@@ -1220,7 +1549,42 @@ class MigrationSmoke(unittest.TestCase):
                 plan_fingerprint=candidate_plan["fingerprint"],
                 approval_reference="fixture-human-gate",
             )
-            shadow.activate()
+            shadow_preflight = validate_recovery_preflight(
+                runtime,
+                action="shadow-activate",
+                phase="mutation",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="fixture-human-gate",
+                expected_fingerprint=candidate_plan["fingerprint"],
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                candidate_manifest_path=candidate_manifest_path,
+            )
+            self.assertEqual(shadow_preflight["status"], "ready")
+            def shadow_state_then_disconnect(
+                path: Path,
+                payload: object,
+            ) -> None:
+                _atomic_write_json(path, payload)
+                raise KeyboardInterrupt(
+                    "shadow client disconnected after state"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "_atomic_write_json",
+                side_effect=shadow_state_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    shadow.activate()
+            self.assertTrue(shadow.activate()["idempotent"])
             shadow.reconcile_legacy_current(chunk_size=1)
             event = FinanceRawIngestor(StoreRegistry(runtime)).ingest_batch(
                 [_raw_row(10, 1001), _raw_row(10, 1002)],
@@ -1233,12 +1597,30 @@ class MigrationSmoke(unittest.TestCase):
                 shadow.apply_live_tail(max_events=10)["destination_cursor"],
                 event.sequence_no,
             )
-            verification = FinanceStorageShadowVerifier(
+            verifier = FinanceStorageShadowVerifier(
                 runtime,
                 candidate_manifest_path=candidate_manifest_path,
                 candidate_plan_fingerprint=candidate_plan["fingerprint"],
                 minimum_observation_seconds=0,
-            ).verify()
+            )
+
+            def soak_evidence_then_disconnect(
+                path: Path,
+                payload: object,
+            ) -> None:
+                _atomic_write_json(path, payload)
+                raise KeyboardInterrupt(
+                    "soak client disconnected after evidence"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "_atomic_write_json",
+                side_effect=soak_evidence_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    verifier.verify()
+            verification = verifier.verify()
             self.assertEqual(
                 verification["status"],
                 "ready",
@@ -1300,6 +1682,49 @@ class MigrationSmoke(unittest.TestCase):
                 plan_fingerprint=fingerprint,
                 maintenance_state=maintenance_state,
             )
+            cutover_preflight = validate_recovery_preflight(
+                runtime,
+                action="cutover-apply",
+                phase="mutation",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="fixture-human-gate",
+                expected_fingerprint=fingerprint,
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                reviewed_plan=cutover_plan,
+                candidate_manifest_path=candidate_manifest_path,
+            )
+            self.assertEqual(
+                cutover_preflight["boundary_classification"],
+                "held_and_recoverable",
+            )
+            def cutover_write_then_disconnect(
+                path: Path,
+                manifest: object,
+            ) -> None:
+                atomic_write_manifest(path, manifest)
+                raise KeyboardInterrupt(
+                    "submitting cutover client disconnected"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "atomic_write_manifest",
+                side_effect=cutover_write_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    cutover.apply(
+                        reviewed_plan=cutover_plan,
+                        expected_fingerprint=fingerprint,
+                        approval_reference="fixture-human-gate",
+                    )
             cutover_result = cutover.apply(
                 reviewed_plan=cutover_plan,
                 expected_fingerprint=fingerprint,
@@ -1308,8 +1733,8 @@ class MigrationSmoke(unittest.TestCase):
             self.assertTrue(cutover_result["global_manifest_switched"])
             self.assertTrue(cutover_result["old_monolith_retained"])
             self.assertEqual(
-                cutover_result["outbox_reconciliation"]["lag_events"],
-                0,
+                cutover_result["continuity_classification"],
+                "exact_post_manifest_readback",
             )
             retry = cutover.apply(
                 reviewed_plan=cutover_plan,
@@ -1416,11 +1841,56 @@ class MigrationSmoke(unittest.TestCase):
                 rollback_plan["prepare_allowed_by_machine_preflight"],
                 rollback_plan["blockers"],
             )
+            rollback_prepare_preflight = validate_recovery_preflight(
+                runtime,
+                action="rollback-prepare",
+                phase="mutation",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="fixture-human-gate",
+                expected_fingerprint=rollback_plan["fingerprint"],
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                reviewed_plan=rollback_plan,
+            )
+            self.assertEqual(
+                rollback_prepare_preflight["status"],
+                "ready",
+            )
+            def rollback_candidate_then_disconnect(
+                path: Path,
+                payload: object,
+            ) -> None:
+                _atomic_write_json(path, payload)
+                raise KeyboardInterrupt(
+                    "rollback prepare client disconnected after evidence"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "_atomic_write_json",
+                side_effect=rollback_candidate_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    rollback.prepare(
+                        reviewed_plan=rollback_plan,
+                        expected_fingerprint=rollback_plan[
+                            "fingerprint"
+                        ],
+                        approval_reference="fixture-human-gate",
+                    )
             rollback_candidate = rollback.prepare(
                 reviewed_plan=rollback_plan,
                 expected_fingerprint=rollback_plan["fingerprint"],
                 approval_reference="fixture-human-gate",
             )
+            self.assertTrue(rollback_candidate["idempotent"])
             post_cutover = FinanceRawIngestor(
                 StoreRegistry(runtime)
             ).ingest_batch(
@@ -1469,6 +1939,58 @@ class MigrationSmoke(unittest.TestCase):
                     ).read_text()
                 ),
             )
+            rollback_apply_preflight = validate_recovery_preflight(
+                runtime,
+                action="rollback-apply",
+                phase="mutation",
+                deployed_sha=DEPLOYED_SHA,
+                approval_reference="fixture-human-gate",
+                expected_fingerprint=rollback_fingerprint,
+                deploy_lease=self._recovery_lease(),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                reviewed_plan=rollback_plan,
+                rollback_candidate_evidence_path=Path(
+                    rollback_candidate["candidate_evidence_path"]
+                ),
+            )
+            self.assertEqual(
+                rollback_apply_preflight[
+                    "boundary_classification"
+                ],
+                "held_and_recoverable",
+            )
+            def rollback_write_then_disconnect(
+                path: Path,
+                manifest: object,
+            ) -> None:
+                atomic_write_manifest(path, manifest)
+                raise KeyboardInterrupt(
+                    "submitting rollback client disconnected"
+                )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration."
+                "atomic_write_manifest",
+                side_effect=rollback_write_then_disconnect,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    rollback.apply(
+                        reviewed_plan=rollback_plan,
+                        expected_fingerprint=rollback_fingerprint,
+                        approval_reference="fixture-human-gate",
+                        candidate_evidence_path=Path(
+                            rollback_candidate[
+                                "candidate_evidence_path"
+                            ]
+                        ),
+                    )
             rollback_result = rollback.apply(
                 reviewed_plan=rollback_plan,
                 expected_fingerprint=rollback_fingerprint,
@@ -1481,9 +2003,10 @@ class MigrationSmoke(unittest.TestCase):
                 rollback_result["status"],
                 "rollback_complete",
             )
+            self.assertTrue(rollback_result["idempotent"])
             self.assertEqual(
-                rollback_result["raw_replay"]["latest_sequence"],
-                2,
+                rollback_result["continuity_classification"],
+                "exact_post_manifest_result_recovered",
             )
             rolled_back = StoreRegistry(runtime)
             rollback_manifest = rolled_back.load(require_files=True)

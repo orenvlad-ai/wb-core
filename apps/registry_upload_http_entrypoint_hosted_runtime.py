@@ -110,6 +110,9 @@ from packages.application.warehouse_functional_maintenance import (
 from packages.application.finance_migration_deploy_lease import (
     validate_finance_migration_deploy_lease,
 )
+from packages.application.finance_storage_recovery_contract import (
+    MUTATION_ACTIONS as FINANCE_STORAGE_MUTATION_ACTIONS,
+)
 
 
 DEFAULT_TARGET_FILE = (
@@ -3665,7 +3668,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     deploy_lease_path = str(
         getattr(args, "finance_deploy_lease_evidence", "") or ""
     ).strip()
-    if action != "health":
+    if action not in {"health", "recovery-contract"}:
         if not deploy_lease_path:
             raise ValueError(
                 "Finance storage migration requires a fresh "
@@ -3689,6 +3692,26 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             deployed_sha=bound_sha,
         )
     transition_evidence: dict[str, Any] = {}
+    if action in FINANCE_STORAGE_MUTATION_ACTIONS:
+        transition_evidence["recovery_preflight"] = (
+            _run_remote_finance_storage_split_action(
+                target,
+                action="recovery-preflight",
+                recovery_action=action,
+                plan_path=plan_path,
+                fingerprint=fingerprint,
+                approval_reference=approval_reference,
+                chunk_size=int(
+                    getattr(args, "chunk_size", 10_000) or 10_000
+                ),
+                source_snapshot_manifest=source_snapshot_manifest,
+                candidate_manifest=candidate_manifest,
+                candidate_plan_fingerprint=candidate_plan_fingerprint,
+                minimum_observation_seconds=minimum_observation_seconds,
+                rollback_candidate_evidence=rollback_candidate_evidence,
+                deploy_lease=deploy_lease,
+            )
+        )
     if action == "rollback-apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
@@ -4091,6 +4114,7 @@ def _run_remote_finance_storage_split_action(
     minimum_observation_seconds: int = 3600,
     rollback_candidate_evidence: str = "",
     deploy_lease: Mapping[str, Any] | None = None,
+    recovery_action: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"finance-storage-split-{action}"
@@ -4115,27 +4139,23 @@ def _run_remote_finance_storage_split_action(
         "rollback-plan",
         "rollback-prepare",
         "rollback-apply",
+        "recovery-contract",
+        "recovery-preflight",
     }:
         raise ValueError(f"unsupported Finance storage split action: {action}")
-    if action in {
-        "apply",
-        "snapshot-create",
-        "snapshot-integrity",
-        "stale-writer-stop",
-        "shadow-activate",
-        "shadow-reconcile",
-        "shadow-verify",
-        "live-tail-apply",
-        "shadow-deactivate",
-        "cutover-apply",
-        "rollback-prepare",
-        "rollback-apply",
-    }:
+    if action in FINANCE_STORAGE_MUTATION_ACTIONS:
         _ensure_target_allows_mutation(
             target,
             action=f"finance-storage-split-{action}",
             dry_run=False,
         )
+    effective_action = action
+    if action == "recovery-preflight":
+        effective_action = str(recovery_action or "").strip()
+        if effective_action not in FINANCE_STORAGE_MUTATION_ACTIONS:
+            raise ValueError(
+                "Finance recovery preflight requires an exact mutation action"
+            )
     runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
     if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
         raise ValueError("Finance storage split runner requires the canonical active runtime dir")
@@ -4154,7 +4174,9 @@ def _run_remote_finance_storage_split_action(
         "--chunk-size",
         str(chunk_size),
     ]
-    if action != "health":
+    if action == "recovery-preflight":
+        runner_args.extend(["--recovery-action", effective_action])
+    if action not in {"health", "recovery-contract"}:
         if not isinstance(deploy_lease, Mapping):
             raise ValueError(
                 "canonical Finance migration execution requires active "
@@ -4179,14 +4201,15 @@ def _run_remote_finance_storage_split_action(
                 source_snapshot_manifest,
             ]
         )
-    if action.startswith("shadow-") or action in {
+    if effective_action.startswith("shadow-") or effective_action in {
         "live-tail-apply",
         "cutover-plan",
         "cutover-apply",
     }:
         if not candidate_manifest:
             raise ValueError(
-                f"Finance storage {action} requires --candidate-manifest"
+                f"Finance storage {effective_action} requires "
+                "--candidate-manifest"
             )
         runner_args.extend(
             [
@@ -4194,10 +4217,10 @@ def _run_remote_finance_storage_split_action(
                 candidate_manifest,
             ]
         )
-    if action in {"cutover-plan", "cutover-apply"}:
+    if effective_action in {"cutover-plan", "cutover-apply"}:
         if not candidate_plan_fingerprint.startswith("sha256:"):
             raise ValueError(
-                f"Finance storage {action} requires "
+                f"Finance storage {effective_action} requires "
                 "--candidate-plan-fingerprint"
             )
         runner_args.extend(
@@ -4206,7 +4229,7 @@ def _run_remote_finance_storage_split_action(
                 candidate_plan_fingerprint,
             ]
         )
-    if action == "apply":
+    if effective_action == "apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError("Finance storage split apply requires an existing --plan-file")
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -4229,7 +4252,7 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-    elif action == "snapshot-create":
+    elif effective_action == "snapshot-create":
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
                 "Finance storage snapshot-create requires an existing --plan-file"
@@ -4261,13 +4284,13 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-    elif action == "snapshot-integrity":
+    elif effective_action == "snapshot-integrity":
         if not source_snapshot_manifest:
             raise ValueError(
                 "Finance storage snapshot-integrity requires "
                 "--source-snapshot-manifest"
             )
-    elif action == "stale-writer-stop":
+    elif effective_action == "stale-writer-stop":
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
                 "Finance stale-writer stop requires --plan-file"
@@ -4300,7 +4323,7 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-    elif action in {
+    elif effective_action in {
         "shadow-status",
         "shadow-activate",
         "shadow-reconcile",
@@ -4320,11 +4343,11 @@ def _run_remote_finance_storage_split_action(
                 approval_reference or "status-only",
             ]
         )
-        if action == "shadow-deactivate":
+        if effective_action == "shadow-deactivate":
             runner_args.extend(
                 ["--reason", "repo-owned shadow lifecycle transition"]
             )
-        elif action == "shadow-verify":
+        elif effective_action == "shadow-verify":
             if minimum_observation_seconds < 0:
                 raise ValueError(
                     "minimum observation seconds cannot be negative"
@@ -4335,7 +4358,7 @@ def _run_remote_finance_storage_split_action(
                     str(minimum_observation_seconds),
                 ]
             )
-    elif action == "cutover-apply":
+    elif effective_action == "cutover-apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
                 "Finance storage cutover-apply requires --plan-file"
@@ -4368,10 +4391,10 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-    elif action in {"rollback-prepare", "rollback-apply"}:
+    elif effective_action in {"rollback-prepare", "rollback-apply"}:
         if plan_path is None or not plan_path.is_file():
             raise ValueError(
-                f"Finance storage {action} requires --plan-file"
+                f"Finance storage {effective_action} requires --plan-file"
             )
         reviewed_plan_json = plan_path.read_text(encoding="utf-8")
         plan = json.loads(reviewed_plan_json)
@@ -4401,7 +4424,7 @@ def _run_remote_finance_storage_split_action(
                 approval_reference.strip(),
             ]
         )
-        if action == "rollback-apply":
+        if effective_action == "rollback-apply":
             if not rollback_candidate_evidence:
                 raise ValueError(
                     "Finance rollback apply requires candidate evidence"
@@ -4462,6 +4485,8 @@ def _run_remote_finance_storage_split_action(
         "health",
         "snapshot-plan",
         "stale-writer-plan",
+        "recovery-contract",
+        "recovery-preflight",
     }:
         if action == "dry-run" and (
             payload.get("query_only_contract", {}).get("production_mutation_count") != 0
@@ -4480,6 +4505,31 @@ def _run_remote_finance_storage_split_action(
         ):
             raise RuntimeError(
                 "Finance stale-writer plan did not prove zero business/data mutation"
+            )
+        if action == "recovery-contract" and (
+            payload.get("status") != "ready"
+            or re.fullmatch(
+                r"[0-9a-f]{40}",
+                str(payload.get("deployed_sha") or ""),
+            )
+            is None
+            or payload.get("fail_closed_default") is not True
+            or payload.get("second_restore_job_allowed") is not False
+            or not str(payload.get("fingerprint") or "").startswith(
+                "sha256:"
+            )
+        ):
+            raise RuntimeError(
+                "Finance recovery contract lacks fail-closed capability proof"
+            )
+        if action == "recovery-preflight" and (
+            payload.get("status") != "ready"
+            or payload.get("fail_closed") is not True
+            or payload.get("action") != effective_action
+            or payload.get("phase") != "pre_barrier"
+        ):
+            raise RuntimeError(
+                "Finance recovery preflight lacks exact ready evidence"
             )
     elif action == "stale-writer-stop" and (
         str(payload.get("status") or "")
@@ -6690,6 +6740,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_split_health.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="health",
+    )
+
+    finance_storage_recovery_contract = subparsers.add_parser(
+        "finance-storage-recovery-contract",
+        help=(
+            "Read the deployed fail-closed Finance recovery matrix and "
+            "runner-version capability fingerprint without mutation."
+        ),
+    )
+    finance_storage_recovery_contract.add_argument("--output", default="")
+    finance_storage_recovery_contract.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    finance_storage_recovery_contract.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="recovery-contract",
     )
 
     finance_storage_split_apply = subparsers.add_parser(
