@@ -123,10 +123,14 @@ The implementation is deliberately inert on deploy:
   for the exact audited unconfirmed-barrier rollback footprint; it never
   treats arbitrary restored-state drift as recoverable.
 - `business-data-maintenance-restore-submit|status` is the transport-independent
-  recovery path for a long exact restore of an unconfirmed acquiring window.
+  recovery path for a long exact restore of either an unconfirmed acquiring
+  window or a quiet confirmed hold that remains `held/restoring` after the
+  protected snapshot completed.
   The submit request is bound to one caller-known job id, deployed SHA, policy
   revision, window/fingerprint, actor/reason and a freshly recaptured exact
-  service-continuity fingerprint containing unit/PID/start evidence. A fixed
+  continuity fingerprint. The unconfirmed form contains unit/PID/start
+  evidence; the confirmed form requires a fully quiet boundary, contains zero
+  continuing services and stays bound to the confirmed barrier phase. A fixed
   repo-owned systemd template persists request, continuity evidence, status,
   result and append-only audit, survives SSH disconnect/restart, rejects a
   concurrent foreground or detached restore, and resumes only from exact
@@ -150,9 +154,11 @@ The implementation is deliberately inert on deploy:
   epoch, transition run, component timers, service results and observation
   order must all match. A redundant later feature-store
   `worker_unavailable` view cannot override that already bound `starting`
-  evidence, while any lifecycle block, identity/component drift, failed
-  service or inactive outer timer still blocks and returns the whole restore
-  to the paused boundary.
+  evidence. Feature-owned non-blocking progress such as
+  `reconciliation_in_progress` remains acceptable, while any lifecycle
+  blocking stop reason, identity/component drift, failed service or inactive
+  outer timer still blocks and returns the whole restore to the paused
+  boundary.
   Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
 - A repeated business-maintenance `prepare` while the same boundary is already

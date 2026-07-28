@@ -17,6 +17,7 @@ import time
 from business_data_maintenance_restore_job import (
     JOB_DIRECTORY_NAME,
     MaintenanceRestoreJobError,
+    QUIET_CONFIRMED_HOLD_CONTINUITY_KIND,
     RESTORE_DEADLINE_SECONDS,
     _classify_worker_observation,
     _fingerprint,
@@ -57,6 +58,17 @@ SERVICE_CONTINUITY = {
     **SERVICE_CONTINUITY_PAYLOAD,
     "fingerprint": _fingerprint(SERVICE_CONTINUITY_PAYLOAD),
 }
+QUIET_SERVICE_CONTINUITY_PAYLOAD = {
+    "boundary_kind": QUIET_CONFIRMED_HOLD_CONTINUITY_KIND,
+    "barrier_window_id": WINDOW_ID,
+    "barrier_plan_fingerprint": PLAN_FINGERPRINT,
+    "hold_started_at": "2026-07-27T18:09:44Z",
+    "services": [],
+}
+QUIET_SERVICE_CONTINUITY = {
+    **QUIET_SERVICE_CONTINUITY_PAYLOAD,
+    "fingerprint": _fingerprint(QUIET_SERVICE_CONTINUITY_PAYLOAD),
+}
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -72,50 +84,76 @@ def _seed_boundary(
     restored: bool = False,
     policy_revision: int = 19,
     service_completed: bool = False,
+    quiet_confirmed: bool = False,
 ) -> None:
     _write_json(
         runtime_dir / ".business-data-write-barrier.json",
         {
             "schema_version": "business_data_write_barrier_v1",
             "active": True,
-            "phase": "acquiring",
-            "hold_confirmed": False,
+            "phase": "restoring" if quiet_confirmed else "acquiring",
+            "hold_confirmed": quiet_confirmed,
             "window_id": WINDOW_ID,
             "plan_fingerprint": PLAN_FINGERPRINT,
         },
     )
     maintenance: dict[str, object] = {
         "schema_version": "business_data_maintenance_v1",
-        "phase": "restored" if restored else "holding",
+        "phase": (
+            "restored"
+            if restored
+            else "held"
+            if quiet_confirmed
+            else "holding"
+        ),
+        "hold_started_at": "2026-07-27T18:09:44Z",
     }
     if restored:
+        continuity_readback = (
+            {
+                "boundary_kind": QUIET_CONFIRMED_HOLD_CONTINUITY_KIND,
+                "services": [],
+                "fingerprint": _fingerprint(
+                    {
+                        "boundary_kind": (
+                            QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
+                        ),
+                        "services": [],
+                    }
+                ),
+            }
+            if quiet_confirmed
+            else {
+                "fingerprint": CONTINUITY_FINGERPRINT,
+                "services": [
+                    {
+                        "unit": (
+                            "wb-core-sheet-vitrina-closure-retry.service"
+                        ),
+                        "outcome": (
+                            "completed"
+                            if service_completed
+                            else "continued"
+                        ),
+                        "main_pid": (
+                            0 if service_completed else 1499161
+                        ),
+                        "started_at": (
+                            "" if service_completed else SERVICE_STARTED_AT
+                        ),
+                    }
+                ],
+            }
+        )
         maintenance.update(
             {
                 "exact_prior_state_restored": True,
                 "restore_control_signature": {
                     "fingerprint": CONTROL_FINGERPRINT,
                 },
-                "pre_hold_service_continuity_readback": {
-                    "fingerprint": CONTINUITY_FINGERPRINT,
-                    "services": [
-                        {
-                            "unit": (
-                                "wb-core-sheet-vitrina-closure-retry.service"
-                            ),
-                            "outcome": (
-                                "completed"
-                                if service_completed
-                                else "continued"
-                            ),
-                            "main_pid": (
-                                0 if service_completed else 1499161
-                            ),
-                            "started_at": (
-                                "" if service_completed else SERVICE_STARTED_AT
-                            ),
-                        }
-                    ],
-                },
+                "pre_hold_service_continuity_readback": (
+                    continuity_readback
+                ),
             }
         )
     _write_json(
@@ -207,6 +245,38 @@ def _submit(
     )
 
 
+def _submit_quiet_confirmed(
+    paths: dict[str, Path],
+    *,
+    starter=None,
+) -> dict[str, object]:
+    return submit_job(
+        **paths,
+        job_id=JOB_ID,
+        deployed_sha=DEPLOYED_SHA,
+        expected_revision=19,
+        window_id=WINDOW_ID,
+        plan_fingerprint=PLAN_FINGERPRINT,
+        service_continuity_fingerprint=str(
+            QUIET_SERVICE_CONTINUITY["fingerprint"]
+        ),
+        actor=ACTOR,
+        reason=REASON,
+        allow_pre_hold_service_continuity=True,
+        continuity_reader=lambda: dict(QUIET_SERVICE_CONTINUITY),
+        starter=starter
+        or (
+            lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture",
+            }
+        ),
+    )
+
+
 def _successful_executor(
     paths: dict[str, Path],
     calls: list[int],
@@ -229,6 +299,55 @@ def _successful_executor(
         }
 
     return execute
+
+
+def _assert_quiet_confirmed_hold_restore_is_durable() -> None:
+    temporary, paths = _fixture()
+    try:
+        _seed_boundary(
+            paths["runtime_dir"],
+            quiet_confirmed=True,
+        )
+        submitted = _submit_quiet_confirmed(paths)
+        assert submitted["status"] == "queued"
+        assert submitted["request"]["service_continuity"] == (
+            QUIET_SERVICE_CONTINUITY
+        )
+
+        def execute(
+            _request: dict[str, object],
+            effective_revision: int,
+        ) -> dict[str, object]:
+            assert effective_revision == 19
+            _seed_boundary(
+                paths["runtime_dir"],
+                restored=True,
+                policy_revision=20,
+                quiet_confirmed=True,
+            )
+            return {
+                "status": "restored",
+                "exact_prior_state_restored": True,
+                "control_signature": CONTROL_FINGERPRINT,
+            }
+
+        completed = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=execute,
+        )
+        assert completed["status"] == "succeeded"
+        readback = completed["result"]["readback"]
+        assert readback["barrier_phase"] == "restoring"
+        assert readback["barrier_hold_confirmed"] is True
+        assert readback["pre_hold_service_continuity_readback"][
+            "boundary_kind"
+        ] == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
+        assert readback["pre_hold_service_continuity_readback"][
+            "services"
+        ] == []
+    finally:
+        temporary.cleanup()
 
 
 def _assert_success_and_terminal_idempotency() -> None:
@@ -1387,6 +1506,7 @@ def _assert_submitter_disconnect_does_not_own_worker() -> None:
 
 
 def run() -> None:
+    _assert_quiet_confirmed_hold_restore_is_durable()
     _assert_success_and_terminal_idempotency()
     _assert_continuity_subprocess_and_fingerprint_binding()
     _assert_single_non_terminal_job()

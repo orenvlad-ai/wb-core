@@ -236,6 +236,7 @@ def _autoanswers_restore_fixture() -> tuple[
 
 def _assert_autoanswers_restore_uses_bound_lifecycle_readback() -> None:
     spec, preflight, lifecycle, status = _autoanswers_restore_fixture()
+    lifecycle["stop_reason"] = "reconciliation_in_progress"
     accepted = maintenance._validated_autoanswers_restore_readback(
         lifecycle_readback=lifecycle,
         preflight_state=preflight,
@@ -245,6 +246,20 @@ def _assert_autoanswers_restore_uses_bound_lifecycle_readback() -> None:
     assert accepted["drift_status"] == "matched"
     assert accepted["lifecycle_state"] == "starting"
     assert accepted["post_resume_validation"]["accepted"] is True
+
+    blocked = maintenance._validated_autoanswers_restore_readback(
+        lifecycle_readback={
+            **lifecycle,
+            "stop_reason": "worker_error",
+        },
+        preflight_state=preflight,
+        status=status,
+        spec=spec,
+    )
+    assert blocked["drift_status"] == "unknown"
+    assert blocked["post_resume_validation"]["failures"] == [
+        "stop_reason"
+    ]
     assert accepted["post_resume_validation"]["fingerprint"].startswith(
         "sha256:"
     )
@@ -720,6 +735,80 @@ def _assert_persisted_service_continuity_accepts_exact_completion() -> None:
                 "started_at": "",
             }
         ]
+
+
+def _assert_quiet_confirmed_hold_continuity_is_exact() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        fingerprint = "sha256:" + "6" * 64
+        state = {
+            "schema_version": maintenance.SCHEMA_VERSION,
+            "phase": "held",
+            "hold_started_at": "2026-07-28T15:44:46Z",
+            "hold_readback": {"quiet": True},
+        }
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id="snapshot-quiet-held-smoke",
+            window_kind="snapshot",
+            plan_fingerprint=fingerprint,
+            approval_reference="quiet-held-smoke-approval",
+            actor="smoke",
+            reason="prove quiet confirmed restore",
+        )
+        (runtime_dir / maintenance.STATE_FILENAME).write_text(
+            json.dumps(state),
+            encoding="utf-8",
+        )
+        maintenance.confirm_barrier_hold(
+            runtime_dir,
+            window_id="snapshot-quiet-held-smoke",
+            plan_fingerprint=fingerprint,
+            maintenance_state=state,
+        )
+        maintenance.mark_barrier_restoring(
+            runtime_dir,
+            window_id="snapshot-quiet-held-smoke",
+            plan_fingerprint=fingerprint,
+        )
+        status = {"quiet": True}
+        evidence = maintenance._restore_service_continuity(
+            runtime_dir,
+            maintenance_state=state,
+            current_status=status,
+        )
+        assert evidence["boundary_kind"] == (
+            maintenance.QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
+        )
+        assert evidence["services"] == []
+        assert maintenance._validated_pre_hold_service_continuity_evidence(
+            runtime_dir,
+            maintenance_state=state,
+            evidence=evidence,
+            current_status=status,
+        ) == evidence
+        readback = maintenance._verify_pre_hold_service_continuity(
+            FakeSystemd(),
+            evidence,
+        )
+        assert readback["boundary_kind"] == (
+            maintenance.QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
+        )
+        assert readback["services"] == []
+
+        try:
+            maintenance._validated_pre_hold_service_continuity_evidence(
+                runtime_dir,
+                maintenance_state=state,
+                evidence=evidence,
+                current_status={"quiet": False},
+            )
+        except RuntimeError as exc:
+            assert "quiet confirmed-hold continuity drifted" in str(exc)
+        else:
+            raise AssertionError(
+                "non-quiet confirmed hold accepted restore continuity"
+            )
 
 
 def _assert_unknown_timer_fails_before_mutation() -> None:
@@ -1234,6 +1323,7 @@ def main() -> int:
     _assert_prepared_quiet_hold_reuse_fails_closed_on_drift()
     _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
     _assert_persisted_service_continuity_accepts_exact_completion()
+    _assert_quiet_confirmed_hold_continuity_is_exact()
     _assert_unknown_timer_fails_before_mutation()
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()
