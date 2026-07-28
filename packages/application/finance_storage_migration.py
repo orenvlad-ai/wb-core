@@ -834,6 +834,7 @@ def _snapshot_plan_fingerprint(plan: Mapping[str, Any]) -> str:
     stable = json.loads(_canonical_json(plan))
     stable.pop("fingerprint", None)
     stable.pop("created_at", None)
+    stable.pop("deploy_lease", None)
     capacity = stable.get("capacity", {})
     for key in (
         "available_bytes",
@@ -1151,6 +1152,8 @@ class FinanceStorageCoherentSnapshot:
             or str(reviewed_plan.get("mode") or "") != "snapshot_dry_run"
             or str(reviewed_plan.get("fingerprint") or "")
             != str(expected_fingerprint or "")
+            or _snapshot_plan_fingerprint(reviewed_plan)
+            != str(expected_fingerprint or "")
             or str(reviewed_plan.get("deployed_sha") or "")
             != self.deployed_sha
             or not bool(
@@ -1270,6 +1273,8 @@ class FinanceStorageCoherentSnapshot:
             != SNAPSHOT_PLAN_CONTRACT
             or str(reviewed_plan.get("mode") or "") != "snapshot_dry_run"
             or str(reviewed_plan.get("fingerprint") or "")
+            != str(expected_fingerprint or "")
+            or _snapshot_plan_fingerprint(reviewed_plan)
             != str(expected_fingerprint or "")
             or not bool(
                 reviewed_plan.get("snapshot_allowed_by_machine_preflight")
