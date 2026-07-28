@@ -120,8 +120,10 @@ The implementation is deliberately inert on deploy:
   a confirmed hold or any window in which protected mutation began. If a nested
   warehouse restore completed before a later outer restore failure disabled
   every timer again, the retry reuses the original warehouse baseline only
-  for the exact audited unconfirmed-barrier rollback footprint; it never
-  treats arbitrary restored-state drift as recoverable.
+  for the exact audited outer rollback footprint while the same unrestored
+  boundary is either unconfirmed/acquiring or confirmed quiet
+  `held/restoring`; it never treats arbitrary restored-state drift as
+  recoverable.
 - `business-data-maintenance-restore-submit|status` is the transport-independent
   recovery path for a long exact restore of either an unconfirmed acquiring
   window or a quiet confirmed hold that remains `held/restoring` after the

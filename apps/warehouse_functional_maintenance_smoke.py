@@ -27,7 +27,11 @@ from packages.application.warehouse_functional_maintenance import (
     maintenance_restore,
     maintenance_status,
 )
-from packages.application.business_data_write_barrier import acquire_barrier
+from packages.application.business_data_write_barrier import (
+    acquire_barrier,
+    confirm_barrier_hold,
+    mark_barrier_restoring,
+)
 
 
 class FakeSystemd:
@@ -311,6 +315,110 @@ def _assert_outer_fail_closed_rollback_is_exactly_recoverable() -> None:
         assert "outer_hold_restore_recovery_started" in audit
 
 
+def _assert_confirmed_outer_fail_closed_rollback_is_exactly_recoverable() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw) / "state"
+        runtime_dir.mkdir()
+        proc_root = Path(raw) / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd()
+        maintenance_hold(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            disable_timer=True,
+        )
+        maintenance_restore(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+        )
+        systemd.mutate("stop", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        systemd.mutate("disable", WAREHOUSE_FUNCTIONAL_TIMER_UNIT)
+        outer_state = {
+            "schema_version": "business_data_maintenance_v1",
+            "phase": "held",
+            "hold_started_at": "2026-07-28T15:44:46Z",
+            "held_at": "2026-07-28T15:47:56Z",
+            "hold_readback": {
+                "quiet": True,
+                "auto_updates": {"revision": 25},
+            },
+        }
+        (runtime_dir / ".business-data-maintenance.json").write_text(
+            json.dumps(outer_state)
+        )
+        fingerprint = "sha256:" + ("7" * 64)
+        acquire_barrier(
+            runtime_dir,
+            window_id="snapshot-confirmed-outer-restore",
+            window_kind="snapshot",
+            plan_fingerprint=fingerprint,
+            approval_reference="confirmed-outer-restore-smoke",
+            actor="smoke",
+            reason="prove confirmed nested recovery",
+        )
+        confirm_barrier_hold(
+            runtime_dir,
+            window_id="snapshot-confirmed-outer-restore",
+            plan_fingerprint=fingerprint,
+            maintenance_state=outer_state,
+        )
+        mark_barrier_restoring(
+            runtime_dir,
+            window_id="snapshot-confirmed-outer-restore",
+            plan_fingerprint=fingerprint,
+        )
+        tampered_outer_state = {
+            **outer_state,
+            "hold_readback": {
+                **outer_state["hold_readback"],
+                "quiet": False,
+            },
+        }
+        (runtime_dir / ".business-data-maintenance.json").write_text(
+            json.dumps(tampered_outer_state)
+        )
+        mutations_before_drift = list(systemd.mutations)
+        try:
+            maintenance_restore(
+                runtime_dir,
+                client=systemd,
+                proc_root=proc_root,
+                allow_outer_hold_recovery=True,
+            )
+        except RuntimeError as exc:
+            assert "exact fail-closed outer-hold" in str(exc)
+        else:
+            raise AssertionError(
+                "confirmed warehouse recovery accepted outer-state drift"
+            )
+        assert systemd.mutations == mutations_before_drift
+        (runtime_dir / ".business-data-maintenance.json").write_text(
+            json.dumps(outer_state)
+        )
+        recovered = maintenance_restore(
+            runtime_dir,
+            client=systemd,
+            proc_root=proc_root,
+            allow_outer_hold_recovery=True,
+        )
+        assert recovered["status"] == "restored"
+        assert recovered["units"]["timer"]["is_enabled"] == "enabled"
+        assert recovered["units"]["timer"]["is_active"] == "active"
+        state = json.loads(
+            (
+                runtime_dir
+                / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME
+            ).read_text()
+        )
+        evidence = state["outer_hold_recovery"]
+        assert evidence["outer_phase"] == "held"
+        assert evidence["outer_boundary_kind"] == "confirmed_quiet_hold"
+        assert evidence["barrier_phase"] == "restoring"
+        assert evidence["barrier_hold_confirmed"] is True
+
+
 def _assert_failed_oneshot_is_quiescent_evidence() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw) / "state"
@@ -567,6 +675,7 @@ def main() -> int:
     _assert_finance_process_blocks_hold()
     _assert_durable_hold_disables_and_remains_restorable()
     _assert_outer_fail_closed_rollback_is_exactly_recoverable()
+    _assert_confirmed_outer_fail_closed_rollback_is_exactly_recoverable()
     _assert_failed_oneshot_is_quiescent_evidence()
     _assert_timed_out_hold_preserves_original_baseline()
     _assert_exact_deployed_service_refresh_is_restorable()

@@ -34,6 +34,9 @@ WAREHOUSE_FUNCTIONAL_MAINTENANCE_AUDIT_FILENAME = (
     ".warehouse-functional-maintenance-audit.jsonl"
 )
 OUTER_BUSINESS_MAINTENANCE_STATE_FILENAME = ".business-data-maintenance.json"
+OUTER_BUSINESS_WRITE_BARRIER_STATE_FILENAME = (
+    ".business-data-write-barrier.json"
+)
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
 SERVICE_QUIESCENT_STATES = frozenset({"inactive", "failed"})
 
@@ -278,6 +281,16 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _stable_fingerprint(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def _save_state(runtime_dir: Path, payload: Mapping[str, Any]) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     path = _state_path(runtime_dir)
@@ -481,19 +494,56 @@ def maintenance_restore(
                 runtime_dir / OUTER_BUSINESS_MAINTENANCE_STATE_FILENAME
             )
             barrier = barrier_status(runtime_dir)
+            barrier_state = _load_json(
+                runtime_dir / OUTER_BUSINESS_WRITE_BARRIER_STATE_FILENAME
+            )
+            barrier_maintenance = dict(
+                (barrier_state or {}).get("maintenance") or {}
+            )
             restored_timer = (
                 (((state.get("restore_readback") or {}).get("units") or {}).get("timer"))
                 or {}
             )
+            outer_phase = str((outer_state or {}).get("phase") or "")
+            unconfirmed_outer_hold = bool(
+                outer_phase in {"holding", "prepared"}
+                and str(barrier.get("phase") or "") == "acquiring"
+                and barrier.get("hold_confirmed") is False
+            )
+            confirmed_outer_hold = bool(
+                str((outer_state or {}).get("schema_version") or "")
+                == "business_data_maintenance_v1"
+                and outer_phase == "held"
+                and bool(
+                    ((outer_state or {}).get("hold_readback") or {}).get(
+                        "quiet"
+                    )
+                )
+                and bool((outer_state or {}).get("hold_started_at"))
+                and str(barrier.get("phase") or "")
+                in {"held", "restoring"}
+                and barrier.get("hold_confirmed") is True
+                and str((barrier_state or {}).get("window_id") or "")
+                == str(barrier.get("window_id") or "")
+                and str(
+                    (barrier_state or {}).get("plan_fingerprint") or ""
+                )
+                == str(barrier.get("plan_fingerprint") or "")
+                and barrier_maintenance.get("quiet") is True
+                and str(barrier_maintenance.get("phase") or "") == "held"
+                and str(
+                    barrier_maintenance.get("state_fingerprint") or ""
+                )
+                == _stable_fingerprint(dict(outer_state or {}))
+            )
             expected_outer_rollback = bool(
-                str((outer_state or {}).get("phase") or "")
-                in {"holding", "prepared"}
+                (unconfirmed_outer_hold or confirmed_outer_hold)
                 and not bool(
                     (outer_state or {}).get("exact_prior_state_restored")
                 )
                 and barrier.get("active") is True
-                and str(barrier.get("phase") or "") == "acquiring"
-                and barrier.get("hold_confirmed") is False
+                and bool(barrier.get("window_id"))
+                and bool(barrier.get("plan_fingerprint"))
                 and bool(state.get("timer_disabled_for_hold"))
                 and restored_timer.get("is_enabled")
                 == baseline_timer.get("is_enabled")
@@ -518,7 +568,16 @@ def maintenance_restore(
                 )
             recovery_evidence = {
                 "started_at": _utc_now(),
-                "outer_phase": str((outer_state or {}).get("phase") or ""),
+                "outer_phase": outer_phase,
+                "outer_boundary_kind": (
+                    "confirmed_quiet_hold"
+                    if confirmed_outer_hold
+                    else "unconfirmed_acquiring_hold"
+                ),
+                "barrier_phase": str(barrier.get("phase") or ""),
+                "barrier_hold_confirmed": bool(
+                    barrier.get("hold_confirmed")
+                ),
                 "barrier_window_id": str(barrier.get("window_id") or ""),
                 "barrier_plan_fingerprint": str(
                     barrier.get("plan_fingerprint") or ""
