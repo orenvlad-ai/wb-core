@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +26,10 @@ import apps.finance_partner_production_ui_flow as finance_ui_flow  # noqa: E402
 import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
 import apps.warehouse_stocks_production_ui_flow as warehouse_ui_flow  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.finance_migration_deploy_lease import (  # noqa: E402
+    baseline_invalidation_epoch as finance_lease_invalidation_epoch,
+    evidence_fingerprint as finance_lease_fingerprint,
+)
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -344,6 +349,57 @@ def main() -> None:
                 "canonical_source": "monolith",
             },
         }
+        lease_now = time.time()
+        deploy_lease = {
+            "contract_version": (
+                "wb_core_finance_migration_deploy_lease_readback_v1"
+            ),
+            "policy": "finance_migration_global_deploy_hold_v1",
+            "status": "active",
+            "allows_finance_migration": True,
+            "global_release_blocked": True,
+            "observed_at": datetime.fromtimestamp(
+                lease_now,
+                tz=timezone.utc,
+            ).isoformat().replace("+00:00", "Z"),
+            "ambiguous_reasons": [],
+            "lease": {
+                "lease_id": "finance-split-fixture",
+                "task_id": "finance-storage-smoke",
+                "anchor_pr": 850,
+                "head_sha": "b" * 40,
+                "deployed_sha": "a" * 40,
+                "window_id": "smoke-window",
+                "phase": "pre-snapshot",
+                "revision": 1,
+                "acquired_at": datetime.fromtimestamp(
+                    lease_now - 60,
+                    tz=timezone.utc,
+                ).isoformat().replace("+00:00", "Z"),
+                "expires_at": datetime.fromtimestamp(
+                    lease_now + 3600,
+                    tz=timezone.utc,
+                ).isoformat().replace("+00:00", "Z"),
+                "baseline_invalidation_epoch": (
+                    finance_lease_invalidation_epoch(
+                        anchor_pr=850,
+                        deployed_sha="a" * 40,
+                        lease_id="finance-split-fixture",
+                        revision=1,
+                        task_id="finance-storage-smoke",
+                    )
+                ),
+                "recovery_policy": "owner_bound_recovery_rebind_required_v1",
+            },
+        }
+        deploy_lease["fingerprint"] = finance_lease_fingerprint(
+            deploy_lease
+        )
+        deploy_lease_path = Path(finance_temp_dir) / "finance-deploy-lease.json"
+        deploy_lease_path.write_text(
+            json.dumps(deploy_lease),
+            encoding="utf-8",
+        )
         for action, expected_timeout in (
             ("dry-run", hosted_runtime.FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS),
             ("health", hosted_runtime.FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS),
@@ -377,6 +433,9 @@ def main() -> None:
                         if action in {"dry-run", "apply"}
                         else ""
                     ),
+                    deploy_lease=(
+                        deploy_lease if action != "health" else None
+                    ),
                 )
             if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
                 raise AssertionError(
@@ -386,6 +445,10 @@ def main() -> None:
             if "apps/finance_storage_split.py" not in remote_command:
                 raise AssertionError(
                     "Finance storage command bypassed the repo-owned runner"
+                )
+            if action != "health" and "--deploy-lease-json" not in remote_command:
+                raise AssertionError(
+                    "Finance storage command lost its global deploy-lease binding"
                 )
             if action == "apply":
                 for token in (
@@ -412,6 +475,8 @@ def main() -> None:
                     "/opt/wb-core-runtime/state/finance-storage-split-snapshots/"
                     "fixture/snapshot_manifest.json"
                 ),
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         storage_apply_args = hosted_runtime.build_arg_parser().parse_args(
@@ -428,6 +493,8 @@ def main() -> None:
                     "/opt/wb-core-runtime/state/finance-storage-split-snapshots/"
                     "fixture/snapshot_manifest.json"
                 ),
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         if (
@@ -483,6 +550,8 @@ def main() -> None:
                 snapshot_fingerprint,
                 "--approval-reference",
                 "program-authorization-smoke",
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         maintenance_actions: list[str] = []
@@ -618,6 +687,8 @@ def main() -> None:
                 candidate_fingerprint,
                 "--output",
                 str(Path(finance_temp_dir) / "cutover-evidence.json"),
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         shadow_args = hosted_runtime.build_arg_parser().parse_args(
@@ -629,6 +700,8 @@ def main() -> None:
                 candidate_fingerprint,
                 "--approval-reference",
                 "human-cutover-smoke",
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         if (
@@ -782,6 +855,8 @@ def main() -> None:
                 ),
                 "--output",
                 str(Path(finance_temp_dir) / "rollback-evidence.json"),
+                "--finance-deploy-lease-evidence",
+                str(deploy_lease_path),
             ]
         )
         maintenance_actions.clear()

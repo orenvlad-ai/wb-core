@@ -2,7 +2,8 @@
 
 Status: **repository implementation complete through the inert maintenance
 barrier, coherent-copy integrity gate, candidate/shadow/soak, atomic cutover and
-reconciled rollback-drill capabilities**. The canonical production source
+reconciled rollback-drill capabilities, including a global fail-closed Finance
+migration deploy lease**. The canonical production source
 remains the monolith until the staged runner is deployed and a fresh exact
 fingerprint receives separate human approval. Old-generation retirement is not
 implemented by this runner and remains a later independent gate.
@@ -146,6 +147,26 @@ The implementation is deliberately inert on deploy:
   to the paused boundary.
   Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
+- The GitHub Release Train owns one global
+  `finance:migration-deploy-lease` on a proven terminal production anchor PR.
+  A paired `finance:migration-deploy-lease-audit` guard makes loss of either the
+  active hold or audit label ambiguous/fail-closed until exact recovery; both
+  are removed only after the durable terminal proof is written.
+  Its Actions-owned binding audits exact canonical task id, anchor/head/deployed
+  SHA, lease/window/phase, revision and bounded owner duration. Acquire is
+  serialized with release selection and is rejected while any
+  running/awaiting/halted deploy exists. A missing, expired, duplicate,
+  partially written or otherwise ambiguous lease never opens silently: the
+  global label keeps unrelated selection/merge/deploy blocked while Finance
+  migration actions reject stale evidence. Only one exact owner-bound
+  `task:standard + scope:live-runtime` recovery PR can pass the hold; after its
+  deploy, explicit production-SHA rebind creates the next lease revision and
+  invalidates every earlier baseline/snapshot/plan/fingerprint. Release or
+  abort requires an OWNER/MEMBER reconciliation comment and Actions-owned
+  readback proving exact deployed SHA, inactive/released manual barrier, full
+  writers/timers/policy restore, unchanged non-target state and either exact
+  migration abort on the monolith or completed post-cutover reconciliation on
+  split storage.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
   cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/
   verify, cutover plan/apply and rollback plan/prepare/apply. Candidate build,
@@ -161,8 +182,10 @@ The implementation is deliberately inert on deploy:
 - hosted snapshot/split/shadow/cutover/rollback lifecycle commands are
   phase-local wrappers around the same repo-owned runner. Plan, health and
   status actions are read-only; every mutation action checks the active target,
-  reviewed external evidence and exact approval. Deployment invokes none of
-  them.
+  reviewed external evidence and exact approval. All migration actions other
+  than health also require a fresh private GitHub lease readback outside Git,
+  no older than five minutes; the remote runner rebinds it to the canonical
+  `.wb-core-runtime-sha`. Deployment invokes none of them.
 
 The private `.finance-storage-shadow-ingest.json` state defaults absent/off.
 If a later reviewed stage enables it while the implicit monolith is selected,
@@ -382,21 +405,27 @@ boundary.
 Canonical hosted sequence is phase-local:
 
 1. deploy inert code;
-2. `finance-storage-snapshot-plan`, then the automatically held
+2. atomically acquire and independently read back the global Finance migration
+   deploy lease on the exact current deployed SHA; any pre-acquire deploy or
+   SHA/schema drift invalidates prior baseline/plan/fingerprint evidence;
+3. `finance-storage-snapshot-plan`, then the automatically held
    `finance-storage-snapshot-apply`, then
    `finance-storage-snapshot-integrity`;
    an active pre-existing writer service blocks the plan and leaves normal
    operation unchanged;
-3. `finance-storage-split-dry-run` against that exact verified snapshot and
+4. `finance-storage-split-dry-run` against that exact verified snapshot and
    stop for approval of its exact fingerprint/generation/capacity;
-4. only after approval, `finance-storage-split-apply`, shadow activate,
+5. only after approval, `finance-storage-split-apply`, shadow activate,
    legacy reconcile, bounded live-tail applies and repeated shadow verify until
    the minimum soak becomes `ready`;
-5. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
+6. cutover plan/apply; the apply owns the final barrier/hold/restore and HTTP
    restart;
-6. production readback/UI observation, rollback plan/prepare and rollback
+7. production readback/UI observation, rollback plan/prepare and rollback
    apply drill if the approved program calls for it;
-7. never retire any retained generation in this lifecycle.
+8. release the global deploy lease only after exact abort or post-cutover
+   reconciliation plus full SHA/writer/timer/policy/barrier/non-target
+   readback;
+9. never retire any retained generation in this lifecycle.
 
 Every evidence/plan file is private and outside Git. A new plan fingerprint is
 not normalized into an old approval. The initial program authorization permits
@@ -407,15 +436,18 @@ Required gates are:
 
 1. repository checks and schema/ownership review;
 2. deploy of inert dual-store capability;
-3. fresh query-only production baseline, short write-barrier snapshot and
+3. active/readback-proven global Finance deploy lease on current production
+   SHA, with bounded owner duration and owner-bound recovery policy;
+4. fresh query-only production baseline, short write-barrier snapshot and
    full coherent-copy integrity check outside the live DB;
-4. exact coherent-snapshot dry-run and capacity reservation;
-5. explicit human approval of exact plan/generation/fingerprint;
-6. bounded backfill and shadow-read/soak evidence;
-7. exact cutover maintenance gate;
-8. post-cutover counts/digests, outbox drain, service/public/UI verification;
-9. observation window and rollback drill;
-10. separate old-generation retirement gate.
+5. exact coherent-snapshot dry-run and capacity reservation;
+6. explicit human approval of exact plan/generation/fingerprint;
+7. bounded backfill and shadow-read/soak evidence;
+8. exact cutover maintenance gate;
+9. post-cutover counts/digests, outbox drain, service/public/UI verification;
+10. observation window and rollback drill;
+11. evidence-bound global deploy-lease release;
+12. separate old-generation retirement gate.
 
 Closure requires:
 

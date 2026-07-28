@@ -37,6 +37,9 @@ from apps.github_release_train_spec import (
     COMPLETION_PROOF_MARKER,
     DEPLOY_PROOF_MARKER,
     DONE_LABEL,
+    FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
+    FINANCE_DEPLOY_LEASE_RECOVERY_PROOF_MARKER,
+    FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
     HALTED_LABEL,
     HALT_PROOF_MARKER,
     IDENTITY_CORRECTION_PROOF_MARKER,
@@ -56,6 +59,13 @@ from apps.github_release_train_spec import (
     assert_state_invariants,
     transition_allowed,
 )
+from packages.application.finance_migration_deploy_lease import (
+    LEASE_POLICY as FINANCE_DEPLOY_LEASE_POLICY,
+    LEASE_READBACK_CONTRACT as FINANCE_DEPLOY_LEASE_READBACK_CONTRACT,
+    LEASE_RECOVERY_POLICY as FINANCE_DEPLOY_LEASE_RECOVERY_POLICY,
+    baseline_invalidation_epoch as finance_deploy_lease_invalidation_epoch,
+    evidence_fingerprint as finance_deploy_lease_evidence_fingerprint,
+)
 
 REPO_ONLY_LABEL = "scope:repo-only"
 LIVE_RUNTIME_LABEL = "scope:live-runtime"
@@ -68,6 +78,11 @@ LOOP_ACK_PREFIX = "loop:ack-"
 LOOP_ACCEPT_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS = {"OWNER", "MEMBER"}
 DEFAULT_NEEDS_RESUME_AFTER_SECONDS = 30 * 60
+FINANCE_DEPLOY_LEASE_LABEL = "finance:migration-deploy-lease"
+FINANCE_DEPLOY_LEASE_AUDIT_LABEL = "finance:migration-deploy-lease-audit"
+FINANCE_DEPLOY_LEASE_RECOVERY_LABEL = "finance:migration-lease-recovery"
+FINANCE_DEPLOY_LEASE_MIN_TTL_MINUTES = 30
+FINANCE_DEPLOY_LEASE_MAX_TTL_MINUTES = 3 * 24 * 60
 
 STATE_LABELS = set(PRIMARY_STATE_LABELS)
 SCOPE_LABELS = {
@@ -95,6 +110,18 @@ LABEL_DEFINITIONS = {
     PRODUCTION_MUTATION_LABEL: ("E99695", "Production data mutation: обязательный human gate"),
     STANDARD_TASK_LABEL: ("D1D5DA", "Обычная задача с полным применимым closure"),
     LOOP_TASK_LABEL: ("8B5CF6", "Итерационная задача с production UI Flow"),
+    FINANCE_DEPLOY_LEASE_LABEL: (
+        "B60205",
+        "Global fail-closed Finance migration deploy lease",
+    ),
+    FINANCE_DEPLOY_LEASE_AUDIT_LABEL: (
+        "6F42C1",
+        "Fail-closed Finance migration deploy-lease audit guard",
+    ),
+    FINANCE_DEPLOY_LEASE_RECOVERY_LABEL: (
+        "F9D0C4",
+        "Exact owner-bound recovery deploy under the Finance migration lease",
+    ),
 }
 
 REQUIRED_DEPLOY_ENV = (
@@ -221,6 +248,25 @@ class ProductionMutationTerminalizationCommand:
     reconciliation_comment_id: int
     reconciliation_digest: str
     evidence_fingerprint: str
+
+
+@dataclass(frozen=True)
+class FinanceDeployLeaseCommand:
+    operation: str
+    anchor_pr: int
+    task_id: str
+    lease_id: str
+    deployed_sha: str = ""
+    head_sha: str = ""
+    window_id: str = ""
+    phase: str = ""
+    ttl_minutes: int = 0
+    revision: int = 0
+    recovery_pr: int = 0
+    recovery_head_sha: str = ""
+    reconciliation_comment_id: int = 0
+    reconciliation_digest: str = ""
+    evidence_fingerprint: str = ""
 
 
 class GitHubApi:
@@ -669,16 +715,199 @@ def parse_production_mutation_terminalization_command(
     )
 
 
+def _lease_token(value: str, field: str) -> str:
+    normalized = str(value or "").strip()
+    if (
+        not normalized
+        or len(normalized) > 160
+        or any(
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+            for character in normalized
+        )
+    ):
+        raise ReleaseBlocked(
+            f"{field} must be a non-empty bounded token without whitespace"
+        )
+    return normalized
+
+
+def parse_finance_deploy_lease_command(command: str) -> FinanceDeployLeaseCommand:
+    parts = command.strip().split()
+    if len(parts) < 4 or parts[:2] != ["/wb-core", "finance-lease"]:
+        raise ReleaseBlocked("unsupported Finance deploy-lease command")
+    operation = parts[2]
+    try:
+        anchor_pr = int(parts[3])
+    except ValueError as exc:
+        raise ReleaseBlocked(
+            "Finance deploy-lease command requires a positive anchor PR"
+        ) from exc
+    if anchor_pr <= 0:
+        raise ReleaseBlocked(
+            "Finance deploy-lease command requires a positive anchor PR"
+        )
+
+    if operation == "acquire":
+        if (
+            len(parts) != 18
+            or parts[4] != "head"
+            or parts[6] != "deployed"
+            or parts[8] != "task"
+            or parts[10] != "lease"
+            or parts[12] != "window"
+            or parts[14] != "phase"
+            or parts[16] != "ttl-minutes"
+        ):
+            raise ReleaseBlocked(
+                "Finance deploy-lease acquire must bind anchor/head/deployed/task/"
+                "lease/window/phase/ttl-minutes"
+            )
+        try:
+            ttl_minutes = int(parts[17])
+        except ValueError as exc:
+            raise ReleaseBlocked(
+                "Finance deploy-lease ttl-minutes must be an integer"
+            ) from exc
+        return FinanceDeployLeaseCommand(
+            operation=operation,
+            anchor_pr=anchor_pr,
+            head_sha=_exact_sha(parts[5], "head"),
+            deployed_sha=_exact_sha(parts[7], "deployed"),
+            task_id=_lease_token(parts[9], "task"),
+            lease_id=_lease_token(parts[11], "lease"),
+            window_id=_lease_token(parts[13], "window"),
+            phase=_lease_token(parts[15], "phase"),
+            ttl_minutes=ttl_minutes,
+        )
+
+    if operation in {"rebind", "resume"}:
+        expected_length = 20 if operation == "rebind" else 18
+        if (
+            len(parts) != expected_length
+            or parts[4] != "deployed"
+            or parts[6] != "task"
+            or parts[8] != "lease"
+            or parts[10] != "revision"
+            or parts[12] != "window"
+            or parts[14] != "phase"
+        ):
+            raise ReleaseBlocked(
+                f"Finance deploy-lease {operation} must bind deployed/task/lease/"
+                "revision/window/phase and bounded owner time"
+            )
+        if operation == "rebind":
+            if parts[16] != "recovery-pr" or parts[18] != "ttl-minutes":
+                raise ReleaseBlocked(
+                    "Finance deploy-lease rebind requires recovery-pr and ttl-minutes"
+                )
+        elif parts[16] != "ttl-minutes":
+            raise ReleaseBlocked(
+                "Finance deploy-lease resume requires ttl-minutes"
+            )
+        try:
+            revision = int(parts[11])
+            recovery_pr = int(parts[17]) if operation == "rebind" else 0
+            ttl_minutes = int(parts[19] if operation == "rebind" else parts[17])
+        except ValueError as exc:
+            raise ReleaseBlocked(
+                f"Finance deploy-lease {operation} contains an invalid numeric identity"
+            ) from exc
+        return FinanceDeployLeaseCommand(
+            operation=operation,
+            anchor_pr=anchor_pr,
+            deployed_sha=_exact_sha(parts[5], "deployed"),
+            task_id=_lease_token(parts[7], "task"),
+            lease_id=_lease_token(parts[9], "lease"),
+            revision=revision,
+            window_id=_lease_token(parts[13], "window"),
+            phase=_lease_token(parts[15], "phase"),
+            recovery_pr=recovery_pr,
+            ttl_minutes=ttl_minutes,
+        )
+
+    if operation == "authorize-recovery":
+        if (
+            len(parts) != 14
+            or parts[4] != "task"
+            or parts[6] != "lease"
+            or parts[8] != "revision"
+            or parts[10] != "recovery-pr"
+            or parts[12] != "head"
+        ):
+            raise ReleaseBlocked(
+                "Finance deploy-lease recovery authorization must bind anchor/task/"
+                "lease/revision/recovery-pr/head"
+            )
+        try:
+            revision = int(parts[9])
+            recovery_pr = int(parts[11])
+        except ValueError as exc:
+            raise ReleaseBlocked(
+                "Finance deploy-lease recovery authorization contains an invalid identity"
+            ) from exc
+        return FinanceDeployLeaseCommand(
+            operation=operation,
+            anchor_pr=anchor_pr,
+            task_id=_lease_token(parts[5], "task"),
+            lease_id=_lease_token(parts[7], "lease"),
+            revision=revision,
+            recovery_pr=recovery_pr,
+            recovery_head_sha=_exact_sha(parts[13], "recovery head"),
+        )
+
+    if operation in {"release", "abort"}:
+        if (
+            len(parts) != 18
+            or parts[4] != "task"
+            or parts[6] != "lease"
+            or parts[8] != "revision"
+            or parts[10] != "deployed"
+            or parts[12] != "reconciliation"
+            or parts[14] != "reconciliation-digest"
+            or parts[16] != "evidence"
+        ):
+            raise ReleaseBlocked(
+                f"Finance deploy-lease {operation} must bind task/lease/revision/"
+                "deployed/reconciliation/digests"
+            )
+        try:
+            revision = int(parts[9])
+            reconciliation_comment_id = int(parts[13])
+        except ValueError as exc:
+            raise ReleaseBlocked(
+                f"Finance deploy-lease {operation} contains an invalid identity"
+            ) from exc
+        return FinanceDeployLeaseCommand(
+            operation=operation,
+            anchor_pr=anchor_pr,
+            task_id=_lease_token(parts[5], "task"),
+            lease_id=_lease_token(parts[7], "lease"),
+            revision=revision,
+            deployed_sha=_exact_sha(parts[11], "deployed"),
+            reconciliation_comment_id=reconciliation_comment_id,
+            reconciliation_digest=_sha256_fingerprint(
+                parts[15], "reconciliation-digest"
+            ),
+            evidence_fingerprint=_sha256_fingerprint(parts[17], "evidence"),
+        )
+    raise ReleaseBlocked(
+        "Finance deploy-lease operation must be acquire, authorize-recovery, "
+        "rebind, resume, release, or abort"
+    )
+
+
 def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: object) -> bool:
     expected = _proof_marker(marker, **values)
     for item in api.list_comments(number):
         if expected not in str(item.get("body") or ""):
             continue
         author = item.get("user")
-        if isinstance(author, Mapping):
-            login = str(author.get("login") or "")
-            if login not in {"github-actions", "github-actions[bot]"}:
-                continue
+        if not isinstance(author, Mapping):
+            continue
+        login = str(author.get("login") or "")
+        if login not in {"github-actions", "github-actions[bot]"}:
+            continue
         return True
     return False
 
@@ -692,7 +921,7 @@ def _repo_owned_marker_fields(
     matches: list[dict[str, str]] = []
     for item in api.list_comments(number):
         author = item.get("user")
-        if isinstance(author, Mapping) and str(author.get("login") or "") not in {
+        if not isinstance(author, Mapping) or str(author.get("login") or "") not in {
             "github-actions",
             "github-actions[bot]",
         }:
@@ -707,6 +936,1088 @@ def _repo_owned_marker_fields(
                     fields[key] = value
             matches.append(fields)
     return matches
+
+
+def _finance_deploy_lease_items(api: ReleaseApi) -> list[dict[str, Any]]:
+    items: dict[int, dict[str, Any]] = {}
+    for item in api.list_issues_by_label(
+        FINANCE_DEPLOY_LEASE_LABEL,
+        state="all",
+    ):
+        if "pull_request" in item:
+            items[int(item.get("number") or 0)] = item
+    for item in api.list_issues_by_label(
+        FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+        state="all",
+    ):
+        if "pull_request" not in item:
+            continue
+        number = int(item.get("number") or 0)
+        if number in items:
+            continue
+        terminal = _repo_owned_marker_fields(
+            api,
+            number,
+            FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+        )
+        if not terminal:
+            items[number] = item
+    return [items[number] for number in sorted(items)]
+
+
+def _finance_deploy_lease_binding_fields(
+    api: ReleaseApi,
+    anchor_pr: int,
+) -> tuple[list[dict[str, str]], list[str]]:
+    bindings: dict[int, dict[str, str]] = {}
+    ambiguous: list[str] = []
+    for fields in _repo_owned_marker_fields(
+        api,
+        anchor_pr,
+        FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
+    ):
+        try:
+            revision = int(fields.get("revision") or 0)
+            proof_anchor = int(fields.get("anchor") or 0)
+            acquired = int(fields.get("acquired") or 0)
+            expires = int(fields.get("expires") or 0)
+            ttl = int(fields.get("ttl") or 0)
+        except ValueError:
+            ambiguous.append("binding_numeric_identity_invalid")
+            continue
+        if (
+            proof_anchor != anchor_pr
+            or revision <= 0
+            or acquired <= 0
+            or expires <= acquired
+            or ttl < FINANCE_DEPLOY_LEASE_MIN_TTL_MINUTES
+            or ttl > FINANCE_DEPLOY_LEASE_MAX_TTL_MINUTES
+            or expires != acquired + ttl * 60
+        ):
+            ambiguous.append("binding_boundary_invalid")
+            continue
+        required = (
+            "actor",
+            "association",
+            "deployed",
+            "head",
+            "lease",
+            "operation",
+            "phase",
+            "task",
+            "window",
+        )
+        if any(not str(fields.get(key) or "") for key in required):
+            ambiguous.append("binding_identity_incomplete")
+            continue
+        try:
+            _exact_sha(fields["deployed"], "lease deployed")
+            _exact_sha(fields["head"], "lease head")
+            for key in ("lease", "phase", "task", "window"):
+                _lease_token(fields[key], key)
+        except ReleaseBlocked:
+            ambiguous.append("binding_identity_invalid")
+            continue
+        previous = bindings.get(revision)
+        if previous is not None and previous != fields:
+            ambiguous.append(f"binding_revision_{revision}_conflict")
+            continue
+        bindings[revision] = dict(fields)
+    ordered = [bindings[key] for key in sorted(bindings)]
+    revisions = [int(item["revision"]) for item in ordered]
+    if revisions and revisions != list(range(1, max(revisions) + 1)):
+        ambiguous.append("binding_revision_gap")
+    if ordered and ordered[0].get("operation") != "acquire":
+        ambiguous.append("binding_revision_one_not_acquire")
+    for item in ordered[1:]:
+        if item.get("operation") not in {"rebind", "resume"}:
+            ambiguous.append("binding_followup_operation_invalid")
+    if ordered:
+        identity = (ordered[0]["task"], ordered[0]["lease"], ordered[0]["head"])
+        for item in ordered[1:]:
+            if (item["task"], item["lease"], item["head"]) != identity:
+                ambiguous.append("binding_owner_identity_changed")
+    return ordered, sorted(set(ambiguous))
+
+
+def finance_deploy_lease_state(
+    api: ReleaseApi,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Read the single durable global Finance lease without mutating GitHub."""
+
+    observed = (
+        datetime.now(timezone.utc).timestamp()
+        if now is None
+        else float(now)
+    )
+    items = _finance_deploy_lease_items(api)
+    if not items:
+        return {
+            "status": "absent",
+            "global_release_blocked": False,
+            "allows_finance_migration": False,
+            "ambiguous_reasons": [],
+        }
+    if len(items) != 1:
+        return {
+            "status": "ambiguous",
+            "global_release_blocked": True,
+            "allows_finance_migration": False,
+            "ambiguous_reasons": ["multiple_active_lease_labels"],
+            "anchor_prs": sorted(int(item.get("number") or 0) for item in items),
+        }
+    anchor_pr = int(items[0].get("number") or 0)
+    pull = api.get_pull(anchor_pr)
+    labels = label_names(pull)
+    hold_label_present = FINANCE_DEPLOY_LEASE_LABEL in labels
+    audit_label_present = FINANCE_DEPLOY_LEASE_AUDIT_LABEL in labels
+    bindings, ambiguous = _finance_deploy_lease_binding_fields(api, anchor_pr)
+    terminal = _repo_owned_marker_fields(
+        api,
+        anchor_pr,
+        FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+    )
+    if terminal:
+        if hold_label_present:
+            ambiguous.append("terminal_proof_present_while_lease_label_active")
+        elif audit_label_present:
+            return {
+                "status": "absent",
+                "global_release_blocked": False,
+                "allows_finance_migration": False,
+                "ambiguous_reasons": [],
+                "terminal_anchor_pr": anchor_pr,
+            }
+    if not hold_label_present:
+        ambiguous.append("active_lease_label_lost")
+    if not audit_label_present:
+        ambiguous.append("lease_audit_anchor_lost")
+    if not terminal_state_proven(api, pull):
+        ambiguous.append("anchor_terminal_release_not_proven")
+    if not bindings:
+        ambiguous.append("binding_proof_missing")
+    if ambiguous or not bindings:
+        return {
+            "status": "ambiguous",
+            "global_release_blocked": True,
+            "allows_finance_migration": False,
+            "ambiguous_reasons": sorted(set(ambiguous)),
+            "anchor_prs": [anchor_pr],
+        }
+
+    current = bindings[-1]
+    expires = int(current["expires"])
+    status = "active" if expires > observed else "stale"
+    recovery_items = [
+        item
+        for item in api.list_issues_by_label(
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            state="all",
+        )
+        if "pull_request" in item
+    ]
+    recovery_pending = False
+    if recovery_items:
+        if len(recovery_items) != 1:
+            ambiguous.append("multiple_recovery_authorizations")
+        else:
+            recovery_pr = int(recovery_items[0].get("number") or 0)
+            recovery_pull = api.get_pull(recovery_pr)
+            recovery_head = str(
+                (recovery_pull.get("head") or {}).get("sha") or ""
+            ).lower()
+            authorized = _finance_recovery_authorization_matches(
+                api,
+                recovery_pr=recovery_pr,
+                recovery_head=recovery_head,
+                lease={
+                    "anchor_pr": anchor_pr,
+                    "head_sha": current["head"],
+                    "lease_id": current["lease"],
+                    "revision": int(current["revision"]),
+                    "task_id": current["task"],
+                },
+            )
+            cleanup_pending = (
+                current.get("operation") == "rebind"
+                and int(current.get("recovery_pr") or 0) == recovery_pr
+                and bool(recovery_pull.get("merged"))
+            )
+            if authorized or cleanup_pending:
+                recovery_pending = True
+            else:
+                ambiguous.append("recovery_authorization_identity_invalid")
+    if ambiguous:
+        return {
+            "status": "ambiguous",
+            "global_release_blocked": True,
+            "allows_finance_migration": False,
+            "ambiguous_reasons": sorted(set(ambiguous)),
+            "anchor_prs": [anchor_pr],
+        }
+    acquired_iso = datetime.fromtimestamp(
+        int(current["acquired"]),
+        tz=timezone.utc,
+    ).isoformat().replace("+00:00", "Z")
+    expires_iso = datetime.fromtimestamp(
+        expires,
+        tz=timezone.utc,
+    ).isoformat().replace("+00:00", "Z")
+    observed_iso = datetime.fromtimestamp(
+        observed,
+        tz=timezone.utc,
+    ).isoformat().replace("+00:00", "Z")
+    invalidation_epoch = finance_deploy_lease_invalidation_epoch(
+        anchor_pr=anchor_pr,
+        deployed_sha=current["deployed"],
+        lease_id=current["lease"],
+        revision=int(current["revision"]),
+        task_id=current["task"],
+    )
+    payload: dict[str, Any] = {
+        "contract_version": FINANCE_DEPLOY_LEASE_READBACK_CONTRACT,
+        "policy": FINANCE_DEPLOY_LEASE_POLICY,
+        "status": status,
+        "allows_finance_migration": status == "active" and not recovery_pending,
+        "global_release_blocked": True,
+        "observed_at": observed_iso,
+        "ambiguous_reasons": [],
+        "lease": {
+            "lease_id": current["lease"],
+            "task_id": current["task"],
+            "anchor_pr": anchor_pr,
+            "head_sha": current["head"],
+            "deployed_sha": current["deployed"],
+            "window_id": current["window"],
+            "phase": current["phase"],
+            "revision": int(current["revision"]),
+            "acquired_at": acquired_iso,
+            "expires_at": expires_iso,
+            "baseline_invalidation_epoch": invalidation_epoch,
+            "recovery_policy": FINANCE_DEPLOY_LEASE_RECOVERY_POLICY,
+        },
+    }
+    if recovery_pending:
+        payload["recovery_pending"] = True
+    payload["fingerprint"] = finance_deploy_lease_evidence_fingerprint(payload)
+    return payload
+
+
+def _finance_deploy_lease_matches_command(
+    state: Mapping[str, Any],
+    command: FinanceDeployLeaseCommand,
+    *,
+    ignore_revision: bool = False,
+) -> Mapping[str, Any]:
+    lease = state.get("lease")
+    if not isinstance(lease, Mapping):
+        raise ReleaseBlocked("active Finance deploy lease identity is unavailable")
+    expected = {
+        "anchor_pr": command.anchor_pr,
+        "task_id": command.task_id,
+        "lease_id": command.lease_id,
+    }
+    mismatches = [
+        key for key, value in expected.items() if lease.get(key) != value
+    ]
+    if (
+        command.revision
+        and not ignore_revision
+        and int(lease.get("revision") or 0) != command.revision
+    ):
+        mismatches.append("revision")
+    if mismatches:
+        raise ReleaseBlocked(
+            "Finance deploy-lease command does not match the active identity: "
+            + ", ".join(sorted(set(mismatches)))
+        )
+    return lease
+
+
+def _finance_deploy_lease_blocking_releases(
+    api: ReleaseApi,
+) -> list[tuple[int, str]]:
+    blocked: dict[int, str] = {}
+    for label in (
+        RUNNING_LABEL,
+        AWAITING_AGENT_LABEL,
+        AWAITING_UI_LABEL,
+        HALTED_LABEL,
+    ):
+        for item in api.list_issues_by_label(label, state="all"):
+            if "pull_request" in item:
+                blocked[int(item.get("number") or 0)] = label
+    return sorted(blocked.items())
+
+
+def _validate_finance_deploy_lease_actor(
+    *,
+    actor: str,
+    association: str,
+) -> str:
+    normalized = str(association or "").upper()
+    if normalized not in PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS:
+        raise ReleaseBlocked(
+            "Finance deploy-lease command requires OWNER or MEMBER association"
+        )
+    if not actor or actor in {"github-actions", "github-actions[bot]"}:
+        raise ReleaseBlocked(
+            "Finance deploy-lease command requires a non-bot owner identity"
+        )
+    return normalized
+
+
+def _validate_canonical_deploy_evidence(
+    deploy_evidence: Mapping[str, Any] | None,
+    *,
+    pr: int,
+    head: str,
+    deployed: str,
+) -> str:
+    if not isinstance(deploy_evidence, Mapping):
+        raise ReleaseBlocked(
+            "Finance deploy-lease transition requires canonical deployment readback"
+        )
+    required = {
+        "healthy": True,
+        "status": "reconciled",
+        "pr": pr,
+        "head": head,
+        "merge": deployed,
+        "expected_sha": deployed,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "read_only": True,
+        "repairs_applied": False,
+    }
+    mismatches = [
+        key for key, value in required.items() if deploy_evidence.get(key) != value
+    ]
+    if mismatches:
+        raise ReleaseBlocked(
+            "Finance deploy-lease production SHA readback is not exact: "
+            + ", ".join(mismatches)
+        )
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            deploy_evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _finance_deploy_lease_anchor_preflight(
+    api: ReleaseApi,
+    command: FinanceDeployLeaseCommand,
+) -> tuple[dict[str, Any], str]:
+    pull = api.get_pull(command.anchor_pr)
+    labels = label_names(pull)
+    if (
+        task_class_from_labels(labels) != STANDARD_TASK_LABEL
+        or scope_from_labels(labels) != LIVE_RUNTIME_LABEL
+    ):
+        raise ReleaseBlocked(
+            "Finance deploy-lease anchor must be a STANDARD live-runtime release"
+        )
+    if not bool(pull.get("merged")) or not terminal_state_proven(api, pull):
+        raise ReleaseBlocked(
+            "Finance deploy-lease anchor must be a proven terminal production release"
+        )
+    actual_head = str((pull.get("head") or {}).get("sha") or "").lower()
+    merge_sha = str(pull.get("merge_commit_sha") or "").lower()
+    if command.head_sha and actual_head != command.head_sha:
+        raise ReleaseBlocked("Finance deploy-lease anchor head SHA is stale")
+    comparison = api.compare(merge_sha, command.deployed_sha)
+    if (
+        str(comparison.get("status") or "") not in {"ahead", "identical"}
+        or int(comparison.get("behind_by") or 0) != 0
+    ):
+        raise ReleaseBlocked(
+            "Finance deploy-lease deployed SHA must be the anchor merge or a descendant"
+        )
+    return pull, merge_sha
+
+
+def acquire_finance_deploy_lease(
+    api: ReleaseApi,
+    command: FinanceDeployLeaseCommand,
+    deploy_evidence: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+    now: float | None = None,
+) -> str:
+    if not actions_owned:
+        raise ReleaseBlocked(
+            "Finance deploy-lease acquire is restricted to trusted-main GitHub Actions"
+        )
+    normalized_association = _validate_finance_deploy_lease_actor(
+        actor=actor,
+        association=association,
+    )
+    if command.operation != "acquire":
+        raise ReleaseBlocked("Finance deploy-lease acquire command is required")
+    if not (
+        FINANCE_DEPLOY_LEASE_MIN_TTL_MINUTES
+        <= command.ttl_minutes
+        <= FINANCE_DEPLOY_LEASE_MAX_TTL_MINUTES
+    ):
+        raise ReleaseBlocked(
+            "Finance deploy-lease ttl-minutes is outside the bounded policy"
+        )
+    _finance_deploy_lease_anchor_preflight(api, command)
+    deploy_digest = _validate_canonical_deploy_evidence(
+        deploy_evidence,
+        pr=command.anchor_pr,
+        head=command.head_sha,
+        deployed=command.deployed_sha,
+    )
+    blocked = _finance_deploy_lease_blocking_releases(api)
+    if blocked:
+        raise ReleaseBlocked(
+            "Finance deploy-lease acquire requires no running/awaiting/halted "
+            "release: "
+            + ", ".join(f"#{number}:{label}" for number, label in blocked)
+        )
+    recovery_items = [
+        item
+        for item in api.list_issues_by_label(
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            state="all",
+        )
+        if "pull_request" in item
+    ]
+    if recovery_items:
+        raise ReleaseBlocked(
+            "Finance deploy-lease acquire found an existing recovery authorization"
+        )
+
+    items = _finance_deploy_lease_items(api)
+    if len(items) > 1 or (
+        items and int(items[0].get("number") or 0) != command.anchor_pr
+    ):
+        raise ReleaseBlocked(
+            "another or ambiguous global Finance deploy lease already exists"
+        )
+    bindings, ambiguous = _finance_deploy_lease_binding_fields(
+        api,
+        command.anchor_pr,
+    )
+    terminal = _repo_owned_marker_fields(
+        api,
+        command.anchor_pr,
+        FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+    )
+    if terminal:
+        raise ReleaseBlocked(
+            "Finance deploy-lease anchor already has terminal lease proof"
+        )
+    if ambiguous:
+        raise ReleaseBlocked(
+            "Finance deploy-lease binding history is ambiguous: "
+            + ", ".join(ambiguous)
+        )
+    if bindings:
+        first = bindings[0]
+        expected = {
+            "deployed": command.deployed_sha,
+            "head": command.head_sha,
+            "lease": command.lease_id,
+            "operation": "acquire",
+            "phase": command.phase,
+            "task": command.task_id,
+            "window": command.window_id,
+            "ttl": str(command.ttl_minutes),
+        }
+        if int(first["revision"]) != 1 or any(
+            first.get(key) != value for key, value in expected.items()
+        ):
+            raise ReleaseBlocked(
+                "existing Finance deploy-lease binding does not match this acquire"
+            )
+        current_labels = label_names(api.get_pull(command.anchor_pr))
+        if (
+            FINANCE_DEPLOY_LEASE_LABEL not in current_labels
+            or FINANCE_DEPLOY_LEASE_AUDIT_LABEL not in current_labels
+        ):
+            api.add_labels(
+                command.anchor_pr,
+                [
+                    FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+                    FINANCE_DEPLOY_LEASE_LABEL,
+                ],
+            )
+        return "already-acquired"
+
+    acquired = int(
+        datetime.now(timezone.utc).timestamp()
+        if now is None
+        else float(now)
+    )
+    values = {
+        "acquired": acquired,
+        "actor": actor,
+        "anchor": command.anchor_pr,
+        "association": normalized_association,
+        "deploy_evidence": deploy_digest,
+        "deployed": command.deployed_sha,
+        "expires": acquired + command.ttl_minutes * 60,
+        "head": command.head_sha,
+        "lease": command.lease_id,
+        "operation": "acquire",
+        "phase": command.phase,
+        "revision": 1,
+        "task": command.task_id,
+        "ttl": command.ttl_minutes,
+        "window": command.window_id,
+    }
+    # Durable audit + global hold labels are written first: a disconnect before
+    # the proof comment leaves an ambiguous label-owned state that blocks every
+    # release. The same exact acquire command can then heal it idempotently.
+    api.add_labels(
+        command.anchor_pr,
+        [
+            FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+            FINANCE_DEPLOY_LEASE_LABEL,
+        ],
+    )
+    api.add_comment(
+        command.anchor_pr,
+        "Release Train acquired the global fail-closed Finance migration "
+        f"deploy lease `{command.lease_id}` for task `{command.task_id}` at "
+        f"deployed SHA `{command.deployed_sha}`.\n\n"
+        + _proof_marker(
+            FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
+            **values,
+        ),
+    )
+    return "acquired"
+
+
+def _finance_recovery_authorization_matches(
+    api: ReleaseApi,
+    *,
+    recovery_pr: int,
+    recovery_head: str,
+    lease: Mapping[str, Any],
+) -> bool:
+    expected = {
+        "anchor": str(int(lease["anchor_pr"])),
+        "head": recovery_head,
+        "lease": str(lease["lease_id"]),
+        "recovery_pr": str(recovery_pr),
+        "revision": str(int(lease["revision"])),
+        "task": str(lease["task_id"]),
+    }
+    for fields in _repo_owned_marker_fields(
+        api,
+        recovery_pr,
+        FINANCE_DEPLOY_LEASE_RECOVERY_PROOF_MARKER,
+    ):
+        if all(fields.get(key) == value for key, value in expected.items()):
+            return True
+    return False
+
+
+def authorize_finance_deploy_lease_recovery(
+    api: ReleaseApi,
+    command: FinanceDeployLeaseCommand,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+) -> str:
+    if not actions_owned:
+        raise ReleaseBlocked(
+            "Finance recovery authorization is restricted to trusted-main GitHub Actions"
+        )
+    normalized_association = _validate_finance_deploy_lease_actor(
+        actor=actor,
+        association=association,
+    )
+    state = finance_deploy_lease_state(api)
+    if state.get("status") not in {"active", "stale"}:
+        raise ReleaseBlocked(
+            "Finance recovery authorization requires one unambiguous active/stale lease"
+        )
+    lease = _finance_deploy_lease_matches_command(state, command)
+    if command.recovery_pr <= 0:
+        raise ReleaseBlocked("Finance recovery PR must be positive")
+    recovery = api.get_pull(command.recovery_pr)
+    labels = label_names(recovery)
+    if (
+        str(recovery.get("state") or "").lower() != "open"
+        or bool(recovery.get("draft"))
+        or task_class_from_labels(labels) != STANDARD_TASK_LABEL
+        or scope_from_labels(labels) != LIVE_RUNTIME_LABEL
+    ):
+        raise ReleaseBlocked(
+            "Finance recovery must be an open non-draft STANDARD live-runtime PR"
+        )
+    actual_head = str((recovery.get("head") or {}).get("sha") or "").lower()
+    if actual_head != command.recovery_head_sha:
+        raise ReleaseBlocked("Finance recovery PR head SHA is stale")
+    if not _has_successful_check(api, actual_head, "baseline"):
+        raise ReleaseBlocked(
+            "Finance recovery authorization requires successful exact-head baseline"
+        )
+    existing = [
+        item
+        for item in api.list_issues_by_label(
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            state="all",
+        )
+        if "pull_request" in item
+        and int(item.get("number") or 0) != command.recovery_pr
+    ]
+    if existing:
+        raise ReleaseBlocked(
+            "another Finance owner-bound recovery authorization is still active"
+        )
+    if _finance_recovery_authorization_matches(
+        api,
+        recovery_pr=command.recovery_pr,
+        recovery_head=actual_head,
+        lease=lease,
+    ):
+        api.add_labels(
+            command.recovery_pr,
+            [FINANCE_DEPLOY_LEASE_RECOVERY_LABEL],
+        )
+        return "already-authorized"
+    values = {
+        "actor": actor,
+        "anchor": command.anchor_pr,
+        "association": normalized_association,
+        "head": actual_head,
+        "lease": command.lease_id,
+        "recovery_pr": command.recovery_pr,
+        "revision": command.revision,
+        "task": command.task_id,
+    }
+    api.add_comment(
+        command.recovery_pr,
+        "Release Train authorized only this exact owner-bound recovery deploy "
+        f"under Finance lease `{command.lease_id}`. A successful deploy must "
+        "be rebound before any migration phase can continue.\n\n"
+        + _proof_marker(
+            FINANCE_DEPLOY_LEASE_RECOVERY_PROOF_MARKER,
+            **values,
+        ),
+    )
+    api.add_labels(
+        command.recovery_pr,
+        [FINANCE_DEPLOY_LEASE_RECOVERY_LABEL],
+    )
+    return "authorized"
+
+
+def rebind_finance_deploy_lease(
+    api: ReleaseApi,
+    command: FinanceDeployLeaseCommand,
+    deploy_evidence: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+    now: float | None = None,
+) -> str:
+    if not actions_owned:
+        raise ReleaseBlocked(
+            "Finance deploy-lease rebind/resume is restricted to trusted-main Actions"
+        )
+    normalized_association = _validate_finance_deploy_lease_actor(
+        actor=actor,
+        association=association,
+    )
+    if command.operation not in {"rebind", "resume"}:
+        raise ReleaseBlocked("Finance deploy-lease rebind/resume command is required")
+    if not (
+        FINANCE_DEPLOY_LEASE_MIN_TTL_MINUTES
+        <= command.ttl_minutes
+        <= FINANCE_DEPLOY_LEASE_MAX_TTL_MINUTES
+    ):
+        raise ReleaseBlocked(
+            "Finance deploy-lease ttl-minutes is outside the bounded policy"
+        )
+    state = finance_deploy_lease_state(api)
+    if state.get("status") not in {"active", "stale"}:
+        raise ReleaseBlocked(
+            "Finance deploy-lease rebind requires one unambiguous active/stale lease"
+        )
+    lease = _finance_deploy_lease_matches_command(
+        state,
+        command,
+        ignore_revision=True,
+    )
+    current_revision = int(lease.get("revision") or 0)
+    if current_revision == command.revision + 1:
+        if (
+            str(lease.get("deployed_sha") or "") != command.deployed_sha
+            or str(lease.get("window_id") or "") != command.window_id
+            or str(lease.get("phase") or "") != command.phase
+        ):
+            raise ReleaseBlocked(
+                "current Finance deploy-lease revision conflicts with repeated rebind"
+            )
+        bindings, ambiguous = _finance_deploy_lease_binding_fields(
+            api,
+            command.anchor_pr,
+        )
+        matching = next(
+            (
+                item
+                for item in bindings
+                if int(item.get("revision") or 0) == current_revision
+            ),
+            None,
+        )
+        if (
+            ambiguous
+            or matching is None
+            or matching.get("operation") != command.operation
+        ):
+            raise ReleaseBlocked(
+                "repeated Finance deploy-lease rebind proof is ambiguous"
+            )
+        repeated_blocked = _finance_deploy_lease_blocking_releases(api)
+        if repeated_blocked:
+            raise ReleaseBlocked(
+                "repeated Finance deploy-lease rebind requires no active deploy"
+            )
+        anchor = api.get_pull(command.anchor_pr)
+        anchor_merge = str(anchor.get("merge_commit_sha") or "").lower()
+        comparison = api.compare(anchor_merge, command.deployed_sha)
+        if (
+            str(comparison.get("status") or "") not in {"ahead", "identical"}
+            or int(comparison.get("behind_by") or 0) != 0
+        ):
+            raise ReleaseBlocked(
+                "repeated Finance deploy-lease rebind SHA is not an anchor descendant"
+            )
+        _validate_canonical_deploy_evidence(
+            deploy_evidence,
+            pr=command.anchor_pr,
+            head=str(lease.get("head_sha") or ""),
+            deployed=command.deployed_sha,
+        )
+        if command.recovery_pr:
+            api.remove_label(
+                command.recovery_pr,
+                FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            )
+        return "already-rebound"
+    if current_revision != command.revision:
+        raise ReleaseBlocked("Finance deploy-lease rebind revision is stale")
+    blocked = _finance_deploy_lease_blocking_releases(api)
+    if blocked:
+        raise ReleaseBlocked(
+            "Finance deploy-lease rebind requires no running/awaiting/halted release: "
+            + ", ".join(f"#{number}:{label}" for number, label in blocked)
+        )
+    head = str(lease.get("head_sha") or "")
+    anchor = api.get_pull(command.anchor_pr)
+    anchor_merge = str(anchor.get("merge_commit_sha") or "").lower()
+    comparison = api.compare(anchor_merge, command.deployed_sha)
+    if (
+        str(comparison.get("status") or "") not in {"ahead", "identical"}
+        or int(comparison.get("behind_by") or 0) != 0
+    ):
+        raise ReleaseBlocked(
+            "Finance deploy-lease rebind SHA is not an anchor descendant"
+        )
+    deploy_digest = _validate_canonical_deploy_evidence(
+        deploy_evidence,
+        pr=command.anchor_pr,
+        head=head,
+        deployed=command.deployed_sha,
+    )
+    if command.operation == "resume":
+        if command.deployed_sha != lease.get("deployed_sha"):
+            raise ReleaseBlocked(
+                "Finance deploy-lease resume cannot change the deployed SHA"
+            )
+    else:
+        if command.recovery_pr <= 0:
+            raise ReleaseBlocked("Finance deploy-lease rebind requires recovery PR")
+        recovery = api.get_pull(command.recovery_pr)
+        recovery_head = str((recovery.get("head") or {}).get("sha") or "").lower()
+        if not _finance_recovery_authorization_matches(
+            api,
+            recovery_pr=command.recovery_pr,
+            recovery_head=recovery_head,
+            lease=lease,
+        ):
+            raise ReleaseBlocked(
+                "Finance deploy-lease rebind lacks exact owner-bound recovery proof"
+            )
+        if not bool(recovery.get("merged")) or not terminal_state_proven(api, recovery):
+            raise ReleaseBlocked(
+                "Finance deploy-lease rebind requires proven terminal recovery deploy"
+            )
+        if str(recovery.get("merge_commit_sha") or "").lower() != command.deployed_sha:
+            raise ReleaseBlocked(
+                "Finance deploy-lease rebind deployed SHA is not the recovery merge"
+            )
+
+    bindings, ambiguous = _finance_deploy_lease_binding_fields(
+        api,
+        command.anchor_pr,
+    )
+    if ambiguous or not bindings:
+        raise ReleaseBlocked(
+            "Finance deploy-lease binding history is missing or ambiguous"
+        )
+    next_revision = command.revision + 1
+    existing = next(
+        (
+            item
+            for item in bindings
+            if int(item.get("revision") or 0) == next_revision
+        ),
+        None,
+    )
+    expected = {
+        "deployed": command.deployed_sha,
+        "head": head,
+        "lease": command.lease_id,
+        "operation": command.operation,
+        "phase": command.phase,
+        "task": command.task_id,
+        "window": command.window_id,
+        "ttl": str(command.ttl_minutes),
+    }
+    if existing is not None:
+        if any(existing.get(key) != value for key, value in expected.items()):
+            raise ReleaseBlocked(
+                "existing Finance deploy-lease revision conflicts with rebind"
+            )
+        if command.recovery_pr:
+            api.remove_label(
+                command.recovery_pr,
+                FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            )
+        return "already-rebound"
+
+    acquired = int(
+        datetime.now(timezone.utc).timestamp()
+        if now is None
+        else float(now)
+    )
+    values = {
+        "acquired": acquired,
+        "actor": actor,
+        "anchor": command.anchor_pr,
+        "association": normalized_association,
+        "deploy_evidence": deploy_digest,
+        "deployed": command.deployed_sha,
+        "expires": acquired + command.ttl_minutes * 60,
+        "head": head,
+        "lease": command.lease_id,
+        "operation": command.operation,
+        "phase": command.phase,
+        "recovery_pr": command.recovery_pr,
+        "revision": next_revision,
+        "task": command.task_id,
+        "ttl": command.ttl_minutes,
+        "window": command.window_id,
+    }
+    api.add_comment(
+        command.anchor_pr,
+        "Release Train rebound the global Finance deploy lease to revision "
+        f"`{next_revision}` and deployed SHA `{command.deployed_sha}`. Every "
+        "earlier baseline, snapshot plan and fingerprint is invalid.\n\n"
+        + _proof_marker(
+            FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
+            **values,
+        ),
+    )
+    if command.recovery_pr:
+        api.remove_label(
+            command.recovery_pr,
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+        )
+    return "rebound"
+
+
+def terminalize_finance_deploy_lease(
+    api: ReleaseApi,
+    command: FinanceDeployLeaseCommand,
+    deploy_evidence: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+) -> str:
+    if not actions_owned:
+        raise ReleaseBlocked(
+            "Finance deploy-lease release/abort is restricted to trusted-main Actions"
+        )
+    normalized_association = _validate_finance_deploy_lease_actor(
+        actor=actor,
+        association=association,
+    )
+    terminal_expected = {
+        "deployed": command.deployed_sha,
+        "evidence": command.evidence_fingerprint,
+        "lease": command.lease_id,
+        "mode": command.operation,
+        "reconciliation_digest": command.reconciliation_digest,
+        "reconciliation_id": str(command.reconciliation_comment_id),
+        "revision": str(command.revision),
+        "task": command.task_id,
+    }
+    terminal_proven = any(
+        all(fields.get(key) == value for key, value in terminal_expected.items())
+        for fields in _repo_owned_marker_fields(
+            api,
+            command.anchor_pr,
+            FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+        )
+    )
+    if terminal_proven:
+        pull = api.get_pull(command.anchor_pr)
+        _validate_canonical_deploy_evidence(
+            deploy_evidence,
+            pr=command.anchor_pr,
+            head=str((pull.get("head") or {}).get("sha") or "").lower(),
+            deployed=command.deployed_sha,
+        )
+        api.remove_label(command.anchor_pr, FINANCE_DEPLOY_LEASE_LABEL)
+        api.remove_label(
+            command.anchor_pr,
+            FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+        )
+        for item in api.list_issues_by_label(
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            state="all",
+        ):
+            if "pull_request" in item:
+                api.remove_label(
+                    int(item.get("number") or 0),
+                    FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+                )
+        return "already-terminal"
+    state = finance_deploy_lease_state(api)
+    if state.get("status") == "absent":
+        raise ReleaseBlocked("Finance deploy lease is absent without terminal proof")
+    if state.get("status") not in {"active", "stale"}:
+        raise ReleaseBlocked(
+            "Finance deploy-lease release/abort requires one unambiguous lease"
+        )
+    lease = _finance_deploy_lease_matches_command(state, command)
+    if command.deployed_sha != lease.get("deployed_sha"):
+        raise ReleaseBlocked(
+            "Finance deploy-lease terminal command deployed SHA is stale"
+        )
+    blocked = _finance_deploy_lease_blocking_releases(api)
+    if blocked:
+        raise ReleaseBlocked(
+            "Finance deploy-lease terminal transition requires no active deploy: "
+            + ", ".join(f"#{number}:{label}" for number, label in blocked)
+        )
+    deploy_digest = _validate_canonical_deploy_evidence(
+        deploy_evidence,
+        pr=command.anchor_pr,
+        head=str(lease.get("head_sha") or ""),
+        deployed=command.deployed_sha,
+    )
+    reconciliation = _comment_by_id(
+        api,
+        command.anchor_pr,
+        command.reconciliation_comment_id,
+        "Finance lease reconciliation",
+    )
+    reconciliation_actor, reconciliation_association = _comment_identity(
+        reconciliation,
+        field="Finance lease reconciliation",
+    )
+    if _comment_body_digest(reconciliation) != command.reconciliation_digest:
+        raise ReleaseBlocked("Finance lease reconciliation comment digest is stale")
+    body = str(reconciliation.get("body") or "")
+    folded = body.casefold()
+    required_common = (
+        f"task={command.task_id}".casefold(),
+        f"lease={command.lease_id}".casefold(),
+        f"revision={command.revision}".casefold(),
+        f"deployed={command.deployed_sha}".casefold(),
+        f"evidence={command.evidence_fingerprint}".casefold(),
+        "manual_barrier=released",
+        "writers=restored",
+        "timers=restored",
+        "policy=restored",
+        "non_target=unchanged",
+        "sha_readback=exact",
+    )
+    required_mode = (
+        ("migration_abort=complete", "canonical_source=monolith")
+        if command.operation == "abort"
+        else (
+            "post_cutover_reconciliation=complete",
+            "canonical_source=split",
+        )
+    )
+    missing = [
+        item for item in (*required_common, *required_mode) if item not in folded
+    ]
+    if missing:
+        raise ReleaseBlocked(
+            "Finance lease reconciliation lacks exact restore/non-target/mode "
+            "readback: "
+            + ", ".join(missing)
+        )
+    values = {
+        "actor": actor,
+        "anchor": command.anchor_pr,
+        "association": normalized_association,
+        "deploy_evidence": deploy_digest,
+        "deployed": command.deployed_sha,
+        "evidence": command.evidence_fingerprint,
+        "lease": command.lease_id,
+        "mode": command.operation,
+        "reconciliation_actor": reconciliation_actor,
+        "reconciliation_association": reconciliation_association,
+        "reconciliation_digest": command.reconciliation_digest,
+        "reconciliation_id": command.reconciliation_comment_id,
+        "revision": command.revision,
+        "task": command.task_id,
+    }
+    if not _has_comment_proof(
+        api,
+        command.anchor_pr,
+        FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+        **values,
+    ):
+        api.add_comment(
+            command.anchor_pr,
+            "Release Train terminalized the global Finance deploy lease only "
+            "after exact migration reconciliation and full control/non-target "
+            "readback.\n\n"
+            + _proof_marker(
+                FINANCE_DEPLOY_LEASE_TERMINAL_PROOF_MARKER,
+                **values,
+            ),
+        )
+    api.remove_label(command.anchor_pr, FINANCE_DEPLOY_LEASE_LABEL)
+    api.remove_label(
+        command.anchor_pr,
+        FINANCE_DEPLOY_LEASE_AUDIT_LABEL,
+    )
+    for item in api.list_issues_by_label(
+        FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+        state="all",
+    ):
+        if "pull_request" in item:
+            api.remove_label(
+                int(item.get("number") or 0),
+                FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            )
+    api.dispatch_workflow("release-train.yml", "main")
+    return "released" if command.operation == "release" else "aborted"
 
 
 def _classification_blocker_unresolved(api: ReleaseApi, number: int) -> bool:
@@ -1711,6 +3022,16 @@ def queue_gate_state(api: ReleaseApi) -> dict[str, Any]:
             "pr_number": int(ui_gate.get("number") or 0),
             "loop_root": root,
         }
+    lease_state = finance_deploy_lease_state(api)
+    if lease_state.get("global_release_blocked") is True:
+        lease = lease_state.get("lease") or {}
+        return {
+            "status": "finance-deploy-lease",
+            "pr_number": int(lease.get("anchor_pr") or 0),
+            "lease_status": str(lease_state.get("status") or "ambiguous"),
+            "lease_id": str(lease.get("lease_id") or ""),
+            "revision": int(lease.get("revision") or 0),
+        }
     running = [
         item
         for item in api.list_issues_by_label(RUNNING_LABEL, state="all")
@@ -1736,6 +3057,29 @@ def _validate_task_context(
     labels: Iterable[str],
     scope: str,
 ) -> tuple[str, int | None]:
+    lease_state = finance_deploy_lease_state(api)
+    if lease_state.get("global_release_blocked") is True:
+        if lease_state.get("status") != "active":
+            raise ReleaseBlocked(
+                "global Finance migration deploy lease is stale or ambiguous"
+            )
+        lease = lease_state.get("lease")
+        if not isinstance(lease, Mapping):
+            raise ReleaseBlocked(
+                "global Finance migration deploy lease identity is unavailable"
+            )
+        pull = api.get_pull(number)
+        head = str((pull.get("head") or {}).get("sha") or "").lower()
+        if not _finance_recovery_authorization_matches(
+            api,
+            recovery_pr=number,
+            recovery_head=head,
+            lease=lease,
+        ):
+            raise ReleaseBlocked(
+                "global Finance migration deploy lease allows only its exact "
+                "owner-bound recovery PR"
+            )
     values = set(labels)
     task_class = task_class_from_labels(values)
     try:
@@ -1833,6 +3177,58 @@ def select_candidate(
         ui_gate = _active_gate(api, AWAITING_UI_LABEL)
     except ReleaseTrainError as exc:
         return {"status": "gate-conflict", "found": False, "reason": str(exc)}
+    lease_state = finance_deploy_lease_state(api, now=now)
+    lease_recovery_pr = 0
+    if lease_state.get("global_release_blocked") is True:
+        if agent_gate is not None or ui_gate is not None:
+            return {
+                "status": "gate-conflict",
+                "found": False,
+                "reason": (
+                    "Finance deploy lease conflicts with an awaiting deploy/UI gate"
+                ),
+            }
+        if lease_state.get("status") != "active":
+            return {
+                "status": "finance-deploy-lease-fail-closed",
+                "found": False,
+                "reason": ", ".join(
+                    str(item)
+                    for item in lease_state.get("ambiguous_reasons") or []
+                )
+                or str(lease_state.get("status") or "ambiguous"),
+            }
+        lease = lease_state.get("lease")
+        if not isinstance(lease, Mapping):
+            return {
+                "status": "gate-conflict",
+                "found": False,
+                "reason": "Finance deploy lease identity is unavailable",
+            }
+        authorized: list[int] = []
+        for item in api.list_issues_by_label(
+            FINANCE_DEPLOY_LEASE_RECOVERY_LABEL,
+            state="open",
+        ):
+            if "pull_request" not in item:
+                continue
+            number = int(item.get("number") or 0)
+            pull = api.get_pull(number)
+            head = str((pull.get("head") or {}).get("sha") or "").lower()
+            if _finance_recovery_authorization_matches(
+                api,
+                recovery_pr=number,
+                recovery_head=head,
+                lease=lease,
+            ):
+                authorized.append(number)
+        if len(authorized) > 1:
+            return {
+                "status": "gate-conflict",
+                "found": False,
+                "reason": "multiple Finance owner-bound recovery PRs are authorized",
+            }
+        lease_recovery_pr = authorized[0] if authorized else 0
     if agent_gate is not None:
         agent_number = int(agent_gate.get("number") or 0)
         try:
@@ -1867,6 +3263,25 @@ def select_candidate(
         and BLOCKED_LABEL not in label_names(item)
         and SUPERSEDED_LABEL not in label_names(item)
     ]
+    if lease_state.get("global_release_blocked") is True:
+        ready = [
+            item
+            for item in ready
+            if int(item.get("number") or 0) == lease_recovery_pr
+        ]
+        if not ready:
+            lease = lease_state.get("lease") or {}
+            return {
+                "status": "finance-deploy-lease",
+                "found": False,
+                "finance_lease_pr_number": int(
+                    lease.get("anchor_pr") or 0
+                ),
+                "finance_lease_id": str(lease.get("lease_id") or ""),
+                "finance_lease_revision": int(
+                    lease.get("revision") or 0
+                ),
+            }
     if ui_gate is not None:
         try:
             _, active_root = _validate_active_ui_gate_registration(api, ui_gate)
@@ -3391,6 +4806,15 @@ def command_select(args: argparse.Namespace) -> int:
             "halted_pr_number": result.get("halted_pr_number", ""),
             "awaiting_agent_pr_number": result.get("awaiting_agent_pr_number", ""),
             "awaiting_ui_pr_number": result.get("awaiting_ui_pr_number", ""),
+            "finance_lease_pr_number": result.get(
+                "finance_lease_pr_number",
+                "",
+            ),
+            "finance_lease_id": result.get("finance_lease_id", ""),
+            "finance_lease_revision": result.get(
+                "finance_lease_revision",
+                "",
+            ),
             "needs_resume": bool(result.get("needs_resume")),
             "pr_number": result.get("pr_number", ""),
             "head_sha": result.get("head_sha", ""),
@@ -3715,6 +5139,192 @@ def command_preflight_production_mutation(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_preflight_finance_lease(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    try:
+        command = parse_finance_deploy_lease_command(args.command)
+        if command.anchor_pr != args.pr:
+            raise ReleaseBlocked(
+                "Finance deploy-lease command must target its anchor PR"
+            )
+        _validate_finance_deploy_lease_actor(
+            actor=args.actor,
+            association=args.association,
+        )
+        needs_deploy_readback = command.operation != "authorize-recovery"
+        head_sha = command.head_sha
+        if command.operation == "acquire":
+            _finance_deploy_lease_anchor_preflight(api, command)
+        else:
+            state = finance_deploy_lease_state(api)
+            if (
+                state.get("status") not in {"active", "stale"}
+                and command.operation not in {"release", "abort"}
+            ):
+                raise ReleaseBlocked(
+                    "Finance deploy-lease command requires one unambiguous active/stale lease"
+                )
+            if state.get("status") in {"active", "stale"}:
+                lease = _finance_deploy_lease_matches_command(
+                    state,
+                    command,
+                    ignore_revision=command.operation in {"rebind", "resume"},
+                )
+                current_revision = int(lease.get("revision") or 0)
+                if (
+                    command.operation in {"rebind", "resume"}
+                    and current_revision
+                    not in {command.revision, command.revision + 1}
+                ):
+                    raise ReleaseBlocked(
+                        "Finance deploy-lease rebind/resume revision is stale"
+                    )
+            else:
+                pull = api.get_pull(command.anchor_pr)
+                head_sha = str((pull.get("head") or {}).get("sha") or "")
+                lease = {"head_sha": head_sha}
+            head_sha = str(lease.get("head_sha") or "")
+    except ReleaseBlocked as exc:
+        _json_print({"status": "rejected", "pr_number": args.pr, "reason": str(exc)})
+        return 2
+    write_github_output(
+        args.output_path,
+        {
+            "operation": command.operation,
+            "head_sha": head_sha,
+            "deployed_sha": command.deployed_sha,
+            "needs_deploy_readback": needs_deploy_readback,
+        },
+    )
+    _json_print(
+        {
+            "status": "ready",
+            "pr_number": args.pr,
+            "operation": command.operation,
+            "head_sha": head_sha,
+            "deployed_sha": command.deployed_sha,
+            "needs_deploy_readback": needs_deploy_readback,
+        }
+    )
+    return 0
+
+
+def _read_json_object(path: Path | None, *, field: str) -> Mapping[str, Any] | None:
+    if path is None:
+        return None
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ReleaseBlocked(f"{field} must contain a JSON object")
+    return loaded
+
+
+def command_handle_finance_lease(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    try:
+        command = parse_finance_deploy_lease_command(args.command)
+        if command.anchor_pr != args.pr:
+            raise ReleaseBlocked(
+                "Finance deploy-lease command must target its anchor PR"
+            )
+        deploy_evidence = _read_json_object(
+            args.deploy_evidence_file,
+            field="Finance deploy evidence",
+        )
+        actions_owned = (
+            os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("GITHUB_EVENT_NAME") == "issue_comment"
+        )
+        if command.operation == "acquire":
+            status = acquire_finance_deploy_lease(
+                api,
+                command,
+                deploy_evidence,
+                actor=args.actor,
+                association=args.association,
+                actions_owned=actions_owned,
+            )
+        elif command.operation == "authorize-recovery":
+            status = authorize_finance_deploy_lease_recovery(
+                api,
+                command,
+                actor=args.actor,
+                association=args.association,
+                actions_owned=actions_owned,
+            )
+        elif command.operation in {"rebind", "resume"}:
+            status = rebind_finance_deploy_lease(
+                api,
+                command,
+                deploy_evidence,
+                actor=args.actor,
+                association=args.association,
+                actions_owned=actions_owned,
+            )
+        else:
+            status = terminalize_finance_deploy_lease(
+                api,
+                command,
+                deploy_evidence,
+                actor=args.actor,
+                association=args.association,
+                actions_owned=actions_owned,
+            )
+    except ReleaseBlocked as exc:
+        _json_print({"status": "rejected", "pr_number": args.pr, "reason": str(exc)})
+        return 2
+    _json_print({"status": status, "pr_number": args.pr})
+    return 0
+
+
+def _write_private_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    target = path.expanduser().resolve()
+    if target == ROOT or ROOT in target.parents:
+        raise ReleaseBlocked(
+            "Finance deploy-lease readback must stay outside the Git checkout"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary.exists():
+            temporary.unlink()
+
+
+def command_finance_lease_status(args: argparse.Namespace) -> int:
+    api = _api_from_env()
+    state = finance_deploy_lease_state(api)
+    if args.output is not None:
+        _write_private_json_file(args.output, state)
+    _json_print(state)
+    if args.require_active and (
+        state.get("status") != "active"
+        or state.get("allows_finance_migration") is not True
+        or state.get("ambiguous_reasons") not in ([], ())
+    ):
+        return 2
+    return 0
+
+
 def command_handle_comment(args: argparse.Namespace) -> int:
     api = _api_from_env()
     try:
@@ -3891,6 +5501,34 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_production_mutation.set_defaults(
         handler=command_preflight_production_mutation
     )
+
+    preflight_finance_lease = subparsers.add_parser(
+        "preflight-finance-lease"
+    )
+    preflight_finance_lease.add_argument("--pr", type=int, required=True)
+    preflight_finance_lease.add_argument("--command", required=True)
+    preflight_finance_lease.add_argument("--actor", required=True)
+    preflight_finance_lease.add_argument("--association", required=True)
+    preflight_finance_lease.add_argument(
+        "--output-path",
+        default=os.environ.get("GITHUB_OUTPUT"),
+    )
+    preflight_finance_lease.set_defaults(
+        handler=command_preflight_finance_lease
+    )
+
+    handle_finance_lease = subparsers.add_parser("handle-finance-lease")
+    handle_finance_lease.add_argument("--pr", type=int, required=True)
+    handle_finance_lease.add_argument("--command", required=True)
+    handle_finance_lease.add_argument("--actor", required=True)
+    handle_finance_lease.add_argument("--association", required=True)
+    handle_finance_lease.add_argument("--deploy-evidence-file", type=Path)
+    handle_finance_lease.set_defaults(handler=command_handle_finance_lease)
+
+    finance_lease_status = subparsers.add_parser("finance-lease-status")
+    finance_lease_status.add_argument("--output", type=Path)
+    finance_lease_status.add_argument("--require-active", action="store_true")
+    finance_lease_status.set_defaults(handler=command_finance_lease_status)
 
     handle_comment = subparsers.add_parser("handle-comment")
     handle_comment.add_argument("--pr", type=int, required=True)

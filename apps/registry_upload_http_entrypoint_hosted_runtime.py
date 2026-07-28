@@ -107,6 +107,9 @@ from packages.adapters.registry_upload_http_entrypoint import (
 from packages.application.warehouse_functional_maintenance import (
     warehouse_functional_service_is_quiescent,
 )
+from packages.application.finance_migration_deploy_lease import (
+    validate_finance_migration_deploy_lease,
+)
 
 
 DEFAULT_TARGET_FILE = (
@@ -3657,6 +3660,33 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     rollback_candidate_evidence = str(
         getattr(args, "rollback_candidate_evidence", "") or ""
     )
+    deploy_lease: dict[str, Any] | None = None
+    deploy_lease_path = str(
+        getattr(args, "finance_deploy_lease_evidence", "") or ""
+    ).strip()
+    if action != "health":
+        if not deploy_lease_path:
+            raise ValueError(
+                "Finance storage migration requires a fresh "
+                "--finance-deploy-lease-evidence readback"
+            )
+        evidence_path = Path(deploy_lease_path).expanduser().resolve()
+        if evidence_path == ROOT or ROOT in evidence_path.parents:
+            raise ValueError(
+                "Finance deploy-lease evidence must stay outside the Git checkout"
+            )
+        loaded_lease = json.loads(evidence_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_lease, dict):
+            raise ValueError(
+                "Finance deploy-lease evidence must contain a JSON object"
+            )
+        bound_sha = str(
+            ((loaded_lease.get("lease") or {}).get("deployed_sha") or "")
+        )
+        deploy_lease = validate_finance_migration_deploy_lease(
+            loaded_lease,
+            deployed_sha=bound_sha,
+        )
     transition_evidence: dict[str, Any] = {}
     if action == "rollback-apply":
         if plan_path is None or not plan_path.is_file():
@@ -3703,6 +3733,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 rollback_candidate_evidence=(
                     rollback_candidate_evidence
                 ),
+                deploy_lease=deploy_lease,
             )
             transition_evidence["http_restart"] = (
                 _restart_finance_cutover_http_service(target)
@@ -3717,6 +3748,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 chunk_size=int(
                     getattr(args, "chunk_size", 10_000) or 10_000
                 ),
+                deploy_lease=deploy_lease,
             )
             transition_evidence["failure_health_readback"] = health
             if str(health.get("canonical_source") or "") == "monolith":
@@ -3797,6 +3829,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 candidate_manifest=candidate_manifest,
                 candidate_plan_fingerprint=candidate_plan_fingerprint,
                 minimum_observation_seconds=minimum_observation_seconds,
+                deploy_lease=deploy_lease,
             )
             transition_evidence["http_restart"] = (
                 _restart_finance_cutover_http_service(target)
@@ -3811,6 +3844,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 chunk_size=int(
                     getattr(args, "chunk_size", 10_000) or 10_000
                 ),
+                deploy_lease=deploy_lease,
             )
             transition_evidence["failure_health_readback"] = health
             if str(health.get("canonical_source") or "") == "split":
@@ -3951,6 +3985,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 candidate_manifest=candidate_manifest,
                 candidate_plan_fingerprint=candidate_plan_fingerprint,
                 minimum_observation_seconds=minimum_observation_seconds,
+                deploy_lease=deploy_lease,
             )
         except Exception as exc:
             snapshot_error = exc
@@ -4020,6 +4055,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             candidate_manifest=candidate_manifest,
             candidate_plan_fingerprint=candidate_plan_fingerprint,
             minimum_observation_seconds=minimum_observation_seconds,
+            deploy_lease=deploy_lease,
         )
     output = str(getattr(args, "output", "") or "").strip()
     if output:
@@ -4053,6 +4089,7 @@ def _run_remote_finance_storage_split_action(
     candidate_plan_fingerprint: str = "",
     minimum_observation_seconds: int = 3600,
     rollback_candidate_evidence: str = "",
+    deploy_lease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"finance-storage-split-{action}"
@@ -4113,6 +4150,23 @@ def _run_remote_finance_storage_split_action(
         "--chunk-size",
         str(chunk_size),
     ]
+    if action != "health":
+        if not isinstance(deploy_lease, Mapping):
+            raise ValueError(
+                "canonical Finance migration execution requires active "
+                "deploy-lease evidence"
+            )
+        runner_args.extend(
+            [
+                "--deploy-lease-json",
+                json.dumps(
+                    deploy_lease,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
     reviewed_plan_json: str | None = None
     if source_snapshot_manifest:
         runner_args.extend(
@@ -6357,6 +6411,19 @@ def run_sqlite_contention_ui_flow_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_finance_migration_deploy_lease_argument(
+    parser: argparse.ArgumentParser,
+) -> None:
+    parser.add_argument(
+        "--finance-deploy-lease-evidence",
+        required=True,
+        help=(
+            "Fresh private JSON readback from the GitHub-owned global "
+            "Finance migration deploy lease."
+        ),
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repo-owned deploy/probe contract for hosted registry upload runtime.",
@@ -6535,6 +6602,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "live monolith scans are not allowed in this hosted phase."
         ),
     )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_split_dry_run
+    )
     finance_storage_split_dry_run.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="dry-run",
@@ -6566,6 +6636,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--source-snapshot-manifest",
         required=True,
     )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_split_apply
+    )
     finance_storage_split_apply.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="apply",
@@ -6583,6 +6656,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_plan
     )
     finance_storage_snapshot_plan.set_defaults(
         handler=run_finance_storage_split_command,
@@ -6608,6 +6684,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=10_000,
     )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_apply
+    )
     finance_storage_snapshot_apply.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="snapshot-create",
@@ -6629,6 +6708,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_integrity
     )
     finance_storage_snapshot_integrity.set_defaults(
         handler=run_finance_storage_split_command,
@@ -6679,6 +6761,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                 type=int,
                 default=3600,
             )
+        _add_finance_migration_deploy_lease_argument(command)
         command.set_defaults(
             handler=run_finance_storage_split_command,
             finance_storage_split_action=action_name,
@@ -6704,6 +6787,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_cutover_plan
     )
     finance_storage_cutover_plan.set_defaults(
         handler=run_finance_storage_split_command,
@@ -6737,6 +6823,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=10_000,
     )
     finance_storage_cutover_apply.add_argument("--output", required=True)
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_cutover_apply
+    )
     finance_storage_cutover_apply.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="cutover-apply",
@@ -6754,6 +6843,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_rollback_plan
     )
     finance_storage_rollback_plan.set_defaults(
         handler=run_finance_storage_split_command,
@@ -6784,6 +6876,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_rollback_prepare
     )
     finance_storage_rollback_prepare.set_defaults(
         handler=run_finance_storage_split_command,
@@ -6818,6 +6913,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=int,
         default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_rollback_apply
     )
     finance_storage_rollback_apply.set_defaults(
         handler=run_finance_storage_split_command,
