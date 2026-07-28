@@ -118,12 +118,14 @@ def _digest(value: Any) -> str:
 
 
 def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
-    """Bind approval to stable source/scope facts, not volatile capacity counters.
+    """Bind approval to stable source/scope facts, not volatile runtime counters.
 
-    Free bytes, PIDs and timer timestamps are still emitted in every plan and
-    are rechecked immediately before any candidate creation. They cannot be
-    part of an idempotent review fingerprint because unrelated filesystem use
-    or a service restart would otherwise invalidate an unchanged source plan.
+    Free bytes, PIDs, timer timestamps and transient systemd execution states
+    are still emitted in every plan and recaptured immediately before any
+    candidate creation. They cannot be part of an idempotent review
+    fingerprint because an ordinary scheduled service transition would
+    otherwise invalidate an unchanged immutable source plan. Unit identity,
+    load state and enablement remain bound to the approval.
     """
 
     stable = json.loads(_canonical_json(plan))
@@ -148,9 +150,24 @@ def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
             for item in writers.get("database_openers", [])
         }
     )
-    for item in writers.get("systemd_units", []):
-        for key in ("main_pid", "last_trigger", "next_trigger"):
-            item.pop(key, None)
+    writers["systemd_units"] = sorted(
+        [
+            (
+                {
+                    "unit": str(item.get("unit") or ""),
+                    "return_code": int(item.get("return_code") or 0),
+                    "load_state": str(item.get("load_state") or ""),
+                    "unit_file_state": str(
+                        item.get("unit_file_state") or ""
+                    ),
+                }
+                if item.get("unit")
+                else dict(item)
+            )
+            for item in writers.get("systemd_units", [])
+        ],
+        key=_canonical_json,
+    )
     return _digest(stable)
 
 
@@ -1765,17 +1782,18 @@ class FinanceStorageMigrationPlanner:
             },
         }
         plan["fingerprint_contract"] = {
-            "version": "wb_core_finance_storage_split_plan_fingerprint_v1",
+            "version": "wb_core_finance_storage_split_plan_fingerprint_v2",
             "includes": (
                 "source identity/schema/logical digests, chunk manifest, "
                 "ownership and open inventories, generation ids, required capacity, "
-                "writer/timer states and rollback scope"
+                "stable systemd unit identity/load/enablement and rollback scope"
             ),
             "volatile_fields_rechecked_not_hashed": [
                 "available_bytes",
                 "capacity_shortfall",
                 "process_pid_and_fd",
                 "timer_trigger_timestamps",
+                "systemd_active_sub_result_exec_state",
                 "performance_timings",
             ],
         }

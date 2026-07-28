@@ -93,8 +93,11 @@ The implementation is deliberately inert on deploy:
   query plans, allocation/capacity evidence, writers/timers and exact writable
   opener ownership, target generations,
   non-target invariants and rollback scope. The fingerprint excludes only
-  volatile free-byte/PID/timer-clock counters that are rechecked immediately
-  before apply.
+  volatile free-byte/PID/timer-clock counters and transient systemd execution
+  states that are recaptured immediately before apply. Stable systemd unit
+  identity, load state and enablement remain approval-bound, so policy/config
+  drift still fails closed while an ordinary scheduled service transition
+  cannot stale an otherwise unchanged immutable-source candidate plan.
 - `packages/application/business_data_write_barrier.py` and the hosted HTTP
   adapter implement a durable fail-closed manual-write barrier. During exact
   snapshot/final-cutover/rollback windows authenticated `POST`, `PATCH` and
@@ -492,6 +495,8 @@ Closure requires:
 - Query-plan/index parity and bounded lock/performance tests.
 - Capacity shortfall before any destination bytes, reservation races and
   restart.
+- Candidate-plan fingerprint stability across transient systemd execution
+  transitions, with unit identity/load/enablement drift still rejected.
 - Exact stale-writer generation drift, runtime FD/socket/child-process
   rejection, stop failure without retry, timer/policy preservation and
   idempotent terminal audit.
