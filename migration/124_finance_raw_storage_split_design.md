@@ -124,15 +124,21 @@ The implementation is deliberately inert on deploy:
   maintenance/policy evidence; successful completion of that same bound service
   generation is accepted without guessing another writer. A bounded deadline and
   durable heartbeat classify stale, ambiguous and lost workers fail closed;
-  status never starts another restore. A first terminal failure is not
-  resubmittable. Only a reviewed recovery deploy may explicitly resume that
-  same job once, with the exact first-failure digest, unchanged original
-  continuity boundary, a single append-only deployed-SHA binding, archived
-  attempt-1 result, zero restore locks and no additional writer; a second
-  binding or automatic retry is forbidden. An actively running bounded
-  Autoanswers oneshot remains truthful `starting` evidence until its successful
-  completion/fresh tick, while an inactive stale worker still blocks. Barrier
-  abort remains a separate exact transition after terminal restore and
+  status never starts another restore. A terminal failure is not resubmittable
+  through the original submit path. Only a reviewed recovery deploy may
+  explicitly append the next binding and resume that same job, with the exact
+  preceding-failure digest, unchanged original continuity boundary, archived
+  attempt result, zero restore locks and no additional writer. The current
+  incident contract admits at most two immutable contiguous recovery bindings
+  (`resume.json`, then `resume-2.json`) and therefore at most attempts 2 and 3;
+  it never creates a second job or automatically retries, and any third binding
+  is rejected fail closed. Timer/service state and the freshness clock used for
+  Autoanswers reconciliation share one observation timestamp taken before the
+  feature-store readback, so a slow SQLite query cannot falsely expire a stale
+  systemd snapshot. An actively running bounded Autoanswers oneshot remains
+  truthful `starting` evidence until its successful completion/fresh tick,
+  while an inactive stale worker observed after the grace still blocks.
+  Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
   cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/

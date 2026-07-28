@@ -1105,7 +1105,15 @@ def _autoanswers_process_actual_state(
     )
     requested_at = _parse_timestamp(lifecycle.get("requested_at"))
     last_tick = _parse_timestamp(feature.get("last_scheduler_tick_at"))
-    now = datetime.now(timezone.utc)
+    # Timer/service states are captured before the feature-owned SQLite
+    # readback, which can legitimately take minutes on the production store.
+    # Evaluate freshness at that same observation boundary; mixing the old
+    # systemd snapshot with a later wall clock can falsely expire a starting
+    # worker that became active while the query was running.
+    now = (
+        _parse_timestamp(status.get("captured_at"))
+        or datetime.now(timezone.utc)
+    )
     fresh_tick = bool(
         mode in {"manual", "draft_only", "auto_safe", "auto_all"}
         and last_tick is not None
@@ -1554,6 +1562,7 @@ def maintenance_status(
     schedules: RuntimeScheduleClient,
     proc_root: Path = Path("/proc"),
 ) -> dict[str, Any]:
+    captured_at = _utc_now()
     timer_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_TIMER_UNITS}
     service_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_SERVICE_UNITS}
     discovered = systemd.discovered_timers()
@@ -1594,7 +1603,7 @@ def maintenance_status(
         "schema_version": SCHEMA_VERSION,
         "status": "quiet" if quiet else "not_quiet",
         "quiet": quiet,
-        "captured_at": _utc_now(),
+        "captured_at": captured_at,
         "timers": timer_states,
         "services": service_states,
         "discovered_wb_core_timers": discovered,
