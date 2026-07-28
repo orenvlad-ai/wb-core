@@ -3167,7 +3167,7 @@ def _run_remote_business_data_maintenance_restore_job(
     if job_action == "status":
         if allow_absent:
             runner_args.append("--allow-absent")
-    else:
+    elif job_action == "submit":
         if expected_revision is None or int(expected_revision) < 0:
             raise ValueError(
                 "detached maintenance restore requires an exact policy revision"
