@@ -170,6 +170,29 @@ def _assert_autoanswers_resume_grace_ignores_stale_worker_marker() -> None:
     assert long_running["lifecycle_state"] == "starting"
     assert long_running["stop_reason"] == ""
 
+    snapshot_at = datetime.now(timezone.utc) - timedelta(minutes=8)
+    feature["lifecycle"]["requested_at"] = (
+        snapshot_at - timedelta(minutes=1)
+    ).isoformat()
+    stale_systemd_snapshot = {
+        **status,
+        "captured_at": snapshot_at.isoformat(),
+    }
+    with mock.patch(
+        "apps.business_data_maintenance._autoanswers_feature_state",
+        return_value=feature,
+    ):
+        coherent_snapshot = _autoanswers_process_actual_state(
+            status=stale_systemd_snapshot,
+            policy={"master_desired": True},
+            runtime_dir=Path("/unused"),
+            spec=spec,
+        )
+    assert coherent_snapshot["service_in_progress"] is False
+    assert coherent_snapshot["drift_status"] == "matched"
+    assert coherent_snapshot["lifecycle_state"] == "starting"
+    assert coherent_snapshot["stop_reason"] == ""
+
 
 def _assert_budget_hold() -> None:
     conn = sqlite3.connect(":memory:")

@@ -7492,8 +7492,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     maintenance_restore_resume = subparsers.add_parser(
         "business-data-maintenance-restore-resume",
         help=(
-            "Explicitly resume the same first-failed durable restore once "
-            "after a reviewed recovery deploy and exact boundary readback."
+            "Explicitly append the next bounded recovery binding and resume "
+            "the same failed durable restore after a reviewed recovery deploy "
+            "and exact boundary readback."
         ),
     )
     maintenance_restore_resume.add_argument("--deployed-sha", required=True)

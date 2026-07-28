@@ -29,6 +29,7 @@ from business_data_maintenance_restore_job import (
 
 DEPLOYED_SHA = "a" * 40
 RECOVERY_DEPLOYED_SHA = "e" * 40
+FINAL_RECOVERY_DEPLOYED_SHA = "f" * 40
 JOB_ID = "1" * 64
 SECOND_JOB_ID = "2" * 64
 WINDOW_ID = "snapshot-fixture"
@@ -675,6 +676,251 @@ def _assert_exact_failed_job_resumes_once_after_recovery_deploy() -> None:
         temporary.cleanup()
 
 
+def _assert_same_job_uses_bounded_second_recovery_binding() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_with_autoanswers_drift(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        first_failure = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_with_autoanswers_drift,
+        )
+        paths["deployed_sha_file"].write_text(
+            RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=str(first_failure["result_digest"]),
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed first same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture-resume-one",
+            },
+        )
+        second_failure = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_with_autoanswers_drift,
+        )
+        assert second_failure["status"] == "failed"
+        assert second_failure["attempt"] == 2
+        job_dir = paths["runtime_dir"] / JOB_DIRECTORY_NAME / JOB_ID
+        first_binding_before = (job_dir / "resume.json").read_bytes()
+
+        paths["deployed_sha_file"].write_text(
+            FINAL_RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        resumed = resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=FINAL_RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=str(second_failure["result_digest"]),
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed final bounded same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture-resume-two",
+            },
+        )
+        assert resumed["status"] == "queued"
+        assert resumed["attempt"] == 2
+        assert resumed["deployment_binding"]["resume_sequence"] == 2
+        assert resumed["deployment_binding"]["previous_deployed_sha"] == (
+            RECOVERY_DEPLOYED_SHA
+        )
+        assert (job_dir / "resume.json").read_bytes() == first_binding_before
+        assert (job_dir / "resume-2.json").is_file()
+        assert (job_dir / "attempt-1-result.json").is_file()
+        assert (job_dir / "attempt-2-result.json").is_file()
+
+        calls: list[int] = []
+        succeeded = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=_successful_executor(paths, calls),
+        )
+        assert calls == [19]
+        assert succeeded["status"] == "succeeded"
+        assert succeeded["attempt"] == 3
+        readback = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=FINAL_RECOVERY_DEPLOYED_SHA,
+            include_systemd=False,
+        )
+        assert readback["deployment_binding"]["resume_sequence"] == 2
+        assert readback["audit"]["events"] == [
+            "queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "succeeded",
+        ]
+        repeated = resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=FINAL_RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=str(second_failure["result_digest"]),
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed final bounded same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda _job_id: (_ for _ in ()).throw(
+                AssertionError("terminal attempt 3 must not restart")
+            ),
+        )
+        assert repeated["status"] == "succeeded"
+
+        paths["deployed_sha_file"].write_text(
+            "9" * 40 + "\n",
+            encoding="utf-8",
+        )
+        try:
+            resume_failed_job(
+                **paths,
+                job_id=JOB_ID,
+                deployed_sha="9" * 40,
+                expected_failure_digest=str(second_failure["result_digest"]),
+                service_continuity_fingerprint=str(
+                    SERVICE_CONTINUITY["fingerprint"]
+                ),
+                actor=ACTOR,
+                reason="forbidden third recovery binding",
+                continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            )
+        except MaintenanceRestoreJobError as exc:
+            assert "sequence is exhausted" in str(exc)
+        else:
+            raise AssertionError("third same-job recovery binding was accepted")
+    finally:
+        temporary.cleanup()
+
+
+def _assert_second_recovery_rejects_continuity_drift_before_binding() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_with_autoanswers_drift(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        first_failure = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_with_autoanswers_drift,
+        )
+        paths["deployed_sha_file"].write_text(
+            RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=str(first_failure["result_digest"]),
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed first same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture-resume-one",
+            },
+        )
+        second_failure = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_with_autoanswers_drift,
+        )
+        paths["deployed_sha_file"].write_text(
+            FINAL_RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        drifted_payload = {
+            **SERVICE_CONTINUITY_PAYLOAD,
+            "services": [],
+        }
+        drifted_continuity = {
+            **drifted_payload,
+            "fingerprint": _fingerprint(drifted_payload),
+        }
+        try:
+            resume_failed_job(
+                **paths,
+                job_id=JOB_ID,
+                deployed_sha=FINAL_RECOVERY_DEPLOYED_SHA,
+                expected_failure_digest=str(second_failure["result_digest"]),
+                service_continuity_fingerprint=str(
+                    SERVICE_CONTINUITY["fingerprint"]
+                ),
+                actor=ACTOR,
+                reason="reviewed final bounded same-job recovery deploy",
+                continuity_reader=lambda: drifted_continuity,
+                starter=lambda _job_id: (_ for _ in ()).throw(
+                    AssertionError("continuity drift must not start attempt 3")
+                ),
+            )
+        except MaintenanceRestoreJobError as exc:
+            assert "continuity fingerprint" in str(exc)
+        else:
+            raise AssertionError("attempt 3 accepted continuity drift")
+        job_dir = paths["runtime_dir"] / JOB_DIRECTORY_NAME / JOB_ID
+        assert (job_dir / "resume.json").is_file()
+        assert not (job_dir / "resume-2.json").exists()
+        assert not (job_dir / "attempt-2-result.json").exists()
+        status = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            include_systemd=False,
+        )
+        assert status["status"] == "failed"
+        assert status["attempt"] == 2
+        assert status["audit"]["last_event"] == "failed"
+    finally:
+        temporary.cleanup()
+
+
 def _assert_same_job_resume_rejects_continuity_drift_before_binding() -> None:
     temporary, paths = _fixture()
     try:
@@ -1042,6 +1288,8 @@ def run() -> None:
     _assert_boundary_drift_rejected()
     _assert_deployed_sha_drift_is_durable_failure()
     _assert_exact_failed_job_resumes_once_after_recovery_deploy()
+    _assert_same_job_uses_bounded_second_recovery_binding()
+    _assert_second_recovery_rejects_continuity_drift_before_binding()
     _assert_same_job_resume_rejects_continuity_drift_before_binding()
     _assert_attempt_two_revalidates_continuity_inside_worker()
     _assert_worker_observation_classification()
