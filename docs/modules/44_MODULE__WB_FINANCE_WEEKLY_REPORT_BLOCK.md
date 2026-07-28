@@ -148,6 +148,9 @@ Canonical-cost hosted operations expose only:
 The separate storage-split lifecycle exposes:
 
 - `finance-storage-snapshot-plan|apply|integrity`;
+- `finance-storage-snapshot-retention-plan|apply|readback` for exact
+  archive-first release of older-SHA coherent snapshots to the dedicated
+  backup device when they block pre-candidate capacity;
 - `finance-storage-stale-writer-plan|stop` for one exact audited stale
   closure-retry generation before a completely fresh snapshot plan;
 - `finance-storage-split-dry-run|apply|health`;
@@ -161,6 +164,11 @@ the manual HTTP/UI write barrier, captures exact writer/timer intent, drains
 known writers, copies a coherent SQLite image, restores exact prior intent and
 releases the barrier; the full integrity scan then runs on the copy outside the
 live DB. Candidate build, live-tail and soak do not keep a broad hold.
+Snapshot retention never opens the live monolith or business stores for write:
+it copies only stale migration snapshots, verifies every archived byte and a
+durable crash-resume transaction, then releases the root copy with its
+manifest last. The archive remains byte-exact evidence, while ambiguity leaves
+the source intact.
 Cutover and rollback apply require their exact held barrier and perform a fresh
 operational reconciliation before one fsynced manifest switch. Only the
 registry HTTP service is restarted. An ambiguous post-switch failure keeps

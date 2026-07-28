@@ -621,6 +621,174 @@ def main() -> None:
             raise AssertionError(
                 "Finance storage reviewed evidence must be written mode 0600"
             )
+        retention_fingerprint = "sha256:" + ("9" * 64)
+        retention_plan_path = (
+            Path(finance_temp_dir) / "snapshot-retention-plan.json"
+        )
+        retention_plan = {
+            "contract_version": (
+                "wb_core_finance_storage_snapshot_retention_plan_v1"
+            ),
+            "mode": "snapshot_retention_dry_run",
+            "fingerprint": retention_fingerprint,
+            "apply_allowed_by_machine_preflight": True,
+            "blockers": [],
+            "query_only_contract": {
+                "business_data_mutation_count": 0,
+                "snapshot_byte_mutation_count": 0,
+                "archive_byte_mutation_count": 0,
+            },
+        }
+        retention_plan_path.write_text(
+            json.dumps(retention_plan),
+            encoding="utf-8",
+        )
+        retention_payloads = {
+            "snapshot-retention-plan": retention_plan,
+            "snapshot-retention-apply": {
+                "contract_version": (
+                    "wb_core_finance_storage_snapshot_retention_result_v1"
+                ),
+                "status": "completed",
+                "archived_snapshot_count": 3,
+                "live_monolith_touched": False,
+                "split_generation_touched": False,
+            },
+            "snapshot-retention-readback": {
+                "contract_version": (
+                    "wb_core_finance_storage_snapshot_retention_result_v1"
+                ),
+                "status": "readback_verified",
+                "capacity_sufficient": True,
+                "live_monolith_touched": False,
+                "split_generation_touched": False,
+            },
+        }
+        for action in (
+            "snapshot-retention-plan",
+            "snapshot-retention-apply",
+            "snapshot-retention-readback",
+        ):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(retention_payloads[action]),
+                stderr="",
+            )
+            with mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                hosted_runtime._run_remote_finance_storage_split_action(
+                    active_target,
+                    action=action,
+                    plan_path=(
+                        retention_plan_path
+                        if action != "snapshot-retention-plan"
+                        else None
+                    ),
+                    fingerprint=(
+                        retention_fingerprint
+                        if action != "snapshot-retention-plan"
+                        else ""
+                    ),
+                    approval_reference=(
+                        "canonical-finance-retention-smoke"
+                        if action == "snapshot-retention-apply"
+                        else ""
+                    ),
+                    chunk_size=10_000,
+                    deploy_lease=deploy_lease,
+                )
+            remote_command = " ".join(run_mock.call_args.args[0])
+            for token in (
+                "apps/finance_storage_split.py",
+                "--deploy-lease-json",
+            ):
+                if token not in remote_command:
+                    raise AssertionError(
+                        f"Finance snapshot retention {action} lost {token}"
+                    )
+            if action != "snapshot-retention-plan":
+                for token in (
+                    "--snapshot-retention-plan-file",
+                    "/dev/stdin",
+                    "--confirm-fingerprint",
+                    retention_fingerprint,
+                ):
+                    if token not in remote_command:
+                        raise AssertionError(
+                            "Finance snapshot retention "
+                            f"{action} lost {token}"
+                        )
+            if action == "snapshot-retention-apply" and (
+                "--approval-reference" not in remote_command
+                or "canonical-finance-retention-smoke"
+                not in remote_command
+            ):
+                raise AssertionError(
+                    "Finance snapshot retention apply lost exact approval"
+                )
+        retention_plan_args = (
+            hosted_runtime.build_arg_parser().parse_args(
+                [
+                    "finance-storage-snapshot-retention-plan",
+                    "--output",
+                    str(
+                        Path(finance_temp_dir)
+                        / "snapshot-retention-output.json"
+                    ),
+                    "--finance-deploy-lease-evidence",
+                    str(deploy_lease_path),
+                ]
+            )
+        )
+        retention_apply_args = (
+            hosted_runtime.build_arg_parser().parse_args(
+                [
+                    "finance-storage-snapshot-retention-apply",
+                    "--plan-file",
+                    str(retention_plan_path),
+                    "--fingerprint",
+                    retention_fingerprint,
+                    "--approval-reference",
+                    "canonical-finance-retention-smoke",
+                    "--finance-deploy-lease-evidence",
+                    str(deploy_lease_path),
+                ]
+            )
+        )
+        retention_readback_args = (
+            hosted_runtime.build_arg_parser().parse_args(
+                [
+                    "finance-storage-snapshot-retention-readback",
+                    "--plan-file",
+                    str(retention_plan_path),
+                    "--fingerprint",
+                    retention_fingerprint,
+                    "--output",
+                    str(
+                        Path(finance_temp_dir)
+                        / "snapshot-retention-readback.json"
+                    ),
+                    "--finance-deploy-lease-evidence",
+                    str(deploy_lease_path),
+                ]
+            )
+        )
+        if (
+            retention_plan_args.finance_storage_split_action
+            != "snapshot-retention-plan"
+            or retention_apply_args.finance_storage_split_action
+            != "snapshot-retention-apply"
+            or retention_readback_args.finance_storage_split_action
+            != "snapshot-retention-readback"
+        ):
+            raise AssertionError(
+                "hosted runner must expose Finance snapshot retention "
+                "plan/apply/readback"
+            )
         stale_writer_fingerprint = "sha256:" + ("5" * 64)
         stale_writer_plan_path = (
             Path(finance_temp_dir) / "stale-writer-plan.json"
