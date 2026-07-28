@@ -700,6 +700,89 @@ class MigrationSmoke(unittest.TestCase):
             )
             self.assertEqual(blocker["services"], [active_service])
 
+    def test_candidate_plan_ignores_transient_systemd_execution_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=2)
+            snapshot_manifest = _create_verified_snapshot(runtime)
+            planner = FinanceStorageMigrationPlanner(
+                runtime,
+                chunk_size=1,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+                require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
+            )
+            unit = {
+                "unit": "wb-core-wb-finance-weekly.service",
+                "return_code": 0,
+                "load_state": "loaded",
+                "active_state": "activating",
+                "sub_state": "start",
+                "unit_file_state": "static",
+                "main_pid": 4242,
+                "result": "success",
+                "exec_main_status": "0",
+                "last_trigger": "now",
+                "next_trigger": "",
+            }
+            idle_unit = {
+                **unit,
+                "active_state": "inactive",
+                "sub_state": "dead",
+                "main_pid": 0,
+                "result": "exit-code",
+                "exec_main_status": "1",
+                "last_trigger": "later",
+            }
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[unit],
+            ):
+                active_plan = planner.build_plan()
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[idle_unit],
+            ):
+                idle_plan = planner.build_plan()
+            self.assertEqual(
+                active_plan["fingerprint"],
+                idle_plan["fingerprint"],
+            )
+            self.assertNotEqual(
+                active_plan["writers_and_timers"]["systemd_units"],
+                idle_plan["writers_and_timers"]["systemd_units"],
+            )
+            self.assertEqual(
+                active_plan["fingerprint_contract"]["version"],
+                "wb_core_finance_storage_split_plan_fingerprint_v2",
+            )
+
+            disabled_unit = {
+                **idle_unit,
+                "unit_file_state": "disabled",
+            }
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[disabled_unit],
+            ):
+                disabled_plan = planner.build_plan()
+            self.assertNotEqual(
+                active_plan["fingerprint"],
+                disabled_plan["fingerprint"],
+            )
+
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[idle_unit],
+            ):
+                result = FinanceStorageCandidateBuilder(
+                    planner,
+                    expected_fingerprint=active_plan["fingerprint"],
+                    approval_reference="fixture-human-gate",
+                ).apply()
+            self.assertEqual(result["status"], "candidate_ready")
+
     def test_dry_run_idempotent_resume_and_non_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime"
