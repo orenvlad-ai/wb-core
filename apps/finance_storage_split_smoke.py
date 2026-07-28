@@ -700,6 +700,105 @@ class MigrationSmoke(unittest.TestCase):
             )
             self.assertEqual(blocker["services"], [active_service])
 
+    def test_snapshot_plan_allows_exact_drainable_autoanswers_oneshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=1)
+            service = {
+                "unit": "wb-core-autoanswers-worker.service",
+                "return_code": 0,
+                "load_state": "loaded",
+                "active_state": "activating",
+                "sub_state": "start",
+                "unit_file_state": "static",
+                "main_pid": 4242,
+                "result": "success",
+                "exec_main_status": "0",
+                "last_trigger": "",
+                "next_trigger": "",
+            }
+            timer = {
+                "unit": "wb-core-autoanswers-worker.timer",
+                "return_code": 0,
+                "load_state": "loaded",
+                "active_state": "active",
+                "sub_state": "running",
+                "unit_file_state": "enabled",
+                "main_pid": 0,
+                "result": "success",
+                "exec_main_status": "",
+                "last_trigger": "now",
+                "next_trigger": "",
+            }
+            readonly_service = {
+                **service,
+                "unit": "wb-core-autoanswers-readonly-sync.service",
+                "main_pid": 4243,
+            }
+            readonly_timer = {
+                **timer,
+                "unit": "wb-core-autoanswers-readonly-sync.timer",
+            }
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[
+                    service,
+                    timer,
+                    readonly_service,
+                    readonly_timer,
+                ],
+            ):
+                plan = FinanceStorageCoherentSnapshot(
+                    runtime,
+                    deployed_sha=DEPLOYED_SHA,
+                    repo_root=ROOT,
+                ).build_plan()
+            self.assertTrue(plan["snapshot_allowed_by_machine_preflight"])
+            self.assertEqual(plan["blockers"], [])
+            drainable = plan["writers_and_timers"][
+                "drainable_active_services"
+            ]
+            self.assertEqual(
+                {
+                    (
+                        item["unit"],
+                        item["paired_timer"]["unit"],
+                    )
+                    for item in drainable
+                },
+                {
+                    (service["unit"], timer["unit"]),
+                    (readonly_service["unit"], readonly_timer["unit"]),
+                },
+            )
+            self.assertEqual(
+                plan["writers_and_timers"]["blocking_active_services"],
+                [],
+            )
+
+            mismatched_timer = {
+                **timer,
+                "unit_file_state": "disabled",
+            }
+            with mock.patch(
+                "packages.application.finance_storage_migration._systemd_inventory",
+                return_value=[service, mismatched_timer],
+            ):
+                blocked = FinanceStorageCoherentSnapshot(
+                    runtime,
+                    deployed_sha=DEPLOYED_SHA,
+                    repo_root=ROOT,
+                ).build_plan()
+            self.assertFalse(
+                blocked["snapshot_allowed_by_machine_preflight"]
+            )
+            blocker = next(
+                row
+                for row in blocked["blockers"]
+                if row["code"] == "active_business_writer_service"
+            )
+            self.assertEqual(blocker["services"], [service])
+
     def test_candidate_plan_ignores_transient_systemd_execution_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime"
