@@ -46,6 +46,7 @@ POLICY_FILENAME = ".auto-updates-policy.json"
 POLICY_AUDIT_FILENAME = ".auto-updates-policy-audit.jsonl"
 WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
 RESTORE_LOCK_FILENAME = ".business-data-maintenance-restore.lock"
+QUIET_CONFIRMED_HOLD_CONTINUITY_KIND = "quiet_confirmed_hold"
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -1410,11 +1411,11 @@ def _validated_autoanswers_restore_readback(
     if desired is False and lifecycle_state != "off":
         failures.append("lifecycle_state")
     stop_reason = str(candidate.get("stop_reason") or "")
-    if stop_reason and not (
-        desired is False
-        and str(candidate.get("business_mode") or "") == "off"
-        and stop_reason == "master_switch_off"
-    ):
+    from packages.application.wb_autoanswers_lifecycle import (
+        BLOCKING_STOP_REASONS,
+    )
+
+    if stop_reason in BLOCKING_STOP_REASONS:
         failures.append("stop_reason")
     if str(candidate.get("last_error") or ""):
         failures.append("last_error")
@@ -2036,19 +2037,70 @@ def _pre_hold_service_continuity(
     }
 
 
+def _restore_service_continuity(
+    runtime_dir: Path,
+    *,
+    maintenance_state: Mapping[str, Any],
+    current_status: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Capture either the legacy active generation or a proven quiet hold."""
+
+    phase = str(maintenance_state.get("phase") or "")
+    if phase in {"holding", "prepared"}:
+        return _pre_hold_service_continuity(
+            runtime_dir,
+            maintenance_state=maintenance_state,
+            current_status=current_status,
+        )
+    barrier = barrier_status(runtime_dir)
+    if (
+        phase != "held"
+        or current_status.get("quiet") is not True
+        or barrier.get("active") is not True
+        or str(barrier.get("phase") or "") not in {"held", "restoring"}
+        or barrier.get("hold_confirmed") is not True
+    ):
+        raise RuntimeError(
+            "restore continuity requires either an exact pre-hold service "
+            "generation or a quiet confirmed hold"
+        )
+    payload = {
+        "boundary_kind": QUIET_CONFIRMED_HOLD_CONTINUITY_KIND,
+        "barrier_window_id": str(barrier.get("window_id") or ""),
+        "barrier_plan_fingerprint": str(
+            barrier.get("plan_fingerprint") or ""
+        ),
+        "hold_started_at": str(
+            maintenance_state.get("hold_started_at") or ""
+        ),
+        "services": [],
+    }
+    if not payload["hold_started_at"]:
+        raise RuntimeError(
+            "quiet confirmed hold lacks an exact maintenance timestamp"
+        )
+    return {
+        **payload,
+        "fingerprint": _stable_fingerprint(payload),
+    }
+
+
 def _validated_pre_hold_service_continuity_evidence(
     runtime_dir: Path,
     *,
     maintenance_state: Mapping[str, Any],
     evidence: Mapping[str, Any],
+    current_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidate = dict(evidence or {})
+    boundary_kind = str(candidate.get("boundary_kind") or "")
     if str(maintenance_state.get("phase") or "") not in {
         "holding",
         "prepared",
+        "held",
     }:
         raise RuntimeError(
-            "persisted pre-hold service continuity requires holding/prepared state"
+            "persisted restore continuity is outside an exact maintenance phase"
         )
     services = [
         dict(item)
@@ -2065,6 +2117,40 @@ def _validated_pre_hold_service_continuity_evidence(
         "hold_started_at": str(candidate.get("hold_started_at") or ""),
         "services": services,
     }
+    if boundary_kind:
+        payload = {
+            "boundary_kind": boundary_kind,
+            **payload,
+        }
+    if boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND:
+        barrier = barrier_status(runtime_dir)
+        if (
+            services
+            or str(candidate.get("fingerprint") or "")
+            != _stable_fingerprint(payload)
+            or str(maintenance_state.get("phase") or "") != "held"
+            or not isinstance(current_status, Mapping)
+            or current_status.get("quiet") is not True
+            or barrier.get("active") is not True
+            or str(barrier.get("phase") or "")
+            not in {"held", "restoring"}
+            or barrier.get("hold_confirmed") is not True
+            or payload["barrier_window_id"]
+            != str(barrier.get("window_id") or "")
+            or payload["barrier_plan_fingerprint"]
+            != str(barrier.get("plan_fingerprint") or "")
+            or payload["hold_started_at"]
+            != str(maintenance_state.get("hold_started_at") or "")
+        ):
+            raise RuntimeError(
+                "persisted quiet confirmed-hold continuity drifted"
+            )
+        return {
+            **payload,
+            "fingerprint": str(candidate["fingerprint"]),
+        }
+    if boundary_kind:
+        raise RuntimeError("persisted restore continuity kind is invalid")
     if (
         not services
         or str(candidate.get("fingerprint") or "")
@@ -2137,6 +2223,20 @@ def _verify_pre_hold_service_continuity(
     systemd: SystemdClient,
     evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    boundary_kind = str(evidence.get("boundary_kind") or "")
+    if boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND:
+        if list(evidence.get("services") or []):
+            raise RuntimeError(
+                "quiet confirmed-hold continuity contains a service"
+            )
+        payload = {
+            "boundary_kind": boundary_kind,
+            "services": [],
+        }
+        return {
+            **payload,
+            "fingerprint": _stable_fingerprint(payload),
+        }
     readback: list[dict[str, Any]] = []
     for expected_raw in evidence.get("services") or []:
         expected = dict(expected_raw)
@@ -2445,6 +2545,7 @@ def maintenance_restore(
                 runtime_dir,
                 maintenance_state=maintenance_state,
                 evidence=pre_hold_service_continuity_evidence,
+                current_status=before,
             )
         )
         if not before["quiet"]:
@@ -3063,7 +3164,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "status": "ready",
             "maintenance": status,
-            "service_continuity": _pre_hold_service_continuity(
+            "service_continuity": _restore_service_continuity(
                 runtime_dir,
                 maintenance_state=maintenance_state,
                 current_status=status,

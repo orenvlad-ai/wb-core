@@ -33,6 +33,7 @@ VALID_STATUSES = frozenset(
 RESTORE_DEADLINE_SECONDS = 10_500
 HEARTBEAT_INTERVAL_SECONDS = 5.0
 STALE_HEARTBEAT_SECONDS = 30.0
+QUIET_CONFIRMED_HOLD_CONTINUITY_KIND = "quiet_confirmed_hold"
 
 
 class MaintenanceRestoreJobError(RuntimeError):
@@ -171,15 +172,6 @@ def submit_job(
             plan_fingerprint=plan_fingerprint,
         )
     else:
-        _validate_recovery_boundary(
-            runtime_dir=runtime_dir,
-            expected_revision=expected_revision,
-            window_id=window_id,
-            plan_fingerprint=plan_fingerprint,
-            actor=actor,
-            reason=reason,
-            allow_resumed_policy=False,
-        )
         service_continuity = _require_service_continuity(
             (
                 continuity_reader()
@@ -193,6 +185,16 @@ def submit_job(
             expected_fingerprint=service_continuity_fingerprint,
             window_id=window_id,
             plan_fingerprint=plan_fingerprint,
+        )
+        _validate_recovery_boundary(
+            runtime_dir=runtime_dir,
+            expected_revision=expected_revision,
+            window_id=window_id,
+            plan_fingerprint=plan_fingerprint,
+            actor=actor,
+            reason=reason,
+            allow_resumed_policy=False,
+            service_continuity=service_continuity,
         )
 
     material = {
@@ -258,6 +260,7 @@ def submit_job(
             actor=actor,
             reason=reason,
             allow_resumed_policy=existing_request,
+            service_continuity=service_continuity,
         )
         job_dir = _job_directory(runtime_dir, job_id, create=True)
         with _exclusive_lock(job_dir / "job.lock"):
@@ -436,6 +439,7 @@ def resume_failed_job(
             actor=str(request["actor"]),
             reason=str(request["reason"]),
             allow_resumed_policy=False,
+            service_continuity=expected_continuity,
         )
         current_continuity = _require_service_continuity(
             (
@@ -904,6 +908,9 @@ def run_worker(
                     actor=str(request["actor"]),
                     reason=str(request["reason"]),
                     allow_resumed_policy=False,
+                    service_continuity=dict(
+                        request.get("service_continuity") or {}
+                    ),
                 )
                 current_continuity = _require_service_continuity(
                     _capture_service_continuity(
@@ -1189,6 +1196,9 @@ def _effective_restore_revision(
         actor=str(request["actor"]),
         reason=str(request["reason"]),
         allow_resumed_policy=True,
+        service_continuity=dict(
+            request.get("service_continuity") or {}
+        ),
     )
     maintenance = boundary["maintenance"]
     policy = boundary["policy"]
@@ -1208,12 +1218,33 @@ def _validate_recovery_boundary(
     actor: str,
     reason: str,
     allow_resumed_policy: bool,
+    service_continuity: Mapping[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    boundary_kind = str(
+        service_continuity.get("boundary_kind") or ""
+    )
     barrier = _read_json(
         runtime_dir / ".business-data-write-barrier.json",
         label="write barrier",
     )
-    if (
+    if boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND:
+        if (
+            barrier.get("active") is not True
+            or str(barrier.get("phase") or "")
+            not in {"held", "restoring"}
+            or barrier.get("hold_confirmed") is not True
+            or str(barrier.get("window_id") or "") != window_id
+            or str(barrier.get("plan_fingerprint") or "")
+            != plan_fingerprint
+        ):
+            raise MaintenanceRestoreJobError(
+                "exact quiet confirmed barrier identity is unavailable"
+            )
+    elif boundary_kind:
+        raise MaintenanceRestoreJobError(
+            "restore continuity kind is not supported"
+        )
+    elif (
         barrier.get("active") is not True
         or str(barrier.get("phase") or "") != "acquiring"
         or barrier.get("hold_confirmed") is not False
@@ -1228,7 +1259,12 @@ def _validate_recovery_boundary(
         label="maintenance state",
     )
     phase = str(maintenance.get("phase") or "")
-    if phase not in {"holding", "restored"}:
+    allowed_phases = (
+        {"held", "restored"}
+        if boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
+        else {"holding", "restored"}
+    )
+    if phase not in allowed_phases:
         raise MaintenanceRestoreJobError(
             "maintenance state is outside the exact recovery phase"
         )
@@ -1291,6 +1327,9 @@ def _validated_terminal_readback(
         actor=str(request["actor"]),
         reason=str(request["reason"]),
         allow_resumed_policy=True,
+        service_continuity=dict(
+            request.get("service_continuity") or {}
+        ),
     )
     maintenance = boundary["maintenance"]
     policy = boundary["policy"]
@@ -1330,6 +1369,7 @@ def _validated_terminal_readback(
         expected=dict(request.get("service_continuity") or {}),
         readback=continuity,
     )
+    barrier = boundary["barrier"]
     return {
         "maintenance_phase": "restored",
         "exact_prior_state_restored": True,
@@ -1337,8 +1377,10 @@ def _validated_terminal_readback(
         "policy_revision": int(policy["revision"]),
         "master_desired": True,
         "barrier_active": True,
-        "barrier_phase": "acquiring",
-        "barrier_hold_confirmed": False,
+        "barrier_phase": str(barrier.get("phase") or ""),
+        "barrier_hold_confirmed": bool(
+            barrier.get("hold_confirmed")
+        ),
         "window_id": str(request["window_id"]),
         "plan_fingerprint": str(request["plan_fingerprint"]),
         "pre_hold_service_continuity_readback": continuity,
@@ -1350,6 +1392,24 @@ def _validate_terminal_service_continuity(
     expected: Mapping[str, Any],
     readback: Mapping[str, Any],
 ) -> None:
+    boundary_kind = str(expected.get("boundary_kind") or "")
+    if boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND:
+        payload = {
+            "boundary_kind": boundary_kind,
+            "services": [],
+        }
+        if (
+            list(expected.get("services") or [])
+            or str(readback.get("boundary_kind") or "") != boundary_kind
+            or list(readback.get("services") or [])
+            or str(readback.get("fingerprint") or "")
+            != _fingerprint(payload)
+        ):
+            raise MaintenanceRestoreJobError(
+                "terminal quiet confirmed-hold continuity disagrees with "
+                "the request"
+            )
+        return
     expected_services = {
         str(item.get("unit") or ""): dict(item)
         for item in expected.get("services") or []
@@ -1831,6 +1891,7 @@ def _require_service_continuity(
     plan_fingerprint: str,
 ) -> dict[str, Any]:
     candidate = dict(value or {})
+    boundary_kind = str(candidate.get("boundary_kind") or "")
     services = [
         dict(item)
         for item in candidate.get("services") or []
@@ -1846,8 +1907,16 @@ def _require_service_continuity(
         "hold_started_at": str(candidate.get("hold_started_at") or ""),
         "services": services,
     }
+    if boundary_kind:
+        payload = {
+            "boundary_kind": boundary_kind,
+            **payload,
+        }
     fingerprint = _require_fingerprint(
         str(candidate.get("fingerprint") or "")
+    )
+    quiet_confirmed = (
+        boundary_kind == QUIET_CONFIRMED_HOLD_CONTINUITY_KIND
     )
     if (
         fingerprint != expected_fingerprint
@@ -1855,11 +1924,17 @@ def _require_service_continuity(
         or payload["barrier_window_id"] != window_id
         or payload["barrier_plan_fingerprint"] != plan_fingerprint
         or not payload["hold_started_at"]
-        or not services
+        or (quiet_confirmed and bool(services))
+        or (not quiet_confirmed and (bool(boundary_kind) or not services))
     ):
         raise MaintenanceRestoreJobError(
-            "exact pre-hold service continuity fingerprint/boundary mismatch"
+            "exact restore continuity fingerprint/boundary mismatch"
         )
+    if quiet_confirmed:
+        return {
+            **payload,
+            "fingerprint": fingerprint,
+        }
     seen: set[str] = set()
     for service in services:
         unit = str(service.get("unit") or "")
