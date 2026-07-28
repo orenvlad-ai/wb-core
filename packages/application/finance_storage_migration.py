@@ -1136,6 +1136,126 @@ class FinanceStorageCoherentSnapshot:
             "maintenance_held_at": str(maintenance.get("held_at") or ""),
         }
 
+    def read_status(
+        self,
+        *,
+        reviewed_plan: Mapping[str, Any],
+        expected_fingerprint: str,
+        approval_reference: str,
+    ) -> dict[str, Any]:
+        """Read one exact persisted snapshot without requiring an active hold."""
+
+        if (
+            str(reviewed_plan.get("contract_version") or "")
+            != SNAPSHOT_PLAN_CONTRACT
+            or str(reviewed_plan.get("mode") or "") != "snapshot_dry_run"
+            or str(reviewed_plan.get("fingerprint") or "")
+            != str(expected_fingerprint or "")
+            or not bool(
+                reviewed_plan.get("snapshot_allowed_by_machine_preflight")
+            )
+        ):
+            raise FinanceStorageMigrationError(
+                "reviewed coherent snapshot plan is invalid or blocked"
+            )
+        if not str(approval_reference or "").strip():
+            raise FinanceStorageMigrationError(
+                "audited snapshot authorization reference is required"
+            )
+        target = dict(reviewed_plan.get("target_snapshot") or {})
+        snapshot_root = Path(str(target.get("snapshot_root") or "")).resolve()
+        database_path = Path(str(target.get("database_path") or "")).resolve()
+        manifest_path = Path(str(target.get("manifest_path") or "")).resolve()
+        try:
+            snapshot_root.relative_to(self.runtime_dir)
+            database_path.relative_to(snapshot_root)
+            manifest_path.relative_to(snapshot_root)
+        except ValueError as exc:
+            raise FinanceStorageMigrationError(
+                "coherent snapshot target escapes the canonical runtime"
+            ) from exc
+        if (
+            database_path.parent != snapshot_root
+            or manifest_path.parent != snapshot_root
+        ):
+            raise FinanceStorageMigrationError(
+                "coherent snapshot target paths are not exact"
+            )
+        existing = _load_private_json(
+            manifest_path,
+            label="coherent snapshot manifest",
+        )
+        evidence_material = {
+            key: value
+            for key, value in existing.items()
+            if key != "evidence_fingerprint"
+        }
+        if (
+            str(existing.get("contract_version") or "")
+            != SNAPSHOT_CONTRACT
+            or str(existing.get("snapshot_plan_fingerprint") or "")
+            != str(expected_fingerprint)
+            or str(existing.get("snapshot_id") or "")
+            != str(target.get("snapshot_id") or "")
+            or str(existing.get("deployed_sha") or "")
+            != self.deployed_sha
+            or str(existing.get("approval_reference") or "")
+            != str(approval_reference).strip()
+            or Path(str(existing.get("database_path") or "")).resolve()
+            != database_path
+            or not database_path.is_file()
+            or existing.get("snapshot_identity")
+            != _destination_path_identity(database_path)
+            or str(existing.get("evidence_fingerprint") or "")
+            != _digest(evidence_material)
+        ):
+            raise FinanceStorageMigrationError(
+                "existing snapshot manifest does not match reviewed plan"
+            )
+        capture_intent = dict(existing.get("capture_intent") or {})
+        intent_path = Path(str(capture_intent.get("path") or "")).resolve()
+        if (
+            intent_path != snapshot_root / "snapshot_capture_intent.json"
+            or not str(capture_intent.get("fingerprint") or "").startswith(
+                "sha256:"
+            )
+        ):
+            raise FinanceStorageMigrationError(
+                "existing snapshot capture intent binding is invalid"
+            )
+        intent = _load_private_json(
+            intent_path,
+            label="coherent snapshot capture intent",
+        )
+        if (
+            str(intent.get("fingerprint") or "")
+            != str(capture_intent["fingerprint"])
+            or _digest(
+                {
+                    key: value
+                    for key, value in intent.items()
+                    if key != "fingerprint"
+                }
+            )
+            != str(intent.get("fingerprint") or "")
+            or intent.get("source_identity")
+            != existing.get("source_identity")
+            or str(intent.get("snapshot_plan_fingerprint") or "")
+            != str(expected_fingerprint)
+            or str(intent.get("database_path") or "") != str(database_path)
+            or str(intent.get("manifest_path") or "") != str(manifest_path)
+        ):
+            raise FinanceStorageMigrationError(
+                "existing snapshot capture intent does not match its manifest"
+            )
+        return {
+            "contract_version": SNAPSHOT_CONTRACT,
+            "status": str(existing.get("status") or "captured_unverified"),
+            "idempotent": True,
+            "snapshot_manifest_path": str(manifest_path),
+            "snapshot": existing,
+        }
+
     def create(
         self,
         *,
@@ -1182,36 +1302,10 @@ class FinanceStorageCoherentSnapshot:
                 "coherent snapshot target paths are not exact"
             )
         if manifest_path.is_file():
-            existing = _load_private_json(
-                manifest_path,
-                label="coherent snapshot manifest",
-            )
-            if (
-                str(existing.get("contract_version") or "")
-                == SNAPSHOT_CONTRACT
-                and str(existing.get("snapshot_plan_fingerprint") or "")
-                == str(expected_fingerprint)
-                and str(existing.get("snapshot_id") or "")
-                == str(target["snapshot_id"])
-                and str(existing.get("deployed_sha") or "")
-                == self.deployed_sha
-                and str(existing.get("approval_reference") or "")
-                == str(approval_reference).strip()
-                and Path(str(existing.get("database_path") or "")).resolve()
-                == database_path
-                and Path(str(existing.get("database_path") or "")).is_file()
-                and existing.get("snapshot_identity")
-                == _destination_path_identity(database_path)
-            ):
-                return {
-                    "contract_version": SNAPSHOT_CONTRACT,
-                    "status": str(existing.get("status") or "captured_unverified"),
-                    "idempotent": True,
-                    "snapshot_manifest_path": str(manifest_path),
-                    "snapshot": existing,
-                }
-            raise FinanceStorageMigrationError(
-                "existing snapshot manifest does not match reviewed plan"
+            return self.read_status(
+                reviewed_plan=current_plan,
+                expected_fingerprint=expected_fingerprint,
+                approval_reference=approval_reference,
             )
         fresh_vfs = os.statvfs(self.runtime_dir)
         fresh_free = int(fresh_vfs.f_bavail * fresh_vfs.f_frsize)
@@ -1242,9 +1336,40 @@ class FinanceStorageCoherentSnapshot:
             source.row_factory = sqlite3.Row
             source.execute("PRAGMA query_only=ON")
             source_before = _source_identity(source_path, source)
-            if source_before != current_plan["source"]["identity"]:
+            planned_source_identity = dict(
+                current_plan["source"]["identity"]
+            )
+            stable_identity_keys = (
+                "path",
+                "device",
+                "inode",
+                "page_size",
+                "schema_digest",
+                "journal_mode",
+                "query_only",
+            )
+            stable_identity_drift = [
+                key
+                for key in stable_identity_keys
+                if source_before.get(key) != planned_source_identity.get(key)
+            ]
+            if stable_identity_drift:
                 raise FinanceStorageMigrationError(
-                    "source identity drifted before coherent snapshot"
+                    "source stable identity drifted before coherent snapshot: "
+                    + ",".join(stable_identity_drift)
+                )
+            actual_source_bytes = max(
+                int(source_before["size_bytes"]),
+                int(source_before["allocated_page_bytes"]),
+            )
+            reserve_bytes = int(
+                current_plan["capacity"]["post_snapshot_reserve_bytes"]
+            )
+            actual_required_bytes = actual_source_bytes + reserve_bytes
+            if fresh_free < actual_required_bytes:
+                raise FinanceStorageMigrationError(
+                    "snapshot capacity became insufficient after held-source "
+                    "recapture"
                 )
             fresh_openers = _process_openers(source_path)
             fresh_systemd = _systemd_inventory()
@@ -1270,7 +1395,8 @@ class FinanceStorageCoherentSnapshot:
                 "approval_reference": str(
                     approval_reference
                 ).strip(),
-                "source_identity": current_plan["source"]["identity"],
+                "planned_source_identity": planned_source_identity,
+                "source_identity": source_before,
                 "database_path": str(database_path),
                 "manifest_path": str(manifest_path),
                 "maintenance_state_fingerprint": str(
@@ -1387,7 +1513,26 @@ class FinanceStorageCoherentSnapshot:
             "approval_reference": str(approval_reference).strip(),
             "deployed_sha": self.deployed_sha,
             "database_path": str(database_path),
-            "source_identity": current_plan["source"]["identity"],
+            "planned_source_identity": planned_source_identity,
+            "source_identity": source_before,
+            "held_source_recapture": {
+                "classification": (
+                    "exact_plan_identity"
+                    if source_before == planned_source_identity
+                    else "bounded_data_drift_recaptured"
+                ),
+                "stable_identity_keys": list(stable_identity_keys),
+                "stable_identity_drift": stable_identity_drift,
+                "planned_source_bytes": max(
+                    int(planned_source_identity["size_bytes"]),
+                    int(planned_source_identity["allocated_page_bytes"]),
+                ),
+                "actual_source_bytes": actual_source_bytes,
+                "fresh_available_bytes": fresh_free,
+                "post_snapshot_reserve_bytes": reserve_bytes,
+                "actual_required_bytes": actual_required_bytes,
+                "capacity_sufficient": True,
+            },
             "snapshot_identity": _destination_path_identity(database_path),
             "hold_evidence": hold_evidence,
             "capture_intent": {

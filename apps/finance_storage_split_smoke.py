@@ -690,6 +690,7 @@ class MigrationSmoke(unittest.TestCase):
             "maintenance_restore": True,
             "barrier_release": True,
             "durable_restore_submit_status": True,
+            "durable_restore_inventory": True,
             "durable_restore_resume": True,
             "restore_systemd_template": True,
         }
@@ -827,16 +828,139 @@ class MigrationSmoke(unittest.TestCase):
                 window_id=window_id,
                 plan_fingerprint=str(plan["fingerprint"]),
             )
+            restoring = validate_recovery_preflight(
+                **common,
+                deploy_lease=self._recovery_lease(),
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+            )
+            self.assertEqual(
+                restoring["boundary_classification"],
+                "exact_restore_release_resume",
+            )
+
+    def test_snapshot_recaptures_bounded_data_drift_after_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            source_path = _create_monolith(runtime, rows=2)
+            snapshot = FinanceStorageCoherentSnapshot(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+            )
+            plan = snapshot.build_plan()
+            planned_identity = dict(plan["source"]["identity"])
+            with closing(sqlite3.connect(source_path)) as conn:
+                conn.execute(
+                    "UPDATE unrelated_runtime_state SET payload=? "
+                    "WHERE state_key='keep'",
+                    (sqlite3.Binary(b"\x00\x01bounded-plan-drift"),),
+                )
+                conn.commit()
+            fingerprint = str(plan["fingerprint"])
+            window_id = str(plan["target_snapshot"]["window_id"])
+            acquire_barrier(
+                runtime,
+                window_id=window_id,
+                window_kind="snapshot",
+                plan_fingerprint=fingerprint,
+                approval_reference="program-authorization-smoke",
+                actor="smoke",
+                reason="held source recapture",
+            )
+            _create_maintenance_hold(runtime)
+            confirm_barrier_hold(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+                maintenance_state=json.loads(
+                    (
+                        runtime / ".business-data-maintenance.json"
+                    ).read_text()
+                ),
+            )
+            created = snapshot.create(
+                reviewed_plan=plan,
+                expected_fingerprint=fingerprint,
+                approval_reference="program-authorization-smoke",
+            )
+            actual_identity = dict(
+                created["snapshot"]["source_identity"]
+            )
+            self.assertNotEqual(actual_identity, planned_identity)
+            self.assertEqual(
+                created["snapshot"]["planned_source_identity"],
+                planned_identity,
+            )
+            self.assertEqual(
+                created["snapshot"]["held_source_recapture"][
+                    "classification"
+                ],
+                "bounded_data_drift_recaptured",
+            )
+            self.assertTrue(
+                created["snapshot"]["held_source_recapture"][
+                    "capacity_sufficient"
+                ]
+            )
+            status = snapshot.read_status(
+                reviewed_plan=plan,
+                expected_fingerprint=fingerprint,
+                approval_reference="program-authorization-smoke",
+            )
+            self.assertTrue(status["idempotent"])
+            self.assertEqual(
+                status["snapshot"]["source_identity"],
+                actual_identity,
+            )
+
+    def test_snapshot_rejects_schema_drift_after_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            source_path = _create_monolith(runtime, rows=2)
+            snapshot = FinanceStorageCoherentSnapshot(
+                runtime,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+            )
+            plan = snapshot.build_plan()
+            with closing(sqlite3.connect(source_path)) as conn:
+                conn.execute(
+                    "ALTER TABLE unrelated_runtime_state "
+                    "ADD COLUMN unexpected_schema TEXT"
+                )
+                conn.commit()
+            fingerprint = str(plan["fingerprint"])
+            window_id = str(plan["target_snapshot"]["window_id"])
+            acquire_barrier(
+                runtime,
+                window_id=window_id,
+                window_kind="snapshot",
+                plan_fingerprint=fingerprint,
+                approval_reference="program-authorization-smoke",
+                actor="smoke",
+                reason="schema drift rejection",
+            )
+            _create_maintenance_hold(runtime)
+            confirm_barrier_hold(
+                runtime,
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+                maintenance_state=json.loads(
+                    (
+                        runtime / ".business-data-maintenance.json"
+                    ).read_text()
+                ),
+            )
             with self.assertRaisesRegex(
-                FinanceStorageRecoveryContractError,
-                "already restoring",
+                FinanceStorageMigrationError,
+                "stable identity drifted.*schema_digest",
             ):
-                validate_recovery_preflight(
-                    **common,
-                    deploy_lease=self._recovery_lease(),
-                    downstream_capabilities=(
-                        self._recovery_capabilities()
-                    ),
+                snapshot.create(
+                    reviewed_plan=plan,
+                    expected_fingerprint=fingerprint,
+                    approval_reference="program-authorization-smoke",
                 )
 
     def test_snapshot_copy_crash_continuity(self) -> None:

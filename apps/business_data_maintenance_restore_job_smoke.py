@@ -22,6 +22,7 @@ from business_data_maintenance_restore_job import (
     _classify_worker_observation,
     _fingerprint,
     job_status,
+    restore_job_inventory,
     resume_failed_job,
     run_worker,
     submit_job,
@@ -299,6 +300,42 @@ def _successful_executor(
         }
 
     return execute
+
+
+def _assert_absent_status_and_inventory_are_fail_closed() -> None:
+    temporary, paths = _fixture()
+    try:
+        absent = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=DEPLOYED_SHA,
+            include_systemd=False,
+            allow_absent=True,
+        )
+        assert absent["status"] == "absent"
+        assert (
+            absent["worker_observation"]["classification"]
+            == "job_absent"
+        )
+        assert not absent["worker_observation"][
+            "second_restore_auto_start_allowed"
+        ]
+        empty = restore_job_inventory(
+            runtime_dir=paths["runtime_dir"],
+        )
+        assert empty["job_count"] == 0
+        assert empty["new_restore_submit_allowed"]
+        queued = _submit(paths)
+        assert queued["status"] == "queued"
+        inventory = restore_job_inventory(
+            runtime_dir=paths["runtime_dir"],
+        )
+        assert inventory["job_count"] == 1
+        assert inventory["nonterminal_job_count"] == 1
+        assert not inventory["new_restore_submit_allowed"]
+        assert not inventory["second_restore_auto_start_allowed"]
+    finally:
+        temporary.cleanup()
 
 
 def _assert_quiet_confirmed_hold_restore_is_durable() -> None:
@@ -1506,6 +1543,7 @@ def _assert_submitter_disconnect_does_not_own_worker() -> None:
 
 
 def run() -> None:
+    _assert_absent_status_and_inventory_are_fail_closed()
     _assert_quiet_confirmed_hold_restore_is_durable()
     _assert_success_and_terminal_idempotency()
     _assert_continuity_subprocess_and_fingerprint_binding()

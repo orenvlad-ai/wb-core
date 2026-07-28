@@ -116,6 +116,9 @@ def _downstream_recovery_capabilities() -> dict[str, bool]:
         "durable_restore_submit_status": (
             ROOT / "apps" / "business_data_maintenance_restore_job.py"
         ).is_file(),
+        "durable_restore_inventory": (
+            ROOT / "apps" / "business_data_maintenance_restore_job.py"
+        ).is_file(),
         "durable_restore_resume": RESTORE_MAX_RESUME_SEQUENCE >= 1,
         "restore_systemd_template": restore_template_exact,
     }
@@ -229,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
             "health",
             "shadow-read",
             "snapshot-plan",
+            "snapshot-status",
             "snapshot-create",
             "snapshot-integrity",
             "stale-writer-plan",
@@ -579,6 +583,25 @@ def main(argv: list[str] | None = None) -> int:
             deployed_sha=deployed_sha,
             repo_root=args.repo_root,
         ).build_plan()
+    elif args.action == "snapshot-status":
+        if args.snapshot_plan_file is None:
+            raise SystemExit(
+                "--snapshot-plan-file is required for snapshot-status"
+            )
+        reviewed_plan = json.loads(
+            args.snapshot_plan_file.expanduser().read_text(encoding="utf-8")
+        )
+        if not isinstance(reviewed_plan, dict):
+            raise SystemExit("--snapshot-plan-file must contain a JSON object")
+        payload = FinanceStorageCoherentSnapshot(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).read_status(
+            reviewed_plan=reviewed_plan,
+            expected_fingerprint=args.confirm_fingerprint,
+            approval_reference=args.approval_reference,
+        )
     elif args.action == "snapshot-create":
         if args.snapshot_plan_file is None:
             raise SystemExit(
