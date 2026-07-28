@@ -3633,6 +3633,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
         in {
             "apply",
             "snapshot-create",
+            "stale-writer-stop",
             "cutover-apply",
             "rollback-prepare",
             "rollback-apply",
@@ -4101,6 +4102,8 @@ def _run_remote_finance_storage_split_action(
         "snapshot-plan",
         "snapshot-create",
         "snapshot-integrity",
+        "stale-writer-plan",
+        "stale-writer-stop",
         "shadow-status",
         "shadow-activate",
         "shadow-reconcile",
@@ -4118,6 +4121,7 @@ def _run_remote_finance_storage_split_action(
         "apply",
         "snapshot-create",
         "snapshot-integrity",
+        "stale-writer-stop",
         "shadow-activate",
         "shadow-reconcile",
         "shadow-verify",
@@ -4263,6 +4267,39 @@ def _run_remote_finance_storage_split_action(
                 "Finance storage snapshot-integrity requires "
                 "--source-snapshot-manifest"
             )
+    elif action == "stale-writer-stop":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Finance stale-writer stop requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_stale_writer_recovery_plan_v1"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or str(plan.get("mode") or "")
+            != "stale_writer_recovery_dry_run"
+            or not bool(plan.get("stop_allowed_by_machine_preflight"))
+        ):
+            raise ValueError(
+                "Finance stale-writer recovery plan is not ready"
+            )
+        if not approval_reference.strip():
+            raise ValueError(
+                "Finance stale-writer stop requires --approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--stale-writer-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+            ]
+        )
     elif action in {
         "shadow-status",
         "shadow-activate",
@@ -4392,6 +4429,7 @@ def _run_remote_finance_storage_split_action(
             if action in {
                 "apply",
                 "snapshot-create",
+                "stale-writer-stop",
                 "shadow-reconcile",
                 "shadow-verify",
                 "live-tail-apply",
@@ -4419,12 +4457,38 @@ def _run_remote_finance_storage_split_action(
         raise RuntimeError("Finance storage split runner returned invalid JSON") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("Finance storage split runner returned non-object JSON")
-    if action in {"dry-run", "health", "snapshot-plan"}:
+    if action in {
+        "dry-run",
+        "health",
+        "snapshot-plan",
+        "stale-writer-plan",
+    }:
         if action == "dry-run" and (
             payload.get("query_only_contract", {}).get("production_mutation_count") != 0
             or payload.get("query_only_contract", {}).get("destination_bytes_created") != 0
         ):
             raise RuntimeError("Finance storage dry-run did not prove zero mutation/bytes")
+        if action == "stale-writer-plan" and (
+            (payload.get("action") or {}).get(
+                "business_data_mutation_count"
+            )
+            != 0
+            or (payload.get("action") or {}).get(
+                "finance_storage_mutation_count"
+            )
+            != 0
+        ):
+            raise RuntimeError(
+                "Finance stale-writer plan did not prove zero business/data mutation"
+            )
+    elif action == "stale-writer-stop" and (
+        str(payload.get("status") or "")
+        not in {"stopped", "already_completed"}
+        or int(payload.get("stop_count") or 0) not in {0, 1}
+    ):
+        raise RuntimeError(
+            "Finance stale-writer stop lacks exact terminal readback"
+        )
     elif action == "apply" and bool(payload.get("global_manifest_switched")):
         raise RuntimeError("candidate builder unexpectedly switched the global manifest")
     elif action == "cutover-apply" and not bool(
@@ -6715,6 +6779,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_snapshot_integrity.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="snapshot-integrity",
+    )
+
+    finance_storage_stale_writer_plan = subparsers.add_parser(
+        "finance-storage-stale-writer-plan",
+        help=(
+            "Build a read-only exact-generation recovery plan for the "
+            "bounded closure-retry oneshot; never stop a process."
+        ),
+    )
+    finance_storage_stale_writer_plan.add_argument("--output", required=True)
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_stale_writer_plan
+    )
+    finance_storage_stale_writer_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="stale-writer-plan",
+    )
+
+    finance_storage_stale_writer_stop = subparsers.add_parser(
+        "finance-storage-stale-writer-stop",
+        help=(
+            "Stop only one reviewed stale closure-retry generation while "
+            "preserving its timer and owner policy."
+        ),
+    )
+    finance_storage_stale_writer_stop.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_stale_writer_stop.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_stale_writer_stop.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_stale_writer_stop
+    )
+    finance_storage_stale_writer_stop.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="stale-writer-stop",
     )
 
     for command_name, action_name, help_text in (

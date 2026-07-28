@@ -77,6 +77,7 @@ jobs:
         run: |
           python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated
           python3 apps/finance_migration_deploy_lease_smoke.py
+          python3 apps/finance_storage_stale_writer_recovery_smoke.py
           python3 apps/business_data_write_barrier_smoke.py
           python3 apps/business_data_maintenance_smoke.py
           python3 apps/business_data_maintenance_restore_job_smoke.py

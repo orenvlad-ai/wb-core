@@ -34,6 +34,9 @@ from packages.application.finance_storage_migration import (
     FinanceStorageShadowRunner,
     FinanceStorageShadowVerifier,
 )
+from packages.application.finance_storage_stale_writer_recovery import (
+    FinanceStorageStaleWriterRecovery,
+)
 from packages.application.storage_registry import parse_manifest
 
 
@@ -147,6 +150,8 @@ def build_parser() -> argparse.ArgumentParser:
             "snapshot-plan",
             "snapshot-create",
             "snapshot-integrity",
+            "stale-writer-plan",
+            "stale-writer-stop",
             "shadow-status",
             "shadow-activate",
             "shadow-reconcile",
@@ -172,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fault-after-chunks", type=int, default=0)
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--snapshot-plan-file", type=Path)
+    parser.add_argument("--stale-writer-plan-file", type=Path)
     parser.add_argument("--cutover-plan-file", type=Path)
     parser.add_argument("--rollback-plan-file", type=Path)
     parser.add_argument("--rollback-candidate-evidence", type=Path)
@@ -377,6 +383,35 @@ def main(argv: list[str] | None = None) -> int:
             repo_root=args.repo_root,
         ).verify_integrity(
             args.source_snapshot_manifest.expanduser().resolve()
+        )
+    elif args.action == "stale-writer-plan":
+        payload = FinanceStorageStaleWriterRecovery(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).build_plan()
+    elif args.action == "stale-writer-stop":
+        if args.stale_writer_plan_file is None:
+            raise SystemExit(
+                "--stale-writer-plan-file is required for stale-writer-stop"
+            )
+        reviewed_plan = json.loads(
+            args.stale_writer_plan_file.expanduser().read_text(
+                encoding="utf-8"
+            )
+        )
+        if not isinstance(reviewed_plan, dict):
+            raise SystemExit(
+                "--stale-writer-plan-file must contain a JSON object"
+            )
+        payload = FinanceStorageStaleWriterRecovery(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            repo_root=args.repo_root,
+        ).apply(
+            reviewed_plan=reviewed_plan,
+            expected_fingerprint=args.confirm_fingerprint,
+            approval_reference=args.approval_reference,
         )
     elif args.action == "health":
         payload = storage_health(
