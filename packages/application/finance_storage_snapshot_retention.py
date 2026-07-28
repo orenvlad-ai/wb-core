@@ -654,7 +654,7 @@ class FinanceStorageSnapshotRetention:
         stable_plan = {
             key: value
             for key, value in reviewed_plan.items()
-            if key != "fingerprint"
+            if key not in {"fingerprint", "deploy_lease"}
         }
         if _fingerprint(stable_plan) != expected_fingerprint:
             raise FinanceStorageSnapshotRetentionError(

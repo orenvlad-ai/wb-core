@@ -266,7 +266,12 @@ The implementation is deliberately inert on deploy:
 - A reviewed snapshot/cutover/rollback plan streamed over stdin is parsed once
   by the remote CLI and the same in-memory object is reused for the repeated
   recovery preflight and the mutation. A second read from exhausted stdin is
-  forbidden and covered by regression evidence before deploy.
+  forbidden and covered by regression evidence before deploy. The hosted
+  wrapper attaches the current `deploy_lease` readback only after planning.
+  That single canonical transport field is excluded from the deterministic
+  plan hash and is instead validated independently against the deployed SHA,
+  lease revision/window/phase and Actions-owned evidence fingerprint before
+  every mutation. No other reviewed field is excluded.
 - Snapshot restore uses a deterministic job id derived from deployed SHA,
   barrier window and reviewed plan fingerprint. The outer hosted wrapper first
   proves global restore inventory, submits that one repo-owned systemd job and
@@ -628,6 +633,10 @@ Closure requires:
 - Recovery-contract transition completeness and stable fingerprint; preflight
   must reject missing lease/approval/downstream capability before creating a
   barrier or destination byte.
+- Snapshot-retention, cutover and rollback apply must accept the wrapper-added
+  canonical `deploy_lease` transport evidence without changing the reviewed
+  deterministic plan fingerprint, while independently rejecting any lease
+  SHA/revision/window/phase or evidence-fingerprint drift.
 - Disconnect/crash rehearsal at each persisted transition, including snapshot
   partial/final-without-manifest, cutover post-manifest and rollback
   post-manifest exact resume; ambiguous variants must remain fail closed.
