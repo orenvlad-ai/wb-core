@@ -2880,7 +2880,7 @@ def run_business_data_maintenance_restore_job_command(
     job_action = str(args.maintenance_restore_job_action)
     action = f"business-data-maintenance-restore-{job_action}"
     _ensure_active_hosted_runtime_target(target, action=action)
-    if job_action == "submit":
+    if job_action in {"submit", "resume"}:
         _ensure_target_allows_mutation(target, action=action, dry_run=False)
     if "wb-core-business-data-maintenance-restore@.service" not in {
         unit.name for unit in target.managed_systemd_units
@@ -2982,6 +2982,44 @@ def run_business_data_maintenance_restore_job_command(
                 "--reason",
                 reason,
                 "--allow-pre-hold-service-continuity",
+            ]
+        )
+    elif job_action == "resume":
+        failure_digest = str(
+            args.expected_failure_digest or ""
+        ).strip().lower()
+        continuity_fingerprint = str(
+            args.service_continuity_fingerprint or ""
+        ).strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", failure_digest):
+            raise ValueError(
+                "same-job restore resume requires the exact first failure "
+                "digest"
+            )
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            continuity_fingerprint,
+        ):
+            raise ValueError(
+                "same-job restore resume requires the original exact "
+                "continuity fingerprint"
+            )
+        actor = str(args.actor or "").strip()
+        reason = str(args.reason or "").strip()
+        if not actor or not reason:
+            raise ValueError(
+                "same-job restore resume requires audited actor and reason"
+            )
+        runner_args.extend(
+            [
+                "--expected-failure-digest",
+                failure_digest,
+                "--service-continuity-fingerprint",
+                continuity_fingerprint,
+                "--actor",
+                actor,
+                "--reason",
+                reason,
             ]
         )
     shell_command = " && ".join(
@@ -7449,6 +7487,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     maintenance_restore_status.set_defaults(
         handler=run_business_data_maintenance_restore_job_command,
         maintenance_restore_job_action="status",
+    )
+
+    maintenance_restore_resume = subparsers.add_parser(
+        "business-data-maintenance-restore-resume",
+        help=(
+            "Explicitly resume the same first-failed durable restore once "
+            "after a reviewed recovery deploy and exact boundary readback."
+        ),
+    )
+    maintenance_restore_resume.add_argument("--deployed-sha", required=True)
+    maintenance_restore_resume.add_argument("--job-id", required=True)
+    maintenance_restore_resume.add_argument(
+        "--expected-failure-digest",
+        required=True,
+    )
+    maintenance_restore_resume.add_argument(
+        "--service-continuity-fingerprint",
+        required=True,
+    )
+    maintenance_restore_resume.add_argument("--actor", required=True)
+    maintenance_restore_resume.add_argument("--reason", required=True)
+    maintenance_restore_resume.set_defaults(
+        handler=run_business_data_maintenance_restore_job_command,
+        maintenance_restore_job_action="resume",
     )
 
     functional_emergency_dry_run = subparsers.add_parser(

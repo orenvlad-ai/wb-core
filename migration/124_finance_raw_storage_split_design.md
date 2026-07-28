@@ -124,9 +124,16 @@ The implementation is deliberately inert on deploy:
   maintenance/policy evidence; successful completion of that same bound service
   generation is accepted without guessing another writer. A bounded deadline and
   durable heartbeat classify stale, ambiguous and lost workers fail closed;
-  status never starts another restore. Barrier abort remains a separate exact
-  transition after terminal restore and independent
-  timer/writer/policy/non-target readback.
+  status never starts another restore. A first terminal failure is not
+  resubmittable. Only a reviewed recovery deploy may explicitly resume that
+  same job once, with the exact first-failure digest, unchanged original
+  continuity boundary, a single append-only deployed-SHA binding, archived
+  attempt-1 result, zero restore locks and no additional writer; a second
+  binding or automatic retry is forbidden. An actively running bounded
+  Autoanswers oneshot remains truthful `starting` evidence until its successful
+  completion/fresh tick, while an inactive stale worker still blocks. Barrier
+  abort remains a separate exact transition after terminal restore and
+  independent timer/writer/policy/non-target readback.
 - `apps/finance_storage_split.py` defaults to `dry-run`. Its staged actions
   cover coherent snapshot, candidate creation, shadow activate/reconcile/tail/
   verify, cutover plan/apply and rollback plan/prepare/apply. Candidate build,

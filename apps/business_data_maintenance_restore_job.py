@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_NAME = "business_data_maintenance_restore_job_v1"
 JOB_DIRECTORY_NAME = "business-data-maintenance-restore-jobs"
 SYSTEMD_UNIT_TEMPLATE = "wb-core-business-data-maintenance-restore@.service"
+RESUME_BINDING_FILENAME = "resume.json"
 JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DEPLOYED_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -83,6 +84,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read one durable restore request/status/result without mutation.",
     )
     _add_job_identity_arguments(status)
+
+    resume = subparsers.add_parser(
+        "resume",
+        help=(
+            "Explicitly resume the same failed job once after a reviewed "
+            "recovery deploy and exact fail-closed boundary readback."
+        ),
+    )
+    _add_job_identity_arguments(resume)
+    resume.add_argument("--expected-failure-digest", required=True)
+    resume.add_argument("--service-continuity-fingerprint", required=True)
+    resume.add_argument("--actor", required=True)
+    resume.add_argument("--reason", required=True)
 
     worker = subparsers.add_parser(
         "worker",
@@ -355,6 +369,349 @@ def submit_job(
     }
 
 
+def resume_failed_job(
+    *,
+    runtime_dir: Path,
+    app_dir: Path,
+    env_file: Path,
+    deployed_sha_file: Path,
+    job_id: str,
+    deployed_sha: str,
+    expected_failure_digest: str,
+    service_continuity_fingerprint: str,
+    actor: str,
+    reason: str,
+    starter: Callable[[str], dict[str, Any]] | None = None,
+    continuity_reader: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Explicitly rebind and resume the same failed restore at most once."""
+
+    job_id = _require_job_id(job_id)
+    deployed_sha = _require_deployed_sha(deployed_sha)
+    expected_failure_digest = _require_fingerprint(
+        expected_failure_digest
+    )
+    service_continuity_fingerprint = _require_fingerprint(
+        service_continuity_fingerprint
+    )
+    actor = _require_audit_text(actor, label="resume actor", maximum=160)
+    reason = _require_audit_text(reason, label="resume reason", maximum=500)
+    runtime_dir = _canonical_directory(runtime_dir, label="runtime")
+    app_dir = _canonical_directory(app_dir, label="application")
+    env_file = _canonical_file(env_file, label="environment")
+    deployed_sha_file = _canonical_file(
+        deployed_sha_file,
+        label="deployed SHA",
+    )
+    _verify_deployed_sha(deployed_sha_file, deployed_sha)
+    job_dir = _job_directory(runtime_dir, job_id, create=False)
+    request = _read_request(job_dir)
+    expected_continuity = _read_service_continuity(
+        job_dir,
+        request=request,
+    )
+    if request["app_dir"] != str(app_dir) or request["env_file"] != str(
+        env_file
+    ):
+        raise MaintenanceRestoreJobError(
+            "persisted restore runtime binding does not match resume"
+        )
+    if (
+        str(expected_continuity.get("fingerprint") or "")
+        != service_continuity_fingerprint
+    ):
+        raise MaintenanceRestoreJobError(
+            "resume continuity fingerprint disagrees with the exact job"
+        )
+    jobs_root = job_dir.parent
+
+    def validate_resume_boundary() -> None:
+        _validate_recovery_boundary(
+            runtime_dir=runtime_dir,
+            expected_revision=int(request["expected_revision"]),
+            window_id=str(request["window_id"]),
+            plan_fingerprint=str(request["plan_fingerprint"]),
+            actor=str(request["actor"]),
+            reason=str(request["reason"]),
+            allow_resumed_policy=False,
+        )
+        current_continuity = _require_service_continuity(
+            (
+                continuity_reader()
+                if continuity_reader is not None
+                else _capture_service_continuity(
+                    runtime_dir=runtime_dir,
+                    app_dir=app_dir,
+                    env_file=env_file,
+                )
+            ),
+            expected_fingerprint=service_continuity_fingerprint,
+            window_id=str(request["window_id"]),
+            plan_fingerprint=str(request["plan_fingerprint"]),
+        )
+        if current_continuity != expected_continuity:
+            raise MaintenanceRestoreJobError(
+                "same-job resume boundary drifted from the original "
+                "continuity evidence"
+            )
+        _prove_lock_free(
+            jobs_root / "worker.lock",
+            label="detached restore worker",
+        )
+        _prove_lock_free(
+            runtime_dir / ".business-data-maintenance-restore.lock",
+            label="business-data maintenance restore",
+        )
+
+    with _exclusive_lock(jobs_root / "submit.lock"):
+        _reject_concurrent_request(jobs_root, requested_job_id=job_id)
+        with _exclusive_lock(job_dir / "job.lock"):
+            status = _read_status(job_dir, request=request)
+            audit = _read_audit_summary(
+                job_dir,
+                request=request,
+                status=status,
+            )
+            binding_path = job_dir / RESUME_BINDING_FILENAME
+            existing_binding = binding_path.exists()
+            if existing_binding:
+                binding = _read_resume_binding(
+                    job_dir,
+                    request=request,
+                )
+                expected_binding = {
+                    "deployed_sha": deployed_sha,
+                    "expected_failure_digest": expected_failure_digest,
+                    "service_continuity_fingerprint": (
+                        service_continuity_fingerprint
+                    ),
+                    "actor": actor,
+                    "reason": reason,
+                }
+                if any(
+                    binding.get(key) != value
+                    for key, value in expected_binding.items()
+                ):
+                    raise MaintenanceRestoreJobError(
+                        "same-job resume is already bound to different evidence"
+                    )
+                archived_result = _read_job_result(
+                    job_dir,
+                    request=request,
+                    filename="attempt-1-result.json",
+                )
+                if (
+                    archived_result.get("result_digest")
+                    != expected_failure_digest
+                    or str(
+                        (archived_result.get("error") or {}).get("code")
+                        or ""
+                    )
+                    != "maintenance_restore_failed"
+                ):
+                    raise MaintenanceRestoreJobError(
+                        "archived first failure disagrees with resume binding"
+                    )
+                if (
+                    status["status"] == "failed"
+                    and int(status.get("attempt") or 0) == 1
+                ):
+                    if (
+                        str((status.get("error") or {}).get("code") or "")
+                        != "maintenance_restore_failed"
+                        or str(status.get("result_digest") or "")
+                        != expected_failure_digest
+                        or audit.get("last_event") != "failed"
+                    ):
+                        raise MaintenanceRestoreJobError(
+                            "persisted same-job resume no longer has the "
+                            "exact first terminal failure"
+                        )
+                    if (
+                        archived_result.get("error") != status.get("error")
+                    ):
+                        raise MaintenanceRestoreJobError(
+                            "archived first failure disagrees with status"
+                        )
+                if status["status"] in TERMINAL_STATUSES and int(
+                    status.get("attempt") or 0
+                ) >= 2:
+                    return _status_report(
+                        runtime_dir=runtime_dir,
+                        job_id=job_id,
+                        expected_deployed_sha=deployed_sha,
+                        include_systemd=False,
+                    )
+                if status["status"] == "running":
+                    return _status_report(
+                        runtime_dir=runtime_dir,
+                        job_id=job_id,
+                        expected_deployed_sha=deployed_sha,
+                        include_systemd=False,
+                    )
+            else:
+                if (
+                    status["status"] != "failed"
+                    or int(status.get("attempt") or 0) != 1
+                    or str((status.get("error") or {}).get("code") or "")
+                    != "maintenance_restore_failed"
+                    or str(status.get("result_digest") or "")
+                    != expected_failure_digest
+                    or audit.get("last_event") != "failed"
+                ):
+                    raise MaintenanceRestoreJobError(
+                        "same-job resume requires the exact first terminal "
+                        "maintenance restore failure"
+                    )
+                result_record = _read_job_result(
+                    job_dir,
+                    request=request,
+                )
+                if (
+                    result_record.get("result_digest")
+                    != expected_failure_digest
+                    or result_record.get("error") != status.get("error")
+                ):
+                    raise MaintenanceRestoreJobError(
+                        "failed status/result evidence disagrees"
+                    )
+                validate_resume_boundary()
+                binding_material = {
+                    "contract_name": CONTRACT_NAME,
+                    "job_id": job_id,
+                    "request_digest": request["request_digest"],
+                    "resume_sequence": 1,
+                    "previous_deployed_sha": request["deployed_sha"],
+                    "deployed_sha": deployed_sha,
+                    "expected_failure_digest": expected_failure_digest,
+                    "service_continuity_fingerprint": (
+                        service_continuity_fingerprint
+                    ),
+                    "actor": actor,
+                    "reason": reason,
+                    "created_at": _now(),
+                }
+                binding = {
+                    **binding_material,
+                    "binding_digest": _fingerprint(binding_material),
+                }
+                _atomic_write_json(
+                    job_dir / "attempt-1-result.json",
+                    result_record,
+                )
+                _atomic_write_json(binding_path, binding)
+            if existing_binding:
+                validate_resume_boundary()
+            if status["status"] == "failed" and int(
+                status.get("attempt") or 0
+            ) == 1:
+                queued = {
+                    "contract_name": CONTRACT_NAME,
+                    "job_id": job_id,
+                    "request_digest": request["request_digest"],
+                    "status": "queued",
+                    "terminal": False,
+                    "attempt": 1,
+                    "resume_sequence": 1,
+                    "updated_at": _now(),
+                }
+                _atomic_write_json(job_dir / "status.json", queued)
+                if audit.get("last_event") != "resume_queued":
+                    _append_audit(
+                        job_dir,
+                        {
+                            "event": "resume_queued",
+                            "captured_at": _now(),
+                            "attempt": 1,
+                            "resume_sequence": 1,
+                            "deployed_sha": deployed_sha,
+                            "expected_failure_digest": (
+                                expected_failure_digest
+                            ),
+                            "binding_digest": binding["binding_digest"],
+                            "actor": actor,
+                            "reason": reason,
+                        },
+                    )
+                status = queued
+            elif (
+                status["status"] == "queued"
+                and audit.get("last_event") != "resume_queued"
+            ):
+                _append_audit(
+                    job_dir,
+                    {
+                        "event": "resume_queued",
+                        "captured_at": _now(),
+                        "attempt": 1,
+                        "resume_sequence": 1,
+                        "deployed_sha": deployed_sha,
+                        "expected_failure_digest": expected_failure_digest,
+                        "binding_digest": binding["binding_digest"],
+                        "actor": actor,
+                        "reason": reason,
+                    },
+                )
+            if status["status"] not in {"queued", "start_failed"}:
+                raise MaintenanceRestoreJobError(
+                    "same-job resume is outside a startable state"
+                )
+            start_preflight_complete = False
+            try:
+                _prove_lock_free(
+                    jobs_root / "worker.lock",
+                    label="detached restore worker",
+                )
+                _prove_lock_free(
+                    runtime_dir / ".business-data-maintenance-restore.lock",
+                    label="business-data maintenance restore",
+                )
+                start_preflight_complete = True
+                unit = (starter or _start_systemd_unit)(job_id)
+            except Exception as exc:
+                start_failed = {
+                    **status,
+                    "status": "start_failed",
+                    "terminal": False,
+                    "retryable": True,
+                    "error": _error_record(
+                        code=(
+                            "systemd_resume_start_failed"
+                            if start_preflight_complete
+                            else "restore_resume_start_preflight_failed"
+                        ),
+                        exc=exc,
+                    ),
+                    "updated_at": _now(),
+                }
+                _append_audit(
+                    job_dir,
+                    {
+                        "event": "start_failed",
+                        "captured_at": _now(),
+                        "error": start_failed["error"],
+                    },
+                )
+                _atomic_write_json(job_dir / "status.json", start_failed)
+                return {
+                    **start_failed,
+                    "request": request,
+                    "resume_idempotent": existing_binding,
+                    "unit_start_requested": False,
+                }
+    return {
+        **_status_report(
+            runtime_dir=runtime_dir,
+            job_id=job_id,
+            expected_deployed_sha=deployed_sha,
+            include_systemd=False,
+        ),
+        "resume_idempotent": existing_binding,
+        "unit_start_requested": True,
+        "unit": unit,
+    }
+
+
 def job_status(
     *,
     runtime_dir: Path,
@@ -394,6 +751,10 @@ def run_worker(
     job_dir = _job_directory(runtime_dir, job_id, create=False)
     request = _read_request(job_dir)
     _read_service_continuity(job_dir, request=request)
+    deployment_binding = _effective_deployment_binding(
+        job_dir,
+        request=request,
+    )
     if request["app_dir"] != str(app_dir) or request["env_file"] != str(env_file):
         raise MaintenanceRestoreJobError(
             "persisted restore runtime binding does not match the fixed worker"
@@ -408,7 +769,7 @@ def run_worker(
         return _status_report(
             runtime_dir=runtime_dir,
             job_id=job_id,
-            expected_deployed_sha=request["deployed_sha"],
+            expected_deployed_sha=deployment_binding["deployed_sha"],
             include_systemd=False,
         )
 
@@ -439,7 +800,7 @@ def run_worker(
                 return _status_report(
                     runtime_dir=runtime_dir,
                     job_id=job_id,
-                    expected_deployed_sha=request["deployed_sha"],
+                    expected_deployed_sha=deployment_binding["deployed_sha"],
                     include_systemd=False,
                 )
             started_at = str(current.get("started_at") or _now())
@@ -474,7 +835,48 @@ def run_worker(
             )
 
         try:
-            _verify_deployed_sha(deployed_sha_file, request["deployed_sha"])
+            _verify_deployed_sha(
+                deployed_sha_file,
+                deployment_binding["deployed_sha"],
+            )
+            if int(deployment_binding.get("resume_sequence") or 0) == 1:
+                _validate_recovery_boundary(
+                    runtime_dir=runtime_dir,
+                    expected_revision=int(request["expected_revision"]),
+                    window_id=str(request["window_id"]),
+                    plan_fingerprint=str(request["plan_fingerprint"]),
+                    actor=str(request["actor"]),
+                    reason=str(request["reason"]),
+                    allow_resumed_policy=False,
+                )
+                current_continuity = _require_service_continuity(
+                    _capture_service_continuity(
+                        runtime_dir=runtime_dir,
+                        app_dir=app_dir,
+                        env_file=env_file,
+                    ),
+                    expected_fingerprint=str(
+                        deployment_binding[
+                            "service_continuity_fingerprint"
+                        ]
+                    ),
+                    window_id=str(request["window_id"]),
+                    plan_fingerprint=str(request["plan_fingerprint"]),
+                )
+                expected_continuity = _read_service_continuity(
+                    job_dir,
+                    request=request,
+                )
+                if current_continuity != expected_continuity:
+                    raise MaintenanceRestoreJobError(
+                        "same-job attempt 2 boundary drifted from the "
+                        "original continuity evidence"
+                    )
+                _prove_lock_free(
+                    runtime_dir
+                    / ".business-data-maintenance-restore.lock",
+                    label="business-data maintenance restore",
+                )
             effective_revision, already_restored = _effective_restore_revision(
                 runtime_dir=runtime_dir,
                 request=request,
@@ -499,7 +901,10 @@ def run_worker(
                     attempt=int(running["attempt"]),
                 )
             )
-            _verify_deployed_sha(deployed_sha_file, request["deployed_sha"])
+            _verify_deployed_sha(
+                deployed_sha_file,
+                deployment_binding["deployed_sha"],
+            )
             readback = _validated_terminal_readback(
                 runtime_dir=runtime_dir,
                 request=request,
@@ -1057,7 +1462,11 @@ def _status_report(
     job_dir = _job_directory(runtime_dir, job_id, create=False)
     request = _read_request(job_dir)
     _read_service_continuity(job_dir, request=request)
-    if request["deployed_sha"] != expected_deployed_sha:
+    deployment_binding = _effective_deployment_binding(
+        job_dir,
+        request=request,
+    )
+    if deployment_binding["deployed_sha"] != expected_deployed_sha:
         raise MaintenanceRestoreJobError(
             "job deployed SHA does not match status request"
         )
@@ -1070,21 +1479,12 @@ def _status_report(
     report: dict[str, Any] = {
         **status,
         "request": request,
+        "deployment_binding": deployment_binding,
         "audit": audit,
     }
     result_path = job_dir / "result.json"
     if result_path.exists():
-        result_record = _read_json(result_path, label="job result")
-        if (
-            result_record.get("contract_name") != CONTRACT_NAME
-            or result_record.get("job_id") != job_id
-            or result_record.get("request_digest")
-            != request["request_digest"]
-        ):
-            raise MaintenanceRestoreJobError("job result identity mismatch")
-        material = result_record.get("result", result_record.get("error"))
-        if result_record.get("result_digest") != _fingerprint(material):
-            raise MaintenanceRestoreJobError("job result digest mismatch")
+        result_record = _read_job_result(job_dir, request=request)
         report["result_record"] = result_record
         if "result" in result_record:
             report["result"] = result_record["result"]
@@ -1097,6 +1497,100 @@ def _status_report(
         unit=unit,
     )
     return report
+
+
+def _read_job_result(
+    job_dir: Path,
+    *,
+    request: Mapping[str, Any],
+    filename: str = "result.json",
+) -> dict[str, Any]:
+    result_record = _read_json(job_dir / filename, label="job result")
+    if (
+        result_record.get("contract_name") != CONTRACT_NAME
+        or result_record.get("job_id") != request["job_id"]
+        or result_record.get("request_digest")
+        != request["request_digest"]
+    ):
+        raise MaintenanceRestoreJobError("job result identity mismatch")
+    material = result_record.get("result", result_record.get("error"))
+    if result_record.get("result_digest") != _fingerprint(material):
+        raise MaintenanceRestoreJobError("job result digest mismatch")
+    return result_record
+
+
+def _read_resume_binding(
+    job_dir: Path,
+    *,
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    binding = _read_json(
+        job_dir / RESUME_BINDING_FILENAME,
+        label="job resume binding",
+    )
+    material = {
+        "contract_name": str(binding.get("contract_name") or ""),
+        "job_id": str(binding.get("job_id") or ""),
+        "request_digest": str(binding.get("request_digest") or ""),
+        "resume_sequence": int(binding.get("resume_sequence") or 0),
+        "previous_deployed_sha": _require_deployed_sha(
+            str(binding.get("previous_deployed_sha") or "")
+        ),
+        "deployed_sha": _require_deployed_sha(
+            str(binding.get("deployed_sha") or "")
+        ),
+        "expected_failure_digest": _require_fingerprint(
+            str(binding.get("expected_failure_digest") or "")
+        ),
+        "service_continuity_fingerprint": _require_fingerprint(
+            str(binding.get("service_continuity_fingerprint") or "")
+        ),
+        "actor": _require_audit_text(
+            str(binding.get("actor") or ""),
+            label="resume actor",
+            maximum=160,
+        ),
+        "reason": _require_audit_text(
+            str(binding.get("reason") or ""),
+            label="resume reason",
+            maximum=500,
+        ),
+        "created_at": str(binding.get("created_at") or ""),
+    }
+    if (
+        material["contract_name"] != CONTRACT_NAME
+        or material["job_id"] != request["job_id"]
+        or material["request_digest"] != request["request_digest"]
+        or material["resume_sequence"] != 1
+        or material["previous_deployed_sha"] != request["deployed_sha"]
+        or material["deployed_sha"] == request["deployed_sha"]
+        or material["service_continuity_fingerprint"]
+        != str(request["service_continuity"]["fingerprint"])
+        or not material["created_at"]
+        or binding.get("binding_digest") != _fingerprint(material)
+    ):
+        raise MaintenanceRestoreJobError(
+            "same-job resume binding identity/digest is invalid"
+        )
+    return {
+        **material,
+        "binding_digest": str(binding["binding_digest"]),
+    }
+
+
+def _effective_deployment_binding(
+    job_dir: Path,
+    *,
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    path = job_dir / RESUME_BINDING_FILENAME
+    if not path.exists():
+        return {
+            "resume_sequence": 0,
+            "deployed_sha": str(request["deployed_sha"]),
+            "request_digest": str(request["request_digest"]),
+        }
+    return _read_resume_binding(job_dir, request=request)
 
 
 def _classify_worker_observation(
@@ -1744,6 +2238,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             runtime_dir=runtime_dir,
             job_id=str(args.job_id),
             deployed_sha=str(args.deployed_sha),
+        )
+    if args.command == "resume":
+        return resume_failed_job(
+            runtime_dir=runtime_dir,
+            app_dir=app_dir,
+            env_file=env_file,
+            deployed_sha_file=deployed_sha_file,
+            job_id=str(args.job_id),
+            deployed_sha=str(args.deployed_sha),
+            expected_failure_digest=str(args.expected_failure_digest),
+            service_continuity_fingerprint=str(
+                args.service_continuity_fingerprint
+            ),
+            actor=str(args.actor),
+            reason=str(args.reason),
         )
     if args.command == "worker":
         return run_worker(

@@ -27,6 +27,7 @@ class FakeSystemd:
             WORKER_TIMER: False,
         }
         self.fail_enable = ""
+        self.active_services: set[str] = set()
         self.calls: list[tuple[str, str]] = []
 
     def unit_state(self, unit: str) -> dict:
@@ -48,7 +49,9 @@ class FakeSystemd:
         return {
             "unit": unit,
             "is_enabled": "static",
-            "is_active": "inactive",
+            "is_active": (
+                "activating" if unit in self.active_services else "inactive"
+            ),
             "properties": {"Result": "success"},
         }
 
@@ -157,6 +160,25 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(stale["lifecycle_state"], "error")
         self.assertEqual(stale["stop_reason"], "worker_unavailable")
         self.assertFalse(stale["fresh_scheduler_tick"])
+
+    def test_active_bounded_worker_extends_starting_readback(self) -> None:
+        self.set_mode("auto_all")
+        starting = self.reconcile()
+        self.assertEqual(starting["lifecycle_state"], "starting")
+        self.clock.value += timedelta(minutes=4)
+        self.systemd.active_services.add(READONLY_SERVICE)
+        readonly_only = self.lifecycle.status(suspended_by_master=False)
+        self.assertFalse(readonly_only["service_in_progress"])
+        self.assertEqual(readonly_only["lifecycle_state"], "error")
+        self.assertEqual(readonly_only["stop_reason"], "worker_unavailable")
+        self.systemd.active_services.add(WORKER_SERVICE)
+        still_starting = self.lifecycle.status(
+            suspended_by_master=False
+        )
+        self.assertTrue(still_starting["service_in_progress"])
+        self.assertEqual(still_starting["drift_status"], "matched")
+        self.assertEqual(still_starting["lifecycle_state"], "starting")
+        self.assertEqual(still_starting["stop_reason"], "")
 
     def test_master_pause_preserves_feature_mode_and_resume_uses_latest_mode(self) -> None:
         self.set_mode("manual")

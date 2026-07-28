@@ -248,6 +248,22 @@ class AutoanswersLifecycle:
             for key, item in components.items()
             if str(item.get("drift_status") or "") != "matched"
         ]
+        worker_component = dict(components.get("worker") or {})
+        service_in_progress = (
+            bool(worker_component.get("desired"))
+            and str(
+                (worker_component.get("service") or {}).get("is_active") or ""
+            )
+            in {"active", "activating", "reloading"}
+            and str(
+                (
+                    (worker_component.get("service") or {}).get("properties")
+                    or {}
+                ).get("Result")
+                or "success"
+            )
+            == "success"
+        )
         operational = self.repository.operational_status()
         budget = self.repository.budget_status()
         reconciliation = self.repository.reconciliation_status() or {}
@@ -297,8 +313,13 @@ class AutoanswersLifecycle:
             stop_reason = "budget_state_unknown"
         elif (
             stop_reason == "worker_unavailable"
-            and requested_at is not None
-            and requested_at > now - timedelta(minutes=3)
+            and (
+                service_in_progress
+                or (
+                    requested_at is not None
+                    and requested_at > now - timedelta(minutes=3)
+                )
+            )
         ):
             # A newly enabled timer has one scheduler interval to produce its
             # first post-request tick. During that bounded grace period the
@@ -374,6 +395,7 @@ class AutoanswersLifecycle:
             "budget_state": str(budget.get("budget_state") or "unknown"),
             "budget": budget,
             "fresh_scheduler_tick": fresh_tick,
+            "service_in_progress": service_in_progress,
             "requested_at": persisted.get("requested_at"),
             "policy_epoch": int(settings.policy_epoch),
             "transition_run_id": transition_run_id or None,
