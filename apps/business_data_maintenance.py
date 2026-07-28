@@ -1066,6 +1066,22 @@ def _autoanswers_process_actual_state(
         for key, value in components.items()
         if value.get("drift_status") != "matched"
     ]
+    worker_component = dict(components.get("worker") or {})
+    service_in_progress = (
+        bool(worker_component.get("desired"))
+        and str(
+            (worker_component.get("service") or {}).get("is_active") or ""
+        )
+        in {"active", "activating", "reloading"}
+        and str(
+            (
+                (worker_component.get("service") or {}).get("properties")
+                or {}
+            ).get("Result")
+            or "success"
+        )
+        == "success"
+    )
     lifecycle = dict(feature.get("lifecycle") or {})
     lifecycle_identity_matches = bool(
         lifecycle
@@ -1110,8 +1126,13 @@ def _autoanswers_process_actual_state(
         stop_reason = "run_cap_missing"
     elif (
         stop_reason == "worker_unavailable"
-        and requested_at is not None
-        and requested_at > now - timedelta(minutes=3)
+        and (
+            service_in_progress
+            or (
+                requested_at is not None
+                and requested_at > now - timedelta(minutes=3)
+            )
+        )
     ):
         # Match the feature-owned lifecycle contract: a newly resumed timer
         # receives one scheduler interval to produce its first post-request
@@ -1220,6 +1241,7 @@ def _autoanswers_process_actual_state(
         ),
         "budget": dict(feature.get("budget") or {}),
         "fresh_scheduler_tick": fresh_tick,
+        "service_in_progress": service_in_progress,
         "provenance": "feature_settings+systemd+lifecycle",
     }
 

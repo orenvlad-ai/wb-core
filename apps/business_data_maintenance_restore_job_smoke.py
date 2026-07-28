@@ -21,12 +21,14 @@ from business_data_maintenance_restore_job import (
     _classify_worker_observation,
     _fingerprint,
     job_status,
+    resume_failed_job,
     run_worker,
     submit_job,
 )
 
 
 DEPLOYED_SHA = "a" * 40
+RECOVERY_DEPLOYED_SHA = "e" * 40
 JOB_ID = "1" * 64
 SECOND_JOB_ID = "2" * 64
 WINDOW_ID = "snapshot-fixture"
@@ -547,6 +549,291 @@ def _assert_deployed_sha_drift_is_durable_failure() -> None:
         temporary.cleanup()
 
 
+def _assert_exact_failed_job_resumes_once_after_recovery_deploy() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_once(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        failed = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_once,
+        )
+        assert failed["status"] == "failed"
+        assert failed["attempt"] == 1
+        failure_digest = str(failed["result_digest"])
+        paths["deployed_sha_file"].write_text(
+            RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        resumed = resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=failure_digest,
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture-resume",
+            },
+        )
+        assert resumed["status"] == "queued"
+        assert resumed["attempt"] == 1
+        assert resumed["deployment_binding"]["resume_sequence"] == 1
+        job_dir = (
+            paths["runtime_dir"]
+            / JOB_DIRECTORY_NAME
+            / JOB_ID
+        )
+        assert (job_dir / "attempt-1-result.json").is_file()
+        try:
+            job_status(
+                runtime_dir=paths["runtime_dir"],
+                job_id=JOB_ID,
+                deployed_sha=DEPLOYED_SHA,
+                include_systemd=False,
+            )
+        except MaintenanceRestoreJobError as exc:
+            assert "deployed SHA" in str(exc)
+        else:
+            raise AssertionError("old deployed SHA read resumed job")
+        calls: list[int] = []
+        succeeded = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=_successful_executor(paths, calls),
+        )
+        assert calls == [19]
+        assert succeeded["status"] == "succeeded"
+        assert succeeded["attempt"] == 2
+        readback = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            include_systemd=False,
+        )
+        assert readback["deployment_binding"]["resume_sequence"] == 1
+        assert readback["audit"]["events"] == [
+            "queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "succeeded",
+        ]
+        repeated = resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=failure_digest,
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda _job_id: (_ for _ in ()).throw(
+                AssertionError("terminal resumed job must not start again")
+            ),
+        )
+        assert repeated["status"] == "succeeded"
+        try:
+            resume_failed_job(
+                **paths,
+                job_id=JOB_ID,
+                deployed_sha="f" * 40,
+                expected_failure_digest=failure_digest,
+                service_continuity_fingerprint=str(
+                    SERVICE_CONTINUITY["fingerprint"]
+                ),
+                actor=ACTOR,
+                reason="different recovery binding",
+                continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            )
+        except MaintenanceRestoreJobError as exc:
+            assert (
+                "deployed SHA" in str(exc)
+                or "different evidence" in str(exc)
+            )
+        else:
+            raise AssertionError("second same-job resume binding was accepted")
+    finally:
+        temporary.cleanup()
+
+
+def _assert_same_job_resume_rejects_continuity_drift_before_binding() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_once(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        failed = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_once,
+        )
+        paths["deployed_sha_file"].write_text(
+            RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        drifted_payload = {
+            **SERVICE_CONTINUITY_PAYLOAD,
+            "services": [
+                *SERVICE_CONTINUITY_PAYLOAD["services"],
+                {
+                    "unit": "wb-core-unexpected-writer.service",
+                    "main_pid": 4242,
+                    "started_at": "Tue 2026-07-28 08:00:00 UTC",
+                    "baseline_active_state": "active",
+                },
+            ],
+        }
+        drifted_continuity = {
+            **drifted_payload,
+            "fingerprint": _fingerprint(drifted_payload),
+        }
+        try:
+            resume_failed_job(
+                **paths,
+                job_id=JOB_ID,
+                deployed_sha=RECOVERY_DEPLOYED_SHA,
+                expected_failure_digest=str(failed["result_digest"]),
+                service_continuity_fingerprint=str(
+                    SERVICE_CONTINUITY["fingerprint"]
+                ),
+                actor=ACTOR,
+                reason="reviewed same-job recovery deploy",
+                continuity_reader=lambda: drifted_continuity,
+                starter=lambda _job_id: (_ for _ in ()).throw(
+                    AssertionError("continuity drift must not start a worker")
+                ),
+            )
+        except MaintenanceRestoreJobError as exc:
+            assert "continuity fingerprint" in str(exc)
+        else:
+            raise AssertionError("same-job resume accepted continuity drift")
+        job_dir = (
+            paths["runtime_dir"]
+            / JOB_DIRECTORY_NAME
+            / JOB_ID
+        )
+        assert not (job_dir / "resume.json").exists()
+        status = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=DEPLOYED_SHA,
+            include_systemd=False,
+        )
+        assert status["status"] == "failed"
+        assert status["attempt"] == 1
+        assert status["audit"]["last_event"] == "failed"
+    finally:
+        temporary.cleanup()
+
+
+def _assert_attempt_two_revalidates_continuity_inside_worker() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_once(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        failed = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_once,
+        )
+        paths["deployed_sha_file"].write_text(
+            RECOVERY_DEPLOYED_SHA + "\n",
+            encoding="utf-8",
+        )
+        resume_failed_job(
+            **paths,
+            job_id=JOB_ID,
+            deployed_sha=RECOVERY_DEPLOYED_SHA,
+            expected_failure_digest=str(failed["result_digest"]),
+            service_continuity_fingerprint=str(
+                SERVICE_CONTINUITY["fingerprint"]
+            ),
+            actor=ACTOR,
+            reason="reviewed same-job recovery deploy",
+            continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+            starter=lambda exact_job_id: {
+                "name": (
+                    "wb-core-business-data-maintenance-restore@"
+                    f"{exact_job_id}.service"
+                ),
+                "start": "fixture-resume",
+            },
+        )
+        drifted_payload = {
+            **SERVICE_CONTINUITY_PAYLOAD,
+            "services": [],
+        }
+        drifted_continuity = {
+            **drifted_payload,
+            "fingerprint": _fingerprint(drifted_payload),
+        }
+        continuity_payload = {
+            "status": "ready",
+            "service_continuity": drifted_continuity,
+        }
+        (
+            paths["app_dir"]
+            / "apps"
+            / "business_data_maintenance.py"
+        ).write_text(
+            "import json\n"
+            "print(json.dumps(" + repr(continuity_payload) + "))\n",
+            encoding="utf-8",
+        )
+        called = False
+
+        def must_not_execute(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            nonlocal called
+            called = True
+            raise AssertionError("attempt 2 executed after continuity drift")
+
+        blocked = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=must_not_execute,
+        )
+        assert not called
+        assert blocked["status"] == "failed"
+        assert blocked["attempt"] == 2
+        assert blocked["terminal"] is True
+        assert "continuity fingerprint" in blocked["error"]["message"]
+    finally:
+        temporary.cleanup()
+
+
 def _assert_worker_observation_classification() -> None:
     now = datetime(2026, 7, 28, 7, 0, tzinfo=timezone.utc)
     base = {
@@ -754,6 +1041,9 @@ def run() -> None:
     _assert_crash_resume_after_durable_restore()
     _assert_boundary_drift_rejected()
     _assert_deployed_sha_drift_is_durable_failure()
+    _assert_exact_failed_job_resumes_once_after_recovery_deploy()
+    _assert_same_job_resume_rejects_continuity_drift_before_binding()
+    _assert_attempt_two_revalidates_continuity_inside_worker()
     _assert_worker_observation_classification()
     _assert_submitter_disconnect_does_not_own_worker()
     print("business_data_maintenance_restore_job_smoke: ok")

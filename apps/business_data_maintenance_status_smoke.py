@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import sys
@@ -137,6 +137,38 @@ def _assert_autoanswers_resume_grace_ignores_stale_worker_marker() -> None:
     assert result["drift_status"] == "matched"
     assert result["lifecycle_state"] == "starting"
     assert result["stop_reason"] == ""
+
+    feature["lifecycle"]["requested_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)
+    ).isoformat()
+    active_service = {
+        **service,
+        "is_active": "activating",
+        "properties": {"Result": "success"},
+    }
+    active_status = {
+        **status,
+        "services": {
+            components["readonly_sync"].removesuffix(".timer")
+            + ".service": dict(service),
+            components["worker"].removesuffix(".timer")
+            + ".service": dict(active_service),
+        },
+    }
+    with mock.patch(
+        "apps.business_data_maintenance._autoanswers_feature_state",
+        return_value=feature,
+    ):
+        long_running = _autoanswers_process_actual_state(
+            status=active_status,
+            policy={"master_desired": True},
+            runtime_dir=Path("/unused"),
+            spec=spec,
+        )
+    assert long_running["service_in_progress"] is True
+    assert long_running["drift_status"] == "matched"
+    assert long_running["lifecycle_state"] == "starting"
+    assert long_running["stop_reason"] == ""
 
 
 def _assert_budget_hold() -> None:

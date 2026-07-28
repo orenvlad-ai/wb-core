@@ -1715,6 +1715,27 @@ def main() -> None:
             ]
         )
     )
+    maintenance_restore_resume_args = (
+        hosted_runtime.build_arg_parser().parse_args(
+            [
+                "--target-file",
+                str(hosted_runtime.DEFAULT_TARGET_FILE),
+                "business-data-maintenance-restore-resume",
+                "--deployed-sha",
+                "a" * 40,
+                "--job-id",
+                "d" * 64,
+                "--expected-failure-digest",
+                "sha256:" + "c" * 64,
+                "--service-continuity-fingerprint",
+                "sha256:" + "f" * 64,
+                "--actor",
+                "fixture_replacement_task",
+                "--reason",
+                "reviewed same-job recovery deploy",
+            ]
+        )
+    )
     promo_gc_apply_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "promo-archive-gc-apply",
@@ -1747,6 +1768,12 @@ def main() -> None:
         )
         or maintenance_restore_status_args.maintenance_restore_job_action
         != "status"
+        or maintenance_restore_resume_args.handler
+        is not (
+            hosted_runtime.run_business_data_maintenance_restore_job_command
+        )
+        or maintenance_restore_resume_args.maintenance_restore_job_action
+        != "resume"
         or promo_gc_apply_args.handler
         is not hosted_runtime.run_promo_archive_gc_command
     ):
@@ -1866,6 +1893,30 @@ def main() -> None:
     ):
         raise AssertionError(
             "hosted maintenance restore status is not exact/read-only"
+        )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed_restore_job,
+    ) as run_mock:
+        hosted_runtime.run_business_data_maintenance_restore_job_command(
+            maintenance_restore_resume_args
+        )
+    restore_resume_command = " ".join(run_mock.call_args.args[0])
+    if (
+        run_mock.call_args.kwargs.get("timeout") != 60.0
+        or " resume " not in restore_resume_command
+        or "--expected-failure-digest sha256:" + "c" * 64
+        not in restore_resume_command
+        or "--service-continuity-fingerprint sha256:" + "f" * 64
+        not in restore_resume_command
+        or "--actor fixture_replacement_task" not in restore_resume_command
+        or "reviewed same-job recovery deploy" not in restore_resume_command
+        or "--expected-revision" in restore_resume_command
+        or "--plan-fingerprint" in restore_resume_command
+    ):
+        raise AssertionError(
+            "hosted same-job restore resume lost exact recovery evidence"
         )
     finance_ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["finance-ui-flow", "--evidence-dir", "/tmp/wb-core-finance-ui-smoke"]
