@@ -246,6 +246,10 @@ The implementation is deliberately inert on deploy:
   identities and fresh capacity calculation are both persisted in the capture
   intent/manifest. Path/inode/schema/device/journal drift or insufficient
   headroom remains fail closed.
+- A reviewed snapshot/cutover/rollback plan streamed over stdin is parsed once
+  by the remote CLI and the same in-memory object is reused for the repeated
+  recovery preflight and the mutation. A second read from exhausted stdin is
+  forbidden and covered by regression evidence before deploy.
 - Snapshot restore uses a deterministic job id derived from deployed SHA,
   barrier window and reviewed plan fingerprint. The outer hosted wrapper first
   proves global restore inventory, submits that one repo-owned systemd job and

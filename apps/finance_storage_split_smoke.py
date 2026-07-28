@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps import finance_storage_split as finance_storage_cli
 from apps.finance_storage_sqlite_open_inventory import inventory
 from packages.application.finance_raw_storage import (
     FinanceOutboxConsumer,
@@ -671,6 +672,114 @@ class OutboxSmoke(unittest.TestCase):
 
 
 class MigrationSmoke(unittest.TestCase):
+    def test_streamed_snapshot_plan_is_parsed_once_and_reused(self) -> None:
+        fingerprint = "sha256:" + ("7" * 64)
+        reviewed_plan = {
+            "contract_version": (
+                "wb_core_finance_storage_snapshot_plan_v1"
+            ),
+            "mode": "snapshot_dry_run",
+            "fingerprint": fingerprint,
+            "snapshot_allowed_by_machine_preflight": True,
+            "target_snapshot": {
+                "window_id": "snapshot-single-read-smoke",
+            },
+        }
+        serialized_plan = json.dumps(reviewed_plan)
+        plan_reads: list[str] = []
+        original_read_text = Path.read_text
+
+        def read_text_once(
+            path: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> str:
+            if str(path) == "/dev/stdin":
+                plan_reads.append(str(path))
+                if len(plan_reads) > 1:
+                    raise AssertionError(
+                        "streamed reviewed plan was read more than once"
+                    )
+                return serialized_plan
+            return original_read_text(path, *args, **kwargs)
+
+        normalized_lease = {
+            "contract_version": (
+                "wb_core_finance_migration_deploy_lease_readback_v1"
+            ),
+            "policy": "finance_migration_global_deploy_hold_v1",
+            "lease": {
+                "deployed_sha": DEPLOYED_SHA,
+                "task_id": "finance-single-read-smoke",
+                "lease_id": "finance-single-read-smoke",
+                "window_id": "finance-single-read-smoke",
+                "phase": "offline-rehearsal",
+                "revision": 1,
+            },
+            "fingerprint": "sha256:" + ("8" * 64),
+        }
+        snapshot = mock.Mock()
+        snapshot.create.return_value = {
+            "status": "captured_unverified",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            with (
+                mock.patch.object(
+                    Path,
+                    "read_text",
+                    new=read_text_once,
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "validate_finance_migration_deploy_lease",
+                    return_value=normalized_lease,
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "validate_recovery_preflight",
+                    return_value={
+                        "status": "ready",
+                        "action": "snapshot-create",
+                        "phase": "mutation",
+                    },
+                ) as recovery_preflight,
+                mock.patch.object(
+                    finance_storage_cli,
+                    "FinanceStorageCoherentSnapshot",
+                    return_value=snapshot,
+                ),
+                mock.patch.object(finance_storage_cli, "_emit"),
+            ):
+                result = finance_storage_cli.main(
+                    [
+                        "snapshot-create",
+                        "--runtime-dir",
+                        raw,
+                        "--repo-root",
+                        str(ROOT),
+                        "--deployed-sha",
+                        DEPLOYED_SHA,
+                        "--snapshot-plan-file",
+                        "/dev/stdin",
+                        "--confirm-fingerprint",
+                        fingerprint,
+                        "--approval-reference",
+                        "single-read-regression-smoke",
+                        "--deploy-lease-json",
+                        "{}",
+                    ]
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(plan_reads, ["/dev/stdin"])
+        self.assertEqual(
+            recovery_preflight.call_args.kwargs["reviewed_plan"],
+            reviewed_plan,
+        )
+        self.assertEqual(
+            snapshot.create.call_args.kwargs["reviewed_plan"],
+            reviewed_plan,
+        )
+
     @staticmethod
     def _recovery_lease() -> dict[str, object]:
         return {
