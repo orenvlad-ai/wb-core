@@ -331,6 +331,173 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
         assert state["runtime_schedule_baseline"]["web_vitrina"]["schedule_policy"]["mode"] == "interval"
 
 
+def _assert_prepared_quiet_hold_is_reused_without_lifecycle_replay() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        systemd = FakeSystemd()
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            prepared = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="snapshot-smoke",
+                reason="first exact drain",
+            )
+            assert prepared["status"] == "prepared"
+            assert prepared["quiet"] is True
+            policy_path = runtime_dir / maintenance.POLICY_FILENAME
+            policy_before = policy_path.read_bytes()
+            mutations_before = list(systemd.mutations)
+            disable_calls_before = schedules.disable_calls
+            state_before = json.loads(
+                (runtime_dir / maintenance.STATE_FILENAME).read_text()
+            )
+
+            held = maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="snapshot-smoke",
+                reason="same exact drain",
+            )
+            prepared_again = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="snapshot-smoke",
+                reason="reuse held drain",
+            )
+        finally:
+            _restore_local_boundaries(old)
+
+        assert held["status"] == "held"
+        assert held["quiet"] is True
+        assert held["idempotent"] is True
+        assert held["reused_phase"] == "prepared"
+        assert prepared_again["status"] == "prepared"
+        assert prepared_again["quiet"] is True
+        assert prepared_again["idempotent"] is True
+        assert prepared_again["reused_phase"] == "held"
+        assert systemd.mutations == mutations_before
+        assert schedules.disable_calls == disable_calls_before
+        assert policy_path.read_bytes() == policy_before
+        state_after = json.loads(
+            (runtime_dir / maintenance.STATE_FILENAME).read_text()
+        )
+        assert state_after["phase"] == "held"
+        assert (
+            state_after["hold_started_at"]
+            == state_before["hold_started_at"]
+        )
+        assert (
+            state_after["control_signature_before_hold"]
+            == state_before["control_signature_before_hold"]
+        )
+        audit_rows = [
+            json.loads(line)
+            for line in (
+                runtime_dir / maintenance.AUDIT_FILENAME
+            ).read_text().splitlines()
+            if line.strip()
+        ]
+        reused = [
+            row for row in audit_rows if row.get("event") == "prepare_reused"
+        ]
+        assert [row["phase"] for row in reused] == [
+            "prepared",
+            "held",
+        ]
+        assert all(row["paused_policy_revision"] > 0 for row in reused)
+
+
+def _assert_prepared_quiet_hold_reuse_fails_closed_on_drift() -> None:
+    cases = (
+        (
+            "policy identity",
+            "active maintenance hold paused-policy identity drifted",
+        ),
+        (
+            "control intent",
+            "active maintenance hold control intent drifted",
+        ),
+        (
+            "baseline signature",
+            "active maintenance hold baseline signature drifted",
+        ),
+        (
+            "quiet boundary",
+            "active maintenance hold is no longer quiet",
+        ),
+    )
+    for case, expected_error in cases:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime_dir = Path(raw)
+            proc_root = runtime_dir / "proc"
+            proc_root.mkdir()
+            systemd = FakeSystemd()
+            schedules = FakeSchedules()
+            old = _with_quiet_local_boundaries()
+            try:
+                prepared = maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    actor="snapshot-smoke",
+                    reason="first exact drain",
+                )
+                assert prepared["status"] == "prepared"
+                mutations_before = list(systemd.mutations)
+                disable_calls_before = schedules.disable_calls
+
+                if case == "policy identity":
+                    policy_path = runtime_dir / maintenance.POLICY_FILENAME
+                    policy = json.loads(policy_path.read_text())
+                    policy["policy_fingerprint"] = "sha256:drifted"
+                    policy_path.write_text(json.dumps(policy))
+                elif case == "control intent":
+                    schedules.payloads["web_vitrina"]["schedule_policy"][
+                        "interval_hours"
+                    ] = 6
+                elif case == "baseline signature":
+                    state_path = runtime_dir / maintenance.STATE_FILENAME
+                    state = json.loads(state_path.read_text())
+                    state["control_signature_before_hold"][
+                        "fingerprint"
+                    ] = "sha256:drifted"
+                    state_path.write_text(json.dumps(state))
+                else:
+                    unit = maintenance.CORE_TIMER_UNITS[0]
+                    systemd.timer_states[unit]["is_enabled"] = "enabled"
+                    systemd.timer_states[unit]["is_active"] = "active"
+
+                try:
+                    maintenance.maintenance_prepare(
+                        runtime_dir,
+                        systemd=systemd,
+                        schedules=schedules,
+                        proc_root=proc_root,
+                        actor="snapshot-smoke",
+                        reason=f"reject {case}",
+                    )
+                except RuntimeError as exc:
+                    assert expected_error in str(exc)
+                else:
+                    raise AssertionError(f"{case} drift was accepted")
+            finally:
+                _restore_local_boundaries(old)
+
+            assert systemd.mutations == mutations_before
+            assert schedules.disable_calls == disable_calls_before
+
+
 def _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -1063,6 +1230,8 @@ def _assert_restore_lock_rejects_overlap() -> None:
 def main() -> int:
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()
     _assert_hold_disables_every_boundary_without_killing_service()
+    _assert_prepared_quiet_hold_is_reused_without_lifecycle_replay()
+    _assert_prepared_quiet_hold_reuse_fails_closed_on_drift()
     _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
     _assert_persisted_service_continuity_accepts_exact_completion()
     _assert_unknown_timer_fails_before_mutation()
