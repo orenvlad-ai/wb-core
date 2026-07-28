@@ -30,6 +30,7 @@ from business_data_maintenance_restore_job import (
 DEPLOYED_SHA = "a" * 40
 RECOVERY_DEPLOYED_SHA = "e" * 40
 FINAL_RECOVERY_DEPLOYED_SHA = "f" * 40
+LAST_RECOVERY_DEPLOYED_SHA = "8" * 40
 JOB_ID = "1" * 64
 SECOND_JOB_ID = "2" * 64
 WINDOW_ID = "snapshot-fixture"
@@ -802,6 +803,115 @@ def _assert_same_job_uses_bounded_second_recovery_binding() -> None:
             ),
         )
         assert repeated["status"] == "succeeded"
+    finally:
+        temporary.cleanup()
+
+
+def _assert_same_job_uses_one_final_third_recovery_binding() -> None:
+    temporary, paths = _fixture()
+    try:
+        _submit(paths)
+
+        def fail_with_autoanswers_drift(
+            _request: dict[str, object],
+            _effective_revision: int,
+        ) -> dict[str, object]:
+            raise RuntimeError("post-resume desired/actual drift: autoanswers")
+
+        failure = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=fail_with_autoanswers_drift,
+        )
+        job_dir = paths["runtime_dir"] / JOB_DIRECTORY_NAME / JOB_ID
+        immutable_bindings: dict[str, bytes] = {}
+        deployments = (
+            RECOVERY_DEPLOYED_SHA,
+            FINAL_RECOVERY_DEPLOYED_SHA,
+            LAST_RECOVERY_DEPLOYED_SHA,
+        )
+        for sequence, deployed_sha in enumerate(deployments, start=1):
+            paths["deployed_sha_file"].write_text(
+                deployed_sha + "\n",
+                encoding="utf-8",
+            )
+            resumed = resume_failed_job(
+                **paths,
+                job_id=JOB_ID,
+                deployed_sha=deployed_sha,
+                expected_failure_digest=str(failure["result_digest"]),
+                service_continuity_fingerprint=str(
+                    SERVICE_CONTINUITY["fingerprint"]
+                ),
+                actor=ACTOR,
+                reason=f"reviewed bounded recovery deploy {sequence}",
+                continuity_reader=lambda: dict(SERVICE_CONTINUITY),
+                starter=lambda exact_job_id: {
+                    "name": (
+                        "wb-core-business-data-maintenance-restore@"
+                        f"{exact_job_id}.service"
+                    ),
+                    "start": f"fixture-resume-{sequence}",
+                },
+            )
+            assert resumed["status"] == "queued"
+            assert resumed["attempt"] == sequence
+            assert (
+                resumed["deployment_binding"]["resume_sequence"]
+                == sequence
+            )
+            binding_name = (
+                "resume.json"
+                if sequence == 1
+                else f"resume-{sequence}.json"
+            )
+            assert (
+                job_dir / f"attempt-{sequence}-result.json"
+            ).is_file()
+            immutable_bindings[binding_name] = (
+                job_dir / binding_name
+            ).read_bytes()
+            for name, content in immutable_bindings.items():
+                assert (job_dir / name).read_bytes() == content
+            if sequence < 3:
+                failure = run_worker(
+                    **paths,
+                    job_id=JOB_ID,
+                    executor=fail_with_autoanswers_drift,
+                )
+                assert failure["status"] == "failed"
+                assert failure["attempt"] == sequence + 1
+
+        calls: list[int] = []
+        succeeded = run_worker(
+            **paths,
+            job_id=JOB_ID,
+            executor=_successful_executor(paths, calls),
+        )
+        assert calls == [19]
+        assert succeeded["status"] == "succeeded"
+        assert succeeded["attempt"] == 4
+        readback = job_status(
+            runtime_dir=paths["runtime_dir"],
+            job_id=JOB_ID,
+            deployed_sha=LAST_RECOVERY_DEPLOYED_SHA,
+            include_systemd=False,
+        )
+        assert readback["deployment_binding"]["resume_sequence"] == 3
+        assert readback["audit"]["events"] == [
+            "queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "failed",
+            "resume_queued",
+            "worker_started",
+            "succeeded",
+        ]
 
         paths["deployed_sha_file"].write_text(
             "9" * 40 + "\n",
@@ -812,18 +922,18 @@ def _assert_same_job_uses_bounded_second_recovery_binding() -> None:
                 **paths,
                 job_id=JOB_ID,
                 deployed_sha="9" * 40,
-                expected_failure_digest=str(second_failure["result_digest"]),
+                expected_failure_digest=str(failure["result_digest"]),
                 service_continuity_fingerprint=str(
                     SERVICE_CONTINUITY["fingerprint"]
                 ),
                 actor=ACTOR,
-                reason="forbidden third recovery binding",
+                reason="forbidden fourth recovery binding",
                 continuity_reader=lambda: dict(SERVICE_CONTINUITY),
             )
         except MaintenanceRestoreJobError as exc:
             assert "sequence is exhausted" in str(exc)
         else:
-            raise AssertionError("third same-job recovery binding was accepted")
+            raise AssertionError("fourth same-job recovery binding was accepted")
     finally:
         temporary.cleanup()
 
@@ -1289,6 +1399,7 @@ def run() -> None:
     _assert_deployed_sha_drift_is_durable_failure()
     _assert_exact_failed_job_resumes_once_after_recovery_deploy()
     _assert_same_job_uses_bounded_second_recovery_binding()
+    _assert_same_job_uses_one_final_third_recovery_binding()
     _assert_second_recovery_rejects_continuity_drift_before_binding()
     _assert_same_job_resume_rejects_continuity_drift_before_binding()
     _assert_attempt_two_revalidates_continuity_inside_worker()

@@ -1360,6 +1360,159 @@ def _process_actual_state(
     }
 
 
+def _validated_autoanswers_restore_readback(
+    *,
+    lifecycle_readback: Mapping[str, Any],
+    preflight_state: Mapping[str, Any],
+    status: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind post-resume acceptance to the feature-owned lifecycle readback."""
+
+    candidate = dict(lifecycle_readback)
+    preflight = dict(preflight_state)
+    failures: list[str] = []
+    if str(candidate.get("contract") or "") != "wb_autoanswers_lifecycle_v1":
+        failures.append("lifecycle_contract")
+    if str(candidate.get("process_key") or "") != "autoanswers":
+        failures.append("process_identity")
+    if str(candidate.get("drift_status") or "") != "matched":
+        failures.append("lifecycle_drift")
+    if bool(candidate.get("suspended_by_master")):
+        failures.append("master_suspension")
+    if candidate.get("desired") is not preflight.get("desired"):
+        failures.append("desired_state")
+    if str(candidate.get("business_mode") or "") != str(
+        preflight.get("business_mode") or ""
+    ):
+        failures.append("business_mode")
+    preflight_schedule = dict(preflight.get("runtime_schedule") or {})
+    candidate_epoch = candidate.get("policy_epoch")
+    if candidate_epoch is None:
+        candidate_epoch = dict(candidate.get("runtime_schedule") or {}).get(
+            "policy_epoch"
+        )
+    if candidate_epoch != preflight_schedule.get("policy_epoch"):
+        failures.append("policy_epoch")
+    candidate_run_id = candidate.get("transition_run_id")
+    if candidate_run_id is None:
+        candidate_run_id = dict(candidate.get("runtime_schedule") or {}).get(
+            "transition_run_id"
+        )
+    if str(candidate_run_id or "") != str(
+        preflight_schedule.get("transition_run_id") or ""
+    ):
+        failures.append("transition_run_id")
+    desired = candidate.get("desired")
+    lifecycle_state = str(candidate.get("lifecycle_state") or "")
+    if desired is True and lifecycle_state not in {"starting", "running"}:
+        failures.append("lifecycle_state")
+    if desired is False and lifecycle_state != "off":
+        failures.append("lifecycle_state")
+    stop_reason = str(candidate.get("stop_reason") or "")
+    if stop_reason and not (
+        desired is False
+        and str(candidate.get("business_mode") or "") == "off"
+        and stop_reason == "master_switch_off"
+    ):
+        failures.append("stop_reason")
+    if str(candidate.get("last_error") or ""):
+        failures.append("last_error")
+
+    candidate_captured_at = _parse_timestamp(
+        candidate.get("readback_captured_at")
+    )
+    outer_captured_at = _parse_timestamp(status.get("captured_at"))
+    requested_at = _parse_timestamp(candidate.get("requested_at"))
+    if candidate_captured_at is None or outer_captured_at is None:
+        failures.append("observation_time")
+    elif candidate_captured_at > outer_captured_at:
+        failures.append("observation_order")
+    if (
+        requested_at is None
+        or candidate_captured_at is None
+        or requested_at > candidate_captured_at
+    ):
+        failures.append("request_time")
+
+    components = dict(candidate.get("components") or {})
+    expected_components = dict(spec.get("components") or {})
+    if set(components) != set(expected_components):
+        failures.append("component_identity")
+    outer_component_readback: dict[str, Any] = {}
+    for component_key, timer_unit_value in expected_components.items():
+        timer_unit = str(timer_unit_value)
+        service_unit = timer_unit.removesuffix(".timer") + ".service"
+        component = dict(components.get(str(component_key)) or {})
+        timer = dict((status.get("timers") or {}).get(timer_unit) or {})
+        service = dict((status.get("services") or {}).get(service_unit) or {})
+        timer_on = bool(
+            str(timer.get("is_enabled") or "") == "enabled"
+            and str(timer.get("is_active") or "") == "active"
+        )
+        component_desired = component.get("desired")
+        component_actual = component.get("actual")
+        service_properties = dict(service.get("properties") or {})
+        service_result = str(service_properties.get("Result") or "success")
+        outer_component_readback[str(component_key)] = {
+            "timer_unit": timer_unit,
+            "service_unit": service_unit,
+            "desired": component_desired,
+            "actual": timer_on,
+            "service_active_state": str(service.get("is_active") or ""),
+            "service_result": service_result,
+        }
+        if (
+            component.get("component_key") != str(component_key)
+            or not isinstance(component_desired, bool)
+            or not isinstance(component_actual, bool)
+            or component_desired != component_actual
+            or str(component.get("drift_status") or "") != "matched"
+            or str(component.get("last_error") or "")
+        ):
+            failures.append(f"{component_key}_lifecycle")
+        if not timer or not service or timer_on is not component_desired:
+            failures.append(f"{component_key}_outer_timer")
+        if service_result != "success":
+            failures.append(f"{component_key}_outer_service")
+
+    validation = {
+        "contract": "business_data_autoanswers_restore_readback_v1",
+        "accepted": not failures,
+        "source": "feature_lifecycle_reconcile+outer_systemd",
+        "lifecycle_readback_captured_at": str(
+            candidate.get("readback_captured_at") or ""
+        ),
+        "outer_captured_at": str(status.get("captured_at") or ""),
+        "identity": {
+            "business_mode": candidate.get("business_mode"),
+            "policy_epoch": candidate_epoch,
+            "transition_run_id": candidate_run_id,
+        },
+        "components": outer_component_readback,
+        "failures": sorted(set(failures)),
+    }
+    validation["fingerprint"] = _stable_fingerprint(validation)
+    result = {
+        **candidate,
+        "post_resume_validation": validation,
+        "provenance": "feature_lifecycle_reconcile+outer_systemd",
+    }
+    if failures:
+        result.update(
+            {
+                "actual": False,
+                "lifecycle_state": "unconfirmed",
+                "drift_status": "unknown",
+                "last_error": (
+                    "post-resume Autoanswers readback is not confirmed: "
+                    + ",".join(sorted(set(failures)))
+                ),
+            }
+        )
+    return result
+
+
 def _with_operator_process_status(
     process: Mapping[str, Any],
     *,
@@ -2220,6 +2373,15 @@ def maintenance_restore(
         proc_root=proc_root,
     )
     preflight_readback = owner_policy_readback(runtime_dir, status=preflight)
+    preflight_autoanswers = next(
+        (
+            dict(item)
+            for item in preflight_readback.get("processes", [])
+            if isinstance(item, Mapping)
+            and str(item.get("process_key") or "") == "autoanswers"
+        ),
+        {},
+    )
     desired = {
         str(item.get("process_key") or ""): item.get("desired")
         for item in preflight_readback.get("processes", [])
@@ -2374,7 +2536,7 @@ def maintenance_restore(
         reconcile_autoanswers = (
             autoanswers_reconcile or _reconcile_autoanswers_lifecycle
         )
-        reconcile_autoanswers(
+        autoanswers_lifecycle_readback = reconcile_autoanswers(
             runtime_dir,
             suspended_by_master=False,
             actor=actor,
@@ -2419,15 +2581,26 @@ def maintenance_restore(
     )
     preview_policy = dict(policy)
     preview_policy["master_desired"] = True
-    actual = [
-        _process_actual_state(
-            spec,
-            status=after,
-            policy=preview_policy,
-            runtime_dir=runtime_dir,
-        )
-        for spec in PROCESS_SPECS
-    ]
+    actual: list[dict[str, Any]] = []
+    for spec in PROCESS_SPECS:
+        if str(spec.get("key") or "") == "autoanswers":
+            actual.append(
+                _validated_autoanswers_restore_readback(
+                    lifecycle_readback=autoanswers_lifecycle_readback,
+                    preflight_state=preflight_autoanswers,
+                    status=after,
+                    spec=spec,
+                )
+            )
+        else:
+            actual.append(
+                _process_actual_state(
+                    spec,
+                    status=after,
+                    policy=preview_policy,
+                    runtime_dir=runtime_dir,
+                )
+            )
     drift = [item["process_key"] for item in actual if item["drift_status"] != "matched"]
     if drift:
         for unit in CORE_TIMER_UNITS + (
@@ -2461,6 +2634,16 @@ def maintenance_restore(
             "post_resume_readback": {
                 "captured_at": after.get("captured_at"),
                 "processes": actual,
+                "autoanswers_validation": dict(
+                    next(
+                        (
+                            item.get("post_resume_validation") or {}
+                            for item in actual
+                            if item.get("process_key") == "autoanswers"
+                        ),
+                        {},
+                    )
+                ),
             },
         }
     )
