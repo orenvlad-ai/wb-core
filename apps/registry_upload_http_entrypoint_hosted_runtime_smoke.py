@@ -1916,6 +1916,41 @@ def main() -> None:
         raise AssertionError(
             "hosted restore continuity preflight lost read-only transport"
         )
+    restore_inventory_payload = {
+        "contract_name": "business_data_maintenance_restore_inventory_v1",
+        "status": "ready",
+        "nonterminal_job_count": 0,
+        "locks_free": True,
+        "new_restore_submit_allowed": True,
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(restore_inventory_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed,
+    ) as run_mock:
+        captured_inventory = (
+            hosted_runtime._run_remote_business_data_maintenance_restore_job(
+                active_target,
+                job_action="inventory",
+                deployed_sha="1" * 40,
+            )
+        )
+    inventory_command = " ".join(run_mock.call_args.args[0])
+    if (
+        captured_inventory != restore_inventory_payload
+        or " inventory" not in inventory_command
+        or "--expected-revision" in inventory_command
+        or "--job-id" in inventory_command
+    ):
+        raise AssertionError(
+            "query-only restore inventory must not require submit bindings"
+        )
     quiet_continuity_payload = {
         "status": "ready",
         "service_continuity": {
