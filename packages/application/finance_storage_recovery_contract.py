@@ -27,6 +27,12 @@ EXPECTED_RUNNER_CONTRACTS = {
     "snapshot": "wb_core_finance_storage_coherent_snapshot_v1",
     "candidate_plan": "wb_core_finance_storage_split_plan_v1",
     "candidate": "wb_core_finance_storage_split_candidate_v1",
+    "candidate_abort_plan": (
+        "wb_core_finance_storage_candidate_abort_plan_v1"
+    ),
+    "candidate_abort_result": (
+        "wb_core_finance_storage_candidate_abort_result_v1"
+    ),
     "shadow": "wb_core_finance_shadow_ingest_state_v1",
     "shadow_verification": "wb_core_finance_shadow_verification_v1",
     "cutover_plan": "wb_core_finance_storage_cutover_plan_v1",
@@ -51,6 +57,7 @@ EXPECTED_RUNNER_CONTRACTS = {
 MUTATION_ACTIONS = frozenset(
     {
         "apply",
+        "candidate-abort-apply",
         "snapshot-create",
         "snapshot-integrity",
         "snapshot-retention-apply",
@@ -68,6 +75,7 @@ MUTATION_ACTIONS = frozenset(
 EXPLICIT_APPROVAL_ACTIONS = frozenset(
     {
         "apply",
+        "candidate-abort-apply",
         "snapshot-create",
         "snapshot-retention-apply",
         "stale-writer-stop",
@@ -173,6 +181,22 @@ _TRANSITIONS = (
         "to": ("shadow",),
         "recovery": "exact_manifest_idempotent_readback",
         "command": "finance-storage-split-apply",
+    },
+    {
+        "transition": "candidate.abort",
+        "persisted_store": (
+            ".finance-storage-candidate-aborts/<generation>.json"
+        ),
+        "from": (
+            "loading",
+            "verified_chunks",
+            "candidate_bytes_without_manifest",
+        ),
+        "to": ("absent",),
+        "recovery": (
+            "exact_allowlist_durable_idempotent_release_or_fail_closed"
+        ),
+        "command": "finance-storage-candidate-abort-apply",
     },
     {
         "transition": "shadow.activate",
@@ -323,6 +347,12 @@ def _reviewed_plan_fingerprint(
             if key not in {"fingerprint", "deploy_lease"}
         }
         return retention_fingerprint(stable)
+    if action == "candidate-abort-apply":
+        from packages.application.finance_storage_candidate_abort import (
+            _plan_fingerprint as candidate_abort_plan_fingerprint,
+        )
+
+        return candidate_abort_plan_fingerprint(plan)
     if action == "stale-writer-stop":
         from packages.application.finance_storage_stale_writer_recovery import (
             _plan_fingerprint as stale_writer_plan_fingerprint,
@@ -591,6 +621,11 @@ def validate_recovery_preflight(
                 "snapshot_retention_dry_run",
                 "apply_allowed_by_machine_preflight",
             ),
+            "candidate-abort-apply": (
+                EXPECTED_RUNNER_CONTRACTS["candidate_abort_plan"],
+                "candidate_abort_dry_run",
+                "candidate_abort_allowed_by_machine_preflight",
+            ),
             "cutover-apply": (
                 EXPECTED_RUNNER_CONTRACTS["cutover_plan"],
                 "cutover_dry_run",
@@ -628,6 +663,7 @@ def validate_recovery_preflight(
         "apply",
         "snapshot-create",
         "snapshot-retention-apply",
+        "candidate-abort-apply",
         "stale-writer-stop",
         "cutover-apply",
         "rollback-prepare",
@@ -852,7 +888,12 @@ def validate_recovery_preflight(
                 "rollback candidate fingerprint/path binding is stale"
             )
 
-    if exact_action in {"snapshot-create", "apply", "stale-writer-stop"}:
+    if exact_action in {
+        "snapshot-create",
+        "apply",
+        "candidate-abort-apply",
+        "stale-writer-stop",
+    }:
         if active.state != "monolith" or active.canonical_source != "monolith":
             raise FinanceStorageRecoveryContractError(
                 f"{exact_action} requires the canonical monolith"
@@ -1057,6 +1098,7 @@ def validate_recovery_preflight(
         "snapshot-integrity": "snapshot.",
         "snapshot-retention-apply": "snapshot_retention.",
         "apply": "candidate.",
+        "candidate-abort-apply": "candidate.",
         "shadow-activate": "shadow.",
         "shadow-reconcile": "shadow.",
         "shadow-verify": "shadow.",

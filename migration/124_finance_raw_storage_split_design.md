@@ -221,6 +221,32 @@ The implementation is deliberately inert on deploy:
   fail closed. The live monolith, candidate/split generations and business
   rows are never opened for write or removed; the archived snapshots remain
   byte-exact recovery evidence on the dedicated backup device.
+- `finance-storage-candidate-abort-plan|apply|readback` is the only recovery
+  path for an interrupted candidate that has persisted destination bytes but
+  has not published `candidate_generation_manifest.json`. It requires the
+  implicit canonical monolith, absent global/candidate manifests, inactive
+  manual barrier and shadow state, exactly one target generation, no active
+  candidate worker/open file or migration-lock owner, and a fresh exact
+  Finance deploy lease. Plan recomputes the saved candidate-plan fingerprint,
+  binds its old deployed SHA/source fingerprint/generation paths, checks both
+  destination schema identities and accepts only verified checkpoint rows
+  that are exact subsets of the saved raw-chunk/operational-table manifests.
+  The delete allowlist is limited to the two candidate databases, their SQLite
+  sidecars and `migration_plan.json`; any symlink, directory, unknown file,
+  identity/checkpoint/process/control drift or already-published candidate
+  manifest fails closed. Apply holds the normal non-blocking migration lock,
+  persists a private fsynced transaction outside the candidate directory,
+  journals each exact unlink, removes the saved plan last, fsyncs the
+  generations parent and writes a durable result plus append-only audit.
+  Disconnect/crash resumes only that transaction; a missing unjournaled file
+  or reappearing/changed file is ambiguous and never starts a second candidate
+  apply. Terminal readback proves the target generation/global manifest absent
+  and the canonical monolith inode/schema, barrier, shadow state and complete
+  snapshot directory inventory unchanged. Because the recovery deploy itself
+  invalidates the old snapshot/plan/fingerprint, the required order is exact
+  candidate abort, stale-snapshot retention, lease rebind and a completely
+  fresh coherent snapshot/integrity/dry-run cycle; partial candidate bytes are
+  never reused after that deploy.
 - A pre-snapshot `finance-storage-stale-writer-plan|stop` recovery is limited
   to the exact closure-retry oneshot generation. The service has a 30-minute
   start bound; recovery additionally requires at least one hour of continuous
@@ -301,8 +327,9 @@ documented classifications are:
 | snapshot copy | partial/final database and snapshot manifest | bounded held-source data drift is recaptured with stable identity/capacity proof; exact partial is rebuilt; structurally exact final-without-manifest is bound and published; dual/sidecar/stable-identity drift is ambiguous |
 | snapshot restore | maintenance plus one deterministic durable restore job and global inventory | only the same digest-bound job may continue; re-dispatch observes it without replaying the snapshot |
 | snapshot release | barrier `held/restoring → released` | exact restore readback is mandatory |
-| candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped |
+| candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped only while their original deployed SHA/snapshot/plan remains valid |
 | candidate manifest | candidate bytes → shadow manifest | exact manifest readback is idempotent |
+| candidate abort | private transaction/result/audit plus exact pre-manifest candidate bytes | exact allowlisted per-file release resumes from the fsynced journal; an unjournaled absence, unknown file, manifest, opener or identity drift stays fail closed and never dispatches another apply |
 | shadow activate | durable shadow state | exact candidate activation is a no-op |
 | shadow reconcile | immutable raw batch/link rows | source identity and committed chunks resume idempotently |
 | shadow live-tail | outbox event plus bridge cursor | event/sequence commit resumes without duplicate apply |
@@ -329,6 +356,10 @@ live-tail cursor acknowledgement and both atomic manifest switches. The
 durable detached restore suite separately kills the submitting client and
 proves system-owned continuation, bounded heartbeat/deadline classification,
 result/audit persistence and the prohibition on a second job.
+The candidate-abort fault suite separately crashes after a persisted unlink
+and proves exact resume, terminal no-op replay, durable result/audit and
+unchanged monolith/snapshot/non-target evidence. It also proves that an
+unknown file or candidate manifest blocks recovery before deletion.
 
 The private `.finance-storage-shadow-ingest.json` state defaults absent/off.
 If a later reviewed stage enables it while the implicit monolith is selected,
