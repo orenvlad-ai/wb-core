@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Schema v8 adds exact per-sweep/member/version reconciliation acknowledgements, action-first materialization, terminal/human-only barrier exclusion, truthful stall telemetry and fingerprint-bound incident recovery while preserving immutable execution evidence, schema-v7 rolling admission, the frozen bundle and the owner-confirmed active run cap."
+update_note: "Schema v9 adds the explicit publication processing-key lookup used by the operator status aggregate, preventing one settings read from multiplying a full publication scan across the active reconciliation scope; schema-v8 acknowledgements and all execution evidence remain unchanged."
 ---
 
 # WB Autoanswers Server v1
@@ -113,6 +113,16 @@ v4 fields retained by v8 include:
 - transition-run identity, bounded materialization cursor and visible pause reason;
 - processing kind for deterministic zero-cost templates;
 - append-only budget corrections and runtime scheduler timestamps.
+
+Schema v9 adds only
+`idx_sv1_pub_jobs_processing_key(processing_key)`. The settings/status aggregate
+joins every exact active member to its optional publication by this key. The
+explicit index keeps that lookup bounded even when SQLite materializes the
+scope with a temporary `UNION`; without it the planner may scan the entire
+publication table once per scope member and monopolize the single HTTP worker.
+Migration preserves every feedback, job, publication, budget, audit and run
+row. A regression test disables automatic indexes and requires the
+production-shaped join plan to use this named index.
 
 `content_version_hash` includes text, pros, cons, rating, tags, product identity and stable media identity. It excludes answers, `wasViewed`, WB service state and temporary media query/fragment signatures. `wb_observation_hash` owns those service observations. Therefore signed-link rotation and WB state/readback changes do not create a paid semantic version.
 
@@ -397,7 +407,7 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. The deploy-only quiet window records active Autoanswers timers, stops the worker/readonly timers and registry HTTP service, then copies all legacy Autoanswers tables from one query-only snapshot into a candidate isolated store. It verifies every table row count and deterministic row digest, foreign keys, integrity and an unchanged source `data_version`, fsyncs a `prepared` manifest before the atomic store rename, and restores the registry plus exactly the previously active timers; interrupted one-shot executions resume idempotently on those timers. An interrupted publish is accepted only after full store re-verification. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries. Legacy main-DB tables are retained for bounded rollback.
 
-Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation takes exclusive locking and checkpoints its committed WAL into the main snapshot before hashing or compression. It then compresses only that owned stable snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v8 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation takes exclusive locking and checkpoints its committed WAL into the main snapshot before hashing or compression. It then compresses only that owned stable snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v9 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
 If the live volume cannot hold a second raw database and neither a current nor
 older recoverable Autoanswers backup exists, `prepare-deploy` keeps the
@@ -409,7 +419,7 @@ exact decompressed source SHA-256, manifest and canonical verifier readback all
 succeed; failed output from the attempt is removed while the source remains
 unchanged.
 
-After that current v8 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v8 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
+After that current v9 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v9 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
 
 Required local checks:
 
