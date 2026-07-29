@@ -981,8 +981,9 @@ class MigrationSmoke(unittest.TestCase):
         transitions = [
             str(item["transition"]) for item in contract["transitions"]
         ]
-        self.assertEqual(len(transitions), 20)
-        self.assertEqual(len(set(transitions)), 20)
+        self.assertEqual(len(transitions), 21)
+        self.assertEqual(len(set(transitions)), 21)
+        self.assertIn("candidate.abort", transitions)
         self.assertTrue(contract["fail_closed_default"])
         self.assertFalse(contract["second_restore_job_allowed"])
         self.assertTrue(

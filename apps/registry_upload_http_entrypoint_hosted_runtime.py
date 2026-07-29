@@ -3976,6 +3976,8 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             "snapshot-create",
             "snapshot-retention-apply",
             "snapshot-retention-readback",
+            "candidate-abort-apply",
+            "candidate-abort-readback",
             "stale-writer-stop",
             "cutover-apply",
             "rollback-prepare",
@@ -3997,6 +3999,9 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     )
     candidate_plan_fingerprint = str(
         getattr(args, "candidate_plan_fingerprint", "") or ""
+    )
+    candidate_generation_epoch = str(
+        getattr(args, "candidate_generation_epoch", "") or ""
     )
     minimum_observation_seconds = int(
         getattr(args, "minimum_observation_seconds", 3600) or 0
@@ -4051,6 +4056,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 source_snapshot_manifest=source_snapshot_manifest,
                 candidate_manifest=candidate_manifest,
                 candidate_plan_fingerprint=candidate_plan_fingerprint,
+                candidate_generation_epoch=candidate_generation_epoch,
                 minimum_observation_seconds=minimum_observation_seconds,
                 rollback_candidate_evidence=rollback_candidate_evidence,
                 deploy_lease=deploy_lease,
@@ -4608,6 +4614,7 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             source_snapshot_manifest=source_snapshot_manifest,
             candidate_manifest=candidate_manifest,
             candidate_plan_fingerprint=candidate_plan_fingerprint,
+            candidate_generation_epoch=candidate_generation_epoch,
             minimum_observation_seconds=minimum_observation_seconds,
             deploy_lease=deploy_lease,
         )
@@ -4641,6 +4648,7 @@ def _run_remote_finance_storage_split_action(
     source_snapshot_manifest: str = "",
     candidate_manifest: str = "",
     candidate_plan_fingerprint: str = "",
+    candidate_generation_epoch: str = "",
     minimum_observation_seconds: int = 3600,
     rollback_candidate_evidence: str = "",
     deploy_lease: Mapping[str, Any] | None = None,
@@ -4660,6 +4668,9 @@ def _run_remote_finance_storage_split_action(
         "snapshot-retention-plan",
         "snapshot-retention-apply",
         "snapshot-retention-readback",
+        "candidate-abort-plan",
+        "candidate-abort-apply",
+        "candidate-abort-readback",
         "stale-writer-plan",
         "stale-writer-stop",
         "shadow-status",
@@ -4737,6 +4748,27 @@ def _run_remote_finance_storage_split_action(
             [
                 "--source-snapshot-manifest",
                 source_snapshot_manifest,
+            ]
+        )
+    if effective_action.startswith("candidate-abort-"):
+        if not re.fullmatch(r"[0-9a-f]{20}", candidate_generation_epoch):
+            raise ValueError(
+                "Finance candidate abort requires an exact generation epoch"
+            )
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            candidate_plan_fingerprint,
+        ):
+            raise ValueError(
+                "Finance candidate abort requires the exact old candidate "
+                "plan fingerprint"
+            )
+        runner_args.extend(
+            [
+                "--candidate-generation-epoch",
+                candidate_generation_epoch,
+                "--candidate-plan-fingerprint",
+                candidate_plan_fingerprint,
             ]
         )
     if effective_action.startswith("shadow-") or effective_action in {
@@ -4873,6 +4905,59 @@ def _run_remote_finance_storage_split_action(
             ]
         )
         if effective_action == "snapshot-retention-apply":
+            runner_args.extend(
+                [
+                    "--approval-reference",
+                    approval_reference.strip(),
+                ]
+            )
+    elif effective_action in {
+        "candidate-abort-apply",
+        "candidate-abort-readback",
+    }:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                f"Finance storage {effective_action} requires --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_version") or "")
+            != "wb_core_finance_storage_candidate_abort_plan_v1"
+            or str(plan.get("mode") or "")
+            != "candidate_abort_dry_run"
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or str(plan.get("generation_epoch") or "")
+            != candidate_generation_epoch
+            or str(plan.get("candidate_plan_fingerprint") or "")
+            != candidate_plan_fingerprint
+            or not bool(
+                plan.get(
+                    "candidate_abort_allowed_by_machine_preflight"
+                )
+            )
+        ):
+            raise ValueError(
+                "Finance candidate abort reviewed plan is invalid"
+            )
+        if (
+            effective_action == "candidate-abort-apply"
+            and not approval_reference.strip()
+        ):
+            raise ValueError(
+                "Finance candidate abort apply requires "
+                "--approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--candidate-abort-plan-file",
+                "/dev/stdin",
+                "--confirm-fingerprint",
+                fingerprint,
+            ]
+        )
+        if effective_action == "candidate-abort-apply":
             runner_args.extend(
                 [
                     "--approval-reference",
@@ -5044,6 +5129,8 @@ def _run_remote_finance_storage_split_action(
                 "snapshot-retention-plan",
                 "snapshot-retention-apply",
                 "snapshot-retention-readback",
+                "candidate-abort-apply",
+                "candidate-abort-readback",
                 "stale-writer-stop",
                 "shadow-reconcile",
                 "shadow-verify",
@@ -5078,6 +5165,8 @@ def _run_remote_finance_storage_split_action(
         "snapshot-plan",
         "snapshot-retention-plan",
         "snapshot-retention-readback",
+        "candidate-abort-plan",
+        "candidate-abort-readback",
         "stale-writer-plan",
         "recovery-contract",
         "recovery-preflight",
@@ -5126,6 +5215,47 @@ def _run_remote_finance_storage_split_action(
             raise RuntimeError(
                 "Finance snapshot retention readback is incomplete"
             )
+        if action == "candidate-abort-plan" and (
+            payload.get(
+                "candidate_abort_allowed_by_machine_preflight"
+            )
+            is not True
+            or payload.get("canonical_source") != "monolith"
+            or payload.get("canonical_manifest_switch_planned") is not False
+            or payload.get("query_only_contract", {}).get(
+                "business_data_mutation_count"
+            )
+            != 0
+            or payload.get("query_only_contract", {}).get(
+                "candidate_byte_mutation_count"
+            )
+            != 0
+            or payload.get("query_only_contract", {}).get(
+                "manifest_mutation_count"
+            )
+            != 0
+        ):
+            raise RuntimeError(
+                "Finance candidate abort plan lacks zero-mutation proof"
+            )
+        if action == "candidate-abort-readback" and (
+            payload.get("status") != "completed"
+            or payload.get("readback", {}).get(
+                "candidate_root_absent"
+            )
+            is not True
+            or payload.get("readback", {}).get(
+                "global_manifest_absent"
+            )
+            is not True
+            or payload.get("readback", {}).get(
+                "non_target_unchanged"
+            )
+            is not True
+        ):
+            raise RuntimeError(
+                "Finance candidate abort readback is incomplete"
+            )
         if action == "recovery-contract" and (
             payload.get("status") != "ready"
             or re.fullmatch(
@@ -5167,6 +5297,18 @@ def _run_remote_finance_storage_split_action(
     ):
         raise RuntimeError(
             "Finance snapshot retention apply lacks exact terminal readback"
+        )
+    elif action == "candidate-abort-apply" and (
+        str(payload.get("status") or "") != "completed"
+        or payload.get("readback", {}).get("candidate_root_absent")
+        is not True
+        or payload.get("readback", {}).get("global_manifest_absent")
+        is not True
+        or payload.get("readback", {}).get("non_target_unchanged")
+        is not True
+    ):
+        raise RuntimeError(
+            "Finance candidate abort apply lacks exact terminal readback"
         )
     elif action == "apply" and bool(payload.get("global_manifest_switched")):
         raise RuntimeError("candidate builder unexpectedly switched the global manifest")
@@ -7571,6 +7713,122 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_snapshot_retention_readback.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="snapshot-retention-readback",
+    )
+
+    finance_storage_candidate_abort_plan = subparsers.add_parser(
+        "finance-storage-candidate-abort-plan",
+        help=(
+            "Build an exact query-only recovery plan for one unselected "
+            "pre-manifest partial Finance candidate."
+        ),
+    )
+    finance_storage_candidate_abort_plan.add_argument(
+        "--candidate-generation-epoch",
+        required=True,
+    )
+    finance_storage_candidate_abort_plan.add_argument(
+        "--candidate-plan-fingerprint",
+        required=True,
+    )
+    finance_storage_candidate_abort_plan.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_candidate_abort_plan.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_candidate_abort_plan
+    )
+    finance_storage_candidate_abort_plan.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="candidate-abort-plan",
+    )
+
+    finance_storage_candidate_abort_apply = subparsers.add_parser(
+        "finance-storage-candidate-abort-apply",
+        help=(
+            "Durably release only the exact reviewed unselected partial "
+            "candidate; never touch the monolith, snapshots, or manifests."
+        ),
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--candidate-generation-epoch",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--candidate-plan-fingerprint",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_candidate_abort_apply.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_candidate_abort_apply
+    )
+    finance_storage_candidate_abort_apply.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="candidate-abort-apply",
+    )
+
+    finance_storage_candidate_abort_readback = subparsers.add_parser(
+        "finance-storage-candidate-abort-readback",
+        help=(
+            "Independently prove the exact candidate is absent and the "
+            "canonical monolith/snapshots/non-target state stayed unchanged."
+        ),
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--candidate-generation-epoch",
+        required=True,
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--candidate-plan-fingerprint",
+        required=True,
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_candidate_abort_readback.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_candidate_abort_readback
+    )
+    finance_storage_candidate_abort_readback.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="candidate-abort-readback",
     )
 
     finance_storage_stale_writer_plan = subparsers.add_parser(

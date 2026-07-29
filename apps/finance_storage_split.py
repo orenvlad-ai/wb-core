@@ -51,6 +51,11 @@ from packages.application.finance_storage_recovery_contract import (
     recovery_contract,
     validate_recovery_preflight,
 )
+from packages.application.finance_storage_candidate_abort import (
+    FinanceStorageCandidateAbort,
+    PLAN_CONTRACT as CANDIDATE_ABORT_PLAN_CONTRACT,
+    RESULT_CONTRACT as CANDIDATE_ABORT_RESULT_CONTRACT,
+)
 from packages.application.finance_storage_stale_writer_recovery import (
     FinanceStorageStaleWriterRecovery,
     PLAN_CONTRACT as STALE_WRITER_PLAN_CONTRACT,
@@ -73,6 +78,8 @@ RUNNER_CONTRACTS = {
     "snapshot": SNAPSHOT_CONTRACT,
     "candidate_plan": PLAN_CONTRACT,
     "candidate": MIGRATION_CONTRACT,
+    "candidate_abort_plan": CANDIDATE_ABORT_PLAN_CONTRACT,
+    "candidate_abort_result": CANDIDATE_ABORT_RESULT_CONTRACT,
     "shadow": SHADOW_STATE_CONTRACT,
     "shadow_verification": SHADOW_VERIFICATION_CONTRACT,
     "cutover_plan": CUTOVER_PLAN_CONTRACT,
@@ -245,6 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
             "snapshot-retention-plan",
             "snapshot-retention-apply",
             "snapshot-retention-readback",
+            "candidate-abort-plan",
+            "candidate-abort-apply",
+            "candidate-abort-readback",
             "stale-writer-plan",
             "stale-writer-stop",
             "shadow-status",
@@ -272,16 +282,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-fingerprint", default="")
     parser.add_argument("--approval-reference", default="")
     parser.add_argument("--fault-after-chunks", type=int, default=0)
+    parser.add_argument("--fault-after-unlinks", type=int, default=0)
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--migration-plan-file", type=Path)
     parser.add_argument("--snapshot-plan-file", type=Path)
     parser.add_argument("--snapshot-retention-plan-file", type=Path)
+    parser.add_argument("--candidate-abort-plan-file", type=Path)
     parser.add_argument("--stale-writer-plan-file", type=Path)
     parser.add_argument("--cutover-plan-file", type=Path)
     parser.add_argument("--rollback-plan-file", type=Path)
     parser.add_argument("--rollback-candidate-evidence", type=Path)
     parser.add_argument("--source-snapshot-manifest", type=Path)
     parser.add_argument("--candidate-plan-fingerprint", default="")
+    parser.add_argument("--candidate-generation-epoch", default="")
     parser.add_argument("--seller-id", default="canonical")
     parser.add_argument("--max-events", type=int, default=100_000)
     parser.add_argument(
@@ -327,6 +340,8 @@ def _reviewed_plan_for_recovery_preflight(
         path = args.snapshot_plan_file
     elif action == "snapshot-retention-apply":
         path = args.snapshot_retention_plan_file
+    elif action == "candidate-abort-apply":
+        path = args.candidate_abort_plan_file
     elif action == "stale-writer-stop":
         path = args.stale_writer_plan_file
     elif action == "cutover-apply":
@@ -467,7 +482,42 @@ def main(argv: list[str] | None = None) -> int:
             deployed_sha=deployed_sha,
             deploy_lease=deploy_lease,
         )
-    if args.action.startswith("rollback-"):
+    if args.action.startswith("candidate-abort-"):
+        candidate_abort = FinanceStorageCandidateAbort(
+            runtime_dir,
+            deployed_sha=deployed_sha,
+            generation_epoch=args.candidate_generation_epoch,
+            candidate_plan_fingerprint=args.candidate_plan_fingerprint,
+            fault_after_unlinks=args.fault_after_unlinks,
+        )
+        if args.action == "candidate-abort-plan":
+            payload = candidate_abort.build_plan()
+        else:
+            if args.candidate_abort_plan_file is None:
+                raise SystemExit(
+                    "--candidate-abort-plan-file is required for candidate "
+                    "abort apply/readback"
+                )
+            reviewed_plan = _reviewed_plan_for_recovery_preflight(
+                args,
+                action="candidate-abort-apply",
+            )
+            if not isinstance(reviewed_plan, dict):
+                raise SystemExit(
+                    "--candidate-abort-plan-file must contain a JSON object"
+                )
+            if args.action == "candidate-abort-apply":
+                payload = candidate_abort.apply(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                    approval_reference=args.approval_reference,
+                )
+            else:
+                payload = candidate_abort.readback(
+                    reviewed_plan=reviewed_plan,
+                    expected_fingerprint=args.confirm_fingerprint,
+                )
+    elif args.action.startswith("rollback-"):
         rollback = FinanceStorageRollback(
             runtime_dir,
             deployed_sha=deployed_sha,
