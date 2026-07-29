@@ -93,7 +93,8 @@ The implementation is deliberately inert on deploy:
   direct-open inventory, ordered logical digests, watermarks, chunks, actual
   query plans, allocation/capacity evidence, writers/timers and exact writable
   opener ownership, target generations,
-  non-target invariants and rollback scope. The fingerprint excludes only
+  non-target invariants and rollback scope. The fingerprint excludes the
+  separately validated top-level `deploy_lease` transport evidence plus only
   volatile free-byte/PID/timer-clock counters and transient systemd execution
   states that are recaptured immediately before apply. Stable systemd unit
   identity, load state and enablement remain approval-bound, so policy/config
@@ -248,10 +249,10 @@ The implementation is deliberately inert on deploy:
   readback. Before **every** Finance storage mutation the hosted wrapper runs
   `recovery-preflight` remotely before barrier acquisition or destination
   mutation. It recomputes the runner-owned deterministic fingerprint from the
-  complete reviewed snapshot/retention/stale-writer/cutover/rollback plan
-  before accepting the plan field; only the separately validated top-level
-  `deploy_lease` transport evidence is excluded. The remote mutation runner
-  repeats the same validation after an exact quiet hold for
+  complete reviewed candidate/snapshot/retention/stale-writer/cutover/rollback
+  plan before accepting the plan field; only the separately validated
+  top-level `deploy_lease` transport evidence is excluded. The remote mutation
+  runner repeats the same validation after an exact quiet hold for
   snapshot/cutover/rollback. The validator binds deployed SHA, lease
   task/id/revision/window/phase, approval reference, reviewed fingerprint,
   active generation, snapshot/candidate/rollback paths and identities, runner
@@ -267,10 +268,12 @@ The implementation is deliberately inert on deploy:
   identities and fresh capacity calculation are both persisted in the capture
   intent/manifest. Path/inode/schema/device/journal drift or insufficient
   headroom remains fail closed.
-- A reviewed snapshot/cutover/rollback plan streamed over stdin is parsed once
-  by the remote CLI and the same in-memory object is reused for the repeated
-  recovery preflight and the mutation. A second read from exhausted stdin is
-  forbidden and covered by regression evidence before deploy. The hosted
+- A reviewed candidate/snapshot/cutover/rollback plan streamed over stdin is
+  parsed once by the remote CLI. Snapshot/cutover/rollback reuse that exact
+  in-memory object for the repeated recovery preflight and mutation; candidate
+  apply validates it before destination bytes and then independently replans
+  the immutable source under its own locks. A second read from exhausted stdin
+  is forbidden and covered by regression evidence before deploy. The hosted
   wrapper attaches the current `deploy_lease` readback only after planning.
   That single canonical transport field is excluded from the deterministic
   plan hash and is instead validated independently against the deployed SHA,
@@ -637,10 +640,10 @@ Closure requires:
 - Recovery-contract transition completeness and stable fingerprint; preflight
   must reject missing lease/approval/downstream capability before creating a
   barrier or destination byte.
-- Snapshot, snapshot-retention, stale-writer, cutover and rollback apply must
-  accept the wrapper-added canonical `deploy_lease` transport evidence without
-  changing the reviewed deterministic plan fingerprint, while independently
-  rejecting any altered reviewed-plan field or lease
+- Candidate, snapshot, snapshot-retention, stale-writer, cutover and rollback
+  apply must accept the wrapper-added canonical `deploy_lease` transport
+  evidence without changing the reviewed deterministic plan fingerprint,
+  while independently rejecting any altered reviewed-plan field or lease
   SHA/revision/window/phase/evidence-fingerprint drift before a barrier or
   destination mutation.
 - Disconnect/crash rehearsal at each persisted transition, including snapshot

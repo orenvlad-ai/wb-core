@@ -300,6 +300,12 @@ def _reviewed_plan_fingerprint(
 ) -> str:
     """Recompute the runner-owned deterministic hash before any mutation."""
 
+    if action == "apply":
+        from packages.application.finance_storage_migration import (
+            _plan_fingerprint,
+        )
+
+        return _plan_fingerprint(plan)
     if action == "snapshot-create":
         from packages.application.finance_storage_migration import (
             _snapshot_plan_fingerprint,
@@ -565,6 +571,11 @@ def validate_recovery_preflight(
                 "reviewed plan deployed SHA does not match recovery binding"
             )
         expected_plan = {
+            "apply": (
+                EXPECTED_RUNNER_CONTRACTS["candidate_plan"],
+                "dry_run",
+                "apply_allowed_by_machine_preflight",
+            ),
             "snapshot-create": (
                 EXPECTED_RUNNER_CONTRACTS["snapshot_plan"],
                 "snapshot_dry_run",
@@ -614,6 +625,7 @@ def validate_recovery_preflight(
                 "reviewed plan deterministic fingerprint is stale"
             )
     elif exact_action in {
+        "apply",
         "snapshot-create",
         "snapshot-retention-apply",
         "stale-writer-stop",

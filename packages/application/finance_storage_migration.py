@@ -138,6 +138,7 @@ def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
     stable.pop("fingerprint", None)
     stable.pop("created_at", None)
     stable.pop("performance", None)
+    stable.pop("deploy_lease", None)
     capacity = stable.get("capacity", {})
     for key in (
         "available_bytes",
@@ -2142,6 +2143,9 @@ class FinanceStorageMigrationPlanner:
                 "ownership and open inventories, generation ids, required capacity, "
                 "stable systemd unit identity/load/enablement and rollback scope"
             ),
+            "transport_fields_rechecked_not_hashed": [
+                "deploy_lease",
+            ],
             "volatile_fields_rechecked_not_hashed": [
                 "available_bytes",
                 "capacity_shortfall",
