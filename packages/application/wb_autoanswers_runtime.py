@@ -65,7 +65,7 @@ from packages.contracts.wb_autoanswers import (
 from packages.application.sqlite_contention import connect_sqlite
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 AUTOANSWERS_STORE_SCHEMA_VERSION = 1
 AUTOANSWERS_DB_FILENAME = "wb_autoanswers_runtime.sqlite3"
 LEGACY_RUNTIME_DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -119,7 +119,7 @@ RECONCILIATION_PRESERVED_OUTCOMES = frozenset(
 )
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v8"
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v9"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -1332,7 +1332,7 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v8(conn)
+            self._migrate_schema_v9(conn)
             applied_at = iso_utc(self._now())
             conn.executemany(
                 """
@@ -2124,6 +2124,18 @@ class AutoanswersRepository:
             ON sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements(
                 sweep_id,outcome_class,outcome,acknowledged_at
             );
+            """
+        )
+
+    @staticmethod
+    def _migrate_schema_v9(conn: sqlite3.Connection) -> None:
+        """Bound publication lookup work in the operator status aggregate."""
+
+        AutoanswersRepository._migrate_schema_v8(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sv1_pub_jobs_processing_key
+            ON sheet_vitrina_v1_wb_publication_jobs(processing_key)
             """
         )
 
@@ -9815,6 +9827,7 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_publication_jobs(
 );
 CREATE INDEX IF NOT EXISTS idx_sv1_pub_jobs_claim ON sheet_vitrina_v1_wb_publication_jobs(state, available_at, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sv1_pub_jobs_one_create_per_version ON sheet_vitrina_v1_wb_publication_jobs(feedback_id, content_version);
+CREATE INDEX IF NOT EXISTS idx_sv1_pub_jobs_processing_key ON sheet_vitrina_v1_wb_publication_jobs(processing_key);
 
 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_publication_attempts(
     attempt_id TEXT PRIMARY KEY,

@@ -300,6 +300,95 @@ class RuntimeTest(unittest.TestCase):
             "ok",
         )
 
+    def test_schema_v9_indexes_publication_status_join_without_rewriting_rows(
+        self,
+    ) -> None:
+        self.enable("manual")
+        self.insert_new("schema-v9-evidence")
+        self.repo.enqueue_manual_processing(
+            "schema-v9-evidence",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        immutable_tables = (
+            "sheet_vitrina_v1_wb_feedbacks",
+            "sheet_vitrina_v1_wb_autoanswer_jobs",
+            "sheet_vitrina_v1_wb_publication_jobs",
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            before = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=9"
+            )
+            conn.execute("DROP INDEX idx_sv1_pub_jobs_processing_key")
+
+        migrated = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env=self.env,
+        )
+        with sqlite3.connect(migrated.db_path) as conn:
+            after = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            index_columns = [
+                str(row[2])
+                for row in conn.execute(
+                    "PRAGMA index_info(idx_sv1_pub_jobs_processing_key)"
+                ).fetchall()
+            ]
+            conn.execute("PRAGMA automatic_index=OFF")
+            query_plan = "\n".join(
+                str(row[3])
+                for row in conn.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    WITH active_members AS (
+                        SELECT
+                            rs.feedback_id,
+                            rs.content_version_at_preview AS content_version,
+                            rs.content_version_hash_at_preview AS content_version_hash,
+                            rs.content_classification_at_preview AS content_classification
+                        FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
+                        WHERE rs.sweep_id=?
+                        UNION
+                        SELECT
+                            ra.feedback_id,
+                            ra.content_version,
+                            ra.content_version_hash,
+                            ra.content_classification
+                        FROM sheet_vitrina_v1_wb_autoanswers_rolling_admissions ra
+                        WHERE ra.transition_run_id=?
+                    )
+                    SELECT COUNT(*)
+                    FROM active_members members
+                    JOIN sheet_vitrina_v1_wb_feedbacks feedback
+                      ON feedback.feedback_id=members.feedback_id
+                     AND feedback.content_version=members.content_version
+                     AND feedback.content_version_hash=members.content_version_hash
+                    LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs job
+                      ON job.feedback_id=feedback.feedback_id
+                     AND job.content_version=members.content_version
+                     AND job.bundle_version=?
+                    LEFT JOIN sheet_vitrina_v1_wb_publication_jobs publication
+                      ON publication.processing_key=job.processing_key
+                    """,
+                    ("run", "run", "bundle"),
+                ).fetchall()
+            )
+        self.assertEqual(after, before)
+        self.assertEqual(index_columns, ["processing_key"])
+        self.assertIn("idx_sv1_pub_jobs_processing_key", query_plan)
+        self.assertNotIn("SCAN publication LEFT-JOIN", query_plan)
+
     def test_new_isolated_store_does_not_modify_unrelated_registry_database(self) -> None:
         with TemporaryDirectory() as directory:
             runtime_dir = Path(directory)
