@@ -308,6 +308,9 @@ class HostedRuntimeTarget:
     status_command: str
     environment_file: str
     runtime_env: dict[str, str] = field(default_factory=dict)
+    finance_generation_filesystem: dict[str, Any] = field(
+        default_factory=dict
+    )
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
     managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
@@ -353,6 +356,13 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
     if not isinstance(raw_runtime_env, dict):
         raise ValueError("runtime_env must be a JSON object")
     runtime_env = {str(key): str(value) for key, value in raw_runtime_env.items()}
+    raw_finance_generation_filesystem = (
+        payload.get("finance_generation_filesystem") or {}
+    )
+    if not isinstance(raw_finance_generation_filesystem, dict):
+        raise ValueError(
+            "finance_generation_filesystem must be a JSON object"
+        )
     raw_managed_systemd_units = payload.get("managed_systemd_units") or []
     if not isinstance(raw_managed_systemd_units, list):
         raise ValueError("managed_systemd_units must be a JSON array")
@@ -403,6 +413,10 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         status_command=str(payload.get("status_command", "")).strip(),
         environment_file=str(payload.get("environment_file", "")).strip(),
         runtime_env=runtime_env,
+        finance_generation_filesystem={
+            str(key): value
+            for key, value in raw_finance_generation_filesystem.items()
+        },
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
         managed_systemd_units=tuple(managed_systemd_units),
@@ -4719,6 +4733,25 @@ def _run_remote_finance_storage_split_action(
         "--chunk-size",
         str(chunk_size),
     ]
+    generation_filesystem_contract = dict(
+        target.finance_generation_filesystem
+    )
+    if not generation_filesystem_contract:
+        raise ValueError(
+            "canonical Finance migration execution requires the target-owned "
+            "generation filesystem contract"
+        )
+    runner_args.extend(
+        [
+            "--generation-filesystem-contract-json",
+            json.dumps(
+                generation_filesystem_contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ]
+    )
     if action == "recovery-preflight":
         runner_args.extend(["--recovery-action", effective_action])
     if action not in {

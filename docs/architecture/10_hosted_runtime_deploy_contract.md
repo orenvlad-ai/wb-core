@@ -821,6 +821,20 @@ The current active public probe target is `https://api.selleros.pro`. Live/publi
 
 Live/public verify that creates temporary runtime users must prefer temp/local runtime state. If a hosted verify must create a live runtime user, it must use an unmistakable service/test prefix or marker, run cleanup in a finally-style path, and verify that the default admin users list does not expose those rows. Archived/inactive service rows such as `codex_live_*`, `codex_debug_*`, `smoke_*` or `test_*` are not user-facing users and must be hidden by the default users API/UI even when cleanup cannot hard-delete an historical row; any bounded live cleanup for those prefixes must not touch env principals or real manual users.
 
+## Finance generation filesystem
+
+The active hosted target owns the Finance generation-filesystem contract:
+exact `/opt/wb-core-runtime/state/generations` mountpoint, ext4 UUID/label,
+required `rw,noatime,nodev,nosuid,noexec` options and separation from the
+runtime filesystem. Every hosted Finance command receives and validates this
+contract before plan or mutation. Candidate, shadow, cutover and rollback
+revalidate the same mount identity/device at their persisted boundaries, and
+capacity is measured on that filesystem rather than the root runtime path.
+The deployed service unit has `RequiresMountsFor` plus
+`ConditionPathIsMountPoint`, so a missing, replaced, wrongly mounted or
+read-only generation filesystem stays fail closed across restart/deploy
+instead of silently writing generations onto root.
+
 ## Human-Only Boundary
 
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:

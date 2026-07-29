@@ -62,5 +62,20 @@
     "SHEET_VITRINA_STATUS_HTTP_PATH": "/v1/sheet-vitrina-v1/status",
     "SHEET_VITRINA_OPERATOR_UI_PATH": "/sheet-vitrina-v1/operator",
     "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH": "/opt/wb-web-bot/storage_state.json"
+  },
+  "finance_generation_filesystem": {
+    "contract_version": "wb_core_finance_generation_filesystem_v1",
+    "path": "__SET_ME__/generations",
+    "filesystem_uuid": "__SET_ME__",
+    "filesystem_label": "__SET_ME__",
+    "filesystem_type": "ext4",
+    "required_mount_options": [
+      "rw",
+      "noatime",
+      "nodev",
+      "nosuid",
+      "noexec"
+    ],
+    "require_distinct_device": true
   }
 }
