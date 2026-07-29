@@ -486,6 +486,16 @@ capacity. The output file stays outside Git with mode `0600`.
 - Each chunk is idempotent and records source count/digest, destination
   count/digest, byte counters and watermark.
 - Resume skips verified chunks and rechecks their digests.
+- Operational tables use a plan-bound topological order derived from the
+  immutable snapshot's foreign keys, so every cross-table parent is committed
+  before its dependants even when alphabetical order is unsafe. Self
+  references are deferred only within that table's transaction. A cycle,
+  ordering drift or final `foreign_key_check` violation fails before candidate
+  manifest publication.
+- A crash after any verified operational-table checkpoint resumes from the
+  same saved plan: verified tables are re-read by count/digest and skipped,
+  while the global manifest remains absent until all tables, schema objects
+  and the final foreign-key check succeed.
 - Build indexes after bulk copy when this reduces total space/time, while the
   source remains canonical.
 - Full row count, key-set digest, ordered business digest and sampled semantic
@@ -494,8 +504,10 @@ capacity. The output file stays outside Git with mode `0600`.
 
 The live reader still uses the monolith.
 
-Repository status: candidate-builder code and fixtures are implemented;
-production execution is **not approved** by repository/deploy closure.
+Repository status: candidate-builder code, dependency-order and
+operational-checkpoint restart fixtures are implemented. Production execution
+still requires the external exact plan/fingerprint/lease gate; deployment
+itself never starts a candidate.
 
 ### Stage 4 — dual/shadow read and live-tail catch-up
 
