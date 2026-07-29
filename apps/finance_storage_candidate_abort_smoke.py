@@ -157,6 +157,35 @@ def _fixture(root: Path) -> tuple[Path, str]:
                 },
             },
         },
+        "performance": {
+            "query_seconds": 12.5,
+        },
+        "capacity": {
+            "available_bytes": 10_000,
+            "shortfall_bytes": 0,
+            "remaining_bytes_after_reservation": 5_000,
+            "sufficient": True,
+        },
+        "writers_and_timers": {
+            "database_openers": [
+                {
+                    "pid": 123,
+                    "comm": "python3",
+                    "access_mode": "read",
+                }
+            ],
+            "systemd_units": [
+                {
+                    "unit": "wb-core-wb-finance-weekly.timer",
+                    "return_code": 0,
+                    "load_state": "loaded",
+                    "unit_file_state": "enabled",
+                    "active_state": "active",
+                    "sub_state": "waiting",
+                    "observed_at": "2026-07-29T00:00:00Z",
+                }
+            ],
+        },
         "apply_allowed_by_machine_preflight": True,
     }
     plan["fingerprint"] = candidate_plan_fingerprint(plan)
