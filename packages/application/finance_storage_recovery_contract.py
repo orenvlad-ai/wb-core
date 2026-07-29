@@ -294,6 +294,52 @@ def _fingerprint(value: Any) -> str:
     ).hexdigest()
 
 
+def _reviewed_plan_fingerprint(
+    action: str,
+    plan: Mapping[str, Any],
+) -> str:
+    """Recompute the runner-owned deterministic hash before any mutation."""
+
+    if action == "snapshot-create":
+        from packages.application.finance_storage_migration import (
+            _snapshot_plan_fingerprint,
+        )
+
+        return _snapshot_plan_fingerprint(plan)
+    if action == "snapshot-retention-apply":
+        from packages.application.finance_storage_snapshot_retention import (
+            _fingerprint as retention_fingerprint,
+        )
+
+        stable = {
+            key: value
+            for key, value in plan.items()
+            if key not in {"fingerprint", "deploy_lease"}
+        }
+        return retention_fingerprint(stable)
+    if action == "stale-writer-stop":
+        from packages.application.finance_storage_stale_writer_recovery import (
+            _plan_fingerprint as stale_writer_plan_fingerprint,
+        )
+
+        return stale_writer_plan_fingerprint(plan)
+    if action == "cutover-apply":
+        from packages.application.finance_storage_migration import (
+            FinanceStorageCutover,
+        )
+
+        return FinanceStorageCutover._fingerprint(plan)
+    if action in {"rollback-prepare", "rollback-apply"}:
+        from packages.application.finance_storage_migration import (
+            FinanceStorageRollback,
+        )
+
+        return FinanceStorageRollback._fingerprint(plan)
+    raise FinanceStorageRecoveryContractError(
+        f"unsupported reviewed-plan fingerprint action: {action!r}"
+    )
+
+
 def recovery_contract(
     *,
     runner_contracts: Mapping[str, str],
@@ -558,6 +604,14 @@ def validate_recovery_preflight(
         ):
             raise FinanceStorageRecoveryContractError(
                 "reviewed plan contract/capability is invalid"
+            )
+        if (
+            expected_plan is not None
+            and _reviewed_plan_fingerprint(exact_action, plan)
+            != fingerprint
+        ):
+            raise FinanceStorageRecoveryContractError(
+                "reviewed plan deterministic fingerprint is stale"
             )
     elif exact_action in {
         "snapshot-create",

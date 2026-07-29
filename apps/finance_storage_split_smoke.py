@@ -890,6 +890,7 @@ class MigrationSmoke(unittest.TestCase):
                 repo_root=ROOT,
             )
             plan = snapshot.build_plan()
+            plan["deploy_lease"] = self._recovery_lease()
             barrier_path = runtime / ".business-data-write-barrier.json"
             common = {
                 "runtime_dir": runtime,
@@ -937,6 +938,31 @@ class MigrationSmoke(unittest.TestCase):
                     downstream_capabilities=(
                         self._recovery_capabilities()
                     ),
+                )
+            self.assertFalse(barrier_path.exists())
+            tampered_plan = json.loads(json.dumps(plan))
+            tampered_plan["target_snapshot"]["snapshot_id"] = (
+                "finance-split-" + ("f" * 20)
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deterministic fingerprint is stale",
+            ):
+                validate_recovery_preflight(
+                    **{**common, "reviewed_plan": tampered_plan},
+                    deploy_lease=self._recovery_lease(),
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                )
+            with self.assertRaisesRegex(
+                FinanceStorageMigrationError,
+                "reviewed coherent snapshot plan",
+            ):
+                snapshot.create(
+                    reviewed_plan=tampered_plan,
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    approval_reference="program-authorization-smoke",
                 )
             self.assertFalse(barrier_path.exists())
             fresh = validate_recovery_preflight(
@@ -1064,6 +1090,28 @@ class MigrationSmoke(unittest.TestCase):
                     reviewed_plan=tampered_plan,
                     expected_fingerprint=str(plan["fingerprint"]),
                     approval_reference="retention-crash-smoke",
+                )
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deterministic fingerprint is stale",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="snapshot-retention-apply",
+                    phase="pre_barrier",
+                    deployed_sha=DEPLOYED_SHA,
+                    approval_reference="retention-crash-smoke",
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    deploy_lease=self._recovery_lease(),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    reviewed_plan=tampered_plan,
                 )
             recovery = validate_recovery_preflight(
                 runtime,
@@ -1261,6 +1309,7 @@ class MigrationSmoke(unittest.TestCase):
                 repo_root=ROOT,
             )
             plan = snapshot.build_plan()
+            plan["deploy_lease"] = self._recovery_lease()
             planned_identity = dict(plan["source"]["identity"])
             with closing(sqlite3.connect(source_path)) as conn:
                 conn.execute(
@@ -2186,6 +2235,29 @@ class MigrationSmoke(unittest.TestCase):
             tampered_plan = json.loads(json.dumps(cutover_plan))
             tampered_plan["candidate"]["bridge_cursor"] = 999
             with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deterministic fingerprint is stale",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="cutover-apply",
+                    phase="pre_barrier",
+                    deployed_sha=DEPLOYED_SHA,
+                    approval_reference="fixture-human-gate",
+                    expected_fingerprint=cutover_plan["fingerprint"],
+                    deploy_lease=self._recovery_lease(),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    reviewed_plan=tampered_plan,
+                    candidate_manifest_path=candidate_manifest_path,
+                )
+            with self.assertRaisesRegex(
                 FinanceStorageMigrationError,
                 "reviewed Finance cutover plan",
             ):
@@ -2384,6 +2456,28 @@ class MigrationSmoke(unittest.TestCase):
             tampered_rollback_plan["unreviewed_transport"] = {
                 "accepted": False
             }
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deterministic fingerprint is stale",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="rollback-prepare",
+                    phase="pre_barrier",
+                    deployed_sha=DEPLOYED_SHA,
+                    approval_reference="fixture-human-gate",
+                    expected_fingerprint=rollback_plan["fingerprint"],
+                    deploy_lease=self._recovery_lease(),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    reviewed_plan=tampered_rollback_plan,
+                )
             with self.assertRaisesRegex(
                 FinanceStorageMigrationError,
                 "reviewed Finance rollback plan",

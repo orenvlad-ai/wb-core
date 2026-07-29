@@ -247,13 +247,17 @@ The implementation is deliberately inert on deploy:
 - `finance-storage-recovery-contract` is the query-only deployed capability
   readback. Before **every** Finance storage mutation the hosted wrapper runs
   `recovery-preflight` remotely before barrier acquisition or destination
-  mutation. The remote mutation runner repeats the same validation after an
-  exact quiet hold for snapshot/cutover/rollback. The validator binds deployed
-  SHA, lease task/id/revision/window/phase, approval reference, reviewed
-  fingerprint, active generation, snapshot/candidate/rollback paths and
-  identities, runner contract versions and all downstream durable
-  restore/release capabilities. Missing, stale, unsupported or ambiguous
-  evidence creates no barrier and fails closed.
+  mutation. It recomputes the runner-owned deterministic fingerprint from the
+  complete reviewed snapshot/retention/stale-writer/cutover/rollback plan
+  before accepting the plan field; only the separately validated top-level
+  `deploy_lease` transport evidence is excluded. The remote mutation runner
+  repeats the same validation after an exact quiet hold for
+  snapshot/cutover/rollback. The validator binds deployed SHA, lease
+  task/id/revision/window/phase, approval reference, reviewed fingerprint,
+  active generation, snapshot/candidate/rollback paths and identities, runner
+  contract versions and all downstream durable restore/release capabilities.
+  Missing, stale, unsupported or ambiguous evidence creates no barrier and
+  fails closed.
 - The snapshot plan is intentionally query-only while ordinary writers remain
   active. After the exact quiet hold, capture therefore re-reads the source
   identity and may bind ordinary data/mtime/page-count/freelist drift only when
@@ -633,10 +637,12 @@ Closure requires:
 - Recovery-contract transition completeness and stable fingerprint; preflight
   must reject missing lease/approval/downstream capability before creating a
   barrier or destination byte.
-- Snapshot-retention, cutover and rollback apply must accept the wrapper-added
-  canonical `deploy_lease` transport evidence without changing the reviewed
-  deterministic plan fingerprint, while independently rejecting any lease
-  SHA/revision/window/phase or evidence-fingerprint drift.
+- Snapshot, snapshot-retention, stale-writer, cutover and rollback apply must
+  accept the wrapper-added canonical `deploy_lease` transport evidence without
+  changing the reviewed deterministic plan fingerprint, while independently
+  rejecting any altered reviewed-plan field or lease
+  SHA/revision/window/phase/evidence-fingerprint drift before a barrier or
+  destination mutation.
 - Disconnect/crash rehearsal at each persisted transition, including snapshot
   partial/final-without-manifest, cutover post-manifest and rollback
   post-manifest exact resume; ambiguous variants must remain fail closed.

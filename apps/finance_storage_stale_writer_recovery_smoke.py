@@ -17,6 +17,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application import finance_storage_stale_writer_recovery as recovery  # noqa: E402
+from packages.application.finance_storage_recovery_contract import (  # noqa: E402
+    _reviewed_plan_fingerprint,
+)
 
 
 SHA = "a" * 40
@@ -209,6 +212,39 @@ def main() -> int:
             assert plan["action"]["business_data_mutation_count"] == 0
             assert systemctl.stop_calls == 0
 
+            plan["deploy_lease"] = {
+                "lease": {
+                    "deployed_sha": SHA,
+                    "revision": 1,
+                }
+            }
+            tampered_plan = json.loads(json.dumps(plan))
+            tampered_plan["service"]["main_pid"] = MAIN_PID + 1
+            assert (
+                _reviewed_plan_fingerprint("stale-writer-stop", plan)
+                == plan["fingerprint"]
+            )
+            assert (
+                _reviewed_plan_fingerprint(
+                    "stale-writer-stop",
+                    tampered_plan,
+                )
+                != plan["fingerprint"]
+            )
+            try:
+                runner.apply(
+                    reviewed_plan=tampered_plan,
+                    expected_fingerprint=plan["fingerprint"],
+                    approval_reference="tampered stale generation",
+                )
+            except recovery.FinanceStorageStaleWriterRecoveryError as exc:
+                assert "not approved" in str(exc)
+            else:
+                raise AssertionError(
+                    "tampered stale-writer plan retained its old fingerprint"
+                )
+            assert systemctl.stop_calls == 0
+
             opened = runtime / "registry_upload_runtime.sqlite3"
             opened.write_bytes(b"fixture")
             fd = runner.proc_root / str(MAIN_PID) / "fd" / "9"
@@ -278,7 +314,7 @@ def main() -> int:
             ).read_text(encoding="utf-8")
             assert '"event":"stale_writer_stop_failed"' in audit
 
-        print("finance_storage_stale_writer_recovery_smoke: 15/15 ok")
+        print("finance_storage_stale_writer_recovery_smoke: 19/19 ok")
         return 0
     finally:
         recovery.barrier_status = original_barrier_status

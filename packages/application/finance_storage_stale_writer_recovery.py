@@ -258,6 +258,7 @@ def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
     stable = json.loads(_canonical_json(plan))
     stable.pop("fingerprint", None)
     stable.pop("created_at", None)
+    stable.pop("deploy_lease", None)
     service = dict(stable.get("service") or {})
     service.pop("age_seconds", None)
     stable["service"] = service
@@ -640,6 +641,7 @@ class FinanceStorageStaleWriterRecovery:
             reviewed_plan.get("contract_version") != PLAN_CONTRACT
             or reviewed_plan.get("mode") != "stale_writer_recovery_dry_run"
             or reviewed_plan.get("fingerprint") != expected_fingerprint
+            or _plan_fingerprint(reviewed_plan) != expected_fingerprint
             or reviewed_plan.get("stop_allowed_by_machine_preflight") is not True
             or not str(approval_reference or "").strip()
         ):
