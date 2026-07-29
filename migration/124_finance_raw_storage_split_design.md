@@ -100,6 +100,18 @@ The implementation is deliberately inert on deploy:
   identity, load state and enablement remain approval-bound, so policy/config
   drift still fails closed while an ordinary scheduled service transition
   cannot stale an otherwise unchanged immutable-source candidate plan.
+- `packages/application/finance_generation_filesystem.py` makes the active
+  target's dedicated `state/generations` ext4 mount part of every hosted
+  Finance migration contract. The target pins its exact filesystem UUID,
+  label, type, required mount options and distinct-device requirement.
+  Candidate, shadow, cutover and rollback paths must remain on that mounted
+  device; their capacity checks use that filesystem, not the monolith/root
+  filesystem. The identity is recaptured before destination creation and
+  again before cutover/rollback writes. A missing mount, root fallback,
+  symlink, UUID/label/source/options/device drift or insufficient fresh space
+  fails closed before destination bytes. The registry HTTP systemd unit also
+  requires the mount and refuses to start against the underlying root
+  directory.
 - `packages/application/business_data_write_barrier.py` and the hosted HTTP
   adapter implement a durable fail-closed manual-write barrier. During exact
   snapshot/final-cutover/rollback windows authenticated `POST`, `PATCH` and

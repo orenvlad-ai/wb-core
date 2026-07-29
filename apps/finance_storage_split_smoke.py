@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -31,6 +33,11 @@ from packages.application.finance_raw_storage import (
     ensure_raw_schema,
     shadow_compare_week,
     storage_health,
+)
+from packages.application.finance_generation_filesystem import (
+    CONTRACT_VERSION as GENERATION_FILESYSTEM_CONTRACT,
+    FinanceGenerationFilesystemError,
+    inspect_generation_filesystem,
 )
 from packages.application.finance_storage_migration import (
     FinanceStorageCandidateBuilder,
@@ -729,6 +736,253 @@ class OutboxSmoke(unittest.TestCase):
 
 
 class MigrationSmoke(unittest.TestCase):
+    def test_generation_filesystem_contract_binds_mount_uuid_and_options(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            runtime = base / "runtime"
+            generations = runtime / "generations"
+            generations.mkdir(parents=True)
+            source = base / "sdc1"
+            source.touch()
+            by_uuid = base / "by-uuid"
+            by_label = base / "by-label"
+            by_uuid.mkdir()
+            by_label.mkdir()
+            filesystem_uuid = "284b3362-b890-431d-a7da-7f0fcd2ee0a6"
+            filesystem_label = "wb-finance-gen"
+            (by_uuid / filesystem_uuid).symlink_to(source)
+            (by_label / filesystem_label).symlink_to(source)
+            runtime_resolved = os.path.realpath(str(runtime))
+            generations_resolved = os.path.realpath(str(generations))
+            source_resolved = os.path.realpath(str(source))
+            mountinfo = base / "mountinfo"
+            mountinfo.write_text(
+                "36 25 8:33 / "
+                + generations_resolved
+                + " rw,nosuid,nodev,noexec,noatime - ext4 "
+                + source_resolved
+                + " rw,errors=remount-ro\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "contract_version": GENERATION_FILESYSTEM_CONTRACT,
+                "path": str(generations),
+                "filesystem_uuid": filesystem_uuid,
+                "filesystem_label": filesystem_label,
+                "filesystem_type": "ext4",
+                "required_mount_options": [
+                    "rw",
+                    "noatime",
+                    "nodev",
+                    "nosuid",
+                    "noexec",
+                ],
+                "require_distinct_device": True,
+            }
+            real_stat = Path.stat
+
+            def fake_stat(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                current = real_stat(path, *args, **kwargs)
+                resolved = os.path.realpath(str(path))
+                payload = {
+                    key: getattr(current, key)
+                    for key in (
+                        "st_mode",
+                        "st_ino",
+                        "st_dev",
+                        "st_nlink",
+                        "st_uid",
+                        "st_gid",
+                        "st_size",
+                        "st_atime",
+                        "st_mtime",
+                        "st_ctime",
+                    )
+                }
+                payload["st_rdev"] = int(
+                    getattr(current, "st_rdev", 0)
+                )
+                if resolved == runtime_resolved:
+                    payload["st_dev"] = 2049
+                elif resolved == generations_resolved:
+                    payload["st_dev"] = 2081
+                elif resolved == source_resolved:
+                    payload["st_mode"] = stat.S_IFBLK | 0o660
+                    payload["st_rdev"] = os.makedev(8, 33)
+                return SimpleNamespace(**payload)
+
+            with (
+                mock.patch(
+                    "packages.application.finance_generation_filesystem."
+                    "os.path.ismount",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    Path,
+                    "stat",
+                    autospec=True,
+                    side_effect=fake_stat,
+                ),
+            ):
+                identity = inspect_generation_filesystem(
+                    runtime,
+                    contract,
+                    mountinfo_path=mountinfo,
+                    by_uuid_root=by_uuid,
+                    by_label_root=by_label,
+                )
+            self.assertEqual(identity["status"], "ready")
+            self.assertEqual(identity["device"], 2081)
+            self.assertEqual(identity["runtime_device"], 2049)
+            self.assertEqual(identity["filesystem_uuid"], filesystem_uuid)
+            self.assertTrue(identity["mountpoint_proven"])
+            self.assertTrue(identity["distinct_device"])
+            self.assertTrue(
+                set(contract["required_mount_options"]).issubset(
+                    identity["mount_options"]
+                )
+            )
+
+            drifted = {
+                **contract,
+                "filesystem_uuid": (
+                    "11111111-1111-4111-8111-111111111111"
+                ),
+            }
+            with (
+                mock.patch(
+                    "packages.application.finance_generation_filesystem."
+                    "os.path.ismount",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    Path,
+                    "stat",
+                    autospec=True,
+                    side_effect=fake_stat,
+                ),
+                self.assertRaisesRegex(
+                    FinanceGenerationFilesystemError,
+                    "UUID/label/source identity drifted",
+                ),
+            ):
+                inspect_generation_filesystem(
+                    runtime,
+                    drifted,
+                    mountinfo_path=mountinfo,
+                    by_uuid_root=by_uuid,
+                    by_label_root=by_label,
+                )
+
+    def test_candidate_capacity_uses_generation_mount_and_mount_loss_blocks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            _create_monolith(runtime, rows=2)
+            snapshot_manifest = _create_verified_snapshot(runtime)
+            generations = runtime / "generations"
+            generations.mkdir()
+            filesystem_identity = {
+                "contract_version": GENERATION_FILESYSTEM_CONTRACT,
+                "path": str(generations.resolve()),
+                "filesystem_uuid": (
+                    "284b3362-b890-431d-a7da-7f0fcd2ee0a6"
+                ),
+                "filesystem_label": "wb-finance-gen",
+                "filesystem_type": "ext4",
+                "required_mount_options": [
+                    "noatime",
+                    "nodev",
+                    "noexec",
+                    "nosuid",
+                    "rw",
+                ],
+                "require_distinct_device": True,
+                "status": "ready",
+                "source": "/dev/sdc1",
+                "device": int(generations.stat().st_dev),
+                "major_minor": "8:33",
+                "mount_root": "/",
+                "mount_options": [
+                    "errors=remount-ro",
+                    "noatime",
+                    "nodev",
+                    "noexec",
+                    "nosuid",
+                    "rw",
+                ],
+                "filesystem_block_size": 4096,
+                "total_bytes": 105_087_164_416,
+                "available_bytes": 103_996_661_760,
+                "runtime_device": int(runtime.stat().st_dev),
+                "distinct_device": True,
+                "mountpoint_proven": True,
+            }
+            fake_vfs = SimpleNamespace(
+                f_bavail=25_389_810,
+                f_frsize=4096,
+                f_blocks=25_656_045,
+            )
+            planner = FinanceStorageMigrationPlanner(
+                runtime,
+                chunk_size=1,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+                require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
+                generation_filesystem_contract={
+                    "configured": True,
+                },
+            )
+            with (
+                mock.patch(
+                    "packages.application.finance_storage_migration."
+                    "inspect_generation_filesystem",
+                    return_value=filesystem_identity,
+                ),
+                mock.patch(
+                    "packages.application.finance_storage_migration."
+                    "os.statvfs",
+                    return_value=fake_vfs,
+                ),
+            ):
+                plan = planner.build_plan()
+            self.assertEqual(
+                plan["capacity"]["available_bytes"],
+                103_996_661_760,
+            )
+            self.assertEqual(
+                plan["capacity"]["generation_filesystem"]["path"],
+                str(generations.resolve()),
+            )
+            self.assertTrue(plan["capacity"]["sufficient"])
+            with (
+                mock.patch(
+                    "packages.application.finance_storage_migration."
+                    "inspect_generation_filesystem",
+                    side_effect=FinanceGenerationFilesystemError(
+                        "fixture mount lost"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    FinanceStorageMigrationError,
+                    "fixture mount lost",
+                ),
+            ):
+                FinanceStorageCandidateBuilder(
+                    planner,
+                    expected_fingerprint=plan["fingerprint"],
+                    approval_reference="fixture-human-gate",
+                ).apply()
+            self.assertEqual(list(generations.iterdir()), [])
+
     def test_streamed_snapshot_plan_is_parsed_once_and_reused(self) -> None:
         fingerprint = "sha256:" + ("7" * 64)
         reviewed_plan = {
@@ -793,6 +1047,16 @@ class MigrationSmoke(unittest.TestCase):
                 ),
                 mock.patch.object(
                     finance_storage_cli,
+                    "validate_generation_filesystem_contract",
+                    return_value={"contract_version": "smoke"},
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "inspect_generation_filesystem",
+                    return_value={"status": "ready"},
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
                     "validate_recovery_preflight",
                     return_value={
                         "status": "ready",
@@ -823,6 +1087,8 @@ class MigrationSmoke(unittest.TestCase):
                         "--approval-reference",
                         "single-read-regression-smoke",
                         "--deploy-lease-json",
+                        "{}",
+                        "--generation-filesystem-contract-json",
                         "{}",
                     ]
                 )
@@ -898,6 +1164,16 @@ class MigrationSmoke(unittest.TestCase):
                 ),
                 mock.patch.object(
                     finance_storage_cli,
+                    "validate_generation_filesystem_contract",
+                    return_value={"contract_version": "smoke"},
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "inspect_generation_filesystem",
+                    return_value={"status": "ready"},
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
                     "validate_recovery_preflight",
                     return_value={
                         "status": "ready",
@@ -932,6 +1208,8 @@ class MigrationSmoke(unittest.TestCase):
                         "--approval-reference",
                         "candidate-single-read-smoke",
                         "--deploy-lease-json",
+                        "{}",
+                        "--generation-filesystem-contract-json",
                         "{}",
                     ]
                 )

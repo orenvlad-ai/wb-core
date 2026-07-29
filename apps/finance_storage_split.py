@@ -26,6 +26,11 @@ from packages.application.finance_raw_storage import shadow_compare_week, storag
 from packages.application.finance_migration_deploy_lease import (
     validate_finance_migration_deploy_lease,
 )
+from packages.application.finance_generation_filesystem import (
+    FinanceGenerationFilesystemError,
+    inspect_generation_filesystem,
+    validate_generation_filesystem_contract,
+)
 from packages.application.finance_storage_migration import (
     CUTOVER_PLAN_CONTRACT,
     CUTOVER_RESULT_CONTRACT,
@@ -321,6 +326,14 @@ def build_parser() -> argparse.ArgumentParser:
             "migration phase except health."
         ),
     )
+    parser.add_argument(
+        "--generation-filesystem-contract-json",
+        default="",
+        help=(
+            "Exact target-owned Finance generation mount path/UUID/label "
+            "contract. Canonical hosted execution requires it."
+        ),
+    )
     return parser
 
 
@@ -415,6 +428,31 @@ def _run_recovery_preflight(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     runtime_dir = args.runtime_dir.expanduser().resolve()
+    generation_filesystem_contract: dict[str, Any] | None = None
+    if args.generation_filesystem_contract_json:
+        try:
+            raw_generation_filesystem_contract = json.loads(
+                args.generation_filesystem_contract_json
+            )
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                "--generation-filesystem-contract-json must contain valid "
+                "JSON"
+            ) from exc
+        if not isinstance(raw_generation_filesystem_contract, dict):
+            raise SystemExit(
+                "--generation-filesystem-contract-json must contain a JSON "
+                "object"
+            )
+        try:
+            generation_filesystem_contract = (
+                validate_generation_filesystem_contract(
+                    raw_generation_filesystem_contract,
+                    runtime_dir=runtime_dir,
+                )
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise SystemExit(str(exc)) from exc
     deployed_sha = str(args.deployed_sha or "").strip()
     if args.deployed_sha_file is not None:
         file_sha = args.deployed_sha_file.expanduser().read_text(encoding="utf-8").strip()
@@ -433,6 +471,22 @@ def main(argv: list[str] | None = None) -> int:
             lease_payload,
             deployed_sha=deployed_sha,
         )
+        if generation_filesystem_contract is None:
+            raise SystemExit(
+                "canonical Finance migration execution requires the exact "
+                "generation filesystem contract"
+            )
+    if (
+        generation_filesystem_contract is not None
+        and args.action not in {"health", "recovery-contract"}
+    ):
+        try:
+            inspect_generation_filesystem(
+                runtime_dir,
+                generation_filesystem_contract,
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise SystemExit(str(exc)) from exc
     if args.action == "recovery-contract":
         if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
             raise SystemExit(
@@ -521,6 +575,9 @@ def main(argv: list[str] | None = None) -> int:
         rollback = FinanceStorageRollback(
             runtime_dir,
             deployed_sha=deployed_sha,
+            generation_filesystem_contract=(
+                generation_filesystem_contract
+            ),
         )
         if args.action == "rollback-plan":
             payload = rollback.build_plan()
@@ -575,6 +632,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             candidate_plan_fingerprint=args.candidate_plan_fingerprint,
             deployed_sha=deployed_sha,
+            generation_filesystem_contract=(
+                generation_filesystem_contract
+            ),
         )
         if args.action == "cutover-plan":
             payload = cutover.build_plan()
@@ -611,6 +671,9 @@ def main(argv: list[str] | None = None) -> int:
                 minimum_observation_seconds=(
                     args.minimum_observation_seconds
                 ),
+                generation_filesystem_contract=(
+                    generation_filesystem_contract
+                ),
             ).verify()
             if deploy_lease is not None:
                 payload["deploy_lease"] = {
@@ -632,6 +695,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             plan_fingerprint=args.confirm_fingerprint,
             approval_reference=args.approval_reference,
+            generation_filesystem_contract=(
+                generation_filesystem_contract
+            ),
         )
         if args.action == "shadow-status":
             payload = shadow.status()
@@ -791,6 +857,9 @@ def main(argv: list[str] | None = None) -> int:
             deployed_sha=deployed_sha,
             repo_root=args.repo_root,
             source_snapshot_manifest=args.source_snapshot_manifest,
+            generation_filesystem_contract=(
+                generation_filesystem_contract
+            ),
         )
         if args.action == "apply":
             payload = FinanceStorageCandidateBuilder(

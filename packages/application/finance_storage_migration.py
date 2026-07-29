@@ -29,6 +29,11 @@ from packages.application.finance_raw_storage import (
     storage_health,
 )
 from packages.application.business_data_write_barrier import barrier_status
+from packages.application.finance_generation_filesystem import (
+    FinanceGenerationFilesystemError,
+    inspect_generation_filesystem,
+    stable_generation_filesystem_identity,
+)
 from packages.application.storage_registry import (
     MANIFEST_FILENAME,
     MONOLITH_FILENAME,
@@ -778,12 +783,13 @@ def _destination_path_identity(path: Path) -> dict[str, Any]:
 
 def _capacity_plan(
     *,
-    runtime_dir: Path,
+    destination_root: Path,
+    generation_filesystem: Mapping[str, Any] | None,
     raw_allocated_bytes: int,
     raw_index_bytes: int,
     non_raw_allocated_bytes: int,
 ) -> dict[str, Any]:
-    vfs = os.statvfs(runtime_dir)
+    vfs = os.statvfs(destination_root)
     free_bytes = int(vfs.f_bavail * vfs.f_frsize)
     projected_raw_bytes = math.ceil(raw_allocated_bytes * 1.08)
     projected_operational_bytes = math.ceil(non_raw_allocated_bytes * 1.10)
@@ -801,8 +807,21 @@ def _capacity_plan(
         + operational_reserve_bytes
     )
     return {
-        "filesystem_device": int(runtime_dir.stat().st_dev),
+        "filesystem_device": int(destination_root.stat().st_dev),
         "filesystem_block_size": int(vfs.f_frsize),
+        "generation_filesystem": (
+            stable_generation_filesystem_identity(
+                generation_filesystem
+            )
+            if generation_filesystem is not None
+            else {
+                "status": "local_fixture_fallback",
+                "path": str(destination_root),
+                "device": int(destination_root.stat().st_dev),
+                "mountpoint_proven": False,
+                "distinct_device": False,
+            }
+        ),
         "available_bytes": free_bytes,
         "projected_raw_destination_bytes": projected_raw_bytes,
         "projected_operational_destination_bytes": projected_operational_bytes,
@@ -1688,6 +1707,7 @@ class FinanceStorageMigrationPlanner:
         repo_root: Path | None = None,
         require_exact_allocations: bool = True,
         source_snapshot_manifest: Path | None = None,
+        generation_filesystem_contract: Mapping[str, Any] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
@@ -1695,6 +1715,11 @@ class FinanceStorageMigrationPlanner:
         self.deployed_sha = str(deployed_sha or "").strip()
         self.repo_root = Path(repo_root).resolve() if repo_root else None
         self.require_exact_allocations = bool(require_exact_allocations)
+        self.generation_filesystem_contract = (
+            dict(generation_filesystem_contract)
+            if isinstance(generation_filesystem_contract, Mapping)
+            else None
+        )
         self.source_snapshot_manifest = (
             Path(source_snapshot_manifest).expanduser().resolve()
             if source_snapshot_manifest is not None
@@ -1702,6 +1727,23 @@ class FinanceStorageMigrationPlanner:
         )
         if self.chunk_size <= 0 or self.chunk_size > 500_000:
             raise FinanceStorageMigrationError("chunk_size must be within 1..500000")
+
+    def generation_filesystem_identity(self) -> dict[str, Any] | None:
+        if self.generation_filesystem_contract is None:
+            return None
+        try:
+            return inspect_generation_filesystem(
+                self.runtime_dir,
+                self.generation_filesystem_contract,
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise FinanceStorageMigrationError(str(exc)) from exc
+
+    def generation_capacity_root(self) -> Path:
+        identity = self.generation_filesystem_identity()
+        if identity is None:
+            return self.runtime_dir
+        return Path(str(identity["path"])).resolve()
 
     @contextmanager
     def _source_session(
@@ -1739,6 +1781,12 @@ class FinanceStorageMigrationPlanner:
 
     def build_plan(self) -> dict[str, Any]:
         plan_started = time.monotonic()
+        generation_filesystem = self.generation_filesystem_identity()
+        generation_capacity_root = (
+            Path(str(generation_filesystem["path"])).resolve()
+            if generation_filesystem is not None
+            else self.runtime_dir
+        )
         manifest = self.registry.load()
         if manifest.state != "monolith" or manifest.canonical_source != "monolith":
             raise FinanceStorageMigrationError("dry-run requires the canonical monolith generation")
@@ -1870,7 +1918,8 @@ class FinanceStorageMigrationPlanner:
         total_allocated = sum(int(value) for value in allocations.values())
         non_raw_allocated = max(0, total_allocated - raw_allocated_bytes)
         capacity = _capacity_plan(
-            runtime_dir=self.runtime_dir,
+            destination_root=generation_capacity_root,
+            generation_filesystem=generation_filesystem,
             raw_allocated_bytes=raw_allocated_bytes,
             raw_index_bytes=raw_index_bytes,
             non_raw_allocated_bytes=non_raw_allocated,
@@ -2349,7 +2398,17 @@ class FinanceStorageCandidateBuilder:
                 generation = plan["target_generation"]
                 candidate = generation["candidate_manifest"]
             capacity = plan["capacity"]
-            fresh_vfs = os.statvfs(self.planner.runtime_dir)
+            generation_capacity_root = (
+                self.planner.generation_capacity_root()
+            )
+            if int(generation_capacity_root.stat().st_dev) != int(
+                capacity["filesystem_device"]
+            ):
+                raise FinanceStorageMigrationError(
+                    "Finance generation filesystem device drifted before "
+                    "destination creation"
+                )
+            fresh_vfs = os.statvfs(generation_capacity_root)
             fresh_free = int(fresh_vfs.f_bavail * fresh_vfs.f_frsize)
             existing_candidate_bytes = (
                 min(
@@ -2829,6 +2888,7 @@ class FinanceStorageShadowRunner:
         candidate_manifest_path: Path,
         plan_fingerprint: str,
         approval_reference: str,
+        generation_filesystem_contract: Mapping[str, Any] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
@@ -2837,16 +2897,33 @@ class FinanceStorageShadowRunner:
         )
         self.plan_fingerprint = str(plan_fingerprint or "").strip()
         self.approval_reference = str(approval_reference or "").strip()
+        self.generation_filesystem_contract = (
+            dict(generation_filesystem_contract)
+            if isinstance(generation_filesystem_contract, Mapping)
+            else None
+        )
         if not self.plan_fingerprint.startswith("sha256:"):
             raise FinanceStorageMigrationError(
                 "exact candidate plan fingerprint is required"
             )
+
+    def _generation_filesystem(self) -> dict[str, Any] | None:
+        if self.generation_filesystem_contract is None:
+            return None
+        try:
+            return inspect_generation_filesystem(
+                self.runtime_dir,
+                self.generation_filesystem_contract,
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise FinanceStorageMigrationError(str(exc)) from exc
 
     @property
     def state_path(self) -> Path:
         return self.runtime_dir / SHADOW_STATE_FILENAME
 
     def _candidate(self) -> tuple[Any, Path, Path]:
+        generation_filesystem = self._generation_filesystem()
         payload = _load_private_json(
             self.candidate_manifest_path,
             label="candidate generation manifest",
@@ -2865,6 +2942,18 @@ class FinanceStorageShadowRunner:
             raise FinanceStorageMigrationError(
                 "candidate generation files are incomplete"
             )
+        if generation_filesystem is not None:
+            expected_device = int(generation_filesystem["device"])
+            if (
+                int(raw_path.stat().st_dev) != expected_device
+                or int(operational_path.stat().st_dev) != expected_device
+                or int(self.candidate_manifest_path.stat().st_dev)
+                != expected_device
+            ):
+                raise FinanceStorageMigrationError(
+                    "candidate generation escaped the exact Finance "
+                    "generation filesystem"
+                )
         return manifest, raw_path, operational_path
 
     def status(self) -> dict[str, Any]:
@@ -3254,6 +3343,7 @@ class FinanceStorageShadowVerifier:
         candidate_manifest_path: Path,
         candidate_plan_fingerprint: str,
         minimum_observation_seconds: int = 3600,
+        generation_filesystem_contract: Mapping[str, Any] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
@@ -3267,8 +3357,22 @@ class FinanceStorageShadowVerifier:
             0,
             int(minimum_observation_seconds),
         )
+        self.generation_filesystem_contract = (
+            dict(generation_filesystem_contract)
+            if isinstance(generation_filesystem_contract, Mapping)
+            else None
+        )
 
     def _candidate(self) -> tuple[Any, Path, Path]:
+        generation_filesystem: dict[str, Any] | None = None
+        if self.generation_filesystem_contract is not None:
+            try:
+                generation_filesystem = inspect_generation_filesystem(
+                    self.runtime_dir,
+                    self.generation_filesystem_contract,
+                )
+            except FinanceGenerationFilesystemError as exc:
+                raise FinanceStorageMigrationError(str(exc)) from exc
         manifest = parse_manifest(
             _load_private_json(
                 self.candidate_manifest_path,
@@ -3279,11 +3383,24 @@ class FinanceStorageShadowVerifier:
             raise FinanceStorageMigrationError(
                 "shadow verification requires an unselected candidate"
             )
-        return (
-            manifest,
-            self.registry.resolve("finance_raw", manifest=manifest),
-            self.registry.resolve("operational", manifest=manifest),
+        raw_path = self.registry.resolve("finance_raw", manifest=manifest)
+        operational_path = self.registry.resolve(
+            "operational",
+            manifest=manifest,
         )
+        if generation_filesystem is not None:
+            expected_device = int(generation_filesystem["device"])
+            if (
+                int(raw_path.stat().st_dev) != expected_device
+                or int(operational_path.stat().st_dev) != expected_device
+                or int(self.candidate_manifest_path.stat().st_dev)
+                != expected_device
+            ):
+                raise FinanceStorageMigrationError(
+                    "shadow verification candidate escaped the exact "
+                    "Finance generation filesystem"
+                )
+        return manifest, raw_path, operational_path
 
     @staticmethod
     def _rows_digest(
@@ -3322,6 +3439,9 @@ class FinanceStorageShadowVerifier:
             candidate_manifest_path=self.candidate_manifest_path,
             plan_fingerprint=self.candidate_plan_fingerprint,
             approval_reference="verification-readback",
+            generation_filesystem_contract=(
+                self.generation_filesystem_contract
+            ),
         ).status()
         if (
             shadow_state.get("enabled") is not True
@@ -3554,6 +3674,7 @@ class FinanceStorageCutover:
         candidate_manifest_path: Path,
         candidate_plan_fingerprint: str,
         deployed_sha: str,
+        generation_filesystem_contract: Mapping[str, Any] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
@@ -3564,8 +3685,25 @@ class FinanceStorageCutover:
             candidate_plan_fingerprint or ""
         ).strip()
         self.deployed_sha = str(deployed_sha or "").strip()
+        self.generation_filesystem_contract = (
+            dict(generation_filesystem_contract)
+            if isinstance(generation_filesystem_contract, Mapping)
+            else None
+        )
+
+    def _generation_filesystem(self) -> dict[str, Any] | None:
+        if self.generation_filesystem_contract is None:
+            return None
+        try:
+            return inspect_generation_filesystem(
+                self.runtime_dir,
+                self.generation_filesystem_contract,
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise FinanceStorageMigrationError(str(exc)) from exc
 
     def _candidate(self) -> tuple[Any, Path, Path]:
+        generation_filesystem = self._generation_filesystem()
         payload = _load_private_json(
             self.candidate_manifest_path,
             label="candidate generation manifest",
@@ -3584,6 +3722,18 @@ class FinanceStorageCutover:
             raise FinanceStorageMigrationError(
                 "cutover candidate files are incomplete"
             )
+        if generation_filesystem is not None:
+            expected_device = int(generation_filesystem["device"])
+            if (
+                int(raw_path.stat().st_dev) != expected_device
+                or int(operational_path.stat().st_dev) != expected_device
+                or int(self.candidate_manifest_path.stat().st_dev)
+                != expected_device
+            ):
+                raise FinanceStorageMigrationError(
+                    "cutover candidate escaped the exact Finance generation "
+                    "filesystem"
+                )
         return manifest, raw_path, operational_path
 
     @staticmethod
@@ -3603,6 +3753,7 @@ class FinanceStorageCutover:
         return _digest(stable)
 
     def build_plan(self) -> dict[str, Any]:
+        generation_filesystem = self._generation_filesystem()
         active = self.registry.load()
         candidate, raw_path, operational_path = self._candidate()
         source_path = self.registry.resolve("operational", manifest=active)
@@ -3620,6 +3771,9 @@ class FinanceStorageCutover:
             candidate_manifest_path=self.candidate_manifest_path,
             plan_fingerprint=self.candidate_plan_fingerprint,
             approval_reference="status-only",
+            generation_filesystem_contract=(
+                self.generation_filesystem_contract
+            ),
         ).status()
         source = sqlite3.connect(
             f"file:{source_path}?mode=ro",
@@ -3702,7 +3856,12 @@ class FinanceStorageCutover:
             source_fingerprint=candidate.source_fingerprint,
             created_at=candidate.created_at,
         )
-        vfs = os.statvfs(self.runtime_dir)
+        capacity_root = (
+            Path(str(generation_filesystem["path"])).resolve()
+            if generation_filesystem is not None
+            else self.runtime_dir
+        )
+        vfs = os.statvfs(capacity_root)
         free_bytes = int(vfs.f_bavail * vfs.f_frsize)
         recopy_bytes = max(
             int(operational_path.stat().st_size * 1.25),
@@ -3780,6 +3939,22 @@ class FinanceStorageCutover:
             "shadow_verification": verification,
             "target_manifest": manifest_payload(cutover_manifest),
             "capacity": {
+                "filesystem_device": int(
+                    capacity_root.stat().st_dev
+                ),
+                "generation_filesystem": (
+                    stable_generation_filesystem_identity(
+                        generation_filesystem
+                    )
+                    if generation_filesystem is not None
+                    else {
+                        "status": "local_fixture_fallback",
+                        "path": str(capacity_root),
+                        "device": int(capacity_root.stat().st_dev),
+                        "mountpoint_proven": False,
+                        "distinct_device": False,
+                    }
+                ),
                 "available_bytes": free_bytes,
                 "operational_recopy_bytes": recopy_bytes,
                 "post_cutover_reserve_bytes": reserve_bytes,
@@ -4180,6 +4355,30 @@ class FinanceStorageCutover:
             raise FinanceStorageMigrationError(
                 "reviewed Finance cutover identity does not match the runner"
             )
+        current_generation_filesystem = self._generation_filesystem()
+        planned_generation_filesystem = (
+            reviewed_plan.get("capacity") or {}
+        ).get("generation_filesystem")
+        if current_generation_filesystem is not None and (
+            stable_generation_filesystem_identity(
+                current_generation_filesystem
+            )
+            != planned_generation_filesystem
+        ):
+            raise FinanceStorageMigrationError(
+                "Finance generation filesystem drifted before cutover"
+            )
+        reviewed_capacity = reviewed_plan.get("capacity") or {}
+        if current_generation_filesystem is not None and (
+            int(current_generation_filesystem["device"])
+            != int(reviewed_capacity.get("filesystem_device") or -1)
+            or int(current_generation_filesystem["available_bytes"])
+            < int(reviewed_capacity.get("required_bytes") or 0)
+        ):
+            raise FinanceStorageMigrationError(
+                "Finance generation filesystem capacity is insufficient "
+                "before cutover"
+            )
         hold_evidence = self._hold_evidence(reviewed_plan)
         candidate, raw_path, operational_path = self._candidate()
         active = self.registry.load()
@@ -4230,6 +4429,9 @@ class FinanceStorageCutover:
             candidate_manifest_path=self.candidate_manifest_path,
             plan_fingerprint=self.candidate_plan_fingerprint,
             approval_reference=str(approval_reference),
+            generation_filesystem_contract=(
+                self.generation_filesystem_contract
+            ),
         )
         tail = shadow.apply_live_tail(max_events=1_000_000)
         if tail["lag_events"] or tail["duplicate_event_ids"] or tail[
@@ -4351,10 +4553,53 @@ class FinanceStorageRollback:
         runtime_dir: Path,
         *,
         deployed_sha: str,
+        generation_filesystem_contract: Mapping[str, Any] | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.registry = StoreRegistry(self.runtime_dir)
         self.deployed_sha = str(deployed_sha or "").strip()
+        self.generation_filesystem_contract = (
+            dict(generation_filesystem_contract)
+            if isinstance(generation_filesystem_contract, Mapping)
+            else None
+        )
+
+    def _generation_filesystem(self) -> dict[str, Any] | None:
+        if self.generation_filesystem_contract is None:
+            return None
+        try:
+            return inspect_generation_filesystem(
+                self.runtime_dir,
+                self.generation_filesystem_contract,
+            )
+        except FinanceGenerationFilesystemError as exc:
+            raise FinanceStorageMigrationError(str(exc)) from exc
+
+    def _assert_reviewed_generation_filesystem(
+        self,
+        reviewed_plan: Mapping[str, Any],
+    ) -> None:
+        current = self._generation_filesystem()
+        if current is None:
+            return
+        planned = (reviewed_plan.get("capacity") or {}).get(
+            "generation_filesystem"
+        )
+        if stable_generation_filesystem_identity(current) != planned:
+            raise FinanceStorageMigrationError(
+                "Finance generation filesystem drifted before rollback"
+            )
+        capacity = reviewed_plan.get("capacity") or {}
+        if (
+            int(current["device"])
+            != int(capacity.get("filesystem_device") or -1)
+            or int(current["available_bytes"])
+            < int(capacity.get("required_bytes") or 0)
+        ):
+            raise FinanceStorageMigrationError(
+                "Finance generation filesystem capacity is insufficient "
+                "before rollback"
+            )
 
     @staticmethod
     def _fingerprint(plan: Mapping[str, Any]) -> str:
@@ -4373,6 +4618,7 @@ class FinanceStorageRollback:
         return _digest(stable)
 
     def build_plan(self) -> dict[str, Any]:
+        generation_filesystem = self._generation_filesystem()
         active = self.registry.load(require_files=True)
         raw_path = self.registry.resolve("finance_raw", manifest=active)
         operational_path = self.registry.resolve(
@@ -4417,7 +4663,12 @@ class FinanceStorageRollback:
         finally:
             raw.close()
         health = storage_health(self.registry)
-        vfs = os.statvfs(self.runtime_dir)
+        capacity_root = (
+            Path(str(generation_filesystem["path"])).resolve()
+            if generation_filesystem is not None
+            else self.runtime_dir
+        )
+        vfs = os.statvfs(capacity_root)
         free_bytes = int(vfs.f_bavail * vfs.f_frsize)
         required_bytes = (
             int(raw_path.stat().st_size)
@@ -4470,6 +4721,22 @@ class FinanceStorageRollback:
                 ),
             },
             "capacity": {
+                "filesystem_device": int(
+                    capacity_root.stat().st_dev
+                ),
+                "generation_filesystem": (
+                    stable_generation_filesystem_identity(
+                        generation_filesystem
+                    )
+                    if generation_filesystem is not None
+                    else {
+                        "status": "local_fixture_fallback",
+                        "path": str(capacity_root),
+                        "device": int(capacity_root.stat().st_dev),
+                        "mountpoint_proven": False,
+                        "distinct_device": False,
+                    }
+                ),
                 "available_bytes": free_bytes,
                 "required_bytes": required_bytes,
                 "remaining_bytes": max(0, free_bytes - required_bytes),
@@ -4596,6 +4863,7 @@ class FinanceStorageRollback:
             raise FinanceStorageMigrationError(
                 "reviewed Finance rollback plan is invalid or blocked"
             )
+        self._assert_reviewed_generation_filesystem(reviewed_plan)
         active = self.registry.load(require_files=True)
         if active.manifest_sha256 != str(
             (reviewed_plan.get("active_manifest") or {}).get(
@@ -4893,6 +5161,7 @@ class FinanceStorageRollback:
             raise FinanceStorageMigrationError(
                 "reviewed Finance rollback plan is invalid"
             )
+        self._assert_reviewed_generation_filesystem(reviewed_plan)
         evidence = _load_private_json(
             Path(candidate_evidence_path).expanduser().resolve(),
             label="rollback candidate evidence",

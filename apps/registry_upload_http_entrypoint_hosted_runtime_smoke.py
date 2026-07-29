@@ -446,6 +446,17 @@ def main() -> None:
                 raise AssertionError(
                     "Finance storage command bypassed the repo-owned runner"
                 )
+            if (
+                "--generation-filesystem-contract-json"
+                not in remote_command
+                or "284b3362-b890-431d-a7da-7f0fcd2ee0a6"
+                not in remote_command
+                or "wb-finance-gen" not in remote_command
+            ):
+                raise AssertionError(
+                    "Finance storage command lost the exact generation "
+                    "filesystem identity"
+                )
             if action != "health" and "--deploy-lease-json" not in remote_command:
                 raise AssertionError(
                     "Finance storage command lost its global deploy-lease binding"
@@ -508,6 +519,8 @@ def main() -> None:
         if (
             " recovery-contract " not in recovery_contract_command
             or "--deploy-lease-json" in recovery_contract_command
+            or "--generation-filesystem-contract-json"
+            not in recovery_contract_command
         ):
             raise AssertionError(
                 "Finance recovery contract must be query-only and "

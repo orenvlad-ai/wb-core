@@ -157,5 +157,20 @@
     "SELLER_PORTAL_CANONICAL_SUPPLIER_ID": "c0ed0bf8-c443-41f2-b9db-1c14f0099815",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL": "ИП Сагитов В. Р.",
     "SELLER_PORTAL_RELOGIN_SSH_DESTINATION": "wb-core-eu-root"
+  },
+  "finance_generation_filesystem": {
+    "contract_version": "wb_core_finance_generation_filesystem_v1",
+    "path": "/opt/wb-core-runtime/state/generations",
+    "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
+    "filesystem_label": "wb-finance-gen",
+    "filesystem_type": "ext4",
+    "required_mount_options": [
+      "rw",
+      "noatime",
+      "nodev",
+      "nosuid",
+      "noexec"
+    ],
+    "require_distinct_device": true
   }
 }
