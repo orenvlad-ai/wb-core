@@ -171,7 +171,10 @@ _TRANSITIONS = (
         ),
         "from": ("loading", "verified_chunks"),
         "to": ("candidate_ready",),
-        "recovery": "verified_chunk_idempotent_resume",
+        "recovery": (
+            "plan_bound_foreign_key_ordered_verified_chunk_"
+            "idempotent_resume"
+        ),
         "command": "finance-storage-split-apply",
     },
     {

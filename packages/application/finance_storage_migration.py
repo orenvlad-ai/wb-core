@@ -355,6 +355,74 @@ def _table_matrix(
     return matrix
 
 
+def _operational_copy_plan(
+    conn: sqlite3.Connection,
+    table_names: Sequence[str],
+) -> dict[str, Any]:
+    """Order operational tables so every cross-table FK parent is copied first."""
+
+    names = {str(table) for table in table_names}
+    dependencies: dict[str, set[str]] = {
+        table: set() for table in names
+    }
+    edges: list[dict[str, str]] = []
+    self_referential: set[str] = set()
+    for table in sorted(names):
+        for row in conn.execute(
+            f"PRAGMA foreign_key_list({_quoted(table)})"
+        ).fetchall():
+            parent = str(row["table"])
+            if parent == table:
+                self_referential.add(table)
+            elif parent in names:
+                dependencies[table].add(parent)
+            if parent in names:
+                edges.append(
+                    {
+                        "child": table,
+                        "parent": parent,
+                        "from_column": str(row["from"]),
+                        "to_column": str(row["to"]),
+                    }
+                )
+
+    completed: set[str] = set()
+    table_order: list[str] = []
+    while len(completed) < len(names):
+        ready = sorted(
+            table
+            for table in names - completed
+            if dependencies[table] <= completed
+        )
+        if not ready:
+            blocked = sorted(names - completed)
+            raise FinanceStorageMigrationError(
+                "operational foreign-key dependency cycle is unsupported: "
+                + ",".join(blocked)
+            )
+        table_order.extend(ready)
+        completed.update(ready)
+
+    return {
+        "table_order": table_order,
+        "foreign_key_dependencies": sorted(
+            edges,
+            key=lambda item: (
+                item["child"],
+                item["parent"],
+                item["from_column"],
+                item["to_column"],
+            ),
+        ),
+        "self_referential_tables": sorted(self_referential),
+        "foreign_key_enforcement": (
+            "parents_before_children; self references deferred per table "
+            "transaction; manifest only after foreign_key_check"
+        ),
+        "cycle_free": True,
+    }
+
+
 def _dbstat_allocations(
     conn: sqlite3.Connection,
 ) -> tuple[dict[str, int], dict[str, Any]]:
@@ -1888,6 +1956,20 @@ class FinanceStorageMigrationPlanner:
                 allocations=allocations,
                 logical_overrides={LEGACY_RAW_TABLE: raw_digest},
             )
+            excluded_operational_tables = (
+                set(RAW_LEGACY_OBJECTS)
+                | set(RAW_SCHEMA_TABLES)
+                | set(OPERATIONAL_SCHEMA_TABLES)
+            )
+            operational_copy = _operational_copy_plan(
+                conn,
+                [
+                    str(item["table"])
+                    for item in table_matrix
+                    if str(item["table"])
+                    not in excluded_operational_tables
+                ],
+            )
             table_digest_ms = round(
                 (time.monotonic() - table_digest_started) * 1000,
                 3,
@@ -2111,6 +2193,7 @@ class FinanceStorageMigrationPlanner:
                 "idempotency": "verified source+destination count/digest skips exact chunk",
             },
             "table_owner_read_write_matrix": table_matrix,
+            "operational_copy": operational_copy,
             "direct_sqlite_open_inventory": direct_open_inventory,
             "allocations": {
                 "evidence": allocation_evidence,
@@ -2186,10 +2269,11 @@ class FinanceStorageMigrationPlanner:
             },
         }
         plan["fingerprint_contract"] = {
-            "version": "wb_core_finance_storage_split_plan_fingerprint_v2",
+            "version": "wb_core_finance_storage_split_plan_fingerprint_v3",
             "includes": (
                 "source identity/schema/logical digests, chunk manifest, "
-                "ownership and open inventories, generation ids, required capacity, "
+                "ownership, exact foreign-key-safe operational copy order and "
+                "open inventories, generation ids, required capacity, "
                 "stable systemd unit identity/load/enablement and rollback scope"
             ),
             "transport_fields_rechecked_not_hashed": [
@@ -2265,11 +2349,16 @@ class FinanceStorageCandidateBuilder:
         expected_fingerprint: str,
         approval_reference: str,
         fault_after_chunks: int = 0,
+        fault_after_operational_tables: int = 0,
     ) -> None:
         self.planner = planner
         self.expected_fingerprint = str(expected_fingerprint or "").strip()
         self.approval_reference = str(approval_reference or "").strip()
         self.fault_after_chunks = max(0, int(fault_after_chunks))
+        self.fault_after_operational_tables = max(
+            0,
+            int(fault_after_operational_tables),
+        )
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -2445,7 +2534,34 @@ class FinanceStorageCandidateBuilder:
             operational.execute("PRAGMA foreign_keys=ON")
             raw.execute("PRAGMA foreign_keys=ON")
             completed_chunks = 0
+            completed_operational_tables = 0
             try:
+                source_schema = _schema_inventory(source)
+                excluded = (
+                    set(RAW_LEGACY_OBJECTS)
+                    | set(RAW_SCHEMA_TABLES)
+                    | set(OPERATIONAL_SCHEMA_TABLES)
+                )
+                table_names = [
+                    str(row["name"])
+                    for row in source.execute(
+                        """SELECT name FROM sqlite_master
+                           WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                           ORDER BY name"""
+                    ).fetchall()
+                    if str(row["name"]) not in excluded
+                ]
+                current_operational_copy = _operational_copy_plan(
+                    source,
+                    table_names,
+                )
+                if (
+                    plan.get("operational_copy")
+                    != current_operational_copy
+                ):
+                    raise FinanceStorageMigrationError(
+                        "operational foreign-key copy plan drifted"
+                    )
                 ensure_operational_schema(operational)
                 bind_generation_identity(
                     operational,
@@ -2692,19 +2808,7 @@ class FinanceStorageCandidateBuilder:
                     (_utc_now(), batch_id),
                 )
                 raw.commit()
-                source_schema = _schema_inventory(source)
-                excluded = set(RAW_LEGACY_OBJECTS) | set(RAW_SCHEMA_TABLES) | set(
-                    OPERATIONAL_SCHEMA_TABLES
-                )
-                table_names = [
-                    str(row["name"])
-                    for row in source.execute(
-                        """SELECT name FROM sqlite_master
-                           WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"""
-                    ).fetchall()
-                    if str(row["name"]) not in excluded
-                ]
-                for table in table_names:
+                for table in current_operational_copy["table_order"]:
                     already = operational.execute(
                         """SELECT status FROM finance_storage_migration_chunks
                            WHERE migration_id=? AND store_name='operational' AND chunk_id=?""",
@@ -2775,6 +2879,9 @@ class FinanceStorageCandidateBuilder:
                             f"operational table schema unavailable: {table}"
                         )
                     operational.execute("BEGIN IMMEDIATE")
+                    operational.execute(
+                        "PRAGMA defer_foreign_keys=ON"
+                    )
                     operational.execute(str(schema_row["sql"]))
                     for _chunk_no, _copied in _copy_rows(
                         source,
@@ -2813,6 +2920,16 @@ class FinanceStorageCandidateBuilder:
                         ),
                     )
                     operational.commit()
+                    completed_operational_tables += 1
+                    if (
+                        self.fault_after_operational_tables
+                        and completed_operational_tables
+                        >= self.fault_after_operational_tables
+                    ):
+                        raise InjectedMigrationFault(
+                            "after_verified_operational_tables:"
+                            f"{completed_operational_tables}"
+                        )
                 for item in source_schema:
                     if item["type"] not in {"index", "trigger"} or not item["sql"]:
                         continue
@@ -2820,6 +2937,14 @@ class FinanceStorageCandidateBuilder:
                         continue
                     operational.execute(str(item["sql"]))
                 operational.commit()
+                foreign_key_violations = operational.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                if foreign_key_violations:
+                    raise FinanceStorageMigrationError(
+                        "operational foreign_key_check failed: "
+                        f"{len(foreign_key_violations)} violation(s)"
+                    )
                 raw_readback = _candidate_raw_digest(raw, batch_id=batch_id)
                 if (
                     raw_readback.row_count != int(plan["raw"]["row_count"])
@@ -2863,6 +2988,8 @@ class FinanceStorageCandidateBuilder:
                     "raw_row_count": raw_readback.row_count,
                     "raw_destination_size_bytes": raw_path.stat().st_size,
                     "operational_destination_size_bytes": operational_path.stat().st_size,
+                    "operational_copy": current_operational_copy,
+                    "operational_foreign_key_check": "ok",
                     "old_monolith_retained": self.planner.registry.resolve(
                         "operational"
                     ).is_file(),

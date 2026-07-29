@@ -2116,7 +2116,7 @@ class MigrationSmoke(unittest.TestCase):
             )
             self.assertEqual(
                 active_plan["fingerprint_contract"]["version"],
-                "wb_core_finance_storage_split_plan_fingerprint_v2",
+                "wb_core_finance_storage_split_plan_fingerprint_v3",
             )
             self.assertEqual(
                 active_plan["fingerprint_contract"][
@@ -2376,6 +2376,119 @@ class MigrationSmoke(unittest.TestCase):
                     "finance_raw",
                     mode="ro",
                     operation="candidate_identity_mismatch_smoke",
+                )
+
+    def test_candidate_orders_foreign_key_parents_and_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime"
+            source = _create_monolith(runtime, rows=3)
+            with closing(sqlite3.connect(source)) as conn:
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.executescript(
+                    """
+                    CREATE TABLE z_dependency_parent (
+                        parent_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL
+                    );
+                    CREATE TABLE a_dependency_child (
+                        child_id TEXT PRIMARY KEY,
+                        parent_id TEXT NOT NULL REFERENCES
+                            z_dependency_parent(parent_id),
+                        payload TEXT NOT NULL
+                    );
+                    INSERT INTO z_dependency_parent
+                    VALUES('parent-1','parent-payload');
+                    INSERT INTO a_dependency_child
+                    VALUES('child-1','parent-1','child-payload');
+                    """
+                )
+                conn.commit()
+            snapshot_manifest = _create_verified_snapshot(runtime)
+            planner = FinanceStorageMigrationPlanner(
+                runtime,
+                chunk_size=2,
+                deployed_sha=DEPLOYED_SHA,
+                repo_root=ROOT,
+                require_exact_allocations=False,
+                source_snapshot_manifest=snapshot_manifest,
+            )
+            plan = planner.build_plan()
+            table_order = plan["operational_copy"]["table_order"]
+            self.assertLess(
+                table_order.index("z_dependency_parent"),
+                table_order.index("a_dependency_child"),
+            )
+            fault_after_parent = (
+                table_order.index("z_dependency_parent") + 1
+            )
+            with self.assertRaisesRegex(
+                InjectedMigrationFault,
+                "after_verified_operational_tables",
+            ):
+                FinanceStorageCandidateBuilder(
+                    planner,
+                    expected_fingerprint=plan["fingerprint"],
+                    approval_reference="fixture-human-gate",
+                    fault_after_operational_tables=fault_after_parent,
+                ).apply()
+            generation_root = (
+                runtime
+                / plan["target_generation"]["generation_directory"]
+            )
+            self.assertFalse(
+                (
+                    generation_root
+                    / "candidate_generation_manifest.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (runtime / "storage_generation_manifest.json").exists()
+            )
+            operational_path = generation_root / "operational.sqlite3"
+            with closing(sqlite3.connect(operational_path)) as conn:
+                verified = {
+                    str(row[0])
+                    for row in conn.execute(
+                        """SELECT chunk_id
+                           FROM finance_storage_migration_chunks
+                           WHERE store_name='operational'
+                             AND status='verified'"""
+                    ).fetchall()
+                }
+                self.assertIn(
+                    "table:z_dependency_parent",
+                    verified,
+                )
+                self.assertNotIn(
+                    "table:a_dependency_child",
+                    verified,
+                )
+
+            result = FinanceStorageCandidateBuilder(
+                planner,
+                expected_fingerprint=plan["fingerprint"],
+                approval_reference="fixture-human-gate",
+            ).apply()
+            self.assertEqual(result["status"], "candidate_ready")
+            self.assertEqual(
+                result["operational_foreign_key_check"],
+                "ok",
+            )
+            with closing(sqlite3.connect(operational_path)) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        """SELECT child.child_id,parent.payload
+                           FROM a_dependency_child AS child
+                           JOIN z_dependency_parent AS parent
+                             ON parent.parent_id=child.parent_id"""
+                    ).fetchone(),
+                    ("child-1", "parent-payload"),
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "PRAGMA foreign_key_check"
+                    ).fetchall(),
+                    [],
                 )
 
     def test_capacity_shortfall_happens_before_destination(self) -> None:
