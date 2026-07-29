@@ -234,7 +234,11 @@ The implementation is deliberately inert on deploy:
   The delete allowlist is limited to the two candidate databases, their SQLite
   sidecars and `migration_plan.json`; any symlink, directory, unknown file,
   identity/checkpoint/process/control drift or already-published candidate
-  manifest fails closed. Apply holds the normal non-blocking migration lock,
+  manifest fails closed. The saved candidate fingerprint is recomputed with
+  the original candidate planner's stable-field algorithm (including its
+  volatile capacity/process exclusions), while the new abort plan uses its own
+  fingerprint; the two approval domains are never conflated. Apply holds the
+  normal non-blocking migration lock,
   persists a private fsynced transaction outside the candidate directory,
   journals each exact unlink, removes the saved plan last, fsyncs the
   generations parent and writes a durable result plus append-only audit.

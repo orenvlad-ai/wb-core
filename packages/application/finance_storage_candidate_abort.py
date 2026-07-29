@@ -24,7 +24,7 @@ from packages.application.business_data_write_barrier import barrier_status
 from packages.application.finance_storage_migration import (
     PLAN_CONTRACT as CANDIDATE_PLAN_CONTRACT,
     _digest,
-    _plan_fingerprint,
+    _plan_fingerprint as _candidate_plan_fingerprint,
 )
 from packages.application.storage_registry import (
     MANIFEST_FILENAME,
@@ -843,7 +843,7 @@ class FinanceStorageCandidateAbort:
             != CANDIDATE_PLAN_CONTRACT
             or str(plan.get("mode") or "") != "dry_run"
             or saved_fingerprint != self.candidate_plan_fingerprint
-            or _plan_fingerprint(plan) != saved_fingerprint
+            or _candidate_plan_fingerprint(plan) != saved_fingerprint
             or str(generation.get("generation_epoch") or "")
             != self.generation_epoch
             or Path(str(raw.get("relative_path") or ""))
