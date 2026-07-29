@@ -4770,7 +4770,8 @@ def _run_remote_finance_storage_split_action(
     if effective_action == "apply":
         if plan_path is None or not plan_path.is_file():
             raise ValueError("Finance storage split apply requires an existing --plan-file")
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(reviewed_plan_json)
         if (
             not isinstance(plan, dict)
             or str(plan.get("contract_version") or "")
@@ -4784,6 +4785,8 @@ def _run_remote_finance_storage_split_action(
             raise ValueError("Finance storage split apply requires --approval-reference")
         runner_args.extend(
             [
+                "--migration-plan-file",
+                "/dev/stdin",
                 "--confirm-fingerprint",
                 fingerprint,
                 "--approval-reference",

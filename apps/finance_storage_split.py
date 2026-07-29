@@ -273,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approval-reference", default="")
     parser.add_argument("--fault-after-chunks", type=int, default=0)
     parser.add_argument("--candidate-manifest", type=Path)
+    parser.add_argument("--migration-plan-file", type=Path)
     parser.add_argument("--snapshot-plan-file", type=Path)
     parser.add_argument("--snapshot-retention-plan-file", type=Path)
     parser.add_argument("--stale-writer-plan-file", type=Path)
@@ -320,7 +321,9 @@ def _reviewed_plan_for_recovery_preflight(
         payload = cached[action]
         return payload if isinstance(payload, dict) else None
     path: Path | None = None
-    if action == "snapshot-create":
+    if action == "apply":
+        path = args.migration_plan_file
+    elif action == "snapshot-create":
         path = args.snapshot_plan_file
     elif action == "snapshot-retention-apply":
         path = args.snapshot_retention_plan_file

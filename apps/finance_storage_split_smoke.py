@@ -44,6 +44,7 @@ from packages.application.finance_storage_migration import (
     InjectedMigrationFault,
     _atomic_write_json,
     _accessible_fd_paths,
+    _plan_fingerprint,
     _unknown_snapshot_writers,
 )
 from packages.application.finance_storage_recovery_contract import (
@@ -835,6 +836,112 @@ class MigrationSmoke(unittest.TestCase):
             snapshot.create.call_args.kwargs["reviewed_plan"],
             reviewed_plan,
         )
+
+    def test_streamed_candidate_plan_is_parsed_once_for_preflight(self) -> None:
+        fingerprint = "sha256:" + ("6" * 64)
+        reviewed_plan = {
+            "contract_version": (
+                "wb_core_finance_storage_split_plan_v1"
+            ),
+            "mode": "dry_run",
+            "deployed_sha": DEPLOYED_SHA,
+            "fingerprint": fingerprint,
+            "apply_allowed_by_machine_preflight": True,
+            "deploy_lease": {"transport": "reviewed-separately"},
+        }
+        serialized_plan = json.dumps(reviewed_plan)
+        plan_reads: list[str] = []
+        original_read_text = Path.read_text
+
+        def read_text_once(
+            path: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> str:
+            if str(path) == "/dev/stdin":
+                plan_reads.append(str(path))
+                if len(plan_reads) > 1:
+                    raise AssertionError(
+                        "streamed candidate plan was read more than once"
+                    )
+                return serialized_plan
+            return original_read_text(path, *args, **kwargs)
+
+        normalized_lease = {
+            "contract_version": (
+                "wb_core_finance_migration_deploy_lease_readback_v1"
+            ),
+            "policy": "finance_migration_global_deploy_hold_v1",
+            "lease": {
+                "deployed_sha": DEPLOYED_SHA,
+                "task_id": "finance-candidate-read-smoke",
+                "lease_id": "finance-candidate-read-smoke",
+                "window_id": "finance-candidate-read-smoke",
+                "phase": "offline-rehearsal",
+                "revision": 1,
+            },
+            "fingerprint": "sha256:" + ("5" * 64),
+        }
+        candidate = mock.Mock()
+        candidate.apply.return_value = {"status": "candidate_ready"}
+        with tempfile.TemporaryDirectory() as raw:
+            with (
+                mock.patch.object(
+                    Path,
+                    "read_text",
+                    new=read_text_once,
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "validate_finance_migration_deploy_lease",
+                    return_value=normalized_lease,
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "validate_recovery_preflight",
+                    return_value={
+                        "status": "ready",
+                        "action": "apply",
+                        "phase": "mutation",
+                    },
+                ) as recovery_preflight,
+                mock.patch.object(
+                    finance_storage_cli,
+                    "FinanceStorageMigrationPlanner",
+                ),
+                mock.patch.object(
+                    finance_storage_cli,
+                    "FinanceStorageCandidateBuilder",
+                    return_value=candidate,
+                ),
+                mock.patch.object(finance_storage_cli, "_emit"),
+            ):
+                result = finance_storage_cli.main(
+                    [
+                        "apply",
+                        "--runtime-dir",
+                        raw,
+                        "--repo-root",
+                        str(ROOT),
+                        "--deployed-sha",
+                        DEPLOYED_SHA,
+                        "--migration-plan-file",
+                        "/dev/stdin",
+                        "--confirm-fingerprint",
+                        fingerprint,
+                        "--approval-reference",
+                        "candidate-single-read-smoke",
+                        "--deploy-lease-json",
+                        "{}",
+                    ]
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(plan_reads, ["/dev/stdin"])
+        self.assertEqual(
+            recovery_preflight.call_args.kwargs["reviewed_plan"],
+            reviewed_plan,
+        )
+        candidate.apply.assert_called_once_with()
 
     @staticmethod
     def _recovery_lease() -> dict[str, object]:
@@ -1732,6 +1839,12 @@ class MigrationSmoke(unittest.TestCase):
                 active_plan["fingerprint_contract"]["version"],
                 "wb_core_finance_storage_split_plan_fingerprint_v2",
             )
+            self.assertEqual(
+                active_plan["fingerprint_contract"][
+                    "transport_fields_rechecked_not_hashed"
+                ],
+                ["deploy_lease"],
+            )
 
             disabled_unit = {
                 **idle_unit,
@@ -2079,6 +2192,67 @@ class MigrationSmoke(unittest.TestCase):
                 source_snapshot_manifest=snapshot_manifest,
             )
             candidate_plan = planner.build_plan()
+            reviewed_candidate_plan = json.loads(
+                json.dumps(candidate_plan)
+            )
+            reviewed_candidate_plan["deploy_lease"] = (
+                self._recovery_lease()
+            )
+            self.assertEqual(
+                _plan_fingerprint(reviewed_candidate_plan),
+                candidate_plan["fingerprint"],
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "requires an exact reviewed plan",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="apply",
+                    phase="mutation",
+                    deployed_sha=DEPLOYED_SHA,
+                    approval_reference="fixture-human-gate",
+                    expected_fingerprint=candidate_plan["fingerprint"],
+                    deploy_lease=self._recovery_lease(),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    source_snapshot_manifest=snapshot_manifest,
+                )
+            tampered_candidate_plan = json.loads(
+                json.dumps(reviewed_candidate_plan)
+            )
+            tampered_candidate_plan["rollback_plan"][
+                "old_monolith_generation_id"
+            ] = "tampered"
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deterministic fingerprint is stale",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="apply",
+                    phase="mutation",
+                    deployed_sha=DEPLOYED_SHA,
+                    approval_reference="fixture-human-gate",
+                    expected_fingerprint=candidate_plan["fingerprint"],
+                    deploy_lease=self._recovery_lease(),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    reviewed_plan=tampered_candidate_plan,
+                    source_snapshot_manifest=snapshot_manifest,
+                )
             candidate_preflight = validate_recovery_preflight(
                 runtime,
                 action="apply",
@@ -2095,6 +2269,7 @@ class MigrationSmoke(unittest.TestCase):
                 downstream_capabilities=(
                     self._recovery_capabilities()
                 ),
+                reviewed_plan=reviewed_candidate_plan,
                 source_snapshot_manifest=snapshot_manifest,
             )
             self.assertEqual(candidate_preflight["status"], "ready")

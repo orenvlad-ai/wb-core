@@ -452,6 +452,8 @@ def main() -> None:
                 )
             if action == "apply":
                 for token in (
+                    "--migration-plan-file",
+                    "/dev/stdin",
                     "--confirm-fingerprint",
                     "sha256:storage-reviewed",
                     "--approval-reference",
@@ -461,6 +463,13 @@ def main() -> None:
                         raise AssertionError(
                             f"Finance storage apply lost {token}"
                         )
+                if (
+                    run_mock.call_args.kwargs.get("input")
+                    != storage_plan_path.read_text(encoding="utf-8")
+                ):
+                    raise AssertionError(
+                        "Finance storage apply did not stream the exact reviewed plan"
+                    )
             elif "--confirm-fingerprint" in remote_command:
                 raise AssertionError(
                     "Finance storage read-only command unexpectedly enables apply"
@@ -541,6 +550,8 @@ def main() -> None:
             " recovery-preflight ",
             "--recovery-action",
             "apply",
+            "--migration-plan-file",
+            "/dev/stdin",
             "--deploy-lease-json",
             "--confirm-fingerprint",
             "--approval-reference",
@@ -549,6 +560,13 @@ def main() -> None:
                 raise AssertionError(
                     f"Finance recovery preflight lost {token}"
                 )
+        if (
+            recovery_preflight_run.call_args.kwargs.get("input")
+            != storage_plan_path.read_text(encoding="utf-8")
+        ):
+            raise AssertionError(
+                "Finance recovery preflight did not stream the exact candidate plan"
+            )
         recovery_contract_args = (
             hosted_runtime.build_arg_parser().parse_args(
                 ["finance-storage-recovery-contract"]
