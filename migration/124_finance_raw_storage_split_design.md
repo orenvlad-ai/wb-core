@@ -573,7 +573,13 @@ During the observation window:
   and only then atomically switches the generation manifest; the original
   pre-cutover monolith stays immutable evidence;
 - no manual cross-store SQL is allowed;
-- health/UI shows generation ids, cursors, lag, failures and rollback readiness.
+- health/UI shows generation ids, cursors, lag, failures and rollback readiness;
+- the authenticated UI acceptance recognizes only the exact implicit-monolith
+  or selected-split phase. Selected split requires one generation epoch across
+  the manifest/raw/operational stores, exact schema revisions, zero pending
+  outbox/consumer lag/cursor mismatch/mismatches/dead letters and the retained
+  `monolith` rollback generation. Transitional shadow, mixed or unhealthy
+  identities stay fail closed.
 
 Repository status: rollback plan/prepare/apply is implemented but inert.
 Preparation builds and fully checks a new rollback monolith without modifying

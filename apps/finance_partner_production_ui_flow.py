@@ -31,6 +31,103 @@ PARTNER_PREVIEW_API_PATH = "/v1/sheet-vitrina-v1/partner-report/preview"
 PARTNER_PREVIEW_XLSX_API_PATH = "/v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 
 
+def _validate_finance_storage_health(
+    storage_health: dict[str, Any],
+) -> str:
+    state = str(storage_health.get("state") or "")
+    canonical_source = str(storage_health.get("canonical_source") or "")
+    raw = dict(storage_health.get("raw") or {})
+    operational = dict(storage_health.get("operational") or {})
+    if state == "monolith" and canonical_source == "monolith":
+        _assert(
+            storage_health.get("implicit_manifest") is True,
+            "Finance monolith storage uses the implicit manifest",
+        )
+        _assert(
+            raw.get("generation_id") == "monolith"
+            and operational.get("generation_id") == "monolith",
+            "Finance logical stores expose the exact monolith generation",
+        )
+        _assert(
+            storage_health.get("rollback_ready") is True
+            and storage_health.get("cutover_ready") is False,
+            "Finance monolith rollback is ready and cutover is not selected",
+        )
+        return "implicit_monolith"
+
+    _assert(
+        state == "cutover"
+        and canonical_source == "split"
+        and storage_health.get("implicit_manifest") is False,
+        "Finance storage is either the implicit monolith or an exact selected split",
+    )
+    generation_epoch = str(storage_health.get("generation_epoch") or "")
+    _assert(
+        len(generation_epoch) == 20
+        and all(character in "0123456789abcdef" for character in generation_epoch),
+        "Finance split exposes an exact generation epoch",
+    )
+    _assert(
+        storage_health.get("rollback_generation_id") == "monolith",
+        "Finance split retains the monolith rollback generation",
+    )
+    _assert(
+        raw.get("exists") is True
+        and raw.get("generation_epoch") == generation_epoch
+        and raw.get("generation_id") == f"finance-raw-{generation_epoch}"
+        and raw.get("schema_revision") == "finance_raw_v1"
+        and int(raw.get("size_bytes") or 0) > 0,
+        "Finance split raw store matches the selected generation",
+    )
+    _assert(
+        operational.get("exists") is True
+        and operational.get("generation_epoch") == generation_epoch
+        and operational.get("generation_id")
+        == f"operational-{generation_epoch}"
+        and operational.get("schema_revision") == "operational_v1"
+        and int(operational.get("size_bytes") or 0) > 0,
+        "Finance split operational store matches the selected generation",
+    )
+    _assert(
+        storage_health.get("raw_schema_ready") is True
+        and storage_health.get("operational_schema_ready") is True
+        and not storage_health.get("raw_health_error")
+        and not storage_health.get("operational_health_error"),
+        "Finance split schemas are healthy",
+    )
+    _assert(
+        int(storage_health.get("latest_outbox_sequence") or 0)
+        == int(storage_health.get("raw_ack_cursor") or 0)
+        == int(storage_health.get("operational_cursor") or 0)
+        and int(storage_health.get("consumer_lag_events") or 0) == 0
+        and storage_health.get("cursor_mismatch") is False,
+        "Finance split consumers are caught up on one exact cursor",
+    )
+    _assert(
+        int(storage_health.get("shadow_mismatch_count") or 0) == 0
+        and int(storage_health.get("actionable_dead_letters") or 0) == 0
+        and int(
+            (storage_health.get("raw_counts") or {}).get("pending_outbox")
+            or 0
+        )
+        == 0
+        and int(
+            (storage_health.get("operational_counts") or {}).get(
+                "dead_letters"
+            )
+            or 0
+        )
+        == 0,
+        "Finance split has no mismatch, pending outbox, or dead letter",
+    )
+    _assert(
+        storage_health.get("rollback_ready") is False
+        and storage_health.get("cutover_ready") is False,
+        "Finance split is selected and awaits the separate rollback candidate gate",
+    )
+    return "selected_split"
+
+
 def run_finance_partner_ui_flow(
     *,
     base_url: str,
@@ -187,23 +284,7 @@ def run_finance_partner_ui_flow(
             _assert(finance_payload.get("status") == "ok", "Finance API status")
             _assert(bool(finance_weeks), "Finance API contains persisted weeks")
             storage_health = dict(finance_payload.get("storage_health") or {})
-            _assert(
-                storage_health.get("state") == "monolith"
-                and storage_health.get("canonical_source") == "monolith"
-                and storage_health.get("implicit_manifest") is True,
-                "Finance storage remains on the implicit canonical monolith",
-            )
-            _assert(
-                (storage_health.get("raw") or {}).get("generation_id") == "monolith"
-                and (storage_health.get("operational") or {}).get("generation_id")
-                == "monolith",
-                "Finance logical stores expose the exact monolith generation",
-            )
-            _assert(
-                storage_health.get("rollback_ready") is True
-                and storage_health.get("cutover_ready") is False,
-                "Finance rollback is ready and cutover is not selected",
-            )
+            storage_phase = _validate_finance_storage_health(storage_health)
             finance_facts = reports.locator("body").evaluate(
                 """
                 () => {
@@ -561,6 +642,7 @@ def run_finance_partner_ui_flow(
                 "first_week": finance_weeks[0].get("week_start"),
                 "last_week": finance_weeks[-1].get("week_end"),
                 "facts": finance_facts,
+                "storage_phase": storage_phase,
                 "storage_health": storage_health,
             },
             "partner": {
