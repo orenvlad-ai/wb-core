@@ -186,6 +186,8 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS finance_raw_outbox_pending
         ON finance_raw_outbox(sequence_no,published_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS finance_raw_outbox_by_batch
+        ON finance_raw_outbox(batch_id);
         CREATE TABLE IF NOT EXISTS finance_raw_consumer_cursors (
             consumer_id TEXT PRIMARY KEY,
             last_sequence_no INTEGER NOT NULL,
@@ -224,6 +226,11 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             )
     conn.executescript(
         """
+        CREATE INDEX IF NOT EXISTS finance_raw_batches_by_scope_commit
+        ON finance_raw_ingest_batches(
+            status,seller_id,week_start,week_end,
+            committed_at,created_at,batch_id
+        );
         DROP VIEW IF EXISTS finance_raw_current_rows;
         CREATE VIEW finance_raw_current_rows AS
         SELECT
@@ -231,8 +238,8 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
                rows.week_start,rows.week_end,rows.nm_id,rows.vendor_code,
                rows.barcode,rows.doc_type_name,rows.seller_oper_name,
                rows.row_hash,rows.raw_json,rows.first_seen_at,
-               MAX(
-                   COALESCE(batch.committed_at,rows.first_seen_at)
+               COALESCE(
+                   batch.committed_at,rows.first_seen_at
                ) AS updated_at
           FROM finance_raw_batch_rows AS links
           JOIN finance_raw_rows AS rows
@@ -249,20 +256,32 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
                    ON newer_event.batch_id=newer.batch_id
                 WHERE newer.status='committed'
                   AND newer.seller_id IN ('*',rows.seller_id)
-                  AND newer.week_start=rows.week_start
-                  AND newer.week_end=rows.week_end
+                  AND newer.week_start<=rows.week_start
+                  AND newer.week_end>=rows.week_end
                   AND (
                       COALESCE(newer_event.sequence_no,0)
                         > COALESCE(event.sequence_no,0)
                       OR (
                           COALESCE(newer_event.sequence_no,0)
                             = COALESCE(event.sequence_no,0)
-                          AND COALESCE(newer.committed_at,newer.created_at)
-                            > COALESCE(batch.committed_at,batch.created_at)
+                          AND (
+                              COALESCE(
+                                  newer.committed_at,newer.created_at
+                              ) > COALESCE(
+                                  batch.committed_at,batch.created_at
+                              )
+                              OR (
+                                  COALESCE(
+                                      newer.committed_at,newer.created_at
+                                  ) = COALESCE(
+                                      batch.committed_at,batch.created_at
+                                  )
+                                  AND newer.batch_id>batch.batch_id
+                              )
+                          )
                       )
                   )
-           )
-         GROUP BY rows.raw_row_id;
+           );
         """
     )
 

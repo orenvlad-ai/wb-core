@@ -75,8 +75,12 @@ The implementation is deliberately inert on deploy:
   `finance_raw_batch_rows`, so an unchanged row can participate in a later
   batch without duplication or a false count/digest. The
   `finance_raw_current_rows` view selects the latest exact weekly snapshot and
-  preserves append-only history. Raw rows, batch links and one replay event
-  commit in one SQLite transaction. The
+  preserves append-only history. Its current-selection predicate remains
+  pushdown-safe: bounded seller/week reads use `finance_raw_rows_by_week`
+  instead of materializing all history, while an all-history reconciliation
+  batch supersedes every covered weekly batch without duplicating current
+  rows. Raw rows, batch links and one replay event commit in one SQLite
+  transaction. The
   operational consumer is at-least-once, receipt-idempotent and keeps poison
   events actionable. After cutover the weekly owner acknowledges an event only
   after the exact seller/week row count, source hash, reports, aggregate,
@@ -234,23 +238,28 @@ The implementation is deliberately inert on deploy:
   rows are never opened for write or removed; the archived snapshots remain
   byte-exact recovery evidence on the dedicated backup device.
 - `finance-storage-candidate-abort-plan|apply|readback` is the only recovery
-  path for an interrupted candidate that has persisted destination bytes but
-  has not published `candidate_generation_manifest.json`. It requires the
-  implicit canonical monolith, absent global/candidate manifests, inactive
-  manual barrier and shadow state, exactly one target generation, no active
-  candidate worker/open file or migration-lock owner, and a fresh exact
-  Finance deploy lease. Plan recomputes the saved candidate-plan fingerprint,
-  binds its old deployed SHA/source fingerprint/generation paths, checks both
-  destination schema identities and accepts only verified checkpoint rows
-  that are exact subsets of the saved raw-chunk/operational-table manifests.
-  The delete allowlist is limited to the two candidate databases, their SQLite
-  sidecars and `migration_plan.json`; any symlink, directory, unknown file,
-  identity/checkpoint/process/control drift or already-published candidate
-  manifest fails closed. The saved candidate fingerprint is recomputed with
-  the original candidate planner's stable-field algorithm (including its
-  volatile capacity/process exclusions), while the new abort plan uses its own
-  fingerprint; the two approval domains are never conflated. Apply holds the
-  normal non-blocking migration lock,
+  path for either an interrupted pre-manifest candidate or an exact
+  completed-but-unselected candidate invalidated by a later recovery deploy.
+  It requires the implicit canonical monolith, an absent global manifest,
+  inactive manual barrier and shadow ingest, exactly one target generation, no
+  active candidate worker/open file or migration-lock owner, and a fresh exact
+  Finance deploy lease. A completed candidate is eligible only after the
+  repo-owned exact `shadow-deactivate` readback; its inactive shadow identity,
+  candidate manifest and optional shadow-verification evidence must all bind
+  the saved candidate plan and target generation. Plan recomputes the saved
+  candidate-plan fingerprint, binds its old deployed SHA/source fingerprint/
+  generation paths, checks both destination schema identities and requires
+  either exact subset checkpoints for an interrupted candidate or complete
+  raw/operational checkpoints with only terminal committed raw batches for a
+  completed candidate. The delete allowlist is limited to the two candidate
+  databases, their SQLite sidecars, the exact candidate/shadow manifests when
+  present, and `migration_plan.json`; any symlink, directory, unknown file,
+  active/mismatched shadow, selected global manifest, identity/checkpoint/
+  process/control drift fails closed. The saved candidate fingerprint is
+  recomputed with the original candidate planner's stable-field algorithm
+  (including its volatile capacity/process exclusions), while the new abort
+  plan uses its own fingerprint; the two approval domains are never
+  conflated. Apply holds the normal non-blocking migration lock,
   persists a private fsynced transaction outside the candidate directory,
   journals each exact unlink, removes the saved plan last, fsyncs the
   generations parent and writes a durable result plus append-only audit.
@@ -260,9 +269,10 @@ The implementation is deliberately inert on deploy:
   and the canonical monolith inode/schema, barrier, shadow state and complete
   snapshot directory inventory unchanged. Because the recovery deploy itself
   invalidates the old snapshot/plan/fingerprint, the required order is exact
-  candidate abort, stale-snapshot retention, lease rebind and a completely
-  fresh coherent snapshot/integrity/dry-run cycle; partial candidate bytes are
-  never reused after that deploy.
+  shadow deactivation when applicable, candidate abort, stale-snapshot
+  retention, lease rebind and a completely fresh coherent
+  snapshot/integrity/dry-run cycle; discarded candidate bytes are never reused
+  after that deploy.
 - A pre-snapshot `finance-storage-stale-writer-plan|stop` recovery is limited
   to the exact closure-retry oneshot generation. The service has a 30-minute
   start bound; recovery additionally requires at least one hour of continuous
@@ -345,7 +355,7 @@ documented classifications are:
 | snapshot release | barrier `held/restoring → released` | exact restore readback is mandatory |
 | candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped only while their original deployed SHA/snapshot/plan remains valid |
 | candidate manifest | candidate bytes → shadow manifest | exact manifest readback is idempotent |
-| candidate abort | private transaction/result/audit plus exact pre-manifest candidate bytes | exact allowlisted per-file release resumes from the fsynced journal; an unjournaled absence, unknown file, manifest, opener or identity drift stays fail closed and never dispatches another apply |
+| candidate abort | private transaction/result/audit plus exact partial or completed-unselected candidate identity | exact allowlisted per-file release resumes from the fsynced journal; completed candidates additionally require complete checkpoints and exact inactive shadow/candidate-manifest bindings; an unjournaled absence, unknown file, active/mismatched shadow, selected manifest, opener or identity drift stays fail closed and never dispatches another apply |
 | shadow activate | durable shadow state | exact candidate activation is a no-op |
 | shadow reconcile | immutable raw batch/link rows | source identity and committed chunks resume idempotently |
 | shadow live-tail | outbox event plus bridge cursor | event/sequence commit resumes without duplicate apply |
@@ -373,9 +383,11 @@ durable detached restore suite separately kills the submitting client and
 proves system-owned continuation, bounded heartbeat/deadline classification,
 result/audit persistence and the prohibition on a second job.
 The candidate-abort fault suite separately crashes after a persisted unlink
-and proves exact resume, terminal no-op replay, durable result/audit and
-unchanged monolith/snapshot/non-target evidence. It also proves that an
-unknown file or candidate manifest blocks recovery before deletion.
+for both partial and completed-unselected candidates and proves exact resume,
+terminal no-op replay, durable result/audit and unchanged
+monolith/snapshot/non-target evidence. It also proves that an unknown file,
+active or mismatched shadow, or selected global manifest blocks recovery before
+deletion.
 
 The private `.finance-storage-shadow-ingest.json` state defaults absent/off.
 If a later reviewed stage enables it while the implicit monolith is selected,
@@ -595,6 +607,10 @@ boundary.
   `finance_raw_current_rows` compatibility view while writing derived rows to
   operational storage. The attach is identity-checked and observed by the
   registry; no persistent cross-store view, trigger or foreign key is allowed.
+- Bounded current-row reads must keep seller/week predicates inside the indexed
+  lookup plan and must not scan/materialize all historical rows. Removing a
+  weekly scope and all-history reconciliation must both retain one deterministic
+  latest committed batch per covered scope.
 - Diagnostics requiring both stores pin one generation manifest, open both
   files `mode=ro`, set `query_only=ON` and use only bounded connection-local
   qualified reads or application-memory joins by stable identity.
@@ -683,7 +699,8 @@ Closure requires:
 - Backfill chunk resume, source drift, corrupt destination and digest mismatch.
 - Shadow-read equality for Finance raw reports, derived weekly summaries and
   warehouse/cost source revisions.
-- Query-plan/index parity and bounded lock/performance tests.
+- Query-plan/index parity, seller/week predicate-pushdown, all-history
+  reconciliation semantics and bounded lock/performance tests.
 - Capacity shortfall before any destination bytes, reservation races and
   restart.
 - Candidate-plan fingerprint stability across transient systemd execution

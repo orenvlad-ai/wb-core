@@ -1,10 +1,11 @@
-"""Fail-closed recovery for one unselected pre-manifest Finance candidate.
+"""Fail-closed recovery for one exact unselected Finance candidate.
 
 This boundary is deliberately narrower than candidate creation.  It can only
-release an exact partial generation while the implicit monolith is canonical,
-no candidate/global manifest exists, no shadow is active, and the persisted
-candidate bytes still match a reviewed dry-run plan.  A durable transaction
-outside the candidate directory makes interruption recovery idempotent.
+release an exact partial or completed-but-unselected generation while the
+implicit monolith is canonical, the global manifest is absent, shadow ingest
+is inactive, and the persisted candidate bytes still match a reviewed dry-run
+plan.  A durable transaction outside the candidate directory makes
+interruption recovery idempotent.
 """
 
 from __future__ import annotations
@@ -23,13 +24,17 @@ from typing import Any, Iterator, Mapping
 from packages.application.business_data_write_barrier import barrier_status
 from packages.application.finance_storage_migration import (
     PLAN_CONTRACT as CANDIDATE_PLAN_CONTRACT,
+    SHADOW_VERIFICATION_CONTRACT,
     _digest,
     _plan_fingerprint as _candidate_plan_fingerprint,
 )
 from packages.application.storage_registry import (
     MANIFEST_FILENAME,
     MONOLITH_FILENAME,
+    StorageRegistryError,
     StoreRegistry,
+    manifest_payload,
+    parse_manifest,
 )
 
 
@@ -46,11 +51,14 @@ CANDIDATE_MANIFEST_FILENAME = "candidate_generation_manifest.json"
 SAVED_PLAN_FILENAME = "migration_plan.json"
 RAW_FILENAME = "finance_raw.sqlite3"
 OPERATIONAL_FILENAME = "operational.sqlite3"
+SHADOW_VERIFICATION_FILENAME = "shadow_verification.json"
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _FINGERPRINT_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _GENERATION_RE = re.compile(r"[0-9a-f]{20}")
 _ALLOWED_NAMES = {
     SAVED_PLAN_FILENAME,
+    CANDIDATE_MANIFEST_FILENAME,
+    SHADOW_VERIFICATION_FILENAME,
     RAW_FILENAME,
     OPERATIONAL_FILENAME,
     f"{RAW_FILENAME}-wal",
@@ -69,12 +77,14 @@ _DELETE_ORDER = (
     f"{OPERATIONAL_FILENAME}-journal",
     RAW_FILENAME,
     OPERATIONAL_FILENAME,
+    SHADOW_VERIFICATION_FILENAME,
+    CANDIDATE_MANIFEST_FILENAME,
     SAVED_PLAN_FILENAME,
 )
 
 
 class FinanceStorageCandidateAbortError(ValueError):
-    """The partial-candidate recovery boundary is unsafe or ambiguous."""
+    """The unselected-candidate recovery boundary is unsafe or ambiguous."""
 
 
 class InjectedCandidateAbortFault(RuntimeError):
@@ -383,24 +393,62 @@ def _barrier_guard(runtime_dir: Path) -> dict[str, Any]:
     }
 
 
-def _shadow_guard(runtime_dir: Path, generation_epoch: str) -> dict[str, Any]:
+def _shadow_guard(
+    runtime_dir: Path,
+    generation_epoch: str,
+    *,
+    candidate_manifest_sha256: str = "",
+    candidate_plan_fingerprint: str = "",
+) -> dict[str, Any]:
     path = runtime_dir / ".finance-storage-shadow-ingest.json"
     if not path.exists():
         return {"path": str(path), "status": "absent", "active": False}
     state = _load_json(path, label="Finance shadow-ingest state")
-    active = bool(state.get("active")) or str(state.get("status") or "") in {
-        "active",
-        "soaking",
-    }
-    if active or str(state.get("generation_epoch") or "") == generation_epoch:
+    active = (
+        bool(state.get("enabled"))
+        or bool(state.get("active"))
+        or str(state.get("status") or "") in {"active", "soaking"}
+    )
+    observed_manifest_sha256 = str(
+        state.get("candidate_manifest_sha256") or ""
+    )
+    observed_plan_fingerprint = str(
+        state.get("plan_fingerprint") or ""
+    )
+    observed_candidate_path = str(
+        state.get("candidate_manifest_path") or ""
+    )
+    references_generation = (
+        str(state.get("generation_epoch") or "") == generation_epoch
+        or generation_epoch in Path(observed_candidate_path).parts
+    )
+    if active:
         raise FinanceStorageCandidateAbortError(
-            "candidate abort is blocked by shadow state for the target generation"
+            "candidate abort is blocked by active shadow ingest"
+        )
+    if candidate_manifest_sha256:
+        if (
+            observed_manifest_sha256 != candidate_manifest_sha256
+            or observed_plan_fingerprint != candidate_plan_fingerprint
+            or not references_generation
+        ):
+            raise FinanceStorageCandidateAbortError(
+                "inactive shadow state does not match the completed candidate"
+            )
+    elif references_generation or observed_manifest_sha256:
+        raise FinanceStorageCandidateAbortError(
+            "partial candidate is blocked by retained shadow identity"
         )
     return {
         "path": str(path),
         "status": str(state.get("status") or ""),
         "active": active,
+        "enabled": bool(state.get("enabled")),
         "generation_epoch": str(state.get("generation_epoch") or ""),
+        "candidate_manifest_path": observed_candidate_path,
+        "candidate_manifest_sha256": observed_manifest_sha256,
+        "plan_fingerprint": observed_plan_fingerprint,
+        "state_fingerprint": str(state.get("state_fingerprint") or ""),
     }
 
 
@@ -424,19 +472,38 @@ def _active_candidate_workers() -> list[dict[str, Any]]:
         if not process.name.isdigit() or int(process.name) == os.getpid():
             continue
         command = _process_command(process)
-        is_direct_apply = any(
-            token.endswith("finance_storage_split.py")
-            and index + 1 < len(command)
-            and command[index + 1] == "apply"
-            for index, token in enumerate(command)
+        direct_action = next(
+            (
+                command[index + 1]
+                for index, token in enumerate(command)
+                if token.endswith("finance_storage_split.py")
+                and index + 1 < len(command)
+            ),
+            "",
         )
-        is_hosted_apply = any(
-            token == "finance-storage-split-apply" for token in command
+        hosted_actions = [
+            token
+            for token in command
+            if token.startswith("finance-storage-")
+        ]
+        allowed_actions = {
+            "candidate-abort-plan",
+            "candidate-abort-apply",
+            "candidate-abort-readback",
+            "recovery-contract",
+        }
+        active_direct = bool(
+            direct_action and direct_action not in allowed_actions
         )
-        if is_direct_apply or is_hosted_apply:
+        active_hosted = any(
+            action.removeprefix("finance-storage-") not in allowed_actions
+            for action in hosted_actions
+        )
+        if active_direct or active_hosted:
             workers.append(
                 {
                     "pid": int(process.name),
+                    "action": direct_action or hosted_actions[0],
                     "command": command,
                 }
             )
@@ -567,6 +634,7 @@ def _checkpoint_summary(
     *,
     saved_plan: Mapping[str, Any],
     generation_epoch: str,
+    completed_candidate: bool,
 ) -> dict[str, Any]:
     chunks = list((saved_plan.get("chunks") or {}).get("manifest") or [])
     raw_expected = {
@@ -598,11 +666,20 @@ def _checkpoint_summary(
             """SELECT batch_id,row_count,rows_digest,status,committed_at
                FROM finance_raw_ingest_batches ORDER BY batch_id"""
         ).fetchall()
-        if len(batches) != 1:
+        if not completed_candidate and len(batches) != 1:
             raise FinanceStorageCandidateAbortError(
                 "partial candidate raw batch inventory is ambiguous"
             )
-        batch = dict(batches[0])
+        matching_batches = [
+            dict(item)
+            for item in batches
+            if str(item["batch_id"]) == expected_batch_id
+        ]
+        if len(matching_batches) != 1:
+            raise FinanceStorageCandidateAbortError(
+                "candidate raw inventory lost the plan-bound batch"
+            )
+        batch = matching_batches[0]
         if (
             str(batch.get("batch_id") or "") != expected_batch_id
             or int(batch.get("row_count") or 0)
@@ -613,6 +690,18 @@ def _checkpoint_summary(
         ):
             raise FinanceStorageCandidateAbortError(
                 "partial candidate raw batch does not match the saved plan"
+            )
+        if completed_candidate and (
+            str(batch.get("status") or "") != "committed"
+            or not str(batch.get("committed_at") or "")
+            or any(
+                str(item["status"] or "") != "committed"
+                or not str(item["committed_at"] or "")
+                for item in batches
+            )
+        ):
+            raise FinanceStorageCandidateAbortError(
+                "completed candidate contains a non-terminal raw batch"
             )
     except sqlite3.Error as exc:
         raise FinanceStorageCandidateAbortError(
@@ -715,11 +804,20 @@ def _checkpoint_summary(
         raise FinanceStorageCandidateAbortError(
             "partial candidate checkpoint counts are impossible"
         )
+    if completed_candidate and (
+        raw_verified != len(raw_expected)
+        or operational_verified != len(operational_expected)
+    ):
+        raise FinanceStorageCandidateAbortError(
+            "completed candidate checkpoint inventory is incomplete"
+        )
     return {
         "batch_id": expected_batch_id,
         "batch_status": str(batch.get("status") or ""),
         "batch_declared_rows": int(batch.get("row_count") or 0),
         "batch_declared_digest": str(batch.get("rows_digest") or ""),
+        "batch_count": len(batches),
+        "completed_candidate": completed_candidate,
         "raw_verified_chunks": raw_verified,
         "raw_total_chunks": len(raw_expected),
         "raw_verified_rows": raw_rows,
@@ -740,7 +838,7 @@ def _plan_fingerprint(payload: Mapping[str, Any]) -> str:
 
 
 class FinanceStorageCandidateAbort:
-    """Plan, apply, resume, and read back one exact partial-candidate abort."""
+    """Plan, apply, resume, and read back one unselected-candidate abort."""
 
     def __init__(
         self,
@@ -875,7 +973,91 @@ class FinanceStorageCandidateAbort:
             "sha256": _sha256_file(path),
         }
 
-    def _candidate_inventory(self) -> list[dict[str, Any]]:
+    def _candidate_manifest(
+        self,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        path = self.candidate_root / CANDIDATE_MANIFEST_FILENAME
+        if not path.exists():
+            return {
+                "status": "absent",
+                "completed_candidate": False,
+                "path": str(path),
+                "manifest_sha256": "",
+            }
+        payload = _load_json(path, label="candidate generation manifest")
+        try:
+            manifest = parse_manifest(payload)
+        except StorageRegistryError as exc:
+            raise FinanceStorageCandidateAbortError(
+                "candidate generation manifest is invalid"
+            ) from exc
+        expected = dict(binding.get("candidate") or {})
+        if (
+            manifest.state != "shadow"
+            or manifest.canonical_source != "monolith"
+            or manifest.generation_epoch != self.generation_epoch
+            or manifest_payload(manifest) != expected
+        ):
+            raise FinanceStorageCandidateAbortError(
+                "candidate manifest does not match the saved unselected generation"
+            )
+        return {
+            "status": "completed_unselected",
+            "completed_candidate": True,
+            "path": str(path),
+            "file_sha256": _sha256_file(path),
+            "manifest_sha256": manifest.manifest_sha256,
+            "generation_epoch": manifest.generation_epoch,
+            "raw_generation_id": manifest.raw.generation_id,
+            "operational_generation_id": manifest.operational.generation_id,
+            "source_fingerprint": manifest.source_fingerprint,
+        }
+
+    def _shadow_verification(
+        self,
+        candidate_manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        path = self.candidate_root / SHADOW_VERIFICATION_FILENAME
+        if not path.exists():
+            return {"status": "absent", "path": str(path)}
+        if candidate_manifest.get("completed_candidate") is not True:
+            raise FinanceStorageCandidateAbortError(
+                "partial candidate has impossible shadow-verification evidence"
+            )
+        payload = _load_json(path, label="candidate shadow verification")
+        if (
+            str(payload.get("contract_version") or "")
+            != SHADOW_VERIFICATION_CONTRACT
+            or str(payload.get("status") or "")
+            not in {"soaking", "ready"}
+            or str(payload.get("candidate_manifest_sha256") or "")
+            != str(candidate_manifest.get("manifest_sha256") or "")
+            or str(payload.get("candidate_plan_fingerprint") or "")
+            != self.candidate_plan_fingerprint
+        ):
+            raise FinanceStorageCandidateAbortError(
+                "candidate shadow-verification binding is invalid"
+            )
+        return {
+            "status": str(payload.get("status") or ""),
+            "path": str(path),
+            "sha256": _sha256_file(path),
+            "candidate_manifest_sha256": str(
+                payload.get("candidate_manifest_sha256") or ""
+            ),
+            "candidate_plan_fingerprint": str(
+                payload.get("candidate_plan_fingerprint") or ""
+            ),
+            "mismatch_count": int(payload.get("mismatch_count") or 0),
+            "performance": dict(payload.get("performance") or {}),
+        }
+
+    def _candidate_inventory(
+        self,
+        *,
+        completed_candidate: bool,
+    ) -> list[dict[str, Any]]:
         if (
             self.candidate_root.is_symlink()
             or not self.candidate_root.is_dir()
@@ -889,9 +1071,17 @@ class FinanceStorageCandidateAbort:
             raise FinanceStorageCandidateAbortError(
                 f"candidate generation has unknown files: {unknown}"
             )
-        if CANDIDATE_MANIFEST_FILENAME in names:
+        manifest_present = CANDIDATE_MANIFEST_FILENAME in names
+        if manifest_present != completed_candidate:
             raise FinanceStorageCandidateAbortError(
-                "candidate abort refuses a manifest-selected lifecycle"
+                "candidate lifecycle and manifest inventory disagree"
+            )
+        if (
+            SHADOW_VERIFICATION_FILENAME in names
+            and not completed_candidate
+        ):
+            raise FinanceStorageCandidateAbortError(
+                "partial candidate cannot contain shadow verification"
             )
         required = {
             SAVED_PLAN_FILENAME,
@@ -905,7 +1095,12 @@ class FinanceStorageCandidateAbort:
         return [
             _file_identity(
                 self.candidate_root / name,
-                include_sha256=name == SAVED_PLAN_FILENAME,
+                include_sha256=name
+                in {
+                    SAVED_PLAN_FILENAME,
+                    CANDIDATE_MANIFEST_FILENAME,
+                    SHADOW_VERIFICATION_FILENAME,
+                },
             )
             for name in names
         ]
@@ -922,10 +1117,6 @@ class FinanceStorageCandidateAbort:
             )
         canonical = _canonical_monolith_identity(self.runtime_dir)
         barrier = _barrier_guard(self.runtime_dir)
-        shadow = _shadow_guard(
-            self.runtime_dir,
-            self.generation_epoch,
-        )
         workers = _active_candidate_workers()
         if workers:
             raise FinanceStorageCandidateAbortError(
@@ -937,6 +1128,21 @@ class FinanceStorageCandidateAbort:
                 "candidate abort is blocked by open candidate files"
             )
         plan, binding = self._saved_plan()
+        candidate_manifest = self._candidate_manifest(binding)
+        completed_candidate = bool(
+            candidate_manifest.get("completed_candidate")
+        )
+        shadow = _shadow_guard(
+            self.runtime_dir,
+            self.generation_epoch,
+            candidate_manifest_sha256=str(
+                candidate_manifest.get("manifest_sha256") or ""
+            ),
+            candidate_plan_fingerprint=self.candidate_plan_fingerprint,
+        )
+        shadow_verification = self._shadow_verification(
+            candidate_manifest
+        )
         source_fingerprint = str(
             (plan.get("source") or {}).get("fingerprint") or ""
         )
@@ -966,13 +1172,23 @@ class FinanceStorageCandidateAbort:
             self.candidate_root / OPERATIONAL_FILENAME,
             saved_plan=plan,
             generation_epoch=self.generation_epoch,
+            completed_candidate=completed_candidate,
         )
-        inventory = self._candidate_inventory()
+        inventory = self._candidate_inventory(
+            completed_candidate=completed_candidate,
+        )
         return {
             "generation_entries": entries,
             "canonical_monolith": canonical,
             "barrier": barrier,
+            "candidate_lifecycle": (
+                "completed_unselected"
+                if completed_candidate
+                else "partial_unselected"
+            ),
+            "candidate_manifest": candidate_manifest,
             "shadow": shadow,
+            "shadow_verification": shadow_verification,
             "candidate_workers": workers,
             "candidate_openers": openers,
             "migration_lock": _migration_lock_status(
@@ -1096,6 +1312,13 @@ class FinanceStorageCandidateAbort:
                 ).get("sha256")
                 or ""
             ),
+            "candidate_lifecycle": str(
+                exact_state.get("candidate_lifecycle") or ""
+            ),
+            "candidate_manifest": dict(
+                exact_state.get("candidate_manifest") or {}
+            ),
+            "shadow": dict(exact_state.get("shadow") or {}),
             "approval_reference": approval_reference,
             "planned_files": list(exact_state.get("candidate_files") or []),
             "deleted_files": [],
@@ -1149,6 +1372,12 @@ class FinanceStorageCandidateAbort:
                 ).get("sha256")
                 or ""
             )
+            or str(state.get("candidate_lifecycle") or "")
+            != str(exact_state.get("candidate_lifecycle") or "")
+            or dict(state.get("candidate_manifest") or {})
+            != dict(exact_state.get("candidate_manifest") or {})
+            or dict(state.get("shadow") or {})
+            != dict(exact_state.get("shadow") or {})
             or list(state.get("planned_files") or [])
             != list(exact_state.get("candidate_files") or [])
             or dict(state.get("canonical_monolith") or {})
@@ -1200,7 +1429,21 @@ class FinanceStorageCandidateAbort:
                 "canonical monolith identity drifted during candidate abort"
             )
         _barrier_guard(self.runtime_dir)
-        _shadow_guard(self.runtime_dir, self.generation_epoch)
+        candidate_manifest = dict(
+            transaction.get("candidate_manifest") or {}
+        )
+        shadow = _shadow_guard(
+            self.runtime_dir,
+            self.generation_epoch,
+            candidate_manifest_sha256=str(
+                candidate_manifest.get("manifest_sha256") or ""
+            ),
+            candidate_plan_fingerprint=self.candidate_plan_fingerprint,
+        )
+        if shadow != dict(transaction.get("shadow") or {}):
+            raise FinanceStorageCandidateAbortError(
+                "inactive shadow identity drifted during candidate abort"
+            )
         if _active_candidate_workers():
             raise FinanceStorageCandidateAbortError(
                 "candidate worker appeared during candidate abort"
@@ -1284,7 +1527,21 @@ class FinanceStorageCandidateAbort:
                 "canonical monolith identity changed during candidate abort"
             )
         barrier = _barrier_guard(self.runtime_dir)
-        shadow = _shadow_guard(self.runtime_dir, self.generation_epoch)
+        candidate_manifest = dict(
+            transaction.get("candidate_manifest") or {}
+        )
+        shadow = _shadow_guard(
+            self.runtime_dir,
+            self.generation_epoch,
+            candidate_manifest_sha256=str(
+                candidate_manifest.get("manifest_sha256") or ""
+            ),
+            candidate_plan_fingerprint=self.candidate_plan_fingerprint,
+        )
+        if shadow != dict(transaction.get("shadow") or {}):
+            raise FinanceStorageCandidateAbortError(
+                "inactive shadow identity changed during candidate abort"
+            )
         snapshots = _snapshot_inventory(self.runtime_dir)
         if snapshots != list(transaction.get("snapshots") or []):
             raise FinanceStorageCandidateAbortError(
@@ -1439,6 +1696,9 @@ class FinanceStorageCandidateAbort:
                 "status": "completed",
                 "deployed_sha": self.deployed_sha,
                 "generation_epoch": self.generation_epoch,
+                "candidate_lifecycle": str(
+                    transaction.get("candidate_lifecycle") or ""
+                ),
                 "candidate_abort_plan_fingerprint": expected_fingerprint,
                 "candidate_plan_fingerprint": (
                     self.candidate_plan_fingerprint
