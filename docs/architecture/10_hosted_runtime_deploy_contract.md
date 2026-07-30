@@ -179,7 +179,10 @@ The same runner owns the only production path for the active functional cutover 
   deterministic rebuild from canonical accepted stocks and policy, while a
   canonical-only or common-key semantic difference is accepted only when the
   active canonical row matches that rebuild. Ordinary Vitrina refresh
-  regenerates a missing canonical row; the retained generation remains
+  regenerates a missing canonical row. At most one retained-only row whose
+  accepted canonical stocks snapshot is absent may be treated as a
+  noncanonical cache-miss orphan and replaced only by a fresh ordinary
+  refresh; a second such row fails closed. The retained generation remains
   immutable and direct cross-generation row copy is forbidden.
 - The candidate-abort boundary also covers an exact completed-but-unselected
   generation after a recovery deploy, but only after repo-owned shadow
