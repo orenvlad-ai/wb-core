@@ -208,9 +208,6 @@ def _run(
                     record_ff_movements=False,
                 )
                 downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
-                finance_cost_recalculation = (
-                    _recalculate_downstream_finance_cost(runtime)
-                )
                 ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
                 fresh_plan = block.build_sync_plan()
                 recheck = _verify_sync_external_recheck(reviewed_plan, fresh_plan)
@@ -234,6 +231,9 @@ def _run(
                     else block.calculation_parameters.publish_current_functional_economics(
                         verified_backup=economics_backup,
                     )
+                )
+                finance_cost_recalculation = (
+                    _recalculate_downstream_finance_cost(runtime)
                 )
                 retention_after = _run_bounded_recovery_retention(runtime)
                 backup_result = result.get("recovery_policy")
@@ -296,11 +296,6 @@ def _run(
                     phase_timings_ms,
                     lambda: _materialize_downstream_cost_layers(runtime),
                 )
-                finance_cost_recalculation = _run_sync_phase(
-                    "recalculate_downstream_finance_cost",
-                    phase_timings_ms,
-                    lambda: _recalculate_downstream_finance_cost(runtime),
-                )
                 ff_state = _run_sync_phase(
                     "reconcile_functional_ff_state",
                     phase_timings_ms,
@@ -344,6 +339,11 @@ def _run(
                             verified_backup=economics_backup,
                         )
                     ),
+                )
+                finance_cost_recalculation = _run_sync_phase(
+                    "recalculate_downstream_finance_cost",
+                    phase_timings_ms,
+                    lambda: _recalculate_downstream_finance_cost(runtime),
                 )
                 retention_after = _run_sync_phase(
                     "recovery_retention_after",
@@ -647,11 +647,12 @@ def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) 
 def _recalculate_downstream_finance_cost(
     runtime: RegistryUploadDbBackedRuntime,
 ) -> dict[str, Any]:
-    """Publish Finance bindings invalidated by the just-written cost layers.
+    """Publish Finance bindings after all warehouse cost writers have finished.
 
-    The caller owns the warehouse functional write lock, so no later cost-layer
-    publication can interleave between stale detection and Finance readback.
-    The July boundary includes the week that starts on 2026-06-29.
+    The caller owns the warehouse functional write lock and invokes this only
+    after supply-layer, functional-version and economics publication, so no
+    later cost writer can invalidate the post-verify before unlock. The July
+    boundary includes the week that starts on 2026-06-29.
     """
 
     return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks(
