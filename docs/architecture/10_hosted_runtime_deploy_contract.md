@@ -858,6 +858,13 @@ and proves that `monolith` remains the rollback generation. Shadow,
 mixed-generation, lagged or unhealthy storage fails before report/XLSX
 evidence can pass.
 
+The hosted `finance-canonical-dry-run` is also selected-split aware. It pins
+one manifest, opens both persistent generations with SQLite `mode=ro`, creates
+only a connection-local raw compatibility view and restores
+`PRAGMA query_only=ON` before planning. The reviewed apply writes only
+operational Finance projections and proves the raw generation unchanged
+through its non-target digest.
+
 ## Human-Only Boundary
 
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:

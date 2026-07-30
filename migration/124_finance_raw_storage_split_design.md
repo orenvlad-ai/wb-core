@@ -616,6 +616,10 @@ boundary.
   `finance_raw_current_rows` compatibility view while writing derived rows to
   operational storage. The attach is identity-checked and observed by the
   registry; no persistent cross-store view, trigger or foreign key is allowed.
+- The all-history canonical Finance dry-run uses that same pinned attach in
+  read-only mode and restores `PRAGMA query_only=ON` before any data query.
+  Its apply may change only reviewed operational projection rows; the selected
+  raw generation remains a digest-bound non-target.
 - Bounded current-row reads must keep seller/week predicates inside the indexed
   lookup plan and must not scan/materialize all historical rows. Removing a
   weekly scope and all-history reconciliation must both retain one deterministic

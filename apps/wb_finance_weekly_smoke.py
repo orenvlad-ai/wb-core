@@ -515,6 +515,25 @@ def _assert_split_storage_contract() -> None:
                 raise AssertionError(
                     "recovered split event did not resolve its failure evidence"
                 )
+        raw_before_plan = _file_sha256(raw_path)
+        operational_before_plan = _file_sha256(operational_path)
+        canonical_plan = block.plan_canonical_finance_backfill()
+        expected_current_rows = len(rows[:-1]) + len(recovery_rows)
+        if (
+            canonical_plan["finance_row_count"] != expected_current_rows
+            or canonical_plan["source_manifests"]["finance"]["row_count"]
+            != expected_current_rows
+        ):
+            raise AssertionError(
+                "canonical dry-run did not read the selected raw generation"
+            )
+        if (
+            _file_sha256(raw_path) != raw_before_plan
+            or _file_sha256(operational_path) != operational_before_plan
+        ):
+            raise AssertionError(
+                "canonical split dry-run changed a persistent store"
+            )
         observations = StoreRegistry(runtime).status()[
             "open_observations"
         ]
@@ -527,6 +546,14 @@ def _assert_split_storage_contract() -> None:
             raise AssertionError(
                 "split Finance raw reads bypassed registry observation"
             )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _assert_client_contract() -> None:
