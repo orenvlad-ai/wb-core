@@ -237,14 +237,16 @@ The implementation is deliberately inert on deploy:
   any writer/timer restore or barrier release. For a selected rollback
   monolith, `finance-storage-post-manifest-recovery-readback` compares core raw
   identity rows and every non-cache operational table against the retained
-  split generation in SQLite query-only mode. It admits at most eight
-  split-only rows from
-  `sheet_vitrina_v1_wb_incident_projection_cache`, and only when each row is
-  deterministically reproducible from the canonical accepted stocks snapshot
-  and incident policy. The normal Vitrina refresh regenerates those derived
-  rows; direct row copy is forbidden. Any canonical-only cache row, semantic
-  cache conflict, raw/non-cache drift or missing retained generation remains
-  fail-closed.
+  split generation in SQLite query-only mode. It admits at most eight total
+  key/value differences in
+  `sheet_vitrina_v1_wb_incident_projection_cache`. A retained-only row is
+  recoverable only when canonical accepted stocks and policy deterministically
+  rebuild its semantic projection; the normal Vitrina refresh regenerates it.
+  A canonical-only row or a common-key semantic difference is admissible only
+  when the active canonical row matches that same deterministic rebuild; the
+  retained generation stays immutable evidence. Direct row copy is forbidden.
+  Any non-reproducible cache row, larger cache drift, raw/non-cache drift or
+  missing retained generation remains fail-closed.
 - `finance-storage-snapshot-retention-plan|apply|readback` is the only
   pre-candidate capacity recovery for stale coherent migration snapshots.
   It runs only while the monolith is canonical, the manual barrier is

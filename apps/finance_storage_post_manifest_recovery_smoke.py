@@ -134,6 +134,7 @@ def _create_fixture(runtime: Path) -> dict[str, object]:
     )
     return {
         "monolith": monolith_path,
+        "retained_operational": operational_path,
         "retained_projection": retained_projection,
     }
 
@@ -177,6 +178,117 @@ def main() -> None:
             ]
         ) == 1
         assert result["cache"]["direct_row_copy_allowed"] is False
+
+        with (
+            sqlite3.connect(
+                Path(str(fixture["monolith"]))
+            ) as canonical,
+            sqlite3.connect(
+                Path(str(fixture["retained_operational"]))
+            ) as retained,
+        ):
+            canonical.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_incident_projection_cache
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    "canonical",
+                    "cache-digest",
+                    2,
+                    "2026-07-31",
+                    json.dumps(fixture["retained_projection"]),
+                    "2026-07-31T00:00:00Z",
+                ),
+            )
+            retained.execute(
+                "DELETE FROM sheet_vitrina_v1_wb_incident_projection_cache"
+            )
+        with (
+            mock.patch.object(
+                recovery,
+                "barrier_status",
+                return_value={
+                    "active": True,
+                    "phase": "restoring",
+                    "hold_confirmed": True,
+                },
+            ),
+            mock.patch.object(
+                recovery,
+                "_rebuild_projection",
+                return_value=rebuilt_projection,
+            ),
+        ):
+            canonical_only = recovery.readback(
+                runtime,
+                expected_retained_generation=SPLIT_GENERATION,
+            )
+        assert canonical_only["status"] == "reconciled"
+        assert canonical_only["cache"]["bounded_drift_row_count"] == 1
+        assert canonical_only["cache"]["regeneration_required"] is False
+        assert canonical_only["cache"]["accepted_canonical_rows"] == [
+            {
+                "classification": "canonical_only",
+                "seller_id": "canonical",
+                "snapshot_digest": "cache-digest",
+                "policy_revision": 2,
+                "snapshot_date": "2026-07-31",
+                "semantic_digest": recovery._digest(
+                    recovery._normalized_projection(
+                        rebuilt_projection
+                    )
+                ),
+                "canonical_rebuild_match": True,
+                "retained_generation_mutation_required": False,
+            }
+        ]
+
+        retained_stale_projection = {
+            **dict(fixture["retained_projection"]),
+            "value": 999,
+        }
+        with sqlite3.connect(
+            Path(str(fixture["retained_operational"]))
+        ) as retained:
+            retained.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_incident_projection_cache
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    "canonical",
+                    "cache-digest",
+                    2,
+                    "2026-07-31",
+                    json.dumps(retained_stale_projection),
+                    "2026-07-31T00:00:00Z",
+                ),
+            )
+        with (
+            mock.patch.object(
+                recovery,
+                "barrier_status",
+                return_value={
+                    "active": True,
+                    "phase": "restoring",
+                    "hold_confirmed": True,
+                },
+            ),
+            mock.patch.object(
+                recovery,
+                "_rebuild_projection",
+                return_value=rebuilt_projection,
+            ),
+        ):
+            semantic_drift = recovery.readback(
+                runtime,
+                expected_retained_generation=SPLIT_GENERATION,
+            )
+        assert semantic_drift["status"] == "reconciled"
+        assert semantic_drift["cache"]["semantic_mismatch_count"] == 1
+        assert (
+            semantic_drift["cache"]["accepted_canonical_rows"][0][
+                "classification"
+            ]
+            == "canonical_authoritative_semantic_mismatch"
+        )
 
         with sqlite3.connect(
             Path(str(fixture["monolith"]))
