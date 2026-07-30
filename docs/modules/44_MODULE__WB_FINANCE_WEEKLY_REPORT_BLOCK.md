@@ -243,9 +243,15 @@ generation read-only and expose only the connection-local current-row
 compatibility view. A weekly raw/outbox commit is acknowledged only after the
 complete operational report/aggregate/SKU/coverage/reconciliation projection
 for the exact source hash reads back; a raw-first crash stays pending and is
-resolved by the idempotent scheduled replay. The production Partner/Finance
-diagnostic pins the same manifest and opens both selected files `mode=ro` with
-`query_only=ON`.
+resolved by the idempotent scheduled replay. Before due-week selection, each
+scheduled tick may acknowledge only a bounded consecutive prefix of pending
+events that already have exact operational receipts/cursor/source revisions;
+an event without that evidence remains pending and no projection is replayed.
+The raw acknowledgement reuses the schema proven by its read phase instead of
+requesting a redundant DDL lock, so a completed receipt can recover after a
+long query-only reconciliation releases the raw store. The production
+Partner/Finance diagnostic pins the same manifest and opens both selected files
+`mode=ro` with `query_only=ON`.
 
 Targeted checks:
 

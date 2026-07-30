@@ -86,7 +86,12 @@ The implementation is deliberately inert on deploy:
   after the exact seller/week row count, source hash, reports, aggregate,
   per-SKU, coverage and reconciliation projections all read back; a raw-first
   crash remains pending/actionable until the idempotent weekly replay completes
-  those projections. Its live-tail bridge mirrors committed batches and outbox
+  those projections. Before choosing the next due week, the scheduled owner
+  drains only a bounded consecutive prefix whose exact operational
+  receipts/cursor/source revisions already exist. It never replays a missing
+  projection under that recovery path, and the raw acknowledgement does not
+  reacquire a redundant schema DDL lock after its read phase proved the schema.
+  Its live-tail bridge mirrors committed batches and outbox
   sequence into an unselected candidate with its own cursor; crash-before-event
   rolls back, crash-after-commit retries as a no-op.
 - `packages/application/finance_storage_migration.py` builds a coherent

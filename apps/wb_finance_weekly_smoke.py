@@ -24,7 +24,9 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
     historical_week_bounds,
 )
 from packages.application.finance_raw_storage import (  # noqa: E402
+    FinanceOutboxConsumer,
     FinanceRawIngestor,
+    InjectedFinanceStorageFault,
     bind_generation_identity,
     ensure_operational_schema,
     ensure_raw_schema,
@@ -431,6 +433,15 @@ def _assert_split_storage_contract() -> None:
             week_start="2026-06-29",
             week_end="2026-07-05",
         )
+        waiting_recovery = block.recover_receipted_split_outbox()
+        if (
+            waiting_recovery["status"] != "waiting_for_projection"
+            or waiting_recovery["pending_sequence_no"]
+            != recovery_event.sequence_no
+        ):
+            raise AssertionError(
+                "raw-only event was not left pending for its projection"
+            )
         try:
             block._acknowledge_split_outbox(  # noqa: SLF001
                 expected_sequence=recovery_event.sequence_no,
@@ -456,6 +467,43 @@ def _assert_split_storage_contract() -> None:
             raise AssertionError(
                 "raw-first crash window did not recover idempotently"
             )
+        receipt_crash_event = FinanceRawIngestor(
+            StoreRegistry(runtime),
+            seller_id="seller-1",
+            now_factory=lambda: "2026-07-07T06:10:00Z",
+        ).ingest_batch(
+            recovery_rows,
+            source_identity="wb-finance-week-retry:2026-06-29/2026-07-05",
+            source_sha256="sha256:" + recovery_hash,
+            week_start="2026-06-29",
+            week_end="2026-07-05",
+        )
+        try:
+            FinanceOutboxConsumer(
+                StoreRegistry(runtime),
+                apply_event=block._verify_outbox_projection,  # noqa: SLF001
+                now_factory=lambda: "2026-07-07T06:11:00Z",
+            ).consume_next(fault_at="after_operational_commit_before_ack")
+        except InjectedFinanceStorageFault:
+            pass
+        else:
+            raise AssertionError(
+                "receipt-before-raw-ack fault window was not injected"
+            )
+        receipt_recovery = block.recover_receipted_split_outbox()
+        if (
+            receipt_recovery["status"] != "acknowledged"
+            or len(receipt_recovery["events"]) != 1
+            or receipt_recovery["events"][0]["event_id"]
+            != receipt_crash_event.event_id
+            or receipt_recovery["events"][0]["status"]
+            != "duplicate_acknowledged"
+        ):
+            raise AssertionError(
+                "receipted split event did not recover before the next due week"
+            )
+        if block.recover_receipted_split_outbox()["status"] != "clean":
+            raise AssertionError("receipted split recovery was not idempotent")
         with sqlite3.connect(raw_path) as raw:
             if raw.execute(
                 "SELECT COUNT(*) FROM finance_raw_rows"
@@ -463,7 +511,9 @@ def _assert_split_storage_contract() -> None:
                 raise AssertionError("immutable raw history was unexpectedly lost")
             if raw.execute(
                 "SELECT COUNT(*) FROM finance_raw_batch_rows"
-            ).fetchone()[0] != len(rows) + len(rows[:-1]) + len(recovery_rows):
+            ).fetchone()[0] != (
+                len(rows) + len(rows[:-1]) + 2 * len(recovery_rows)
+            ):
                 raise AssertionError("batch-to-row replay links are incomplete")
             if raw.execute(
                 "SELECT COUNT(*) FROM finance_raw_current_rows"
@@ -480,7 +530,7 @@ def _assert_split_storage_contract() -> None:
                 """SELECT last_sequence_no
                    FROM finance_raw_consumer_cursors
                    WHERE consumer_id='finance_operational_projection_v1'"""
-            ).fetchone()[0] != 3:
+            ).fetchone()[0] != 4:
                 raise AssertionError("split raw outbox cursor did not advance")
         with sqlite3.connect(operational_path) as operational:
             if operational.execute(
@@ -502,7 +552,7 @@ def _assert_split_storage_contract() -> None:
                 )
             if operational.execute(
                 "SELECT COUNT(*) FROM finance_operational_receipts"
-            ).fetchone()[0] != 3:
+            ).fetchone()[0] != 4:
                 raise AssertionError(
                     "split operational outbox receipts are incomplete"
                 )
