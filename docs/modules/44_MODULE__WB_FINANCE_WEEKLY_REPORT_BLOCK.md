@@ -145,6 +145,13 @@ Canonical-cost hosted operations expose only:
 - `finance-canonical-apply`;
 - `finance-canonical-readback`.
 
+When the selected manifest is split, the canonical dry-run pins that manifest,
+opens operational and raw generations with SQLite `mode=ro`, restores
+`query_only=ON` before the first data query and reads current raw history
+through an identity-checked connection-local view. Apply reuses the same
+registry-selected view while its transaction mutates only operational
+projections; raw Finance remains covered by the non-target digest.
+
 The separate storage-split lifecycle exposes:
 
 - `finance-storage-snapshot-plan|apply|integrity`;

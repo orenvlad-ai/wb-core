@@ -23,7 +23,7 @@ from packages.application.finance_raw_storage import (
     ensure_raw_schema,
     storage_health,
 )
-from packages.application.storage_registry import StoreRegistry
+from packages.application.storage_registry import GenerationManifest, StoreRegistry
 from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
@@ -3572,17 +3572,15 @@ class WbFinanceWeeklyBlock:
     ) -> dict[str, Any]:
         """Read-only all-history Finance preflight bound to canonical cost truth."""
 
-        with self.store_registry.session(
-            "operational",
-            mode="ro",
-            operation="finance_canonical_backfill_plan",
-            timeout_ms=60_000,
-        ) as conn:
+        conn = self._connect_canonical_plan()
+        try:
             return self._plan_canonical_finance_backfill_in_connection(
                 conn,
                 date_from=date_from,
                 date_to=date_to,
             )
+        finally:
+            conn.close()
 
     def _plan_canonical_finance_backfill_in_connection(
         self,
@@ -4974,25 +4972,33 @@ class WbFinanceWeeklyBlock:
             ).encode("utf-8")
         ).hexdigest()
 
-    def _connect(self) -> sqlite3.Connection:
-        manifest = self.store_registry.load()
-        conn = self.store_registry.connect(
-            "operational",
-            mode="rw",
-            operation="wb_finance_weekly",
-            manifest=manifest,
-        )
-        if (
+    def _attach_split_raw_read_view(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        manifest: GenerationManifest,
+        query_only_primary: bool,
+    ) -> None:
+        if not (
             manifest.state == "cutover"
             and manifest.canonical_source == "split"
         ):
-            self.store_registry.attach_readonly(
-                conn,
-                "finance_raw",
-                schema_name="finance_raw_store",
-                operation="wb_finance_weekly_raw_read",
-                manifest=manifest,
-            )
+            return
+        self.store_registry.attach_readonly(
+            conn,
+            "finance_raw",
+            schema_name="finance_raw_store",
+            operation="wb_finance_weekly_raw_read",
+            manifest=manifest,
+        )
+        if query_only_primary:
+            if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise ValueError("canonical Finance plan requires query_only")
+            # Both persistent databases are already opened with SQLite
+            # ``mode=ro``. Relax query_only only for this connection-local
+            # view, then restore it before any data query.
+            conn.execute("PRAGMA query_only=OFF")
+        try:
             conn.execute(
                 """CREATE TEMP VIEW wb_finance_weekly_raw_rows AS
                    SELECT seller_id,report_id,rrd_id,report_type,week_start,
@@ -5001,6 +5007,47 @@ class WbFinanceWeeklyBlock:
                           updated_at
                      FROM finance_raw_store.finance_raw_current_rows"""
             )
+        finally:
+            if query_only_primary:
+                conn.execute("PRAGMA query_only=ON")
+        if query_only_primary and int(
+            conn.execute("PRAGMA query_only").fetchone()[0]
+        ) != 1:
+            raise ValueError("canonical Finance plan lost query_only")
+
+    def _connect_canonical_plan(self) -> sqlite3.Connection:
+        manifest = self.store_registry.load()
+        conn = self.store_registry.connect(
+            "operational",
+            mode="ro",
+            operation="finance_canonical_backfill_plan",
+            manifest=manifest,
+            timeout_ms=60_000,
+        )
+        try:
+            self._attach_split_raw_read_view(
+                conn,
+                manifest=manifest,
+                query_only_primary=True,
+            )
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    def _connect(self) -> sqlite3.Connection:
+        manifest = self.store_registry.load()
+        conn = self.store_registry.connect(
+            "operational",
+            mode="rw",
+            operation="wb_finance_weekly",
+            manifest=manifest,
+        )
+        self._attach_split_raw_read_view(
+            conn,
+            manifest=manifest,
+            query_only_primary=False,
+        )
         return conn
 
 
