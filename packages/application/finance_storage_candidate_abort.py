@@ -643,11 +643,40 @@ def _checkpoint_summary(
         if isinstance(item, Mapping)
     }
     matrix = list(saved_plan.get("table_owner_read_write_matrix") or [])
+    matrix_by_table: dict[str, dict[str, Any]] = {}
+    for item in matrix:
+        if not isinstance(item, Mapping):
+            raise FinanceStorageCandidateAbortError(
+                "candidate plan table matrix is malformed"
+            )
+        table = str(item.get("table") or "")
+        if not table or table in matrix_by_table:
+            raise FinanceStorageCandidateAbortError(
+                "candidate plan table matrix is ambiguous"
+            )
+        matrix_by_table[table] = dict(item)
+    operational_copy = saved_plan.get("operational_copy")
+    if not isinstance(operational_copy, Mapping):
+        raise FinanceStorageCandidateAbortError(
+            "candidate plan operational copy inventory is missing"
+        )
+    table_order = operational_copy.get("table_order")
+    if not isinstance(table_order, list):
+        raise FinanceStorageCandidateAbortError(
+            "candidate plan operational copy inventory is malformed"
+        )
+    operational_tables = [str(table or "") for table in table_order]
+    if (
+        any(not table for table in operational_tables)
+        or len(set(operational_tables)) != len(operational_tables)
+        or any(table not in matrix_by_table for table in operational_tables)
+    ):
+        raise FinanceStorageCandidateAbortError(
+            "candidate plan operational copy inventory is ambiguous"
+        )
     operational_expected = {
-        f"table:{str(item.get('table') or '')}": dict(item)
-        for item in matrix
-        if isinstance(item, Mapping)
-        and str(item.get("table") or "")
+        f"table:{table}": matrix_by_table[table]
+        for table in operational_tables
     }
     expected_batch_id = _digest(
         {

@@ -249,9 +249,12 @@ The implementation is deliberately inert on deploy:
   the saved candidate plan and target generation. Plan recomputes the saved
   candidate-plan fingerprint, binds its old deployed SHA/source fingerprint/
   generation paths, checks both destination schema identities and requires
-  either exact subset checkpoints for an interrupted candidate or complete
-  raw/operational checkpoints with only terminal committed raw batches for a
-  completed candidate. The delete allowlist is limited to the two candidate
+  either exact subset checkpoints for an interrupted candidate or complete raw
+  checkpoints plus the exact saved `operational_copy.table_order` checkpoint
+  inventory for a completed candidate. The broader owner/read/write matrix
+  remains binding evidence but does not invent operational checkpoints for
+  excluded raw/schema tables. All raw batches must be terminal committed. The
+  delete allowlist is limited to the two candidate
   databases, their SQLite sidecars, the exact candidate/shadow manifests when
   present, and `migration_plan.json`; any symlink, directory, unknown file,
   active/mismatched shadow, selected global manifest, identity/checkpoint/
@@ -355,7 +358,7 @@ documented classifications are:
 | snapshot release | barrier `held/restoring → released` | exact restore readback is mandatory |
 | candidate backfill | verified chunk ledger | exact verified chunks are re-read and skipped only while their original deployed SHA/snapshot/plan remains valid |
 | candidate manifest | candidate bytes → shadow manifest | exact manifest readback is idempotent |
-| candidate abort | private transaction/result/audit plus exact partial or completed-unselected candidate identity | exact allowlisted per-file release resumes from the fsynced journal; completed candidates additionally require complete checkpoints and exact inactive shadow/candidate-manifest bindings; an unjournaled absence, unknown file, active/mismatched shadow, selected manifest, opener or identity drift stays fail closed and never dispatches another apply |
+| candidate abort | private transaction/result/audit plus exact partial or completed-unselected candidate identity | exact allowlisted per-file release resumes from the fsynced journal; completed candidates additionally require every raw chunk and every table in the saved operational-copy inventory (not excluded raw/schema owner-matrix entries), plus exact inactive shadow/candidate-manifest bindings; an unjournaled absence, unknown file, active/mismatched shadow, selected manifest, opener or identity drift stays fail closed and never dispatches another apply |
 | shadow activate | durable shadow state | exact candidate activation is a no-op |
 | shadow reconcile | immutable raw batch/link rows | source identity and committed chunks resume idempotently |
 | shadow live-tail | outbox event plus bridge cursor | event/sequence commit resumes without duplicate apply |

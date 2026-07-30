@@ -169,8 +169,11 @@ The same runner owns the only production path for the active functional cutover 
   generation after a recovery deploy, but only after repo-owned shadow
   deactivation. This extension supersedes the pre-manifest-only wording in the
   preceding lifecycle summary: the global manifest must still be absent, the
-  monolith remains canonical, all candidate checkpoints and raw batches must be
-  terminal, and the inactive shadow state, candidate manifest, optional
+  monolith remains canonical, every raw checkpoint and every table in the
+  saved `operational_copy.table_order` inventory must be terminal (excluded
+  raw/schema entries in the broader owner matrix are not operational
+  checkpoints), all raw batches must be terminal, and the inactive shadow
+  state, candidate manifest, optional
   verification evidence and saved candidate-plan fingerprint must bind the same
   generation. Only those exact manifest/evidence files join the existing
   deletion allowlist; active/mismatched shadow, a selected manifest, an opener,
