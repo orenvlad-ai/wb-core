@@ -174,8 +174,11 @@ manifest last. The archive remains byte-exact evidence, while ambiguity leaves
 the source intact.
 Candidate abort likewise preserves the canonical monolith and every snapshot.
 It deletes only a fingerprint-bound allowlist from one unselected generation;
-active/mismatched shadow state, incomplete completed checkpoints, a global
-selected manifest, an opener or any unknown file fails closed.
+for a completed candidate, checkpoint completeness is measured against every
+raw chunk and the exact saved `operational_copy.table_order`, not raw/schema
+tables excluded from that copy plan. Active/mismatched shadow state, incomplete
+completed checkpoints, a global selected manifest, an opener or any unknown
+file fails closed.
 Cutover and rollback apply require their exact held barrier and perform a fresh
 operational reconciliation before one fsynced manifest switch. Only the
 registry HTTP service is restarted. An ambiguous post-switch failure keeps

@@ -157,8 +157,16 @@ def _fixture(root: Path) -> tuple[Path, str]:
                 "table": "business_state",
                 "row_count": 1,
                 "logical_digest": "sha256:" + "f" * 64,
+            },
+            {
+                "table": "wb_finance_weekly_raw_rows",
+                "row_count": 3,
+                "logical_digest": "sha256:" + "d" * 64,
             }
         ],
+        "operational_copy": {
+            "table_order": ["business_state"],
+        },
         "target_generation": {
             "generation_epoch": GENERATION,
             "generation_directory": f"generations/{GENERATION}",
