@@ -39,10 +39,17 @@ from packages.application.wb_incident_policy import (
 CONTRACT_NAME = "wb_core_finance_post_manifest_recovery_readback_v1"
 CACHE_TABLE = "sheet_vitrina_v1_wb_incident_projection_cache"
 MAX_RECOVERABLE_CACHE_ROWS = 8
+MAX_SOURCE_UNAVAILABLE_RETAINED_ONLY_ROWS = 1
 
 
 class FinanceStoragePostManifestRecoveryError(ValueError):
     """The selected monolith cannot be safely recovered in place."""
+
+
+class FinanceStorageProjectionSourceUnavailable(
+    FinanceStoragePostManifestRecoveryError
+):
+    """A noncanonical cache row has no accepted canonical source snapshot."""
 
 
 def _canonical_json(value: Any) -> str:
@@ -245,7 +252,7 @@ def _rebuild_projection(
         payload is None
         or str(getattr(payload, "kind", "") or "") != "success"
     ):
-        raise FinanceStoragePostManifestRecoveryError(
+        raise FinanceStorageProjectionSourceUnavailable(
             "accepted stocks success snapshot is unavailable for bounded "
             f"cache recovery: {snapshot_date}"
         )
@@ -430,8 +437,48 @@ def readback(
                 )
             )
         recoverable_rows: list[dict[str, Any]] = []
+        source_unavailable_rows = 0
         for key in split_only:
-            rebuilt = _rebuild_projection(canonical, key=key)
+            try:
+                rebuilt = _rebuild_projection(canonical, key=key)
+            except FinanceStorageProjectionSourceUnavailable:
+                source_unavailable_rows += 1
+                if (
+                    source_unavailable_rows
+                    > MAX_SOURCE_UNAVAILABLE_RETAINED_ONLY_ROWS
+                ):
+                    raise FinanceStoragePostManifestRecoveryError(
+                        "retained-only projection cache rows without an "
+                        "accepted canonical source exceed the exact recovery "
+                        "contract: "
+                        + _canonical_json(
+                            {
+                                "count": source_unavailable_rows,
+                                "maximum": (
+                                    MAX_SOURCE_UNAVAILABLE_RETAINED_ONLY_ROWS
+                                ),
+                            }
+                        )
+                    )
+                recoverable_rows.append(
+                    {
+                        "seller_id": key[0],
+                        "snapshot_digest": key[1],
+                        "policy_revision": key[2],
+                        "snapshot_date": key[3],
+                        "semantic_digest": retained_cache[key][
+                            "semantic_digest"
+                        ],
+                        "accepted_snapshot_available": False,
+                        "recovery_mode": (
+                            "canonical_cache_miss_fresh_refresh"
+                        ),
+                        "recovery_owner": (
+                            "wb-core-sheet-vitrina-refresh.service"
+                        ),
+                    }
+                )
+                continue
             rebuilt_digest = _digest(
                 _normalized_projection(rebuilt)
             )
@@ -450,6 +497,10 @@ def readback(
                     "policy_revision": key[2],
                     "snapshot_date": key[3],
                     "semantic_digest": rebuilt_digest,
+                    "accepted_snapshot_available": True,
+                    "recovery_mode": (
+                        "deterministic_from_accepted_snapshot"
+                    ),
                     "recovery_owner": (
                         "wb-core-sheet-vitrina-refresh.service"
                     ),

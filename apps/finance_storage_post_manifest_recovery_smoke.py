@@ -180,6 +180,96 @@ def main() -> None:
         assert result["cache"]["direct_row_copy_allowed"] is False
 
         with (
+            mock.patch.object(
+                recovery,
+                "barrier_status",
+                return_value={
+                    "active": True,
+                    "phase": "restoring",
+                    "hold_confirmed": True,
+                },
+            ),
+            mock.patch.object(
+                recovery,
+                "_rebuild_projection",
+                side_effect=(
+                    recovery.FinanceStorageProjectionSourceUnavailable(
+                        "accepted snapshot unavailable"
+                    )
+                ),
+            ),
+        ):
+            source_unavailable = recovery.readback(
+                runtime,
+                expected_retained_generation=SPLIT_GENERATION,
+            )
+        orphan = source_unavailable["cache"][
+            "recoverable_missing_canonical_rows"
+        ]
+        assert len(orphan) == 1
+        assert orphan[0]["accepted_snapshot_available"] is False
+        assert (
+            orphan[0]["recovery_mode"]
+            == "canonical_cache_miss_fresh_refresh"
+        )
+        assert source_unavailable["cache"]["direct_row_copy_allowed"] is False
+
+        with sqlite3.connect(
+            Path(str(fixture["retained_operational"]))
+        ) as retained:
+            retained.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_incident_projection_cache
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    "canonical",
+                    "cache-digest-2",
+                    2,
+                    "2026-07-30",
+                    json.dumps(fixture["retained_projection"]),
+                    "2026-07-31T00:00:00Z",
+                ),
+            )
+        with (
+            mock.patch.object(
+                recovery,
+                "barrier_status",
+                return_value={
+                    "active": True,
+                    "phase": "restoring",
+                    "hold_confirmed": True,
+                },
+            ),
+            mock.patch.object(
+                recovery,
+                "_rebuild_projection",
+                side_effect=(
+                    recovery.FinanceStorageProjectionSourceUnavailable(
+                        "accepted snapshot unavailable"
+                    )
+                ),
+            ),
+        ):
+            try:
+                recovery.readback(
+                    runtime,
+                    expected_retained_generation=SPLIT_GENERATION,
+                )
+            except recovery.FinanceStoragePostManifestRecoveryError as exc:
+                if "source exceed" not in str(exc):
+                    raise
+            else:
+                raise AssertionError(
+                    "multiple source-unavailable cache rows were not blocked"
+                )
+        with sqlite3.connect(
+            Path(str(fixture["retained_operational"]))
+        ) as retained:
+            retained.execute(
+                """DELETE FROM sheet_vitrina_v1_wb_incident_projection_cache
+                   WHERE snapshot_digest='cache-digest-2'"""
+            )
+
+        with (
             sqlite3.connect(
                 Path(str(fixture["monolith"]))
             ) as canonical,

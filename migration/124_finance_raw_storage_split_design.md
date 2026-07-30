@@ -242,6 +242,11 @@ The implementation is deliberately inert on deploy:
   `sheet_vitrina_v1_wb_incident_projection_cache`. A retained-only row is
   recoverable only when canonical accepted stocks and policy deterministically
   rebuild its semantic projection; the normal Vitrina refresh regenerates it.
+  One exact retained-only row may instead be classified as a noncanonical
+  cache-miss orphan when its accepted canonical stocks snapshot is absent: the
+  row is never copied, the canonical cache remains authoritative, and the same
+  normal refresh rematerializes current cache state from fresh source inputs.
+  A second source-unavailable orphan remains fail-closed.
   A canonical-only row or a common-key semantic difference is admissible only
   when the active canonical row matches that same deterministic rebuild; the
   retained generation stays immutable evidence. Direct row copy is forbidden.
