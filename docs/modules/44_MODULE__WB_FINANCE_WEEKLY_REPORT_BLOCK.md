@@ -150,7 +150,10 @@ opens operational and raw generations with SQLite `mode=ro`, restores
 `query_only=ON` before the first data query and reads current raw history
 through an identity-checked connection-local view. Apply reuses the same
 registry-selected view while its transaction mutates only operational
-projections; raw Finance remains covered by the non-target digest.
+projections; raw Finance remains covered by the non-target digest. Hosted read
+actions have a one-hour remote process bound and apply has a two-hour bound,
+with transport grace outside that bound so a disconnected client cannot leave
+an orphaned canonical runner.
 
 The separate storage-split lifecycle exposes:
 
