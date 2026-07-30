@@ -848,6 +848,16 @@ The deployed service unit has `RequiresMountsFor` plus
 read-only generation filesystem stays fail closed across restart/deploy
 instead of silently writing generations onto root.
 
+The authenticated `finance-ui-flow` is phase-aware but not permissive. It
+accepts only the implicit canonical monolith or one exact selected split.
+Selected split binds the manifest, raw and operational stores to the same
+generation and exact schema revisions; requires the latest outbox, raw
+acknowledgement and operational cursor to match with zero pending records,
+consumer lag, cursor mismatch, shadow mismatch or actionable dead letters;
+and proves that `monolith` remains the rollback generation. Shadow,
+mixed-generation, lagged or unhealthy storage fails before report/XLSX
+evidence can pass.
+
 ## Human-Only Boundary
 
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ from apps.finance_partner_production_ui_flow import (  # noqa: E402
     _partner_acceptance_passed,
     _partner_preview_api_evidence,
     _protected_json_post,
+    _validate_finance_storage_health,
     _verify_partner_xlsx,
     _xlsx_evidence,
 )
@@ -35,6 +37,38 @@ VISIBLE_EXPENSE_CATEGORIES = OTHER_EXPENSE_CATEGORIES[:-1]
 
 
 def main() -> None:
+    _assert(
+        _validate_finance_storage_health(_monolith_storage_health())
+        == "implicit_monolith",
+        "implicit monolith storage phase was not accepted",
+    )
+    split_health = _split_storage_health()
+    _assert(
+        _validate_finance_storage_health(split_health) == "selected_split",
+        "selected split storage phase was not accepted",
+    )
+    invalid_split_generation = deepcopy(split_health)
+    invalid_split_generation["operational"]["generation_epoch"] = "f" * 20
+    _assert_storage_rejected(
+        invalid_split_generation,
+        "mixed split generation",
+    )
+    invalid_split_lag = deepcopy(split_health)
+    invalid_split_lag["consumer_lag_events"] = 1
+    _assert_storage_rejected(invalid_split_lag, "split consumer lag")
+    invalid_split_rollback = deepcopy(split_health)
+    invalid_split_rollback["rollback_generation_id"] = "unknown"
+    _assert_storage_rejected(
+        invalid_split_rollback,
+        "missing retained monolith rollback",
+    )
+    invalid_split_dead_letter = deepcopy(split_health)
+    invalid_split_dead_letter["actionable_dead_letters"] = 1
+    _assert_storage_rejected(
+        invalid_split_dead_letter,
+        "split actionable dead letter",
+    )
+
     class NonJsonResponse:
         status = 502
 
@@ -268,8 +302,66 @@ def main() -> None:
     print(
         "finance_partner_production_ui_flow_smoke: ok -> preview ready/blockers, "
         "non-200 API evidence, mandatory XLSX, nmID/weeks, percent units, retained failure evidence, "
-        "hidden sheet, external link, semantic sums"
+        "hidden sheet, external link, semantic sums, exact monolith/split storage phases"
     )
+
+
+def _monolith_storage_health() -> dict:
+    return {
+        "state": "monolith",
+        "canonical_source": "monolith",
+        "implicit_manifest": True,
+        "raw": {"generation_id": "monolith"},
+        "operational": {"generation_id": "monolith"},
+        "rollback_ready": True,
+        "cutover_ready": False,
+    }
+
+
+def _split_storage_health() -> dict:
+    generation_epoch = "a" * 20
+    return {
+        "state": "cutover",
+        "canonical_source": "split",
+        "implicit_manifest": False,
+        "generation_epoch": generation_epoch,
+        "rollback_generation_id": "monolith",
+        "raw": {
+            "exists": True,
+            "generation_epoch": generation_epoch,
+            "generation_id": f"finance-raw-{generation_epoch}",
+            "schema_revision": "finance_raw_v1",
+            "size_bytes": 10_000,
+        },
+        "operational": {
+            "exists": True,
+            "generation_epoch": generation_epoch,
+            "generation_id": f"operational-{generation_epoch}",
+            "schema_revision": "operational_v1",
+            "size_bytes": 5_000,
+        },
+        "raw_schema_ready": True,
+        "operational_schema_ready": True,
+        "latest_outbox_sequence": 7,
+        "raw_ack_cursor": 7,
+        "operational_cursor": 7,
+        "consumer_lag_events": 0,
+        "cursor_mismatch": False,
+        "shadow_mismatch_count": 0,
+        "actionable_dead_letters": 0,
+        "raw_counts": {"pending_outbox": 0},
+        "operational_counts": {"dead_letters": 0},
+        "rollback_ready": False,
+        "cutover_ready": False,
+    }
+
+
+def _assert_storage_rejected(storage_health: dict, label: str) -> None:
+    try:
+        _validate_finance_storage_health(storage_health)
+    except AssertionError:
+        return
+    raise AssertionError(f"Finance UI accepted invalid storage health: {label}")
 
 
 def _preview() -> dict:

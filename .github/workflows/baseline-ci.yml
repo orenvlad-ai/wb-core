@@ -87,6 +87,7 @@ jobs:
           python3 apps/wb_finance_weekly_smoke.py
           python3 apps/partner_report_smoke.py
           python3 apps/partner_finance_production_diagnostic_smoke.py
+          python3 apps/finance_partner_production_ui_flow_smoke.py
           python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 
       - name: Parse workflow YAML
