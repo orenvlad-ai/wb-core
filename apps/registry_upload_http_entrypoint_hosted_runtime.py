@@ -36,6 +36,8 @@ AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 3600.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS = 60.0
+FINANCE_CANONICAL_STATUS_POLL_SECONDS = 15.0
+FINANCE_CANONICAL_OPERATION_ID_PATTERN = re.compile(r"^[a-f0-9]{24,64}$")
 FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS = 3600.0
 FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS = 43_200.0
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
@@ -3614,6 +3616,7 @@ def run_finance_canonical_command(args: argparse.Namespace) -> int:
         plan_path=plan_path,
         fingerprint=str(getattr(args, "fingerprint", "") or ""),
         approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        operation_id=str(getattr(args, "operation_id", "") or ""),
     )
     output = str(getattr(args, "output", "") or "").strip()
     if action == "dry-run" and output:
@@ -3645,6 +3648,7 @@ def _run_remote_finance_canonical_action(
     plan_path: Path | None,
     fingerprint: str,
     approval_reference: str,
+    operation_id: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(target, action=f"finance-canonical-{action}")
     if action == "apply":
@@ -3695,33 +3699,267 @@ def _run_remote_finance_canonical_action(
         if action == "apply"
         else FINANCE_CANONICAL_READ_TIMEOUT_SECONDS
     )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    try:
+        runtime_sha_result = subprocess.run(
+            _remote_shell_command(
+                target,
+                f"cat {shlex.quote(runtime_sha_path)}",
+            ),
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=60.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "Finance canonical deployed-SHA preflight failed"
+        ) from exc
+    deployed_sha = runtime_sha_result.stdout.strip()
+    if (
+        runtime_sha_result.returncode != 0
+        or re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None
+    ):
+        raise RuntimeError(
+            "Finance canonical deployed-SHA preflight failed: "
+            + (
+                runtime_sha_result.stderr.strip()
+                or runtime_sha_result.stdout.strip()
+                or f"exit {runtime_sha_result.returncode}"
+            )
+        )
     remote_runner_command = " ".join(shlex.quote(item) for item in runner_args)
-    shell_command = " && ".join(
+    exact_operation_id = operation_id.strip() or hashlib.sha256(
+        os.urandom(32)
+    ).hexdigest()[:24]
+    if not FINANCE_CANONICAL_OPERATION_ID_PATTERN.fullmatch(
+        exact_operation_id
+    ):
+        raise ValueError(
+            "Finance canonical --operation-id must contain 24..64 "
+            "lowercase hexadecimal characters"
+        )
+    operation_root = (
+        f"{runtime_dir.rstrip('/')}/.finance-canonical-operations"
+    )
+    operation_dir = f"{operation_root}/{exact_operation_id}"
+    request = {
+        "action": action,
+        "deployed_sha": deployed_sha,
+        "operation_id": exact_operation_id,
+        "remote_timeout_seconds": int(remote_timeout_seconds),
+        "runner_args": runner_args,
+    }
+    request_json = json.dumps(
+        request,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request_sha256 = hashlib.sha256(
+        request_json.encode("utf-8")
+    ).hexdigest()
+    worker_command = "; ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
             (
+                "set +e; "
                 "timeout --signal=TERM --kill-after=30s "
                 f"{int(remote_timeout_seconds)}s {remote_runner_command}"
+                f" >{shlex.quote(operation_dir + '/result.tmp')}"
+                f" 2>{shlex.quote(operation_dir + '/stderr.tmp')}"
+            ),
+            "exit_code=$?",
+            (
+                f"if [ \"$exit_code\" -eq 0 ]; then "
+                f"mv {shlex.quote(operation_dir + '/result.tmp')} "
+                f"{shlex.quote(operation_dir + '/result.json')} "
+                "|| exit_code=75; fi"
+            ),
+            (
+                f"printf '%s\\n' \"$exit_code\" "
+                f">{shlex.quote(operation_dir + '/exit_code.tmp')}"
+            ),
+            (
+                f"mv {shlex.quote(operation_dir + '/exit_code.tmp')} "
+                f"{shlex.quote(operation_dir + '/exit_code')}"
             ),
         ]
     )
-    result = subprocess.run(
-        _remote_shell_command(target, shell_command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=remote_timeout_seconds + FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS,
-        check=False,
+    start_command = "; ".join(
+        [
+            (
+                f"if [ \"$(cat {shlex.quote(runtime_sha_path)} "
+                f"2>/dev/null)\" != {shlex.quote(deployed_sha)} ]; then "
+                "printf 'deployed-sha-mismatch\\n'; exit 75; fi"
+            ),
+            "umask 077",
+            f"install -d -m 0700 {shlex.quote(operation_root)}",
+            (
+                f"if mkdir -m 0700 {shlex.quote(operation_dir)}; then "
+                f"printf '%s\\n' {shlex.quote(request_json)} "
+                f">{shlex.quote(operation_dir + '/request.json')}; "
+                f"printf '%s\\n' {shlex.quote(request_sha256)} "
+                f">{shlex.quote(operation_dir + '/request.sha256')}; "
+                f"nohup sh -c {shlex.quote(worker_command)} "
+                "</dev/null >/dev/null 2>&1 & "
+                f"printf '%s\\n' \"$!\" >"
+                f"{shlex.quote(operation_dir + '/pid')}; "
+                "printf 'started\\n'; "
+                f"elif [ \"$(cat {shlex.quote(operation_dir + '/request.sha256')} "
+                f"2>/dev/null)\" = {shlex.quote(request_sha256)} ]; then "
+                "printf 'resumed\\n'; "
+                "else printf 'request-mismatch\\n'; exit 74; fi"
+            ),
+        ]
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Finance canonical {action} failed: "
-            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
-        )
+    print(
+        "Finance canonical exact operation "
+        f"{exact_operation_id}: starting or resuming",
+        file=sys.stderr,
+        flush=True,
+    )
+    started_at = time.monotonic()
     try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Finance canonical runner returned invalid JSON") from exc
+        start_result = subprocess.run(
+            _remote_shell_command(target, start_command),
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=60.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        start_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=255,
+            stdout="",
+            stderr=str(exc),
+        )
+    status_command = "; ".join(
+        [
+            f"operation_dir={shlex.quote(operation_dir)}",
+            (
+                "if [ ! -d \"$operation_dir\" ]; then "
+                "printf 'missing\\n'; "
+                "elif [ \"$(cat \"$operation_dir/request.sha256\" "
+                f"2>/dev/null)\" != {shlex.quote(request_sha256)} ]; then "
+                "printf 'request-mismatch\\n'; "
+                "elif [ -f \"$operation_dir/exit_code\" ]; then "
+                "exit_code=$(cat \"$operation_dir/exit_code\"); "
+                "printf 'complete\\n%s\\n' \"$exit_code\"; "
+                "if [ \"$exit_code\" -eq 0 ]; then "
+                "cat \"$operation_dir/result.json\"; "
+                "else cat \"$operation_dir/stderr.tmp\"; fi; "
+                "elif [ -f \"$operation_dir/pid\" ]; then "
+                "worker_pid=$(cat \"$operation_dir/pid\"); "
+                "if kill -0 \"$worker_pid\" 2>/dev/null "
+                "&& tr '\\000' ' ' <\"/proc/$worker_pid/cmdline\" "
+                "| grep -F -- \"$operation_dir\" >/dev/null; then "
+                "printf 'running\\n'; "
+                "else printf 'incomplete\\n'; fi; "
+                "else printf 'incomplete\\n'; fi"
+            ),
+        ]
+    )
+    deadline = (
+        started_at
+        + remote_timeout_seconds
+        + FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS
+    )
+    last_transport_error = (
+        start_result.stderr.strip()
+        or start_result.stdout.strip()
+        or (
+            f"start exit {start_result.returncode}"
+            if start_result.returncode
+            else ""
+        )
+    )
+    incomplete_observations = 0
+    while time.monotonic() < deadline:
+        try:
+            status_result = subprocess.run(
+                _remote_shell_command(target, status_command),
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                timeout=60.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_transport_error = str(exc)
+            time.sleep(FINANCE_CANONICAL_STATUS_POLL_SECONDS)
+            continue
+        if status_result.returncode != 0:
+            last_transport_error = (
+                status_result.stderr.strip()
+                or status_result.stdout.strip()
+                or f"status exit {status_result.returncode}"
+            )
+            time.sleep(FINANCE_CANONICAL_STATUS_POLL_SECONDS)
+            continue
+        status_lines = status_result.stdout.splitlines()
+        state = status_lines[0].strip() if status_lines else ""
+        if state == "running":
+            incomplete_observations = 0
+            time.sleep(FINANCE_CANONICAL_STATUS_POLL_SECONDS)
+            continue
+        if state == "missing":
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} was not created: "
+                + (last_transport_error or "remote start failed")
+            )
+        if state == "request-mismatch":
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} belongs to a different request"
+            )
+        if state == "incomplete":
+            incomplete_observations += 1
+            if incomplete_observations < 2:
+                time.sleep(FINANCE_CANONICAL_STATUS_POLL_SECONDS)
+                continue
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} lost its bounded worker before "
+                "terminal evidence"
+            )
+        if state != "complete" or len(status_lines) < 2:
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} returned invalid status"
+            )
+        try:
+            remote_exit_code = int(status_lines[1])
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} returned an invalid exit code"
+            ) from exc
+        result_body = "\n".join(status_lines[2:]).strip()
+        if remote_exit_code != 0:
+            raise RuntimeError(
+                f"Finance canonical {action} exact operation "
+                f"{exact_operation_id} failed: "
+                + (result_body or f"exit {remote_exit_code}")
+            )
+        try:
+            payload = json.loads(result_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Finance canonical exact operation "
+                f"{exact_operation_id} returned invalid JSON"
+            ) from exc
+        break
+    else:
+        raise RuntimeError(
+            f"Finance canonical {action} exact operation "
+            f"{exact_operation_id} exceeded its bounded remote deadline: "
+            + (last_transport_error or "no terminal status")
+        )
     if not isinstance(payload, dict):
         raise RuntimeError("Finance canonical runner returned a non-object JSON payload")
     if action == "readback":
@@ -7490,6 +7728,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Build the read-only all-history Finance/ads/canonical-cost plan.",
     )
     finance_canonical_dry_run.add_argument("--output", default="")
+    finance_canonical_dry_run.add_argument("--operation-id", default="")
     finance_canonical_dry_run.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="dry-run",
@@ -7502,6 +7741,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_canonical_apply.add_argument("--plan-file", required=True)
     finance_canonical_apply.add_argument("--fingerprint", required=True)
     finance_canonical_apply.add_argument("--approval-reference", required=True)
+    finance_canonical_apply.add_argument("--operation-id", default="")
     finance_canonical_apply.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="apply",
@@ -7511,6 +7751,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "finance-canonical-readback",
         help="Prove zero all-history Finance deltas/blockers after canonical apply.",
     )
+    finance_canonical_readback.add_argument("--operation-id", default="")
     finance_canonical_readback.set_defaults(
         handler=run_finance_canonical_command,
         finance_canonical_action="readback",

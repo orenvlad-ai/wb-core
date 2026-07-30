@@ -864,9 +864,15 @@ only a connection-local raw compatibility view and restores
 `PRAGMA query_only=ON` before planning. The reviewed apply writes only
 operational Finance projections and proves the raw generation unchanged
 through its non-target digest. Canonical read actions have a one-hour remote
-process bound and apply has a two-hour bound; the SSH transport grace expires
-only after that remote owner has terminated or been killed, so a client timeout
-cannot leave an unowned canonical runner.
+process bound and apply has a two-hour bound. Each call first creates or resumes
+one request-digest-bound operation id in the server-owned
+`.finance-canonical-operations` directory, starts the bounded worker at most
+once with stdout/stderr redirected to durable exact-operation evidence, and
+then uses short SSH status reads. The request and remote start are also bound
+to the exact deployed `.wb-core-runtime-sha`. A connection reset therefore
+cannot lose the terminal result or justify a duplicate planner/apply;
+`--operation-id` resumes only an exact matching request/deploy and mismatches
+fail closed.
 
 ## Human-Only Boundary
 

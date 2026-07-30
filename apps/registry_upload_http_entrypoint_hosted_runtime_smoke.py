@@ -241,32 +241,80 @@ def main() -> None:
             ("readback", hosted_runtime.FINANCE_CANONICAL_READ_TIMEOUT_SECONDS),
             ("apply", hosted_runtime.FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS),
         ):
+            operation_id = {
+                "dry-run": "a" * 24,
+                "readback": "b" * 24,
+                "apply": "c" * 24,
+            }[action]
+            deployed_sha = "1" * 40
+            sha_readback = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=deployed_sha + "\n",
+                stderr="",
+            )
+            started = subprocess.CompletedProcess(
+                args=[],
+                returncode=255 if action == "dry-run" else 0,
+                stdout="" if action == "dry-run" else "started\n",
+                stderr=(
+                    "Connection reset by peer"
+                    if action == "dry-run"
+                    else ""
+                ),
+            )
             completed = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
                 stdout=(
-                    '{"blockers":[],"weeks":[]}'
+                    'complete\n0\n{"blockers":[],"weeks":[]}'
                     if action == "readback"
-                    else '{"status":"dry_run"}'
+                    else 'complete\n0\n{"status":"dry_run"}'
                 ),
                 stderr="",
             )
-            with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+            with mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                side_effect=[sha_readback, started, completed],
+            ) as run_mock:
                 payload = hosted_runtime._run_remote_finance_canonical_action(
                     active_target,
                     action=action,
                     plan_path=finance_plan_path if action == "apply" else None,
                     fingerprint="sha256:finance-reviewed" if action == "apply" else "",
                     approval_reference="human-gate-123" if action == "apply" else "",
+                    operation_id=operation_id,
                 )
-            if run_mock.call_args.kwargs.get("timeout") != (
-                expected_timeout
-                + hosted_runtime.FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS
-            ):
+            if run_mock.call_count != 3:
                 raise AssertionError(
-                    f"Finance canonical {action} lost its bounded transport grace"
+                    f"Finance canonical {action} did not use deployed-SHA preflight, "
+                    "one start and exact status readback"
                 )
-            remote_command = " ".join(run_mock.call_args.args[0])
+            sha_call, start_call, status_call = run_mock.call_args_list
+            if any(
+                call.kwargs.get("timeout") != 60.0
+                for call in (sha_call, start_call, status_call)
+            ):
+                raise AssertionError("Finance canonical transport calls lost their bounded timeout")
+            remote_command = " ".join(start_call.args[0])
+            status_command = " ".join(status_call.args[0])
+            for shell_snippet in (
+                start_call.args[0][-1],
+                status_call.args[0][-1],
+            ):
+                syntax = subprocess.run(
+                    ["sh", "-n"],
+                    input=shell_snippet,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if syntax.returncode != 0:
+                    raise AssertionError(
+                        f"Finance canonical {action} emitted invalid remote shell: "
+                        f"{syntax.stderr}"
+                    )
             if "canonical-cost-backfill" not in remote_command:
                 raise AssertionError("Finance canonical command bypassed the repo-owned runner")
             if (
@@ -275,6 +323,19 @@ def main() -> None:
             ):
                 raise AssertionError(
                     f"Finance canonical {action} lost its remote process timeout"
+                )
+            if (
+                operation_id not in remote_command
+                or deployed_sha not in remote_command
+                or "nohup sh -c" not in remote_command
+                or ".finance-canonical-operations" not in remote_command
+                or operation_id not in status_command
+                or "exit_code" not in status_command
+                or "request.sha256" not in status_command
+                or "request-mismatch" not in status_command
+            ):
+                raise AssertionError(
+                    f"Finance canonical {action} lost durable exact-operation recovery"
                 )
             if action == "apply" and not all(
                 token in remote_command
@@ -293,7 +354,13 @@ def main() -> None:
             if action == "readback" and not payload.get("readback"):
                 raise AssertionError("Finance canonical readback did not prove zero deltas")
         dry_args = hosted_runtime.build_arg_parser().parse_args(
-            ["finance-canonical-dry-run", "--output", str(Path(finance_temp_dir) / "review.json")]
+            [
+                "finance-canonical-dry-run",
+                "--output",
+                str(Path(finance_temp_dir) / "review.json"),
+                "--operation-id",
+                "d" * 24,
+            ]
         )
         apply_args = hosted_runtime.build_arg_parser().parse_args(
             [
@@ -309,6 +376,7 @@ def main() -> None:
         if (
             dry_args.handler is not hosted_runtime.run_finance_canonical_command
             or dry_args.finance_canonical_action != "dry-run"
+            or dry_args.operation_id != "d" * 24
             or apply_args.finance_canonical_action != "apply"
         ):
             raise AssertionError("hosted runner must expose bounded Finance canonical commands")

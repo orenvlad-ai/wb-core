@@ -152,8 +152,13 @@ through an identity-checked connection-local view. Apply reuses the same
 registry-selected view while its transaction mutates only operational
 projections; raw Finance remains covered by the non-target digest. Hosted read
 actions have a one-hour remote process bound and apply has a two-hour bound,
-with transport grace outside that bound so a disconnected client cannot leave
-an orphaned canonical runner.
+with transport grace outside that bound. Every invocation owns one explicit
+24..64-character lowercase-hex operation id under the server-owned
+`.finance-canonical-operations` directory. The hosted wrapper starts that
+exact id at most once, redirects result/error evidence there, and polls only
+its bound deployed SHA/PID/request digest; `--operation-id` resumes the same
+operation after a client/SSH interruption and never launches a duplicate
+planner or apply.
 
 The separate storage-split lifecycle exposes:
 
