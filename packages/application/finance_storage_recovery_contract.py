@@ -96,6 +96,19 @@ BARRIER_OWNING_ACTIONS = {
 
 _TRANSITIONS = (
     {
+        "transition": "transport.hold_mutation",
+        "persisted_store": (
+            "finance-storage-transport-jobs/<request-digest>/"
+            "request.json + status.json + result.json"
+        ),
+        "from": ("absent", "queued", "running"),
+        "to": ("succeeded",),
+        "recovery": (
+            "same_request_digest_observe_only_no_duplicate_worker"
+        ),
+        "command": "finance-storage-transport-job submit/status",
+    },
+    {
         "transition": "snapshot.acquire",
         "persisted_store": ".business-data-write-barrier.json",
         "from": ("absent", "released"),
@@ -408,6 +421,7 @@ def recovery_contract(
         "durable_restore_inventory",
         "durable_restore_resume",
         "restore_systemd_template",
+        "durable_storage_transport",
     )
     missing_capabilities = sorted(
         key
@@ -1119,6 +1133,8 @@ def validate_recovery_preflight(
         for item in contract["transitions"]
         if str(item["transition"]).startswith(transition_prefix)
     ]
+    if exact_action in BARRIER_OWNING_ACTIONS:
+        relevant_transitions.insert(0, "transport.hold_mutation")
     evidence: dict[str, Any] = {
         "contract_version": RECOVERY_VALIDATION_VERSION,
         "status": "ready",

@@ -125,6 +125,12 @@ row. A regression test disables automatic indexes and requires the
 production-shaped join plan to use this named index.
 
 `content_version_hash` includes text, pros, cons, rating, tags, product identity and stable media identity. It excludes answers, `wasViewed`, WB service state and temporary media query/fragment signatures. `wb_observation_hash` owns those service observations. Therefore signed-link rotation and WB state/readback changes do not create a paid semantic version.
+If WB later returns content equal to an older immutable version after an
+intermediate change, sync reuses that existing `(feedback_id,
+content_version_hash)` version number and moves the current pointer back to it.
+It never inserts a duplicate immutable row and reports the additive
+`content_version_reused` evidence; truly new content still appends the next
+version.
 
 Processing idempotency is `feedback_id | content_version | 1.4.2`. Publication idempotency is `feedback_id | content_version | normalized-final-reply-sha256 | create-answer-v1`. One feedback version can have at most one publication aggregate.
 

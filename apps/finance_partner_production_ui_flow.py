@@ -39,21 +39,51 @@ def _validate_finance_storage_health(
     raw = dict(storage_health.get("raw") or {})
     operational = dict(storage_health.get("operational") or {})
     if state == "monolith" and canonical_source == "monolith":
-        _assert(
-            storage_health.get("implicit_manifest") is True,
-            "Finance monolith storage uses the implicit manifest",
-        )
-        _assert(
-            raw.get("generation_id") == "monolith"
-            and operational.get("generation_id") == "monolith",
-            "Finance logical stores expose the exact monolith generation",
-        )
+        implicit = storage_health.get("implicit_manifest") is True
+        if implicit:
+            _assert(
+                raw.get("generation_id") == "monolith"
+                and operational.get("generation_id") == "monolith",
+                "Finance logical stores expose the exact implicit monolith",
+            )
+        else:
+            generation_epoch = str(
+                storage_health.get("generation_epoch") or ""
+            )
+            _assert(
+                generation_epoch.startswith("rollback-")
+                and raw.get("generation_epoch") == generation_epoch
+                and operational.get("generation_epoch")
+                == generation_epoch
+                and raw.get("generation_id")
+                == operational.get("generation_id")
+                and raw.get("relative_path")
+                == operational.get("relative_path")
+                and raw.get("exists") is True
+                and operational.get("exists") is True,
+                "Finance rollback monolith binds one exact selected file",
+            )
+            _assert(
+                storage_health.get("raw_schema_ready") is True
+                and storage_health.get("raw_schema_mode")
+                == "legacy_monolith"
+                and storage_health.get("operational_schema_ready") is True
+                and storage_health.get("cursor_contract")
+                == "not_applicable_monolith"
+                and storage_health.get("cursor_mismatch") is False,
+                "Finance rollback monolith exposes healthy legacy raw and "
+                "non-applicable split cursors",
+            )
         _assert(
             storage_health.get("rollback_ready") is True
             and storage_health.get("cutover_ready") is False,
             "Finance monolith rollback is ready and cutover is not selected",
         )
-        return "implicit_monolith"
+        return (
+            "implicit_monolith"
+            if implicit
+            else "selected_rollback_monolith"
+        )
 
     _assert(
         state == "cutover"
@@ -135,7 +165,10 @@ def _validate_finance_storage_card(
     storage_phase: str,
 ) -> None:
     visible = str(storage_text or "")
-    if storage_phase == "implicit_monolith":
+    if storage_phase in {
+        "implicit_monolith",
+        "selected_rollback_monolith",
+    }:
         required = (
             "canonical: monolith",
             "rollback: готов",

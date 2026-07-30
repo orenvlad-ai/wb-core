@@ -13878,6 +13878,7 @@
         const filesystem = health.filesystem && typeof health.filesystem === "object" ? health.filesystem : {};
         const state = String(health.state || "unknown");
         const canonical = String(health.canonical_source || "unknown");
+        const monolithCursors = String(health.cursor_contract || "") === "not_applicable_monolith";
         const lag = Number(health.consumer_lag_events || 0);
         const tailLag = Number(health.live_tail_lag_events || 0);
         const mismatches = Number(health.shadow_mismatch_count || 0);
@@ -13898,7 +13899,9 @@
           "<ul>" +
           "<li>Raw generation: <code>" + escapeHtml(String(raw.generation_id || "—")) + "</code>, schema <code>" + escapeHtml(String(raw.schema_revision || "—")) + "</code>, " + escapeHtml(formatBytes(raw.size_bytes)) + ".</li>" +
           "<li>Operational generation: <code>" + escapeHtml(String(operational.generation_id || "—")) + "</code>, schema <code>" + escapeHtml(String(operational.schema_revision || "—")) + "</code>, " + escapeHtml(formatBytes(operational.size_bytes)) + ".</li>" +
-          "<li>Cursor raw/operational: " + escapeHtml(String(health.raw_ack_cursor || 0)) + " / " + escapeHtml(String(health.operational_cursor || 0)) + "; consumer lag: " + escapeHtml(String(lag)) + "; live-tail cursor/lag: " + escapeHtml(String(health.live_tail_cursor || 0)) + " / " + escapeHtml(String(tailLag)) + "; mismatches: " + escapeHtml(String(mismatches)) + "; dead letters: " + escapeHtml(String(deadLetters)) + ".</li>" +
+          "<li>" + (monolithCursors
+            ? "Split cursors: не применимы для canonical monolith"
+            : "Cursor raw/operational: " + escapeHtml(String(health.raw_ack_cursor || 0)) + " / " + escapeHtml(String(health.operational_cursor || 0)) + "; consumer lag: " + escapeHtml(String(lag)) + "; live-tail cursor/lag: " + escapeHtml(String(health.live_tail_cursor || 0)) + " / " + escapeHtml(String(tailLag))) + "; mismatches: " + escapeHtml(String(mismatches)) + "; dead letters: " + escapeHtml(String(deadLetters)) + ".</li>" +
           "<li>Свободная ёмкость: " + escapeHtml(formatBytes(filesystem.free_bytes)) + "; rollback: " + escapeHtml(health.rollback_ready ? "готов" : "не доказан") + "; cutover: " + escapeHtml(health.cutover_ready ? "готов" : "не разрешён/не готов") + ".</li>" +
           "</ul>";
       }

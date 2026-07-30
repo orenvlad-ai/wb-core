@@ -43,6 +43,13 @@ def main() -> None:
         == "implicit_monolith",
         "implicit monolith storage phase was not accepted",
     )
+    _assert(
+        _validate_finance_storage_health(
+            _rollback_monolith_storage_health()
+        )
+        == "selected_rollback_monolith",
+        "explicit rollback monolith is accepted as one healthy selected file",
+    )
     split_health = _split_storage_health()
     _assert(
         _validate_finance_storage_health(split_health) == "selected_split",
@@ -342,6 +349,39 @@ def _monolith_storage_health() -> dict:
         "implicit_manifest": True,
         "raw": {"generation_id": "monolith"},
         "operational": {"generation_id": "monolith"},
+        "rollback_ready": True,
+        "cutover_ready": False,
+    }
+
+
+def _rollback_monolith_storage_health() -> dict:
+    generation_epoch = "rollback-" + ("a" * 20)
+    relative_path = (
+        f"generations/{generation_epoch}/monolith.sqlite3"
+    )
+    return {
+        "state": "monolith",
+        "canonical_source": "monolith",
+        "implicit_manifest": False,
+        "generation_epoch": generation_epoch,
+        "rollback_generation_id": "a" * 20,
+        "raw": {
+            "exists": True,
+            "generation_epoch": generation_epoch,
+            "generation_id": generation_epoch,
+            "relative_path": relative_path,
+        },
+        "operational": {
+            "exists": True,
+            "generation_epoch": generation_epoch,
+            "generation_id": generation_epoch,
+            "relative_path": relative_path,
+        },
+        "raw_schema_ready": True,
+        "raw_schema_mode": "legacy_monolith",
+        "operational_schema_ready": True,
+        "cursor_contract": "not_applicable_monolith",
+        "cursor_mismatch": False,
         "rollback_ready": True,
         "cutover_ready": False,
     }

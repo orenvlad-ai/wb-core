@@ -22,6 +22,7 @@ from packages.application.storage_registry import (
     StoreRegistry,
     StorageRegistryError,
     explain_query_plan,
+    sqlite_process_openers,
 )
 
 
@@ -49,6 +50,7 @@ OPERATIONAL_SCHEMA_TABLES = frozenset(
 )
 OUTBOX_EVENT_TYPE = "finance.raw.batch_committed.v1"
 CONSUMER_ID = "finance_operational_projection_v1"
+LEGACY_MONOLITH_RAW_TABLE = "wb_finance_weekly_raw_rows"
 
 
 class FinanceStorageError(ValueError):
@@ -1200,6 +1202,15 @@ class FinanceRawLiveTailBridge:
 
 def storage_health(registry: StoreRegistry) -> dict[str, Any]:
     health = registry.status()
+    manifest = registry.load(require_files=True)
+    raw_path = registry.resolve("finance_raw", manifest=manifest)
+    operational_path = registry.resolve("operational", manifest=manifest)
+    monolith_selected = bool(
+        manifest.state == "monolith"
+        and manifest.canonical_source == "monolith"
+        and manifest.raw.generation_id == manifest.operational.generation_id
+        and raw_path == operational_path
+    )
     raw_tables: set[str] = set()
     operational_tables: set[str] = set()
     raw_counts: dict[str, int] = {}
@@ -1250,6 +1261,14 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
                            FROM finance_raw_bridge_cursors"""
                     ).fetchone()[0]
                 )
+            elif monolith_selected and LEGACY_MONOLITH_RAW_TABLE in raw_tables:
+                raw_counts = {
+                    "rows": int(
+                        raw.execute(
+                            f"SELECT COUNT(*) FROM {LEGACY_MONOLITH_RAW_TABLE}"
+                        ).fetchone()[0]
+                    )
+                }
     except (sqlite3.Error, StorageRegistryError) as exc:
         health["raw_health_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     try:
@@ -1297,21 +1316,63 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
     statvfs = Path(registry.runtime_dir)
     vfs = __import__("os").statvfs(statvfs)
     free_bytes = int(vfs.f_bavail * vfs.f_frsize)
+    raw_schema_ready = bool(
+        RAW_SCHEMA_TABLES.issubset(raw_tables)
+        or (
+            monolith_selected
+            and LEGACY_MONOLITH_RAW_TABLE in raw_tables
+        )
+    )
+    cursor_contract = (
+        "not_applicable_monolith"
+        if monolith_selected
+        else "split_outbox_v1"
+    )
+    if monolith_selected:
+        latest_outbox_value: int | None = None
+        raw_cursor_value: int | None = None
+        bridge_cursor_value: int | None = None
+        operational_cursor_value: int | None = None
+        consumer_lag = 0
+        live_tail_lag = 0
+        cursor_mismatch = False
+    else:
+        latest_outbox_value = latest_outbox
+        raw_cursor_value = raw_cursor
+        bridge_cursor_value = bridge_cursor
+        operational_cursor_value = operational_cursor
+        consumer_lag = max(0, latest_outbox - operational_cursor)
+        live_tail_lag = max(0, latest_outbox - bridge_cursor)
+        cursor_mismatch = raw_cursor != operational_cursor
+    raw_openers = sqlite_process_openers(raw_path)
+    operational_openers = (
+        raw_openers
+        if operational_path == raw_path
+        else sqlite_process_openers(operational_path)
+    )
+    health["raw"]["openers"] = raw_openers
+    health["operational"]["openers"] = operational_openers
     health.update(
         {
-            "raw_schema_ready": RAW_SCHEMA_TABLES.issubset(raw_tables),
+            "raw_schema_ready": raw_schema_ready,
+            "raw_schema_mode": (
+                "legacy_monolith"
+                if monolith_selected
+                else "split_raw"
+            ),
             "operational_schema_ready": OPERATIONAL_SCHEMA_TABLES.issubset(
                 operational_tables
             ),
             "raw_counts": raw_counts,
             "operational_counts": operational_counts,
-            "latest_outbox_sequence": latest_outbox,
-            "raw_ack_cursor": raw_cursor,
-            "live_tail_cursor": bridge_cursor,
-            "live_tail_lag_events": max(0, latest_outbox - bridge_cursor),
-            "operational_cursor": operational_cursor,
-            "consumer_lag_events": max(0, latest_outbox - operational_cursor),
-            "cursor_mismatch": raw_cursor != operational_cursor,
+            "cursor_contract": cursor_contract,
+            "latest_outbox_sequence": latest_outbox_value,
+            "raw_ack_cursor": raw_cursor_value,
+            "live_tail_cursor": bridge_cursor_value,
+            "live_tail_lag_events": live_tail_lag,
+            "operational_cursor": operational_cursor_value,
+            "consumer_lag_events": consumer_lag,
+            "cursor_mismatch": cursor_mismatch,
             "shadow_mismatch_count": mismatch_count,
             "actionable_dead_letters": actionable_dead_letters,
             "filesystem": {
@@ -1319,8 +1380,12 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
                 "inode": int(filesystem.st_ino),
                 "free_bytes": free_bytes,
             },
-            "rollback_ready": health["canonical_source"] == "monolith"
-            and health["rollback_generation_id"] == "monolith",
+            "rollback_ready": bool(
+                monolith_selected
+                and health["raw"]["exists"]
+                and health["operational"]["exists"]
+                and raw_schema_ready
+            ),
             "cutover_ready": bool(
                 health["state"] == "shadow"
                 and RAW_SCHEMA_TABLES.issubset(raw_tables)

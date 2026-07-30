@@ -40,6 +40,11 @@ FINANCE_CANONICAL_STATUS_POLL_SECONDS = 15.0
 FINANCE_CANONICAL_OPERATION_ID_PATTERN = re.compile(r"^[a-f0-9]{24,64}$")
 FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS = 3600.0
 FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS = 43_200.0
+FINANCE_STORAGE_TRANSPORT_GRACE_SECONDS = 120.0
+FINANCE_STORAGE_TRANSPORT_STATUS_POLL_SECONDS = 5.0
+FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
+    {"snapshot-create", "cutover-apply", "rollback-apply"}
+)
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
@@ -4195,6 +4200,8 @@ def _restart_finance_cutover_http_service(
     command = (
         f"systemctl restart {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
         f" && systemctl is-active {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+        f" && systemctl show --property MainPID --value "
+        f"{shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
     )
     result = subprocess.run(
         _remote_shell_command(target, command),
@@ -4204,9 +4211,20 @@ def _restart_finance_cutover_http_service(
         timeout=300.0,
         check=False,
     )
-    if result.returncode != 0 or result.stdout.strip().splitlines()[-1:] != [
-        "active"
-    ]:
+    output_lines = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    try:
+        main_pid = int(output_lines[-1])
+    except (IndexError, ValueError):
+        main_pid = 0
+    if (
+        result.returncode != 0
+        or output_lines[:1] != ["active"]
+        or main_pid <= 0
+    ):
         raise RuntimeError(
             "Finance cutover HTTP service restart/readback failed: "
             + (
@@ -4215,9 +4233,47 @@ def _restart_finance_cutover_http_service(
                 or f"exit {result.returncode}"
             )
         )
+    storage_health = _run_remote_finance_storage_split_action(
+        target,
+        action="health",
+        plan_path=None,
+        fingerprint="",
+        approval_reference="",
+        chunk_size=10_000,
+    )
+    raw_openers = list(
+        (storage_health.get("raw") or {}).get("openers") or []
+    )
+    operational_openers = list(
+        (storage_health.get("operational") or {}).get("openers") or []
+    )
+    raw_bound = any(
+        int(item.get("pid") or 0) == main_pid
+        for item in raw_openers
+        if isinstance(item, dict)
+    )
+    operational_bound = any(
+        int(item.get("pid") or 0) == main_pid
+        for item in operational_openers
+        if isinstance(item, dict)
+    )
+    if not raw_bound or not operational_bound:
+        raise RuntimeError(
+            "Finance cutover HTTP service is active but its MainPID is not "
+            "bound to both canonical manifest stores; barrier remains active"
+        )
     return {
         "service": ACTIVE_HOSTED_RUNTIME_SERVICE_NAME,
         "status": "active",
+        "main_pid": main_pid,
+        "canonical_source": storage_health.get("canonical_source"),
+        "generation_epoch": storage_health.get("generation_epoch"),
+        "raw_path": (storage_health.get("raw") or {}).get("path"),
+        "operational_path": (
+            storage_health.get("operational") or {}
+        ).get("path"),
+        "raw_bound": raw_bound,
+        "operational_bound": operational_bound,
         "unrelated_services_restarted": [],
     }
 
@@ -4260,6 +4316,9 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     )
     candidate_generation_epoch = str(
         getattr(args, "candidate_generation_epoch", "") or ""
+    )
+    expected_retained_generation = str(
+        getattr(args, "expected_retained_generation", "") or ""
     )
     minimum_observation_seconds = int(
         getattr(args, "minimum_observation_seconds", 3600) or 0
@@ -4315,6 +4374,9 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
                 candidate_manifest=candidate_manifest,
                 candidate_plan_fingerprint=candidate_plan_fingerprint,
                 candidate_generation_epoch=candidate_generation_epoch,
+                expected_retained_generation=(
+                    expected_retained_generation
+                ),
                 minimum_observation_seconds=minimum_observation_seconds,
                 rollback_candidate_evidence=rollback_candidate_evidence,
                 deploy_lease=deploy_lease,
@@ -4873,6 +4935,9 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             candidate_manifest=candidate_manifest,
             candidate_plan_fingerprint=candidate_plan_fingerprint,
             candidate_generation_epoch=candidate_generation_epoch,
+            expected_retained_generation=(
+                expected_retained_generation
+            ),
             minimum_observation_seconds=minimum_observation_seconds,
             deploy_lease=deploy_lease,
         )
@@ -4895,6 +4960,229 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _finance_storage_transport_identity_args(
+    runner_args: list[str],
+) -> list[str]:
+    stable: list[str] = []
+    skip_transport_value = False
+    for item in runner_args:
+        if skip_transport_value:
+            stable.append("<fresh-deploy-lease-transport>")
+            skip_transport_value = False
+            continue
+        stable.append(item)
+        if item == "--deploy-lease-json":
+            skip_transport_value = True
+    return stable
+
+
+def _run_remote_finance_storage_transport_job(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    runner_args: list[str],
+    reviewed_plan_json: str | None,
+    deployed_sha: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    if (
+        action not in FINANCE_STORAGE_DURABLE_HOLD_ACTIONS
+        or re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None
+    ):
+        raise ValueError(
+            "Finance durable transport requires an exact hold action/SHA"
+        )
+    stdin_text = reviewed_plan_json
+    stdin_sha256 = (
+        "sha256:"
+        + hashlib.sha256(
+            (stdin_text or "").encode("utf-8")
+        ).hexdigest()
+    )
+    identity: dict[str, Any] = {
+        "contract_name": (
+            "wb_core_finance_storage_transport_identity_v1"
+        ),
+        "action": action,
+        "deployed_sha": deployed_sha,
+        "runner_args": _finance_storage_transport_identity_args(
+            runner_args
+        ),
+        "stdin_sha256": stdin_sha256,
+        "timeout_seconds": int(timeout_seconds),
+    }
+    job_id = hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    identity["job_id"] = job_id
+    request_identity = "sha256:" + hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    request = {
+        "contract_name": (
+            "wb_core_finance_storage_transport_request_v1"
+        ),
+        "job_id": job_id,
+        "request_identity": request_identity,
+        "identity": identity,
+        "action": action,
+        "deployed_sha": deployed_sha,
+        "repo_root": target.target_dir,
+        "runner_args": runner_args,
+        "stdin_text": stdin_text,
+        "timeout_seconds": int(timeout_seconds),
+    }
+    runtime_sha_path = (
+        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    )
+
+    def remote_job(action_name: str) -> subprocess.CompletedProcess[str]:
+        job_args = (
+                "cd",
+                target.target_dir,
+                "python3",
+                "apps/finance_storage_transport_job.py",
+                action_name,
+                "--runtime-dir",
+                ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR,
+                "--job-id",
+                job_id,
+                "--deployed-sha-file",
+                runtime_sha_path,
+        )
+        command = (
+            f"cd {shlex.quote(job_args[1])} && "
+            + " ".join(
+                shlex.quote(item)
+                for item in job_args[2:]
+            )
+        )
+        return subprocess.run(
+            _remote_shell_command(target, command),
+            text=True,
+            capture_output=True,
+            input=(
+                json.dumps(
+                    request,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if action_name == "submit"
+                else None
+            ),
+            cwd=ROOT,
+            timeout=60.0,
+            check=False,
+        )
+
+    print(
+        "Finance storage exact transport job "
+        f"{job_id}: starting or observing",
+        file=sys.stderr,
+        flush=True,
+    )
+    started_at = time.monotonic()
+    last_transport_error = ""
+    try:
+        submitted = remote_job("submit")
+        if submitted.returncode != 0:
+            last_transport_error = (
+                submitted.stderr.strip()
+                or submitted.stdout.strip()
+                or f"submit exit {submitted.returncode}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        last_transport_error = str(exc)
+    deadline = (
+        started_at
+        + float(timeout_seconds)
+        + FINANCE_STORAGE_TRANSPORT_GRACE_SECONDS
+    )
+    while time.monotonic() < deadline:
+        try:
+            observed = remote_job("status")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_transport_error = str(exc)
+            time.sleep(FINANCE_STORAGE_TRANSPORT_STATUS_POLL_SECONDS)
+            continue
+        if observed.returncode != 0:
+            last_transport_error = (
+                observed.stderr.strip()
+                or observed.stdout.strip()
+                or f"status exit {observed.returncode}"
+            )
+            time.sleep(FINANCE_STORAGE_TRANSPORT_STATUS_POLL_SECONDS)
+            continue
+        try:
+            status = json.loads(observed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Finance storage durable transport returned invalid status"
+            ) from exc
+        if (
+            not isinstance(status, dict)
+            or str(status.get("job_id") or "") != job_id
+            or str(status.get("deployed_sha") or "") != deployed_sha
+        ):
+            raise RuntimeError(
+                "Finance storage durable transport identity drifted"
+            )
+        classification = str(
+            status.get("worker_classification") or ""
+        )
+        if classification == "active_worker":
+            time.sleep(FINANCE_STORAGE_TRANSPORT_STATUS_POLL_SECONDS)
+            continue
+        if (
+            classification == "terminal_succeeded"
+            and status.get("terminal") is True
+            and str(status.get("status") or "") == "succeeded"
+            and isinstance(status.get("result"), dict)
+        ):
+            return {
+                **dict(status["result"]),
+                "transport_job": {
+                    "contract_name": status.get("contract_name"),
+                    "job_id": job_id,
+                    "request_identity": request_identity,
+                    "deployed_sha": deployed_sha,
+                    "status": "succeeded",
+                    "transport_disconnect_recovered": bool(
+                        last_transport_error
+                    ),
+                },
+            }
+        if classification == "terminal_failed":
+            raise RuntimeError(
+                f"Finance storage split {action} durable job failed: "
+                + (
+                    str(status.get("error") or "")
+                    or f"exit {status.get('exit_code')}"
+                )
+            )
+        raise RuntimeError(
+            f"Finance storage split {action} durable job is fail-closed: "
+            f"status={status.get('status')}; "
+            f"classification={classification}"
+        )
+    raise RuntimeError(
+        f"Finance storage split {action} durable job exceeded its "
+        "bounded deadline: "
+        + (last_transport_error or "no terminal status")
+    )
+
+
 def _run_remote_finance_storage_split_action(
     target: HostedRuntimeTarget,
     *,
@@ -4907,6 +5195,7 @@ def _run_remote_finance_storage_split_action(
     candidate_manifest: str = "",
     candidate_plan_fingerprint: str = "",
     candidate_generation_epoch: str = "",
+    expected_retained_generation: str = "",
     minimum_observation_seconds: int = 3600,
     rollback_candidate_evidence: str = "",
     deploy_lease: Mapping[str, Any] | None = None,
@@ -4942,6 +5231,7 @@ def _run_remote_finance_storage_split_action(
         "rollback-plan",
         "rollback-prepare",
         "rollback-apply",
+        "post-manifest-recovery-readback",
         "recovery-contract",
         "recovery-preflight",
     }:
@@ -5046,6 +5336,21 @@ def _run_remote_finance_storage_split_action(
                 candidate_generation_epoch,
                 "--candidate-plan-fingerprint",
                 candidate_plan_fingerprint,
+            ]
+        )
+    if effective_action == "post-manifest-recovery-readback":
+        if not re.fullmatch(
+            r"(?:rollback-)?[0-9a-f]{20}",
+            expected_retained_generation,
+        ):
+            raise ValueError(
+                "Finance post-manifest recovery readback requires the exact "
+                "retained split generation"
+            )
+        runner_args.extend(
+            [
+                "--expected-retained-generation",
+                expected_retained_generation,
             ]
         )
     if effective_action.startswith("shadow-") or effective_action in {
@@ -5392,15 +5697,9 @@ def _run_remote_finance_storage_split_action(
             " ".join(shlex.quote(item) for item in runner_args),
         ]
     )
-    result = subprocess.run(
-        _remote_shell_command(target, shell_command),
-        text=True,
-        capture_output=True,
-        input=reviewed_plan_json,
-        cwd=ROOT,
-        timeout=(
-            FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS
-            if action in {
+    remote_timeout_seconds = (
+        FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS
+        if action in {
                 "apply",
                 "snapshot-create",
                 "snapshot-retention-plan",
@@ -5416,26 +5715,63 @@ def _run_remote_finance_storage_split_action(
                 "rollback-prepare",
                 "rollback-apply",
             }
-            else FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS
-        ),
-        check=False,
+        else FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Finance storage split {action} failed: "
-            + (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or f"exit {result.returncode}"
+    if action in FINANCE_STORAGE_DURABLE_HOLD_ACTIONS:
+        deployed_sha = str(
+            ((deploy_lease or {}).get("lease") or {}).get(
+                "deployed_sha"
             )
+            or ""
         )
-    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-    try:
-        payload = json.loads(stdout_lines[-1] if stdout_lines else "")
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Finance storage split runner returned invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("Finance storage split runner returned non-object JSON")
+        payload = _run_remote_finance_storage_transport_job(
+            target,
+            action=action,
+            runner_args=runner_args,
+            reviewed_plan_json=reviewed_plan_json,
+            deployed_sha=deployed_sha,
+            timeout_seconds=remote_timeout_seconds,
+        )
+        result = None
+    else:
+        result = subprocess.run(
+            _remote_shell_command(target, shell_command),
+            text=True,
+            capture_output=True,
+            input=reviewed_plan_json,
+            cwd=ROOT,
+            timeout=remote_timeout_seconds,
+            check=False,
+        )
+    if result is None:
+        stdout_lines: list[str] = []
+    else:
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Finance storage split {action} failed: "
+                + (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or f"exit {result.returncode}"
+                )
+            )
+        stdout_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        try:
+            payload = json.loads(
+                stdout_lines[-1] if stdout_lines else ""
+            )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Finance storage split runner returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "Finance storage split runner returned non-object JSON"
+            )
     if action in {
         "dry-run",
         "health",
@@ -5447,6 +5783,7 @@ def _run_remote_finance_storage_split_action(
         "stale-writer-plan",
         "recovery-contract",
         "recovery-preflight",
+        "post-manifest-recovery-readback",
     }:
         if action == "dry-run" and (
             payload.get("query_only_contract", {}).get("production_mutation_count") != 0
@@ -5548,6 +5885,26 @@ def _run_remote_finance_storage_split_action(
         ):
             raise RuntimeError(
                 "Finance recovery contract lacks fail-closed capability proof"
+            )
+        if action == "post-manifest-recovery-readback" and (
+            payload.get("query_only") is not True
+            or payload.get("canonical_source") != "monolith"
+            or payload.get("raw", {}).get("match") is not True
+            or payload.get("operational", {}).get(
+                "non_cache_match"
+            )
+            is not True
+            or payload.get("cache", {}).get(
+                "semantic_mismatch_count"
+            )
+            != 0
+            or payload.get("cache", {}).get(
+                "direct_row_copy_allowed"
+            )
+            is not False
+        ):
+            raise RuntimeError(
+                "Finance post-manifest recovery readback is incomplete"
             )
         if action == "recovery-preflight" and (
             payload.get("status") != "ready"
@@ -7791,6 +8148,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_split_health.set_defaults(
         handler=run_finance_storage_split_command,
         finance_storage_split_action="health",
+    )
+
+    finance_storage_post_manifest_recovery = subparsers.add_parser(
+        "finance-storage-post-manifest-recovery-readback",
+        help=(
+            "Prove query-only core equality and bounded regenerable cache "
+            "drift for an exact retained split generation."
+        ),
+    )
+    finance_storage_post_manifest_recovery.add_argument(
+        "--expected-retained-generation",
+        required=True,
+    )
+    finance_storage_post_manifest_recovery.add_argument(
+        "--output",
+        required=True,
+    )
+    finance_storage_post_manifest_recovery.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_post_manifest_recovery
+    )
+    finance_storage_post_manifest_recovery.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action=(
+            "post-manifest-recovery-readback"
+        ),
     )
 
     finance_storage_recovery_contract = subparsers.add_parser(

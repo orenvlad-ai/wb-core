@@ -202,6 +202,60 @@ class RuntimeTest(unittest.TestCase):
         self.assertNotEqual(wb_observation_hash(original), wb_observation_hash(viewed_changed))
         self.assertEqual(content_version_hash(original), content_version_hash(viewed_changed))
 
+    def test_content_reversion_reuses_immutable_version_without_unique_failure(
+        self,
+    ) -> None:
+        original = feedback("content-aba", text="Первая версия")
+        changed = feedback("content-aba", text="Вторая версия")
+        first = self.repo.upsert_feedback(
+            original,
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        second = self.repo.upsert_feedback(
+            changed,
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        reverted = self.repo.upsert_feedback(
+            original,
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        repeated = self.repo.upsert_feedback(
+            original,
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+
+        self.assertEqual(first["content_version"], 1)
+        self.assertEqual(second["content_version"], 2)
+        self.assertEqual(reverted["content_version"], 1)
+        self.assertTrue(reverted["content_changed"])
+        self.assertTrue(reverted["content_version_reused"])
+        self.assertFalse(repeated["content_changed"])
+        self.assertFalse(repeated["content_version_reused"])
+        with sqlite3.connect(self.repo.db_path) as conn:
+            versions = conn.execute(
+                """
+                SELECT content_version,content_version_hash
+                FROM sheet_vitrina_v1_wb_feedback_versions
+                WHERE feedback_id=?
+                ORDER BY content_version
+                """,
+                ("content-aba",),
+            ).fetchall()
+            current = conn.execute(
+                """
+                SELECT content_version,content_version_hash
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id=?
+                """,
+                ("content-aba",),
+            ).fetchone()
+        self.assertEqual(len(versions), 2)
+        self.assertEqual(current, versions[0])
+
     def test_master_default_off_and_emergency_force_off(self) -> None:
         self.assertFalse(self.repo.settings().effective_enabled)
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
