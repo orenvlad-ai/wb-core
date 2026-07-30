@@ -566,6 +566,7 @@ def main() -> int:
                 "durable_restore_inventory": True,
                 "durable_restore_resume": True,
                 "restore_systemd_template": True,
+                "durable_storage_transport": True,
             },
             reviewed_plan=planned,
         )

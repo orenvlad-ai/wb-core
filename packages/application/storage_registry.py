@@ -82,6 +82,72 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def sqlite_process_openers(path: Path) -> list[dict[str, Any]]:
+    """Read the exact local processes that currently hold one SQLite inode."""
+
+    source = Path(path).expanduser().resolve()
+    proc = Path("/proc")
+    if not source.is_file() or not proc.is_dir():
+        return []
+    source_stat = source.stat()
+    openers: list[dict[str, Any]] = []
+    for pid_dir in sorted(
+        (item for item in proc.iterdir() if item.name.isdigit()),
+        key=lambda item: int(item.name),
+    ):
+        fd_dir = pid_dir / "fd"
+        if not fd_dir.is_dir():
+            continue
+        try:
+            fd_paths = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd_path in fd_paths:
+            try:
+                target = fd_path.resolve(strict=True)
+                target_stat = target.stat()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            if (
+                target_stat.st_dev != source_stat.st_dev
+                or target_stat.st_ino != source_stat.st_ino
+            ):
+                continue
+            flags: int | None = None
+            try:
+                for line in (
+                    pid_dir / "fdinfo" / fd_path.name
+                ).read_text(encoding="utf-8").splitlines():
+                    if line.startswith("flags:"):
+                        flags = int(line.split(":", 1)[1].strip(), 8)
+                        break
+            except (OSError, ValueError):
+                pass
+            try:
+                comm = (pid_dir / "comm").read_text(
+                    encoding="utf-8"
+                ).strip()[:120]
+            except OSError:
+                comm = ""
+            openers.append(
+                {
+                    "pid": int(pid_dir.name),
+                    "fd": int(fd_path.name),
+                    "access_mode": (
+                        {
+                            0: "read_only",
+                            1: "write_only",
+                            2: "read_write",
+                        }.get(flags & os.O_ACCMODE, "unknown")
+                        if flags is not None
+                        else "unknown"
+                    ),
+                    "comm": comm,
+                }
+            )
+    return openers
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(
         value,

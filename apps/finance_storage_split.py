@@ -71,6 +71,9 @@ from packages.application.finance_storage_snapshot_retention import (
     PLAN_CONTRACT as SNAPSHOT_RETENTION_PLAN_CONTRACT,
     RESULT_CONTRACT as SNAPSHOT_RETENTION_RESULT_CONTRACT,
 )
+from packages.application.finance_storage_post_manifest_recovery import (
+    readback as post_manifest_recovery_readback,
+)
 from packages.application.storage_registry import parse_manifest
 from apps.business_data_maintenance_restore_job import (
     CONTRACT_NAME as RESTORE_JOB_CONTRACT,
@@ -140,6 +143,9 @@ def _downstream_recovery_capabilities() -> dict[str, bool]:
         ).is_file(),
         "durable_restore_resume": RESTORE_MAX_RESUME_SEQUENCE >= 1,
         "restore_systemd_template": restore_template_exact,
+        "durable_storage_transport": (
+            ROOT / "apps" / "finance_storage_transport_job.py"
+        ).is_file(),
     }
 
 
@@ -273,6 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
             "rollback-plan",
             "rollback-prepare",
             "rollback-apply",
+            "post-manifest-recovery-readback",
             "recovery-contract",
             "recovery-preflight",
         ),
@@ -300,6 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-snapshot-manifest", type=Path)
     parser.add_argument("--candidate-plan-fingerprint", default="")
     parser.add_argument("--candidate-generation-epoch", default="")
+    parser.add_argument("--expected-retained-generation", default="")
     parser.add_argument("--seller-id", default="canonical")
     parser.add_argument("--max-events", type=int, default=100_000)
     parser.add_argument(
@@ -536,7 +544,19 @@ def main(argv: list[str] | None = None) -> int:
             deployed_sha=deployed_sha,
             deploy_lease=deploy_lease,
         )
-    if args.action.startswith("candidate-abort-"):
+    if args.action == "post-manifest-recovery-readback":
+        if not args.expected_retained_generation:
+            raise SystemExit(
+                "--expected-retained-generation is required for "
+                "post-manifest recovery readback"
+            )
+        payload = post_manifest_recovery_readback(
+            runtime_dir,
+            expected_retained_generation=(
+                args.expected_retained_generation
+            ),
+        )
+    elif args.action.startswith("candidate-abort-"):
         candidate_abort = FinanceStorageCandidateAbort(
             runtime_dir,
             deployed_sha=deployed_sha,

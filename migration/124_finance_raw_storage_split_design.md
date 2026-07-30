@@ -189,6 +189,13 @@ The implementation is deliberately inert on deploy:
   boundary.
   Barrier abort remains a separate exact transition after terminal restore and
   independent timer/writer/policy/non-target readback.
+- The protected snapshot/cutover/rollback byte mutation is also detached from
+  the caller transport. `finance_storage_transport_job.py` persists one
+  request-digest-bound job with exact deployed SHA, runner arguments, reviewed
+  stdin digest, status and terminal result. A repeated submit observes that
+  same job; a connection reset never starts a second worker, and lost-worker
+  or identity drift is ambiguous/fail-closed. The hosted wrapper does not
+  restore controls until that exact job reaches a terminal result.
 - A repeated business-maintenance `prepare` while the same boundary is already
   `prepared` or `held` and quiet is an audited no-op only when the paused
   owner-policy revision/fingerprint, original control signature and current
@@ -225,6 +232,19 @@ The implementation is deliberately inert on deploy:
   normal operation, then replays only post-prepare raw scopes and recopies
   operational state under its short hold. Original monolith and split files
   remain retained.
+- Post-manifest recovery restarts only the registry HTTP service and proves its
+  exact `MainPID` has opened both paths selected by the current manifest before
+  any writer/timer restore or barrier release. For a selected rollback
+  monolith, `finance-storage-post-manifest-recovery-readback` compares core raw
+  identity rows and every non-cache operational table against the retained
+  split generation in SQLite query-only mode. It admits at most eight
+  split-only rows from
+  `sheet_vitrina_v1_wb_incident_projection_cache`, and only when each row is
+  deterministically reproducible from the canonical accepted stocks snapshot
+  and incident policy. The normal Vitrina refresh regenerates those derived
+  rows; direct row copy is forbidden. Any canonical-only cache row, semantic
+  cache conflict, raw/non-cache drift or missing retained generation remains
+  fail-closed.
 - `finance-storage-snapshot-retention-plan|apply|readback` is the only
   pre-candidate capacity recovery for stale coherent migration snapshots.
   It runs only while the monolith is canonical, the manual barrier is
@@ -734,6 +754,10 @@ Closure requires:
 - Recovery-contract transition completeness and stable fingerprint; preflight
   must reject missing lease/approval/downstream capability before creating a
   barrier or destination byte.
+- Durable hold-mutation transport must survive a submit disconnect while
+  starting exactly one worker; registry HTTP restart must reject a stale
+  storage binding; post-manifest readback must accept only deterministically
+  regenerable bounded cache drift and reject all core/non-cache drift.
 - Candidate, snapshot, snapshot-retention, stale-writer, cutover and rollback
   apply must accept the wrapper-added canonical `deploy_lease` transport
   evidence without changing the reviewed deterministic plan fingerprint,

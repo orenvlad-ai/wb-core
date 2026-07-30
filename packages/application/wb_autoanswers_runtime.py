@@ -2642,7 +2642,25 @@ class AutoanswersRepository:
             is_new = current is None
             content_changed = is_new or str(current["content_version_hash"]) != content_hash
             observation_changed = is_new or str(current["wb_observation_hash"]) != observation_hash
-            content_version = 1 if is_new else int(current["content_version"]) + int(content_changed)
+            reused_content_version: int | None = None
+            if content_changed and not is_new:
+                reused = conn.execute(
+                    """
+                    SELECT content_version
+                    FROM sheet_vitrina_v1_wb_feedback_versions
+                    WHERE feedback_id=? AND content_version_hash=?
+                    """,
+                    (feedback_id, content_hash),
+                ).fetchone()
+                if reused is not None:
+                    reused_content_version = int(reused["content_version"])
+            content_version = (
+                1
+                if is_new
+                else reused_content_version
+                if reused_content_version is not None
+                else int(current["content_version"]) + int(content_changed)
+            )
             effective_on = bool(settings["master_enabled"]) and not _force_off_from_env(self.env)
             eligible_epoch: int | None = None
             automatic_mode = str(settings["mode"]) != MODE_MANUAL
@@ -2721,7 +2739,7 @@ class AutoanswersRepository:
                     content_classification,
                 ),
             )
-            if content_changed:
+            if content_changed and reused_content_version is None:
                 conn.execute(
                     """
                     INSERT INTO sheet_vitrina_v1_wb_feedback_versions(
@@ -2800,6 +2818,7 @@ class AutoanswersRepository:
             "observation_changed": observation_changed,
             "content_version": content_version,
             "content_version_hash": content_hash,
+            "content_version_reused": reused_content_version is not None,
             "wb_observation_hash": observation_hash,
             "has_external_answer": bool(answer_text),
             "content_classification": content_classification,

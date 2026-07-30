@@ -79,6 +79,169 @@ def main() -> None:
     if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
         raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
     active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    durable_transport_calls: list[str] = []
+    durable_transport_job_id = ""
+
+    def durable_transport_run(
+        command: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal durable_transport_job_id
+        command_text = " ".join(str(item) for item in command)
+        durable_transport_calls.append(command_text)
+        if " submit " in command_text:
+            request_payload = json.loads(str(kwargs.get("input") or ""))
+            durable_transport_job_id = str(
+                request_payload.get("job_id") or ""
+            )
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=255,
+                stdout="",
+                stderr="transport reset",
+            )
+        status_count = sum(
+            " status " in item for item in durable_transport_calls
+        )
+        if status_count == 1:
+            status_payload = {
+                "contract_name": (
+                    "wb_core_finance_storage_transport_job_v1"
+                ),
+                "job_id": durable_transport_job_id,
+                "deployed_sha": "a" * 40,
+                "status": "running",
+                "terminal": False,
+                "worker_classification": "active_worker",
+            }
+        else:
+            status_payload = {
+                "contract_name": (
+                    "wb_core_finance_storage_transport_job_v1"
+                ),
+                "job_id": durable_transport_job_id,
+                "deployed_sha": "a" * 40,
+                "status": "succeeded",
+                "terminal": True,
+                "worker_classification": "terminal_succeeded",
+                "result": {
+                    "status": "rollback_complete",
+                    "global_manifest_switched": True,
+                },
+            }
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(status_payload),
+            stderr="",
+        )
+
+    with (
+        mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=durable_transport_run,
+        ),
+        mock.patch.object(hosted_runtime.time, "sleep"),
+    ):
+        durable_result = (
+            hosted_runtime._run_remote_finance_storage_transport_job(
+                active_target,
+                action="rollback-apply",
+                runner_args=[
+                    "python3",
+                    "apps/finance_storage_split.py",
+                    "rollback-apply",
+                ],
+                reviewed_plan_json='{"fingerprint":"sha256:smoke"}',
+                deployed_sha="a" * 40,
+                timeout_seconds=30,
+            )
+        )
+    if (
+        durable_result.get("status") != "rollback_complete"
+        or durable_result.get("transport_job", {}).get(
+            "transport_disconnect_recovered"
+        )
+        is not True
+        or sum(" submit " in item for item in durable_transport_calls)
+        != 1
+    ):
+        raise AssertionError(
+            "Finance hosted transport must observe one exact remote job "
+            "through a submit disconnect"
+        )
+    with (
+        mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="active\n1234\n",
+                stderr="",
+            ),
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_finance_storage_split_action",
+            return_value={
+                "canonical_source": "monolith",
+                "generation_epoch": "rollback-smoke",
+                "raw": {
+                    "path": "/runtime/generations/rollback-smoke/monolith.sqlite3",
+                    "openers": [{"pid": 1234, "fd": 7}],
+                },
+                "operational": {
+                    "path": "/runtime/generations/rollback-smoke/monolith.sqlite3",
+                    "openers": [{"pid": 1234, "fd": 7}],
+                },
+            },
+        ),
+    ):
+        binding = hosted_runtime._restart_finance_cutover_http_service(
+            active_target
+        )
+    if (
+        binding.get("main_pid") != 1234
+        or binding.get("raw_bound") is not True
+        or binding.get("operational_bound") is not True
+    ):
+        raise AssertionError(
+            "Finance HTTP restart must prove MainPID binding to both "
+            "canonical manifest stores"
+        )
+    with (
+        mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="active\n1234\n",
+                stderr="",
+            ),
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_finance_storage_split_action",
+            return_value={
+                "raw": {"openers": [{"pid": 9999}]},
+                "operational": {"openers": [{"pid": 9999}]},
+            },
+        ),
+    ):
+        try:
+            hosted_runtime._restart_finance_cutover_http_service(
+                active_target
+            )
+        except RuntimeError as exc:
+            if "MainPID is not bound" not in str(exc):
+                raise
+        else:
+            raise AssertionError(
+                "Finance HTTP restart accepted a stale storage binding"
+            )
     maintenance_probe = {
         "route": "web_vitrina_group_refresh_missing_group",
         "method": "POST",
@@ -673,6 +836,31 @@ def main() -> None:
         ):
             raise AssertionError(
                 "hosted runner must expose Finance recovery contract readback"
+            )
+        post_manifest_args = (
+            hosted_runtime.build_arg_parser().parse_args(
+                [
+                    "finance-storage-post-manifest-recovery-readback",
+                    "--expected-retained-generation",
+                    "1" * 20,
+                    "--output",
+                    str(
+                        Path(finance_temp_dir)
+                        / "post-manifest-recovery.json"
+                    ),
+                    "--finance-deploy-lease-evidence",
+                    str(deploy_lease_path),
+                ]
+            )
+        )
+        if (
+            post_manifest_args.handler
+            is not hosted_runtime.run_finance_storage_split_command
+            or post_manifest_args.finance_storage_split_action
+            != "post-manifest-recovery-readback"
+        ):
+            raise AssertionError(
+                "hosted runner must expose post-manifest recovery readback"
             )
         storage_dry_args = hosted_runtime.build_arg_parser().parse_args(
             [
