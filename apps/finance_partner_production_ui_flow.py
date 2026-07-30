@@ -128,6 +128,52 @@ def _validate_finance_storage_health(
     return "selected_split"
 
 
+def _validate_finance_storage_card(
+    storage_text: str,
+    *,
+    storage_health: dict[str, Any],
+    storage_phase: str,
+) -> None:
+    visible = str(storage_text or "")
+    if storage_phase == "implicit_monolith":
+        required = (
+            "canonical: monolith",
+            "rollback: готов",
+            "cutover: не разрешён/не готов",
+        )
+    else:
+        _assert(
+            storage_phase == "selected_split",
+            "Finance storage card uses a validated lifecycle phase",
+        )
+        raw = dict(storage_health.get("raw") or {})
+        operational = dict(storage_health.get("operational") or {})
+        required = (
+            "canonical: split",
+            f"Raw generation: {raw.get('generation_id')}",
+            f"schema {raw.get('schema_revision')}",
+            f"Operational generation: {operational.get('generation_id')}",
+            f"schema {operational.get('schema_revision')}",
+            "Cursor raw/operational: "
+            f"{int(storage_health.get('raw_ack_cursor') or 0)} / "
+            f"{int(storage_health.get('operational_cursor') or 0)}",
+            f"consumer lag: {int(storage_health.get('consumer_lag_events') or 0)}",
+            "live-tail cursor/lag: "
+            f"{int(storage_health.get('live_tail_cursor') or 0)} / "
+            f"{int(storage_health.get('live_tail_lag_events') or 0)}",
+            f"mismatches: {int(storage_health.get('shadow_mismatch_count') or 0)}",
+            f"dead letters: {int(storage_health.get('actionable_dead_letters') or 0)}",
+            "rollback: не доказан",
+            "cutover: не разрешён/не готов",
+        )
+    missing = [item for item in required if item not in visible]
+    _assert(
+        not missing,
+        "Finance storage health card is missing validated lifecycle evidence: "
+        + ", ".join(missing),
+    )
+
+
 def run_finance_partner_ui_flow(
     *,
     base_url: str,
@@ -345,12 +391,10 @@ def run_finance_partner_ui_flow(
             _assert("недоступен" not in finance_facts["status"].casefold(), "Finance UI is available")
             _assert("стоимость того же nmid на 01.07" in finance_facts["notes"].casefold(), "Finance temporal method is visible")
             _assert("retro-map" in finance_facts["notes"], "Finance rejects an independent retro-cost source")
-            _assert(
-                "canonical: monolith" in finance_facts["storageHealth"]
-                and "rollback: готов" in finance_facts["storageHealth"]
-                and "cutover: не разрешён/не готов"
-                in finance_facts["storageHealth"],
-                "Finance storage health is visible without cutover",
+            _validate_finance_storage_card(
+                finance_facts["storageHealth"],
+                storage_health=storage_health,
+                storage_phase=storage_phase,
             )
             _assert(bool(finance_facts["horizontalOverflow"]), "Finance table scrolls locally")
             finance_screenshot = evidence_dir / "finance_weekly_desktop.png"
