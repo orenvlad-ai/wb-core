@@ -390,6 +390,77 @@ class StoreRegistrySmoke(unittest.TestCase):
 
 
 class OutboxSmoke(unittest.TestCase):
+    def test_current_rows_scope_predicates_use_week_index_and_latest_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            _create_monolith(runtime, rows=1)
+            registry = StoreRegistry(runtime)
+            timestamps = iter(
+                (
+                    "2026-07-29T00:00:00Z",
+                    "2026-07-29T00:01:00Z",
+                )
+            )
+            ingestor = FinanceRawIngestor(
+                registry,
+                now_factory=lambda: next(timestamps),
+            )
+            ingestor.ingest_batch(
+                [_raw_row(30, 3001), _raw_row(30, 3002)],
+                source_identity="fixture:scope-first",
+                source_sha256="sha256:" + "1" * 64,
+                week_start="2026-02-02",
+                week_end="2026-02-08",
+            )
+            ingestor.ingest_batch(
+                [_raw_row(30, 3002)],
+                source_identity="fixture:scope-replacement",
+                source_sha256="sha256:" + "2" * 64,
+                week_start="2026-02-02",
+                week_end="2026-02-08",
+            )
+            sql = """SELECT report_id,rrd_id,row_hash
+                     FROM finance_raw_current_rows
+                     WHERE seller_id=? AND week_start=? AND week_end=?
+                     ORDER BY report_id,rrd_id,row_hash"""
+            params = (
+                "canonical",
+                "2026-02-02",
+                "2026-02-08",
+            )
+            with registry.session(
+                "finance_raw",
+                mode="ro",
+                operation="current_rows_scope_plan_smoke",
+            ) as conn:
+                rows = conn.execute(sql, params).fetchall()
+                plan = [
+                    str(row[3])
+                    for row in conn.execute(
+                        "EXPLAIN QUERY PLAN " + sql,
+                        params,
+                    ).fetchall()
+                ]
+            self.assertEqual(
+                [(str(row[0]), str(row[1])) for row in rows],
+                [("30", "3002")],
+            )
+            self.assertTrue(
+                any(
+                    "finance_raw_rows_by_week" in detail
+                    for detail in plan
+                ),
+                plan,
+            )
+            self.assertFalse(
+                any(
+                    "SCAN rows" in detail
+                    or "SCAN finance_raw_current_rows" in detail
+                    for detail in plan
+                ),
+                plan,
+            )
+
     def test_ingest_fault_matrix(self) -> None:
         for fault_at in (
             "before_transaction",
@@ -2309,6 +2380,44 @@ class MigrationSmoke(unittest.TestCase):
             self.assertEqual(reconciled["missing_current_rows"], 0)
             self.assertEqual(reconciled["source_row_count"], 5)
             self.assertEqual(reconciled["reused_count"], 5)
+            with (
+                closing(
+                    sqlite3.connect(
+                        f"file:{source.resolve()}?mode=ro",
+                        uri=True,
+                    )
+                ) as source_reconciled,
+                closing(
+                    sqlite3.connect(
+                        f"file:{raw_path.resolve()}?mode=ro",
+                        uri=True,
+                    )
+                ) as candidate_reconciled,
+            ):
+                source_reconciled.execute("PRAGMA query_only=ON")
+                candidate_reconciled.execute("PRAGMA query_only=ON")
+                comparison = shadow_compare_week(
+                    source_conn=source_reconciled,
+                    shadow_conn=candidate_reconciled,
+                    seller_id="canonical",
+                    week_start="2026-01-05",
+                    week_end="2026-01-11",
+                )
+                self.assertEqual(comparison["status"], "match")
+                self.assertEqual(comparison["shadow_row_count"], 5)
+                self.assertTrue(
+                    any(
+                        "finance_raw_rows_by_week" in detail
+                        for detail in comparison["shadow_query_plan"]
+                    ),
+                    comparison["shadow_query_plan"],
+                )
+                self.assertEqual(
+                    candidate_reconciled.execute(
+                        "SELECT COUNT(*) FROM finance_raw_current_rows"
+                    ).fetchone()[0],
+                    5,
+                )
             event = FinanceRawIngestor(StoreRegistry(runtime)).ingest_batch(
                 [_raw_row(31, 3101)],
                 source_identity="fixture:shadow-tail",

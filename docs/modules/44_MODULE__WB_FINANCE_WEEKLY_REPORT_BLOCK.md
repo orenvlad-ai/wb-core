@@ -153,6 +153,9 @@ The separate storage-split lifecycle exposes:
   backup device when they block pre-candidate capacity;
 - `finance-storage-stale-writer-plan|stop` for one exact audited stale
   closure-retry generation before a completely fresh snapshot plan;
+- `finance-storage-candidate-abort-plan|apply|readback` for an exact partial or
+  completed-but-unselected generation after exact shadow deactivation, never a
+  selected generation;
 - `finance-storage-split-dry-run|apply|health`;
 - `finance-storage-shadow-status|activate|reconcile|verify|deactivate` and
   `finance-storage-live-tail-apply`;
@@ -169,6 +172,10 @@ it copies only stale migration snapshots, verifies every archived byte and a
 durable crash-resume transaction, then releases the root copy with its
 manifest last. The archive remains byte-exact evidence, while ambiguity leaves
 the source intact.
+Candidate abort likewise preserves the canonical monolith and every snapshot.
+It deletes only a fingerprint-bound allowlist from one unselected generation;
+active/mismatched shadow state, incomplete completed checkpoints, a global
+selected manifest, an opener or any unknown file fails closed.
 Cutover and rollback apply require their exact held barrier and perform a fresh
 operational reconciliation before one fsynced manifest switch. Only the
 registry HTTP service is restarted. An ambiguous post-switch failure keeps
@@ -231,6 +238,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
 - `python3 apps/finance_storage_split_smoke.py`;
+- `python3 apps/finance_storage_candidate_abort_smoke.py`;
 - `python3 apps/finance_storage_stale_writer_recovery_smoke.py`;
 - `python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated`;
 - `python3 apps/warehouse_functional_maintenance_smoke.py`;

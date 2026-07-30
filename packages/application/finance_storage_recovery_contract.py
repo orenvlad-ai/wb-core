@@ -188,12 +188,14 @@ _TRANSITIONS = (
     {
         "transition": "candidate.abort",
         "persisted_store": (
-            ".finance-storage-candidate-aborts/<generation>.json"
+            ".finance-storage-candidate-aborts/<generation>.json + "
+            "optional inactive candidate/shadow manifests"
         ),
         "from": (
             "loading",
             "verified_chunks",
             "candidate_bytes_without_manifest",
+            "completed_unselected_shadow_inactive",
         ),
         "to": ("absent",),
         "recovery": (

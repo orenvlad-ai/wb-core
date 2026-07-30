@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fault and safety smoke for exact pre-manifest candidate abort recovery."""
+"""Fault and safety smoke for exact unselected candidate abort recovery."""
 
 from __future__ import annotations
 
@@ -38,6 +38,10 @@ from packages.application.finance_storage_recovery_contract import (
 )
 from apps import finance_storage_split as finance_storage_cli
 from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+from packages.application.storage_registry import (
+    build_manifest,
+    manifest_payload,
+)
 
 
 CURRENT_SHA = "a" * 40
@@ -110,6 +114,26 @@ def _fixture(root: Path) -> tuple[Path, str]:
             "raw_json_digest": "sha256:" + "e" * 64,
         }
     )
+    candidate_manifest = manifest_payload(
+        build_manifest(
+            state="shadow",
+            canonical_source="monolith",
+            generation_epoch=GENERATION,
+            raw_generation_id=raw_generation_id,
+            raw_relative_path=(
+                f"generations/{GENERATION}/finance_raw.sqlite3"
+            ),
+            raw_watermark="3",
+            operational_generation_id=operational_generation_id,
+            operational_relative_path=(
+                f"generations/{GENERATION}/operational.sqlite3"
+            ),
+            operational_watermark=SOURCE_FINGERPRINT,
+            rollback_generation_id="monolith",
+            source_fingerprint=SOURCE_FINGERPRINT,
+            created_at="2026-07-29T00:00:00Z",
+        )
+    )
     plan: dict[str, object] = {
         "contract_version": CANDIDATE_PLAN_CONTRACT,
         "mode": "dry_run",
@@ -140,22 +164,7 @@ def _fixture(root: Path) -> tuple[Path, str]:
             "generation_directory": f"generations/{GENERATION}",
             "raw_generation_id": raw_generation_id,
             "operational_generation_id": operational_generation_id,
-            "candidate_manifest": {
-                "raw": {
-                    "generation_id": raw_generation_id,
-                    "generation_epoch": GENERATION,
-                    "relative_path": (
-                        f"generations/{GENERATION}/finance_raw.sqlite3"
-                    ),
-                },
-                "operational": {
-                    "generation_id": operational_generation_id,
-                    "generation_epoch": GENERATION,
-                    "relative_path": (
-                        f"generations/{GENERATION}/operational.sqlite3"
-                    ),
-                },
-            },
+            "candidate_manifest": candidate_manifest,
         },
         "performance": {
             "query_seconds": 12.5,
@@ -280,6 +289,103 @@ def _runner(
         candidate_plan_fingerprint=candidate_plan,
         fault_after_unlinks=fault_after_unlinks,
     )
+
+
+def _complete_candidate(
+    runtime: Path,
+    candidate_plan_fingerprint_value: str,
+    *,
+    shadow_enabled: bool,
+) -> None:
+    generation_root = runtime / "generations" / GENERATION
+    plan = json.loads(
+        (generation_root / "migration_plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    candidate_manifest = dict(
+        (plan.get("target_generation") or {}).get(
+            "candidate_manifest"
+        )
+        or {}
+    )
+    _private_json(
+        generation_root / "candidate_generation_manifest.json",
+        candidate_manifest,
+    )
+    _private_json(
+        generation_root / "shadow_verification.json",
+        {
+            "contract_version": (
+                "wb_core_finance_shadow_verification_v1"
+            ),
+            "status": "soaking",
+            "candidate_manifest_sha256": str(
+                candidate_manifest.get("manifest_sha256") or ""
+            ),
+            "candidate_plan_fingerprint": (
+                candidate_plan_fingerprint_value
+            ),
+            "mismatch_count": 0,
+            "performance": {"regression_count": 1},
+        },
+    )
+    _private_json(
+        runtime / ".finance-storage-shadow-ingest.json",
+        {
+            "contract_version": (
+                "wb_core_finance_shadow_ingest_state_v1"
+            ),
+            "status": "active" if shadow_enabled else "inactive",
+            "enabled": shadow_enabled,
+            "plan_fingerprint": candidate_plan_fingerprint_value,
+            "candidate_manifest_path": str(
+                generation_root
+                / "candidate_generation_manifest.json"
+            ),
+            "candidate_manifest_sha256": str(
+                candidate_manifest.get("manifest_sha256") or ""
+            ),
+            "raw_generation_id": str(
+                candidate_manifest.get("raw", {}).get(
+                    "generation_id"
+                )
+                or ""
+            ),
+            "operational_generation_id": str(
+                candidate_manifest.get("operational", {}).get(
+                    "generation_id"
+                )
+                or ""
+            ),
+            "state_fingerprint": "sha256:" + "6" * 64,
+        },
+    )
+    with sqlite3.connect(
+        generation_root / "finance_raw.sqlite3"
+    ) as raw:
+        original = raw.execute(
+            """SELECT row_count,rows_digest,created_at,committed_at
+               FROM finance_raw_ingest_batches LIMIT 1"""
+        ).fetchone()
+        raw.execute(
+            """INSERT OR IGNORE INTO finance_raw_ingest_batches(
+               batch_id,source_identity,source_sha256,report_period,
+               seller_id,week_start,week_end,row_count,rows_digest,status,
+               created_at,committed_at
+               ) VALUES(?,?,?,'all-history','*','2026-01-01',
+                        '2026-01-07',?,?,'committed',?,?)""",
+            (
+                "sha256:" + "5" * 64,
+                "sha256:" + "4" * 64,
+                "sha256:" + "4" * 64,
+                int(original[0]),
+                str(original[1]),
+                str(original[2]),
+                str(original[3]),
+            ),
+        )
+        raw.commit()
 
 
 def _expect_refusal(action, message: str) -> None:
@@ -589,6 +695,84 @@ def main() -> int:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
     with tempfile.TemporaryDirectory(
+        prefix="finance-candidate-abort-completed-"
+    ) as temporary:
+        runtime, candidate_plan = _fixture(Path(temporary))
+        _complete_candidate(
+            runtime,
+            candidate_plan,
+            shadow_enabled=True,
+        )
+        _expect_refusal(
+            lambda: _runner(runtime, candidate_plan).build_plan(),
+            "active shadow ingest must block completed candidate abort",
+        )
+        _complete_candidate(
+            runtime,
+            candidate_plan,
+            shadow_enabled=False,
+        )
+        runner = _runner(
+            runtime,
+            candidate_plan,
+            fault_after_unlinks=1,
+        )
+        planned = runner.build_plan()
+        if (
+            (planned.get("exact_state") or {}).get(
+                "candidate_lifecycle"
+            )
+            != "completed_unselected"
+            or (
+                (planned.get("exact_state") or {}).get(
+                    "checkpoints"
+                )
+                or {}
+            ).get("batch_count")
+            != 2
+            or (
+                (planned.get("exact_state") or {}).get(
+                    "shadow_verification"
+                )
+                or {}
+            ).get("status")
+            != "soaking"
+        ):
+            raise AssertionError(
+                "completed candidate abort plan lost exact lifecycle evidence"
+            )
+        try:
+            runner.apply(
+                reviewed_plan=planned,
+                expected_fingerprint=str(planned["fingerprint"]),
+                approval_reference="completed-candidate-recovery",
+            )
+        except InjectedCandidateAbortFault:
+            pass
+        else:
+            raise AssertionError(
+                "completed candidate abort fault injection did not fire"
+            )
+        result = _runner(runtime, candidate_plan).apply(
+            reviewed_plan=planned,
+            expected_fingerprint=str(planned["fingerprint"]),
+            approval_reference="completed-candidate-recovery",
+        )
+        if (
+            result.get("status") != "completed"
+            or (
+                runtime / "generations" / GENERATION
+            ).exists()
+            or {
+                "candidate_generation_manifest.json",
+                "shadow_verification.json",
+            }
+            - set(result.get("deleted_files") or [])
+        ):
+            raise AssertionError(
+                "completed unselected candidate did not abort exactly"
+            )
+    with tempfile.TemporaryDirectory(
         prefix="finance-candidate-abort-manifest-"
     ) as temporary:
         runtime, candidate_plan = _fixture(Path(temporary))
@@ -605,9 +789,10 @@ def main() -> int:
         )
     _hosted_transport_smoke()
     print(
-        "finance_storage_candidate_abort_smoke: ok -> exact partial "
-        "candidate, durable pending/unlinked crash resume, idempotent "
-        "terminal readback, lock/manifest/unknown-file fail-closed"
+        "finance_storage_candidate_abort_smoke: ok -> exact partial and "
+        "completed-unselected candidates, durable pending/unlinked crash "
+        "resume, idempotent terminal readback, active-shadow/lock/manifest/"
+        "unknown-file fail-closed"
     )
     return 0
 
