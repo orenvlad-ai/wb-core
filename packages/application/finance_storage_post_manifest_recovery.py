@@ -409,14 +409,25 @@ def readback(
             if canonical_cache[key]["semantic_digest"]
             != retained_cache[key]["semantic_digest"]
         ]
-        if (
-            canonical_only
-            or semantic_mismatches
-            or len(split_only) > MAX_RECOVERABLE_CACHE_ROWS
-        ):
+        cache_drift_count = (
+            len(split_only)
+            + len(canonical_only)
+            + len(semantic_mismatches)
+        )
+        if cache_drift_count > MAX_RECOVERABLE_CACHE_ROWS:
             raise FinanceStoragePostManifestRecoveryError(
                 "projection cache drift exceeds the bounded derived-row "
-                "recovery contract"
+                "recovery contract: "
+                + _canonical_json(
+                    {
+                        "canonical_only_count": len(canonical_only),
+                        "retained_only_count": len(split_only),
+                        "semantic_mismatch_count": len(
+                            semantic_mismatches
+                        ),
+                        "maximum": MAX_RECOVERABLE_CACHE_ROWS,
+                    }
+                )
             )
         recoverable_rows: list[dict[str, Any]] = []
         for key in split_only:
@@ -444,6 +455,48 @@ def readback(
                     ),
                 }
             )
+        accepted_canonical_rows: list[dict[str, Any]] = []
+        for classification, keys in (
+            ("canonical_only", canonical_only),
+            (
+                "canonical_authoritative_semantic_mismatch",
+                semantic_mismatches,
+            ),
+        ):
+            for key in keys:
+                rebuilt = _rebuild_projection(canonical, key=key)
+                rebuilt_digest = _digest(
+                    _normalized_projection(rebuilt)
+                )
+                if (
+                    rebuilt_digest
+                    != canonical_cache[key]["semantic_digest"]
+                ):
+                    raise FinanceStoragePostManifestRecoveryError(
+                        "canonical projection cache row differs from the "
+                        "deterministic rebuild: "
+                        + _canonical_json(
+                            {
+                                "classification": classification,
+                                "seller_id": key[0],
+                                "snapshot_digest": key[1],
+                                "policy_revision": key[2],
+                                "snapshot_date": key[3],
+                            }
+                        )
+                    )
+                accepted_canonical_rows.append(
+                    {
+                        "classification": classification,
+                        "seller_id": key[0],
+                        "snapshot_digest": key[1],
+                        "policy_revision": key[2],
+                        "snapshot_date": key[3],
+                        "semantic_digest": rebuilt_digest,
+                        "canonical_rebuild_match": True,
+                        "retained_generation_mutation_required": False,
+                    }
+                )
     except FinanceStorageMigrationError as exc:
         raise FinanceStoragePostManifestRecoveryError(str(exc)) from exc
     finally:
@@ -479,8 +532,10 @@ def readback(
         "cache": {
             "canonical_rows": len(canonical_cache),
             "retained_rows": len(retained_cache),
+            "bounded_drift_row_count": cache_drift_count,
             "recoverable_missing_canonical_rows": recoverable_rows,
-            "semantic_mismatch_count": 0,
+            "accepted_canonical_rows": accepted_canonical_rows,
+            "semantic_mismatch_count": len(semantic_mismatches),
             "regeneration_required": bool(recoverable_rows),
             "regeneration_command": (
                 "business-data-maintenance durable restore of "

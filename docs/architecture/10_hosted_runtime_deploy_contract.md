@@ -174,10 +174,13 @@ The same runner owns the only production path for the active functional cutover 
   For rollback-monolith recovery,
   `finance-storage-post-manifest-recovery-readback` uses SQLite query-only
   comparison against the retained split generation: core raw and every
-  non-cache operational table must match. A bounded split-only Vitrina incident
-  cache row is admissible only when canonical accepted stocks and policy
-  deterministically rebuild the same semantic projection; ordinary Vitrina
-  refresh regenerates it and direct cross-generation row copy is forbidden.
+  non-cache operational table must match. At most eight total Vitrina incident
+  cache key/value differences are admissible: a retained-only row must match a
+  deterministic rebuild from canonical accepted stocks and policy, while a
+  canonical-only or common-key semantic difference is accepted only when the
+  active canonical row matches that rebuild. Ordinary Vitrina refresh
+  regenerates a missing canonical row; the retained generation remains
+  immutable and direct cross-generation row copy is forbidden.
 - The candidate-abort boundary also covers an exact completed-but-unselected
   generation after a recovery deploy, but only after repo-owned shadow
   deactivation. This extension supersedes the pre-manifest-only wording in the
