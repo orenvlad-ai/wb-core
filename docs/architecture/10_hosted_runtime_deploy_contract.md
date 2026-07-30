@@ -863,7 +863,10 @@ one manifest, opens both persistent generations with SQLite `mode=ro`, creates
 only a connection-local raw compatibility view and restores
 `PRAGMA query_only=ON` before planning. The reviewed apply writes only
 operational Finance projections and proves the raw generation unchanged
-through its non-target digest.
+through its non-target digest. Canonical read actions have a one-hour remote
+process bound and apply has a two-hour bound; the SSH transport grace expires
+only after that remote owner has terminated or been killed, so a client timeout
+cannot leave an unowned canonical runner.
 
 ## Human-Only Boundary
 

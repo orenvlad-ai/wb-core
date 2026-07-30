@@ -259,11 +259,23 @@ def main() -> None:
                     fingerprint="sha256:finance-reviewed" if action == "apply" else "",
                     approval_reference="human-gate-123" if action == "apply" else "",
                 )
-            if run_mock.call_args.kwargs.get("timeout") != expected_timeout:
-                raise AssertionError(f"Finance canonical {action} lost its bounded timeout")
+            if run_mock.call_args.kwargs.get("timeout") != (
+                expected_timeout
+                + hosted_runtime.FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS
+            ):
+                raise AssertionError(
+                    f"Finance canonical {action} lost its bounded transport grace"
+                )
             remote_command = " ".join(run_mock.call_args.args[0])
             if "canonical-cost-backfill" not in remote_command:
                 raise AssertionError("Finance canonical command bypassed the repo-owned runner")
+            if (
+                f"timeout --signal=TERM --kill-after=30s {int(expected_timeout)}s"
+                not in remote_command
+            ):
+                raise AssertionError(
+                    f"Finance canonical {action} lost its remote process timeout"
+                )
             if action == "apply" and not all(
                 token in remote_command
                 for token in (

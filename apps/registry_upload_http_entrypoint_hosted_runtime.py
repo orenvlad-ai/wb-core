@@ -33,8 +33,9 @@ WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
-FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 900.0
-FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 1800.0
+FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 3600.0
+FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 7200.0
+FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS = 60.0
 FINANCE_STORAGE_SPLIT_READ_TIMEOUT_SECONDS = 3600.0
 FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS = 43_200.0
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
@@ -3689,10 +3690,19 @@ def _run_remote_finance_canonical_action(
                 approval_reference.strip(),
             ]
         )
+    remote_timeout_seconds = (
+        FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS
+        if action == "apply"
+        else FINANCE_CANONICAL_READ_TIMEOUT_SECONDS
+    )
+    remote_runner_command = " ".join(shlex.quote(item) for item in runner_args)
     shell_command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
-            " ".join(shlex.quote(item) for item in runner_args),
+            (
+                "timeout --signal=TERM --kill-after=30s "
+                f"{int(remote_timeout_seconds)}s {remote_runner_command}"
+            ),
         ]
     )
     result = subprocess.run(
@@ -3700,11 +3710,7 @@ def _run_remote_finance_canonical_action(
         text=True,
         capture_output=True,
         cwd=ROOT,
-        timeout=(
-            FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS
-            if action == "apply"
-            else FINANCE_CANONICAL_READ_TIMEOUT_SECONDS
-        ),
+        timeout=remote_timeout_seconds + FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS,
         check=False,
     )
     if result.returncode != 0:
