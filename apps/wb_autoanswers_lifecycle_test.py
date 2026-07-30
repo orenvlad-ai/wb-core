@@ -180,6 +180,31 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(still_starting["lifecycle_state"], "starting")
         self.assertEqual(still_starting["stop_reason"], "")
 
+    def test_active_worker_may_replace_only_a_stale_worker_error(self) -> None:
+        self.set_mode("auto_all")
+        with self.repository.transaction() as conn:
+            self.repository._set_stop_reason(
+                conn,
+                "worker_error",
+                details={
+                    "code": "synthetic_previous_attempt",
+                    "stage": "processing",
+                },
+                at=self.clock(),
+            )
+        self.systemd.active_services.add(WORKER_SERVICE)
+        starting = self.reconcile()
+        self.assertTrue(starting["service_in_progress"])
+        self.assertEqual(starting["lifecycle_state"], "starting")
+        self.assertEqual(starting["drift_status"], "matched")
+        self.assertEqual(starting["stop_reason"], "")
+
+        self.systemd.active_services.remove(WORKER_SERVICE)
+        blocked = self.lifecycle.status(suspended_by_master=False)
+        self.assertEqual(blocked["lifecycle_state"], "error")
+        self.assertEqual(blocked["drift_status"], "blocked")
+        self.assertEqual(blocked["stop_reason"], "worker_error")
+
     def test_master_pause_preserves_feature_mode_and_resume_uses_latest_mode(self) -> None:
         self.set_mode("manual")
         self.reconcile()
