@@ -866,7 +866,10 @@ class FinanceOutboxConsumer:
             operation="finance_outbox_consumer_ack",
             isolation_level=None,
         ) as raw_write:
-            ensure_raw_schema(raw_write)
+            # The read phase already proved the complete raw schema. Re-running
+            # DDL here can require an exclusive schema lock and strand an
+            # otherwise complete duplicate acknowledgement behind a long
+            # query-only Finance reconciliation.
             raw_write.execute("BEGIN IMMEDIATE")
             raw_write.execute(
                 """UPDATE finance_raw_outbox

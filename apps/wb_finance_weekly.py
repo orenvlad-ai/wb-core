@@ -301,12 +301,14 @@ def main(argv: list[str] | None = None) -> int:
                 client,
             )
         else:
+            outbox_recovery = block.recover_receipted_split_outbox()
             due = block.due_tick_week()
             result = (
                 {"status": "no_due_week"}
                 if due is None
                 else block.sync_week(due[0], due[1], client)
             )
+            result["storage_outbox_recovery"] = outbox_recovery
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return (
         0 if str(result.get("status")) not in {"error", "completed_with_errors"} else 1

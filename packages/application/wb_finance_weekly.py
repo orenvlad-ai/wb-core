@@ -995,6 +995,126 @@ class WbFinanceWeeklyBlock:
                     "events": acknowledged,
                 }
 
+    def recover_receipted_split_outbox(
+        self,
+        *,
+        max_events: int = 64,
+    ) -> dict[str, Any]:
+        """Acknowledge only pending events with an exact operational receipt."""
+
+        if max_events < 1 or max_events > 64:
+            raise ValueError("receipted outbox recovery max_events must be within 1..64")
+        manifest = self.store_registry.load()
+        if not (
+            manifest.state == "cutover"
+            and manifest.canonical_source == "split"
+        ):
+            return {
+                "status": "disabled",
+                "reason": "canonical Finance storage is not selected split",
+                "events": [],
+            }
+        consumer = FinanceOutboxConsumer(
+            self.store_registry,
+            apply_event=self._verify_outbox_projection,
+            now_factory=lambda: self.now_factory()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        )
+        recovered: list[dict[str, Any]] = []
+        while True:
+            with self.store_registry.session(
+                "finance_raw",
+                mode="ro",
+                operation="wb_finance_receipted_outbox_recovery_read",
+            ) as raw:
+                cursor = raw.execute(
+                    """SELECT last_sequence_no
+                       FROM finance_raw_consumer_cursors
+                       WHERE consumer_id='finance_operational_projection_v1'"""
+                ).fetchone()
+                last_sequence = int(cursor["last_sequence_no"]) if cursor else 0
+                event = raw.execute(
+                    """SELECT event_id,sequence_no,payload_json
+                       FROM finance_raw_outbox
+                       WHERE sequence_no>? ORDER BY sequence_no LIMIT 1""",
+                    (last_sequence,),
+                ).fetchone()
+            if event is None:
+                return {
+                    "status": "acknowledged" if recovered else "clean",
+                    "last_sequence_no": last_sequence,
+                    "events": recovered,
+                }
+            if len(recovered) >= max_events:
+                raise ValueError(
+                    "receipted outbox recovery reached its bounded event limit"
+                )
+            sequence_no = int(event["sequence_no"])
+            if sequence_no != last_sequence + 1:
+                raise ValueError(
+                    "receipted outbox recovery found a sequence gap or reorder"
+                )
+            payload = json.loads(str(event["payload_json"]))
+            rows_digest = str(payload.get("rows_digest") or "")
+            row_count = int(payload.get("row_count") or 0)
+            with self.store_registry.session(
+                "operational",
+                mode="ro",
+                operation="wb_finance_receipted_outbox_recovery_receipt",
+            ) as operational:
+                receipt = operational.execute(
+                    """SELECT sequence_no,source_revision,result_row_count,
+                              result_digest
+                       FROM finance_operational_receipts
+                       WHERE consumer_id='finance_operational_projection_v1'
+                         AND event_id=?""",
+                    (str(event["event_id"]),),
+                ).fetchone()
+                operational_cursor = operational.execute(
+                    """SELECT last_sequence_no
+                       FROM finance_operational_consumer_cursors
+                       WHERE consumer_id='finance_operational_projection_v1'"""
+                ).fetchone()
+            if receipt is None:
+                return {
+                    "status": "waiting_for_projection",
+                    "last_sequence_no": last_sequence,
+                    "pending_event_id": str(event["event_id"]),
+                    "pending_sequence_no": sequence_no,
+                    "events": recovered,
+                }
+            if (
+                int(receipt["sequence_no"]) != sequence_no
+                or str(receipt["source_revision"]) != rows_digest
+                or int(receipt["result_row_count"]) != row_count
+                or not str(receipt["result_digest"])
+                or operational_cursor is None
+                or int(operational_cursor["last_sequence_no"]) < sequence_no
+            ):
+                raise ValueError(
+                    "receipted outbox recovery evidence does not match the pending event"
+                )
+            result = consumer.consume_next()
+            if (
+                result is None
+                or result.sequence_no != sequence_no
+                or result.event_id != str(event["event_id"])
+                or not result.duplicate
+            ):
+                raise ValueError(
+                    "receipted outbox recovery did not produce an exact duplicate acknowledgement"
+                )
+            recovered.append(
+                {
+                    "event_id": result.event_id,
+                    "sequence_no": result.sequence_no,
+                    "status": result.status,
+                    "duplicate": result.duplicate,
+                }
+            )
+
     def _verify_outbox_projection(
         self,
         conn: sqlite3.Connection,
