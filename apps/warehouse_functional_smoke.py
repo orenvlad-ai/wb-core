@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import inspect
 import json
 from pathlib import Path
 import sqlite3
@@ -95,6 +97,7 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
 )
 from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
 from apps.warehouse_functional_runner import (  # noqa: E402
+    _run,
     _recalculate_downstream_finance_cost,
     _verify_cutover_external_recheck,
 )
@@ -134,6 +137,7 @@ def main() -> None:
     _test_initial_settings_preserve_outer_transaction()
     _test_external_optimistic_recheck()
     _test_downstream_cost_refresh_recalculates_finance_before_unlock()
+    _test_finance_recalculation_is_the_last_cost_writer()
     _test_semantic_digest_ignores_volatile_capture_identity()
     _test_source_capture_exposes_calculation_timestamp()
     _test_supply_refresh_completeness_gate()
@@ -200,8 +204,48 @@ def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
     _assert(
         result["post_verify_stale_week_count"] == 0
         and result["non_target_preserved"] is True,
-        "Finance recalculation must expose exact post-verify/non-target evidence",
+        "last cost writer must expose exact Finance post-verify/non-target evidence",
     )
+
+
+def _test_finance_recalculation_is_the_last_cost_writer() -> None:
+    tree = ast.parse(inspect.getsource(_run))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    ]
+    recalculate_lines = sorted(
+        node.lineno
+        for node in calls
+        if isinstance(node.func, ast.Name)
+        and node.func.id == "_recalculate_downstream_finance_cost"
+    )
+    economics_lines = sorted(
+        node.lineno
+        for node in calls
+        if isinstance(node.func, ast.Attribute)
+        and node.func.attr == "publish_current_functional_economics"
+    )
+    retention_lines = sorted(
+        node.lineno
+        for node in calls
+        if isinstance(node.func, ast.Name)
+        and node.func.id == "_run_bounded_recovery_retention"
+    )
+    _assert(
+        len(recalculate_lines) == 2,
+        "reviewed and hourly/manual sync must each recalculate Finance once",
+    )
+    for line in recalculate_lines:
+        _assert(
+            any(economics < line for economics in economics_lines),
+            "Finance recalculation must follow functional-economics publication",
+        )
+        _assert(
+            any(retention > line for retention in retention_lines),
+            "Finance recalculation must finish before final retention and unlock",
+        )
 
 
 def _test_source_mutation_removes_green_balance_status() -> None:
