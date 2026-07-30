@@ -86,7 +86,7 @@ Paid acceptance/transit addback is allowed only when exact Finance `giId/supplyI
 
 Global capitalization allocations are built once for the coherent SQLite connection used by one plan/apply/readback pass and then reused by the global and every per-SKU aggregate. A new connection always rebuilds the raw/supply-layer manifest and allocations, so a later Finance sync or canonical layer correction invalidates the cache. This avoids the accidental `weeks × SKUs × all cost layers` re-hashing path without weakening source drift detection.
 
-The existing stale-derived hook now checks every loaded week, including the backward historical projection. It compares canonical cost state, classifier version and the complete deterministic metrics payload, so both a corrected 01.07 cost and a corrected supply-layer cap invalidate every affected historical projection instead of only post-cutover COGS.
+The existing stale-derived hook now checks every loaded week, including the backward historical projection. It compares canonical cost state, classifier version and the complete deterministic metrics payload, so both a corrected 01.07 cost and a corrected supply-layer cap invalidate every affected historical projection instead of only post-cutover COGS. The hourly/manual warehouse functional writer runs that exact stale-week recalculation inside the same warehouse write lock immediately after it materializes new supply-cost layers. It returns the Finance post-verify and non-target evidence in the sync result, so releasing the lock cannot expose newly written layers with stale Partner/Finance SKU bindings.
 
 ```text
 profit_period_expenses = total_wb_expenses

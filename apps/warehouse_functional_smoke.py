@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -94,7 +94,10 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
 from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
-from apps.warehouse_functional_runner import _verify_cutover_external_recheck  # noqa: E402
+from apps.warehouse_functional_runner import (  # noqa: E402
+    _recalculate_downstream_finance_cost,
+    _verify_cutover_external_recheck,
+)
 
 
 NOW = "2026-07-18T12:00:00Z"
@@ -130,6 +133,7 @@ def main() -> None:
     _test_versioned_parameters_and_reference()
     _test_initial_settings_preserve_outer_transaction()
     _test_external_optimistic_recheck()
+    _test_downstream_cost_refresh_recalculates_finance_before_unlock()
     _test_semantic_digest_ignores_volatile_capture_identity()
     _test_source_capture_exposes_calculation_timestamp()
     _test_supply_refresh_completeness_gate()
@@ -160,6 +164,44 @@ def _test_decimal_and_allocations() -> None:
         method="quantity",
     )
     _assert(sum(quantity.values(), Decimal("0")) == Decimal("1"), "allocation conserves exact capital")
+
+
+def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
+    class FakeFinance:
+        def __init__(self) -> None:
+            self.date_from = None
+
+        def recalculate_stale_cost_weeks(self, *, date_from):
+            self.date_from = date_from
+            return {
+                "status": "applied",
+                "recalculated_week_count": 2,
+                "post_verify_stale_week_count": 0,
+                "non_target_preserved": True,
+            }
+
+    class FakeRuntime:
+        runtime_dir = Path("/tmp/fake-warehouse-runtime")
+
+    finance = FakeFinance()
+    with patch(
+        "apps.warehouse_functional_runner.block_from_env",
+        return_value=finance,
+    ) as factory:
+        result = _recalculate_downstream_finance_cost(FakeRuntime())  # type: ignore[arg-type]
+    _assert(
+        factory.call_args.args == (FakeRuntime.runtime_dir,),
+        "Finance recalculation must use the selected runtime registry",
+    )
+    _assert(
+        finance.date_from == date(2026, 7, 1),
+        "Finance recalculation must include the 2026-06-29 boundary week",
+    )
+    _assert(
+        result["post_verify_stale_week_count"] == 0
+        and result["non_target_preserved"] is True,
+        "Finance recalculation must expose exact post-verify/non-target evidence",
+    )
 
 
 def _test_source_mutation_removes_green_balance_status() -> None:
