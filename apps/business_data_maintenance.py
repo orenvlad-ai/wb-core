@@ -1134,23 +1134,31 @@ def _autoanswers_process_actual_state(
     ):
         stop_reason = "run_cap_missing"
     elif (
-        stop_reason == "worker_unavailable"
-        and (
-            service_in_progress
-            or (
-                requested_at is not None
-                and requested_at > now - timedelta(minutes=3)
+        (
+            stop_reason == "worker_error"
+            and service_in_progress
+        )
+        or (
+            stop_reason == "worker_unavailable"
+            and (
+                service_in_progress
+                or (
+                    requested_at is not None
+                    and requested_at > now - timedelta(minutes=3)
+                )
             )
         )
     ):
         # Match the feature-owned lifecycle contract: a newly resumed timer
         # receives one scheduler interval to produce its first post-request
-        # tick.  Treating the stale pre-request worker_unavailable marker as
-        # immediate drift makes an otherwise exact outer restore impossible.
+        # tick.  While the exact worker service is in progress it also owns
+        # replacement of a stale pre-request worker_error marker.  Neither
+        # marker is ignored without that bounded startup evidence.
         stop_reason = ""
     elif (
         mode in {"manual", "draft_only", "auto_safe", "auto_all"}
         and not fresh_tick
+        and stop_reason != "worker_error"
         and (
             requested_at is None
             or requested_at <= now - timedelta(minutes=3)

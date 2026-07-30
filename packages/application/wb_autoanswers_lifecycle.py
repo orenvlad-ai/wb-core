@@ -312,18 +312,25 @@ class AutoanswersLifecycle:
         elif str(budget.get("budget_state") or "") == "unknown":
             stop_reason = "budget_state_unknown"
         elif (
-            stop_reason == "worker_unavailable"
-            and (
-                service_in_progress
-                or (
-                    requested_at is not None
-                    and requested_at > now - timedelta(minutes=3)
+            (
+                stop_reason == "worker_error"
+                and service_in_progress
+            )
+            or (
+                stop_reason == "worker_unavailable"
+                and (
+                    service_in_progress
+                    or (
+                        requested_at is not None
+                        and requested_at > now - timedelta(minutes=3)
+                    )
                 )
             )
         ):
             # A newly enabled timer has one scheduler interval to produce its
-            # first post-request tick. During that bounded grace period the
-            # truthful state is "starting", not a terminal failure.
+            # first post-request tick.  An in-progress worker also owns the
+            # right to replace a stale pre-request worker_error marker.
+            # Outside those bounded facts the same markers remain blocking.
             stop_reason = ""
         last_error = str(persisted.get("last_error") or "")
         if suspended_by_master:

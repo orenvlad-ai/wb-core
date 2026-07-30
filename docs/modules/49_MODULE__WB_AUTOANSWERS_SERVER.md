@@ -156,7 +156,9 @@ mode write alone. It must read back settings, required `policy_epoch`, exact
 transition run and run cap, timer enabled/active states and absence of lifecycle
 drift. Until the first post-request scheduler tick the operational state is
 `starting`; after the grace interval a stale tick is `worker_unavailable`, not
-healthy.
+healthy. A retained `worker_error` from the preceding attempt is replaced only
+while the exact desired worker service is demonstrably active/activating with a
+successful result; otherwise it remains a blocking lifecycle error.
 
 The force-off readonly runner proves its own safety from the causal `enqueued=0`
 result of every sync tick plus its provider/writer-free import boundary. It does

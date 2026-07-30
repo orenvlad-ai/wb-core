@@ -170,6 +170,38 @@ def _assert_autoanswers_resume_grace_ignores_stale_worker_marker() -> None:
     assert long_running["lifecycle_state"] == "starting"
     assert long_running["stop_reason"] == ""
 
+    feature["stop_reason"] = "worker_error"
+    with mock.patch(
+        "apps.business_data_maintenance._autoanswers_feature_state",
+        return_value=feature,
+    ):
+        recovering_error = _autoanswers_process_actual_state(
+            status=active_status,
+            policy={"master_desired": True},
+            runtime_dir=Path("/unused"),
+            spec=spec,
+        )
+    assert recovering_error["service_in_progress"] is True
+    assert recovering_error["drift_status"] == "matched"
+    assert recovering_error["lifecycle_state"] == "starting"
+    assert recovering_error["stop_reason"] == ""
+
+    with mock.patch(
+        "apps.business_data_maintenance._autoanswers_feature_state",
+        return_value=feature,
+    ):
+        unowned_error = _autoanswers_process_actual_state(
+            status=status,
+            policy={"master_desired": True},
+            runtime_dir=Path("/unused"),
+            spec=spec,
+        )
+    assert unowned_error["service_in_progress"] is False
+    assert unowned_error["drift_status"] == "blocked"
+    assert unowned_error["lifecycle_state"] == "error"
+    assert unowned_error["stop_reason"] == "worker_error"
+
+    feature["stop_reason"] = "worker_unavailable"
     snapshot_at = datetime.now(timezone.utc) - timedelta(minutes=8)
     feature["lifecycle"]["requested_at"] = (
         snapshot_at - timedelta(minutes=1)

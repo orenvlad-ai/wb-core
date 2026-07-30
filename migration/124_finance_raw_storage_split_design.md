@@ -182,7 +182,10 @@ The implementation is deliberately inert on deploy:
   epoch, transition run, component timers, service results and observation
   order must all match. A redundant later feature-store
   `worker_unavailable` view cannot override that already bound `starting`
-  evidence. Feature-owned non-blocking progress such as
+  evidence. A pre-request `worker_error` is likewise treated as replaced only
+  while the exact desired worker service is actively executing successfully;
+  without that bounded service-generation fact it remains a blocking error.
+  Feature-owned non-blocking progress such as
   `reconciliation_in_progress` remains acceptable, while any lifecycle
   blocking stop reason, identity/component drift, failed service or inactive
   outer timer still blocks and returns the whole restore to the paused
