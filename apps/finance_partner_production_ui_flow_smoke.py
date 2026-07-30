@@ -21,6 +21,7 @@ from apps.finance_partner_production_ui_flow import (  # noqa: E402
     _partner_acceptance_passed,
     _partner_preview_api_evidence,
     _protected_json_post,
+    _validate_finance_storage_card,
     _validate_finance_storage_health,
     _verify_partner_xlsx,
     _xlsx_evidence,
@@ -46,6 +47,34 @@ def main() -> None:
     _assert(
         _validate_finance_storage_health(split_health) == "selected_split",
         "selected split storage phase was not accepted",
+    )
+    _validate_finance_storage_card(
+        _monolith_storage_card(),
+        storage_health=_monolith_storage_health(),
+        storage_phase="implicit_monolith",
+    )
+    _validate_finance_storage_card(
+        _split_storage_card(split_health),
+        storage_health=split_health,
+        storage_phase="selected_split",
+    )
+    _assert_storage_card_rejected(
+        _split_storage_card(split_health).replace(
+            "operational-" + str(split_health["generation_epoch"]),
+            "operational-" + "f" * 20,
+        ),
+        storage_health=split_health,
+        storage_phase="selected_split",
+        label="mixed rendered split generation",
+    )
+    _assert_storage_card_rejected(
+        _split_storage_card(split_health).replace(
+            "consumer lag: 0",
+            "consumer lag: 1",
+        ),
+        storage_health=split_health,
+        storage_phase="selected_split",
+        label="rendered split consumer lag",
     )
     invalid_split_generation = deepcopy(split_health)
     invalid_split_generation["operational"]["generation_epoch"] = "f" * 20
@@ -356,12 +385,59 @@ def _split_storage_health() -> dict:
     }
 
 
+def _monolith_storage_card() -> str:
+    return (
+        "Состояние: monolith; canonical: monolith; implicit monolith.\n"
+        "rollback: готов; cutover: не разрешён/не готов."
+    )
+
+
+def _split_storage_card(storage_health: dict) -> str:
+    raw = storage_health["raw"]
+    operational = storage_health["operational"]
+    return (
+        "Состояние: cutover; canonical: split.\n"
+        f"Raw generation: {raw['generation_id']}, "
+        f"schema {raw['schema_revision']}, 1,00 ГБ.\n"
+        f"Operational generation: {operational['generation_id']}, "
+        f"schema {operational['schema_revision']}, 512,0 МБ.\n"
+        "Cursor raw/operational: "
+        f"{storage_health['raw_ack_cursor']} / "
+        f"{storage_health['operational_cursor']}; "
+        f"consumer lag: {storage_health['consumer_lag_events']}; "
+        "live-tail cursor/lag: "
+        f"{storage_health.get('live_tail_cursor', 0)} / "
+        f"{storage_health.get('live_tail_lag_events', 0)}; "
+        f"mismatches: {storage_health['shadow_mismatch_count']}; "
+        f"dead letters: {storage_health['actionable_dead_letters']}.\n"
+        "rollback: не доказан; cutover: не разрешён/не готов."
+    )
+
+
 def _assert_storage_rejected(storage_health: dict, label: str) -> None:
     try:
         _validate_finance_storage_health(storage_health)
     except AssertionError:
         return
     raise AssertionError(f"Finance UI accepted invalid storage health: {label}")
+
+
+def _assert_storage_card_rejected(
+    storage_text: str,
+    *,
+    storage_health: dict,
+    storage_phase: str,
+    label: str,
+) -> None:
+    try:
+        _validate_finance_storage_card(
+            storage_text,
+            storage_health=storage_health,
+            storage_phase=storage_phase,
+        )
+    except AssertionError:
+        return
+    raise AssertionError(f"Finance UI accepted invalid storage card: {label}")
 
 
 def _preview() -> dict:
