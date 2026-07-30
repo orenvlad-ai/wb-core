@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
     build_supplier_cost_state_replay_plan,
     rollback_supplier_cost_state_replay,
 )
+from packages.application.wb_finance_weekly import block_from_env  # noqa: E402
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 from packages.application.stocks_block import StocksBlock  # noqa: E402
 
@@ -206,6 +208,9 @@ def _run(
                     record_ff_movements=False,
                 )
                 downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
+                finance_cost_recalculation = (
+                    _recalculate_downstream_finance_cost(runtime)
+                )
                 ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
                 fresh_plan = block.build_sync_plan()
                 recheck = _verify_sync_external_recheck(reviewed_plan, fresh_plan)
@@ -241,6 +246,7 @@ def _run(
                     "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "wb_finance_cost_recalculation": finance_cost_recalculation,
                     "ff_state": ff_state,
                     "external_optimistic_recheck": recheck,
                     "diff": reviewed_plan.get("diff"),
@@ -289,6 +295,11 @@ def _run(
                     "materialize_downstream_cost_layers",
                     phase_timings_ms,
                     lambda: _materialize_downstream_cost_layers(runtime),
+                )
+                finance_cost_recalculation = _run_sync_phase(
+                    "recalculate_downstream_finance_cost",
+                    phase_timings_ms,
+                    lambda: _recalculate_downstream_finance_cost(runtime),
                 )
                 ff_state = _run_sync_phase(
                     "reconcile_functional_ff_state",
@@ -351,6 +362,7 @@ def _run(
                     "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "wb_finance_cost_recalculation": finance_cost_recalculation,
                     "ff_state": ff_state,
                     "plan_fingerprint": plan["plan_fingerprint"],
                     "diff": plan["diff"],
@@ -629,6 +641,21 @@ def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) 
 
     return OurWbCostBlock(runtime=runtime).materialize_wb_supply_cost_layers(
         opening_date="2026-07-01"
+    )
+
+
+def _recalculate_downstream_finance_cost(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> dict[str, Any]:
+    """Publish Finance bindings invalidated by the just-written cost layers.
+
+    The caller owns the warehouse functional write lock, so no later cost-layer
+    publication can interleave between stale detection and Finance readback.
+    The July boundary includes the week that starts on 2026-06-29.
+    """
+
+    return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks(
+        date_from=date(2026, 7, 1)
     )
 
 
