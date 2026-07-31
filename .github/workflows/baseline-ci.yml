@@ -83,6 +83,7 @@ jobs:
           python3 apps/business_data_maintenance_restore_job_smoke.py
           python3 apps/registry_upload_http_entrypoint_auth_smoke.py
           python3 apps/finance_storage_split_smoke.py
+          python3 apps/finance_storage_backup_rotation_smoke.py
           python3 apps/finance_storage_candidate_abort_smoke.py
           python3 apps/finance_storage_transport_job_smoke.py
           python3 apps/finance_storage_post_manifest_recovery_smoke.py

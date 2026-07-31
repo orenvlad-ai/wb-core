@@ -70,6 +70,8 @@ _SYSTEMD_UNITS = (
     "wb-core-registry-http.service",
     "wb-core-wb-finance-weekly.service",
     "wb-core-wb-finance-weekly.timer",
+    "wb-core-finance-backup-rotation.service",
+    "wb-core-finance-backup-rotation.timer",
     "wb-core-warehouse-functional-sync.service",
     "wb-core-warehouse-functional-sync.timer",
     "wb-core-sheet-vitrina-refresh.service",

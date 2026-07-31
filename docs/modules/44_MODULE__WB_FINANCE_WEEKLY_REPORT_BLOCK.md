@@ -236,7 +236,7 @@ Production apply is not implied by merge/deploy and remains forbidden until the 
 
 ## UI and verification
 
-The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store.
+The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store. It also reads the bounded post-cutover backup health: selected restore-set identity/count/bytes, age and RPO/RTO, next atomic-replacement capacity, last success/failure, 30/90-day retained-growth projection and blockers.
 
 After split cutover, Finance and Partner attach the manifest-selected raw
 generation read-only and expose only the connection-local current-row
@@ -262,6 +262,7 @@ Targeted checks:
 - `python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py`;
 - `python3 apps/wb_finance_weekly_browser_smoke.py`;
 - `python3 apps/finance_storage_split_smoke.py`;
+- `python3 apps/finance_storage_backup_rotation_smoke.py`;
 - `python3 apps/finance_storage_candidate_abort_smoke.py`;
 - `python3 apps/finance_storage_stale_writer_recovery_smoke.py`;
 - `python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated`;

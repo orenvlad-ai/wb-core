@@ -68,6 +68,21 @@ WRITERS = [
         ),
     },
     {
+        "owner": "finance_post_cutover_backup_rotation",
+        "source": "packages/application/finance_storage_backup_rotation.py",
+        "cadence": "daily_due_check_weekly_max_full",
+        "artifact": "one coherent raw+operational split restore-set",
+        "full_monolith": False,
+        "guard": (
+            "exact manifest/device/inventory CAS + one-current selector + "
+            "integrity/FK/logical/restore readback"
+        ),
+        "lifecycle": (
+            "count=1; temporary count=2 only until atomic replacement; "
+            "hard byte/age/capacity limits"
+        ),
+    },
+    {
         "owner": "finance_legacy_helper",
         "source": "apps/wb_finance_weekly.py",
         "cadence": "unreferenced_legacy_helper",

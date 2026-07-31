@@ -97,6 +97,16 @@
       "restart": false
     },
     {
+      "name": "wb-core-finance-backup-rotation.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-finance-backup-rotation.timer",
+      "enable": true,
+      "restart": false
+    },
+    {
       "name": "wb-core-warehouse-functional-sync.service",
       "enable": false,
       "restart": false

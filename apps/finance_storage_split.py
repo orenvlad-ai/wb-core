@@ -71,13 +71,20 @@ from packages.application.finance_storage_snapshot_retention import (
     PLAN_CONTRACT as SNAPSHOT_RETENTION_PLAN_CONTRACT,
     RESULT_CONTRACT as SNAPSHOT_RETENTION_RESULT_CONTRACT,
 )
+from packages.application.finance_storage_backup_rotation import (
+    FinanceStorageBackupRotation,
+    backup_rotation_health,
+)
 from packages.application.finance_storage_post_manifest_recovery import (
     readback as post_manifest_recovery_readback,
 )
-from packages.application.storage_registry import parse_manifest
+from packages.application.storage_registry import StoreRegistry, parse_manifest
 from apps.business_data_maintenance_restore_job import (
     CONTRACT_NAME as RESTORE_JOB_CONTRACT,
     MAX_RESUME_SEQUENCE as RESTORE_MAX_RESUME_SEQUENCE,
+)
+from apps.finance_storage_transport_job import (
+    MAX_RESUME_ATTEMPTS as TRANSPORT_MAX_RESUME_ATTEMPTS,
 )
 
 
@@ -146,6 +153,9 @@ def _downstream_recovery_capabilities() -> dict[str, bool]:
         "durable_storage_transport": (
             ROOT / "apps" / "finance_storage_transport_job.py"
         ).is_file(),
+        "durable_storage_transport_resume": (
+            TRANSPORT_MAX_RESUME_ATTEMPTS >= 8
+        ),
     }
 
 
@@ -794,9 +804,20 @@ def main(argv: list[str] | None = None) -> int:
             args.source_snapshot_manifest.expanduser().resolve()
         )
     elif args.action.startswith("snapshot-retention-"):
-        retention = FinanceStorageSnapshotRetention(
-            runtime_dir,
-            deployed_sha=deployed_sha,
+        active_manifest = StoreRegistry(runtime_dir).load()
+        retention = (
+            FinanceStorageBackupRotation(
+                runtime_dir,
+                deployed_sha=deployed_sha,
+            )
+            if (
+                active_manifest.state == "cutover"
+                and active_manifest.canonical_source == "split"
+            )
+            else FinanceStorageSnapshotRetention(
+                runtime_dir,
+                deployed_sha=deployed_sha,
+            )
         )
         if args.action == "snapshot-retention-plan":
             payload = retention.build_plan()
@@ -862,6 +883,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=args.repo_root,
             ).registry
         )
+        payload["backup"] = backup_rotation_health(runtime_dir)
     elif args.action == "shadow-read":
         if args.candidate_manifest is None:
             raise SystemExit("--candidate-manifest is required for shadow-read")

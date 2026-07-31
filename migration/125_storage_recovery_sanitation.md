@@ -224,6 +224,13 @@ fresh fingerprint. The Stage 3 fingerprint that predated sanitation is stale.
 No candidate backfill, live-tail, cutover or monolith retirement is permitted
 by this migration.
 
+Historical note: PR #884 subsequently completed the Finance split. The
+archive-first Finance migration snapshots were not T2 warehouse artifacts and
+therefore were not bounded by this sanitation policy. Their post-cutover
+one-current restore-set lifecycle and exact cleanup are now specified by
+`migration/128_finance_backup_rotation.md`; migration 125 grants no authority
+to retire the original monolith or any Finance generation.
+
 ## Required checks
 
 - `python3 apps/warehouse_recovery_policy_smoke.py`

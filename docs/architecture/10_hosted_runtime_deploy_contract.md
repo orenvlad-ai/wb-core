@@ -175,7 +175,29 @@ The same runner owns the only production path for the active functional cutover 
   `cutover_evidence.json`, active exact barrier and fresh recovery-deploy lease
   must all agree. It never replays the final tail, operational recopy or
   manifest mutation.
-- Snapshot/cutover/rollback byte mutations run through one persisted
+- After a selected split cutover, the same
+  `finance-storage-snapshot-retention-plan|apply|readback` surface switches to
+  `post_cutover_atomic_replace_v1`. It binds the exact deployed SHA, selected
+  manifest/store identities, dedicated backup mount, complete legacy/current
+  inventory and count/byte/age/capacity policy. Apply may release oldest
+  verified legacy archives before copy only while a separate verified fallback
+  remains. It copies operational then raw directly to a private set on the
+  mounted backup device, requires integrity/FK/logical-digest and isolated
+  cursor restore readback, fsyncs and atomically selects one current set before
+  releasing any remaining root/backup legacy artifact or old current. Unknown,
+  corrupt, incomplete, opened or drifted artifacts remain protected. The
+  original monolith and every `generations/` path are structurally outside the
+  deletion allowlist. The daily systemd due-check is byte-inert until an
+  approved first apply writes the private policy; thereafter it resumes only
+  the same durable transaction and holds one current set with a temporary
+  second only during replacement. Operator health exposes identity, age,
+  RPO/RTO, bytes, next replacement capacity, success/failure and zero 30/90-day
+  retained-growth projection. A terminal failed post-cutover retention worker
+  is resumed only by the explicit
+  `finance-storage-snapshot-retention-resume` surface with the same request
+  identity, SHA, plan, fingerprint and approval; it archives the prior failure,
+  rejects active/ambiguous workers and caps the chain at eight attempts;
+- Snapshot/snapshot-retention/cutover/rollback byte mutations run through one persisted
   `finance_storage_transport_job.py` request identity. Submit transport loss is
   followed only by status observation of that exact worker; request/SHA drift
   or a lost worker remains ambiguous and never triggers a replacement.
@@ -264,6 +286,8 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-finance-backup-rotation.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-finance-backup-rotation.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-business-data-maintenance-restore@.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-spp-tester-schedule-tick.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-spp-tester-schedule-tick.timer`

@@ -67,6 +67,7 @@ CORE_TIMER_UNITS = (
     "wb-core-feedbacks-auto-complaints-tick.timer",
     "wb-core-spp-tester-schedule-tick.timer",
     "wb-core-wb-finance-weekly.timer",
+    "wb-core-finance-backup-rotation.timer",
 )
 FORCE_OFF_TIMER_UNITS = (
     "wb-core-warehouse-functional-sync.timer",
@@ -122,6 +123,7 @@ WRITER_PROCESS_MARKERS = (
     "sheet_vitrina_v1_feedbacks_auto_complaints_tick.py",
     "wb_spp_tester_schedule_tick.py",
     "wb_finance_weekly.py",
+    "finance_storage_backup_rotation.py",
     "warehouse_functional_runner.py",
     "wb_autoanswers_readonly.py",
     "wb_autoanswers_worker.py",
@@ -465,6 +467,9 @@ def _lock_summary(runtime_dir: Path) -> dict[str, Any]:
         "web_schedule": _flock_snapshot(runtime_dir / "sheet_vitrina_v1_auto_refresh_schedules.json.lock"),
         "spp_execution": _flock_snapshot(runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests" / "execution.lock"),
         "seller_portal": current_lock_status(runtime_dir),
+        "finance_backup": _flock_snapshot(
+            runtime_dir / ".finance-storage-snapshot-retention.lock"
+        ),
     }
 
 
@@ -1728,7 +1733,11 @@ def maintenance_status(
     timer_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_TIMER_UNITS}
     service_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_SERVICE_UNITS}
     discovered = systemd.discovered_timers()
-    unknown_timers = [unit for unit in discovered if unit not in ALL_BUSINESS_TIMER_UNITS]
+    unknown_timers = [
+        unit
+        for unit in discovered
+        if unit not in ALL_BUSINESS_TIMER_UNITS
+    ]
     runtime = _runtime_summary(schedules.read_all())
     processes = _writer_processes(proc_root)
     locks = _lock_summary(runtime_dir)
