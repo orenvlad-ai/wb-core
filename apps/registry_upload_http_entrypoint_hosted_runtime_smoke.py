@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -22,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+import apps.registry_upload_http_entrypoint_live as live_runner  # noqa: E402
 import apps.finance_partner_production_ui_flow as finance_ui_flow  # noqa: E402
 import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
 import apps.warehouse_stocks_production_ui_flow as warehouse_ui_flow  # noqa: E402
@@ -68,6 +70,74 @@ class _ShortReadResponse:
 
 
 def main() -> None:
+    with TemporaryDirectory(
+        prefix="finance-canonical-process-bindings-"
+    ) as bindings_temp_dir:
+        binding_root = Path(bindings_temp_dir)
+        raw_path = binding_root / "finance_raw.sqlite3"
+        operational_path = binding_root / "operational.sqlite3"
+        for path in (raw_path, operational_path):
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE binding_smoke(value TEXT)"
+                )
+
+        class _BindingRegistry:
+            def load(self, *, require_files: bool = False) -> object:
+                if not require_files:
+                    raise AssertionError(
+                        "canonical process binding must require store files"
+                    )
+                return object()
+
+            def resolve(
+                self,
+                logical_store: str,
+                *,
+                manifest: object,
+            ) -> Path:
+                del manifest
+                return (
+                    raw_path
+                    if logical_store == "finance_raw"
+                    else operational_path
+                )
+
+        with mock.patch.object(
+            live_runner,
+            "StoreRegistry",
+            return_value=_BindingRegistry(),
+        ):
+            bindings = live_runner.FinanceCanonicalStoreBindings(
+                binding_root
+            )
+        try:
+            if bindings.paths != (
+                raw_path.resolve(),
+                operational_path.resolve(),
+            ):
+                raise AssertionError(
+                    "HTTP startup must bind both exact canonical stores"
+                )
+            if any(
+                int(
+                    connection.execute(
+                        "PRAGMA query_only"
+                    ).fetchone()[0]
+                )
+                != 1
+                for connection in bindings._connections
+            ):
+                raise AssertionError(
+                    "HTTP canonical store bindings must stay query-only"
+                )
+        finally:
+            bindings.close()
+        if bindings._connections:
+            raise AssertionError(
+                "HTTP canonical store bindings must close on shutdown"
+            )
+
     if hosted_runtime._warehouse_opening_timeout_seconds("dry-run") != 300.0:
         raise AssertionError("warehouse opening dry-run must retain the bounded read timeout")
     if hosted_runtime._warehouse_opening_timeout_seconds("readback") != 300.0:

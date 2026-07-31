@@ -610,12 +610,78 @@ def validate_recovery_preflight(
         "operational_generation_id": active.operational.generation_id,
     }
     plan = dict(reviewed_plan or {})
+    exact_cutover_recovery_deploy = False
+    if (
+        exact_action == "cutover-apply"
+        and active.state == "cutover"
+        and active.canonical_source == "split"
+        and reviewed_plan is not None
+    ):
+        target_manifest = dict(plan.get("target_manifest") or {})
+        cutover_evidence_path = (
+            root
+            / "generations"
+            / active.generation_epoch
+            / "cutover_evidence.json"
+        )
+        cutover_evidence = (
+            _load_object(
+                cutover_evidence_path,
+                label="cutover result evidence",
+            )
+            if cutover_evidence_path.is_file()
+            else {}
+        )
+        evidence_manifest = dict(
+            cutover_evidence.get("manifest") or {}
+        )
+        exact_cutover_recovery_deploy = bool(
+            active.generation_epoch
+            == str(target_manifest.get("generation_epoch") or "")
+            and active.raw.generation_id
+            == str(
+                (target_manifest.get("raw") or {}).get(
+                    "generation_id"
+                )
+                or ""
+            )
+            and active.operational.generation_id
+            == str(
+                (target_manifest.get("operational") or {}).get(
+                    "generation_id"
+                )
+                or ""
+            )
+            and active.source_fingerprint
+            == str(target_manifest.get("source_fingerprint") or "")
+            and str(cutover_evidence.get("status") or "")
+            == "cutover_complete"
+            and str(
+                cutover_evidence.get("plan_fingerprint") or ""
+            )
+            == str(plan.get("fingerprint") or "")
+            and str(
+                evidence_manifest.get("manifest_sha256") or ""
+            )
+            == active.manifest_sha256
+            and cutover_evidence.get("global_manifest_switched")
+            is True
+            and str(
+                cutover_evidence.get("canonical_source") or ""
+            )
+            == "split"
+            and cutover_evidence.get("old_monolith_retained") is True
+            and cutover_evidence.get("retirement_authorized") is False
+        )
     if reviewed_plan is not None:
         if str(plan.get("fingerprint") or "") != fingerprint:
             raise FinanceStorageRecoveryContractError(
                 "reviewed plan fingerprint does not match recovery binding"
             )
-        if str(plan.get("deployed_sha") or "") != deployed_sha:
+        if (
+            str(plan.get("deployed_sha") or "") != deployed_sha
+            and not exact_cutover_recovery_deploy
+        ):
             raise FinanceStorageRecoveryContractError(
                 "reviewed plan deployed SHA does not match recovery binding"
             )
@@ -1189,6 +1255,15 @@ def validate_recovery_preflight(
             "active_manifest_sha256": str(
                 rollback_evidence.get("active_manifest_sha256") or ""
             ),
+        }
+    if exact_cutover_recovery_deploy:
+        evidence["post_manifest_recovery_deploy"] = {
+            "status": "exact_cutover_evidence_readback",
+            "original_deployed_sha": str(
+                plan.get("deployed_sha") or ""
+            ),
+            "recovery_deployed_sha": deployed_sha,
+            "active_manifest_sha256": active.manifest_sha256,
         }
     evidence["fingerprint"] = _fingerprint(evidence)
     return evidence

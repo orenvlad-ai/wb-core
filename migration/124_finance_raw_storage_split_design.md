@@ -237,7 +237,12 @@ The implementation is deliberately inert on deploy:
   remain retained.
 - Post-manifest recovery restarts only the registry HTTP service and proves its
   exact `MainPID` has opened both paths selected by the current manifest before
-  any writer/timer restore or barrier release. For a selected rollback
+  any writer/timer restore or barrier release. The HTTP process keeps
+  transaction-free query-only handles on the distinct manifest-selected stores
+  for that process-binding proof. An exact split manifest plus persisted
+  cutover evidence may cross a recovery deploy only for idempotent cutover
+  result readback and control release; the old tail, recopy and manifest
+  mutation are never replayed. For a selected rollback
   monolith, `finance-storage-post-manifest-recovery-readback` compares core raw
   identity rows and every non-cache operational table against the retained
   split generation in SQLite query-only mode. It admits at most eight total
