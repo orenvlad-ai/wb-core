@@ -415,6 +415,9 @@ def _split_storage_health() -> dict:
         "raw_ack_cursor": 7,
         "operational_cursor": 7,
         "consumer_lag_events": 0,
+        "live_tail_cursor": 0,
+        "live_tail_applicable": False,
+        "live_tail_lag_events": 0,
         "cursor_mismatch": False,
         "shadow_mismatch_count": 0,
         "actionable_dead_letters": 0,
@@ -445,9 +448,8 @@ def _split_storage_card(storage_health: dict) -> str:
         f"{storage_health['raw_ack_cursor']} / "
         f"{storage_health['operational_cursor']}; "
         f"consumer lag: {storage_health['consumer_lag_events']}; "
-        "live-tail cursor/lag: "
-        f"{storage_health.get('live_tail_cursor', 0)} / "
-        f"{storage_health.get('live_tail_lag_events', 0)}; "
+        "live-tail: не применяется после cutover "
+        f"(исторический cursor: {storage_health.get('live_tail_cursor', 0)}); "
         f"mismatches: {storage_health['shadow_mismatch_count']}; "
         f"dead letters: {storage_health['actionable_dead_letters']}.\n"
         "rollback: не доказан; cutover: не разрешён/не готов."

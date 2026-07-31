@@ -23,7 +23,11 @@ import stat as stat_module
 from typing import Any, Mapping
 
 from packages.application.business_data_write_barrier import barrier_status
-from packages.application.finance_storage_migration import logical_table_digest
+from packages.application.finance_storage_migration import (
+    SHADOW_STATE_CONTRACT,
+    SHADOW_STATE_FILENAME,
+    logical_table_digest,
+)
 from packages.application.finance_storage_snapshot_retention import (
     ARCHIVE_CONTRACT,
     ARCHIVE_MANIFEST_FILENAME,
@@ -433,12 +437,13 @@ def _restore_watermarks(raw_path: Path, operational_path: Path) -> dict[str, Any
         "latest_outbox_sequence": latest_outbox,
         "raw_ack_cursor": raw_cursor,
         "live_tail_cursor": bridge_cursor,
+        "live_tail_applicable": False,
         "operational_cursor": operational_cursor,
         "raw_rows": raw_rows,
         "raw_batches": raw_batches,
         "pending_outbox": pending_outbox,
         "consumer_lag_events": max(0, latest_outbox - operational_cursor),
-        "live_tail_lag_events": max(0, latest_outbox - bridge_cursor),
+        "live_tail_lag_events": 0,
         "cursor_mismatch": raw_cursor != operational_cursor,
         "shadow_mismatch_count": mismatch_count,
         "actionable_dead_letters": actionable_dead_letters,
@@ -446,7 +451,6 @@ def _restore_watermarks(raw_path: Path, operational_path: Path) -> dict[str, Any
     if (
         pending_outbox != 0
         or latest_outbox != raw_cursor
-        or raw_cursor != bridge_cursor
         or raw_cursor != operational_cursor
         or mismatch_count != 0
         or actionable_dead_letters != 0
@@ -583,6 +587,35 @@ class FinanceStorageBackupRotation:
                     "canonical split path escapes the protected generations root"
                 ) from exc
         health = storage_health(registry)
+        shadow_path = self.runtime_dir / SHADOW_STATE_FILENAME
+        shadow_state: dict[str, Any] = {
+            "path": str(shadow_path),
+            "present": False,
+            "enabled": False,
+        }
+        if shadow_path.exists():
+            if shadow_path.is_symlink() or not shadow_path.is_file():
+                raise FinanceStorageBackupRotationError(
+                    "post-cutover backup shadow state is unsafe"
+                )
+            shadow_payload = _load_json(
+                shadow_path, label="Finance shadow ingest state"
+            )
+            if (
+                str(shadow_payload.get("contract_version") or "")
+                != SHADOW_STATE_CONTRACT
+                or shadow_payload.get("enabled") is not False
+            ):
+                raise FinanceStorageBackupRotationError(
+                    "post-cutover backup requires inactive shadow ingest"
+                )
+            shadow_state = {
+                "path": str(shadow_path),
+                "present": True,
+                "enabled": False,
+                "contract_version": SHADOW_STATE_CONTRACT,
+                "file": _file_identity(shadow_path, include_sha256=True),
+            }
         if (
             health.get("raw_schema_ready") is not True
             or health.get("operational_schema_ready") is not True
@@ -591,6 +624,7 @@ class FinanceStorageBackupRotation:
             or bool(health.get("operational_health_error"))
             or int(health.get("consumer_lag_events") or 0) != 0
             or int(health.get("live_tail_lag_events") or 0) != 0
+            or health.get("live_tail_applicable") is not False
             or health.get("cursor_mismatch") is not False
             or int(health.get("shadow_mismatch_count") or 0) != 0
             or int(health.get("actionable_dead_letters") or 0) != 0
@@ -611,6 +645,7 @@ class FinanceStorageBackupRotation:
                 "window_id": str(barrier.get("window_id") or ""),
             },
             "source_fingerprint": manifest.source_fingerprint,
+            "shadow_state": shadow_state,
             "raw": {
                 "path": str(raw),
                 **_sqlite_source_identity(raw),
@@ -631,6 +666,7 @@ class FinanceStorageBackupRotation:
                 ),
                 "raw_ack_cursor": int(health.get("raw_ack_cursor") or 0),
                 "live_tail_cursor": int(health.get("live_tail_cursor") or 0),
+                "live_tail_applicable": False,
                 "operational_cursor": int(health.get("operational_cursor") or 0),
                 "raw_rows": int((health.get("raw_counts") or {}).get("rows") or 0),
                 "raw_batches": int(
@@ -1068,6 +1104,7 @@ class FinanceStorageBackupRotation:
             "latest_outbox_sequence",
             "raw_ack_cursor",
             "live_tail_cursor",
+            "live_tail_applicable",
             "operational_cursor",
             "raw_rows",
             "raw_batches",
@@ -1098,6 +1135,7 @@ class FinanceStorageBackupRotation:
             or int(watermarks.get("pending_outbox") or 0) != 0
             or int(watermarks.get("consumer_lag_events") or 0) != 0
             or int(watermarks.get("live_tail_lag_events") or 0) != 0
+            or watermarks.get("live_tail_applicable") is not False
             or watermarks.get("cursor_mismatch") is not False
             or int(watermarks.get("shadow_mismatch_count") or 0) != 0
             or int(watermarks.get("actionable_dead_letters") or 0) != 0
@@ -1856,6 +1894,10 @@ class FinanceStorageBackupRotation:
             "generation_epoch"
         ] != expected.get("generation_epoch"):
             raise FinanceStorageBackupRotationError("canonical manifest CAS drifted")
+        if guard.get("shadow_state") != expected.get("shadow_state"):
+            raise FinanceStorageBackupRotationError(
+                "Finance shadow state CAS drifted"
+            )
         for name in ("raw", "operational"):
             for key in ("path", "device", "inode"):
                 if guard[name].get(key) != dict(expected.get(name) or {}).get(key):

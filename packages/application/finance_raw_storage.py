@@ -1211,6 +1211,10 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
         and manifest.raw.generation_id == manifest.operational.generation_id
         and raw_path == operational_path
     )
+    cutover_selected = bool(
+        manifest.state == "cutover"
+        and manifest.canonical_source == "split"
+    )
     raw_tables: set[str] = set()
     operational_tables: set[str] = set()
     raw_counts: dict[str, int] = {}
@@ -1342,7 +1346,14 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
         bridge_cursor_value = bridge_cursor
         operational_cursor_value = operational_cursor
         consumer_lag = max(0, latest_outbox - operational_cursor)
-        live_tail_lag = max(0, latest_outbox - bridge_cursor)
+        # The bridge cursor belongs to the temporary unselected shadow
+        # candidate.  Once the split is selected at cutover it is historical
+        # migration evidence, not a canonical consumer cursor.
+        live_tail_lag = (
+            0
+            if cutover_selected
+            else max(0, latest_outbox - bridge_cursor)
+        )
         cursor_mismatch = raw_cursor != operational_cursor
     raw_openers = sqlite_process_openers(raw_path)
     operational_openers = (
@@ -1369,6 +1380,9 @@ def storage_health(registry: StoreRegistry) -> dict[str, Any]:
             "latest_outbox_sequence": latest_outbox_value,
             "raw_ack_cursor": raw_cursor_value,
             "live_tail_cursor": bridge_cursor_value,
+            "live_tail_applicable": bool(
+                not monolith_selected and not cutover_selected
+            ),
             "live_tail_lag_events": live_tail_lag,
             "operational_cursor": operational_cursor_value,
             "consumer_lag_events": consumer_lag,

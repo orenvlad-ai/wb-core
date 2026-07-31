@@ -111,12 +111,15 @@ Apply performs one durable transaction:
    file/directory evidence. Crash resume preserves that original capture age;
    a later verification timestamp cannot make an old partial look fresh.
 4. Reopen both backup-local files as an isolated restore target, require raw,
-   raw-ack, live-tail and operational cursors to agree, require zero pending
+   raw-ack and operational cursors to agree, require zero pending
    outbox/mismatch/actionable dead letters, persist the original source
    manifest identity plus a backup-local manifest whose paths resolve the two
    retained files, and persist the watermarks read from the restored files.
    `StoreRegistry` must load that local manifest and open both stores
    query-only before the verified backup manifest is fsynced.
+   The inactive post-cutover live-tail bridge cursor remains recorded as
+   historical migration evidence but is explicitly non-applicable to retained
+   backup lag; an enabled or drifting shadow state blocks planning/apply.
 5. Rename the complete set and atomically replace `current.json`; read back
    the selector and its backup-manifest fingerprint.
 6. Only after selection, remove the superseded current, remaining proven
