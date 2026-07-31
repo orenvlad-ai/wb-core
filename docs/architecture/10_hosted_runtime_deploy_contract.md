@@ -179,6 +179,10 @@ The same runner owns the only production path for the active functional cutover 
   `finance_storage_transport_job.py` request identity. Submit transport loss is
   followed only by status observation of that exact worker; request/SHA drift
   or a lost worker remains ambiguous and never triggers a replacement.
+  Rollback plan, prepare and final raw readback traverse ordered seller/week
+  scopes and require predicate pushdown through `finance_raw_current_rows`
+  with `finance_raw_rows_by_week`; an unscoped all-history current-row
+  materialization is not an allowed rollback path.
   After a manifest switch the registry HTTP restart is accepted only when the
   new systemd `MainPID` is observed opening both manifest-selected stores.
   For rollback-monolith recovery,

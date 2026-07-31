@@ -49,6 +49,7 @@ from packages.application.finance_storage_migration import (
     FinanceStorageShadowRunner,
     FinanceStorageShadowVerifier,
     InjectedMigrationFault,
+    _CURRENT_RAW_COPY_SQL,
     _atomic_write_json,
     _accessible_fd_paths,
     _plan_fingerprint,
@@ -391,6 +392,133 @@ class StoreRegistrySmoke(unittest.TestCase):
 
 
 class OutboxSmoke(unittest.TestCase):
+    def test_rollback_current_rows_are_week_scoped_and_indexed(self) -> None:
+        class GuardedConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self.connection = connection
+
+            def execute(
+                self,
+                sql: str,
+                params: tuple[object, ...] = (),
+            ) -> sqlite3.Cursor:
+                normalized = " ".join(str(sql).split())
+                if (
+                    "FROM finance_raw_current_rows" in normalized
+                    and (
+                        "WHERE seller_id=? AND week_start=? "
+                        "AND week_end=?"
+                    )
+                    not in normalized
+                ):
+                    raise AssertionError(
+                        "rollback attempted an unscoped current-row scan"
+                    )
+                return self.connection.execute(sql, params)
+
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            _create_monolith(runtime, rows=1)
+            registry = StoreRegistry(runtime)
+            timestamps = iter(
+                (
+                    "2026-07-29T00:00:00Z",
+                    "2026-07-29T00:01:00Z",
+                    "2026-07-29T00:02:00Z",
+                )
+            )
+            ingestor = FinanceRawIngestor(
+                registry,
+                now_factory=lambda: next(timestamps),
+            )
+            ingestor.ingest_batch(
+                [_raw_row(30, 3001), _raw_row(30, 3002)],
+                source_identity="fixture:rollback-scope-first",
+                source_sha256="sha256:" + "1" * 64,
+                week_start="2026-02-02",
+                week_end="2026-02-08",
+            )
+            ingestor.ingest_batch(
+                [_raw_row(30, 3002)],
+                source_identity="fixture:rollback-scope-replacement",
+                source_sha256="sha256:" + "2" * 64,
+                week_start="2026-02-02",
+                week_end="2026-02-08",
+            )
+            ingestor.ingest_batch(
+                [_raw_row(31, 3101, week=2)],
+                source_identity="fixture:rollback-scope-second-week",
+                source_sha256="sha256:" + "3" * 64,
+                week_start="2026-02-09",
+                week_end="2026-02-15",
+            )
+            candidate_path = runtime / "rollback-candidate.sqlite3"
+            with (
+                registry.session(
+                    "finance_raw",
+                    mode="ro",
+                    operation="rollback_scope_smoke",
+                ) as source,
+                closing(
+                    sqlite3.connect(
+                        candidate_path,
+                        isolation_level=None,
+                    )
+                ) as candidate,
+            ):
+                guarded = GuardedConnection(source)
+                digest = FinanceStorageShadowVerifier._rows_digest(
+                    guarded,  # type: ignore[arg-type]
+                    table="finance_raw_current_rows",
+                )
+                FinanceStorageRollback._create_legacy_raw_schema(
+                    candidate
+                )
+                copied = FinanceStorageRollback._copy_current_raw(
+                    guarded,  # type: ignore[arg-type]
+                    candidate,
+                )
+                readback = FinanceStorageShadowVerifier._rows_digest(
+                    candidate,
+                    table="wb_finance_weekly_raw_rows",
+                )
+                scopes = source.execute(
+                    """SELECT DISTINCT seller_id,week_start,week_end
+                         FROM finance_raw_rows
+                        ORDER BY seller_id,week_start,week_end"""
+                ).fetchall()
+                plans = [
+                    [
+                        str(row[3])
+                        for row in source.execute(
+                            "EXPLAIN QUERY PLAN "
+                            + _CURRENT_RAW_COPY_SQL,
+                            tuple(scope),
+                        ).fetchall()
+                    ]
+                    for scope in scopes
+                ]
+            self.assertEqual(digest.row_count, 2)
+            self.assertEqual(copied, digest)
+            self.assertEqual(readback, digest)
+            self.assertTrue(plans)
+            for plan in plans:
+                self.assertTrue(
+                    any(
+                        "finance_raw_rows_by_week" in detail
+                        for detail in plan
+                    ),
+                    plan,
+                )
+                self.assertFalse(
+                    any(
+                        "SCAN rows" in detail
+                        or "SCAN finance_raw_current_rows" in detail
+                        for detail in plan
+                    ),
+                    plan,
+                )
+
     def test_current_rows_scope_predicates_use_week_index_and_latest_batch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw)

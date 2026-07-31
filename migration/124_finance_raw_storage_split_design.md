@@ -233,8 +233,12 @@ The implementation is deliberately inert on deploy:
   fresh operational recopy and final raw tail under the short exact hold,
   fsyncs and atomically replaces the manifest. Rollback is prepared during
   normal operation, then replays only post-prepare raw scopes and recopies
-  operational state under its short hold. Original monolith and split files
-  remain retained.
+  operational state under its short hold. Rollback planning, candidate raw
+  copy and final equality readback enumerate ordered seller/week scopes from
+  `finance_raw_rows` and push every scope predicate through
+  `finance_raw_current_rows`; the `finance_raw_rows_by_week` plan is required.
+  They never materialize one unscoped all-history current-row query on the
+  root filesystem. Original monolith and split files remain retained.
 - Post-manifest recovery restarts only the registry HTTP service and proves its
   exact `MainPID` has opened both paths selected by the current manifest before
   any writer/timer restore or barrier release. The HTTP process keeps
