@@ -72,12 +72,20 @@ The retained policy is:
 - projected retained growth is zero over 30 and 90 days because superseded
   current bytes are removed after every successful selection.
 
-The timer is safe to enable at deploy: without the private, fingerprinted
+The timer is safe to enable and start at deploy: without the private, fingerprinted
 `retention_policy.json` created by the approved first apply it returns
 `policy_inert` and creates or deletes no bytes. After activation it uses the
 same implementation and lock as the reviewed cleanup. A non-terminal scheduled
 transaction retains its reviewed plan and resumes that exact fingerprint; a
 new plan cannot silently replace it.
+
+The current-live target marks the timer for both `enable` and `restart`. Merely
+creating the enablement symlink does not activate a newly installed timer in
+the running systemd manager; the deploy restart is therefore required to
+publish a real next trigger. Restart remains inert before the first approved
+policy, and after policy activation its first persistent invocation must read
+back as `not_due` unless the source/age policy independently requires a
+replacement.
 
 The Finance source timer checks hourly for newly available weekly reports; it
 does not perform an hourly full ingest. The backup timer is a separate daily
