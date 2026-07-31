@@ -18,6 +18,7 @@ from packages.application.wb_autoanswers_runtime import (
     LEGACY_RUNTIME_DB_FILENAME,
     AutoanswersRepository,
     AutoanswersRuntimeError,
+    PREVIOUS_POLICY_VERSION,
     SCHEMA_VERSION,
     autoanswers_settings_revision,
     classify_feedback_content,
@@ -442,6 +443,73 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(index_columns, ["processing_key"])
         self.assertIn("idx_sv1_pub_jobs_processing_key", query_plan)
         self.assertNotIn("SCAN publication LEFT-JOIN", query_plan)
+
+    def test_schema_v10_adds_only_inert_backlog_recovery_ledger(self) -> None:
+        self.enable("manual")
+        self.insert_new("schema-v10-evidence")
+        self.repo.enqueue_manual_processing(
+            "schema-v10-evidence",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        immutable_tables = (
+            "sheet_vitrina_v1_wb_feedbacks",
+            "sheet_vitrina_v1_wb_autoanswer_jobs",
+            "sheet_vitrina_v1_wb_publication_jobs",
+        )
+        with sqlite3.connect(self.repo.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_autoanswers_settings SET policy_version=?",
+                (PREVIOUS_POLICY_VERSION,),
+            )
+            before = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=10"
+            )
+            conn.execute(
+                "DROP TABLE sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs"
+            )
+
+        migrated = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env=self.env,
+        )
+        with sqlite3.connect(migrated.db_path) as conn:
+            after = {
+                table: conn.execute(
+                    f"SELECT * FROM {table} ORDER BY 1"  # noqa: S608 - fixed allowlist
+                ).fetchall()
+                for table in immutable_tables
+            }
+            policy_version = str(
+                conn.execute(
+                    "SELECT policy_version FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+                ).fetchone()[0]
+            )
+            ledger_sql = str(
+                conn.execute(
+                    """
+                    SELECT sql FROM sqlite_master
+                    WHERE type='table'
+                      AND name='sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs'
+                    """
+                ).fetchone()[0]
+            )
+            ledger_rows = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs"
+                ).fetchone()[0]
+            )
+        self.assertEqual(after, before)
+        self.assertEqual(policy_version, PREVIOUS_POLICY_VERSION)
+        self.assertEqual(ledger_rows, 0)
+        self.assertIn("'planned','applied'", ledger_sql)
 
     def test_new_isolated_store_does_not_modify_unrelated_registry_database(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1393,10 +1461,11 @@ class RuntimeTest(unittest.TestCase):
             worker_id="worker",
             diagnostics={"returncode": 1, "stderr_bytes": 8},
         )
-        self.assertEqual(isolated["state"], "needs_review")
+        self.assertEqual(isolated["state"], "queued")
+        self.assertEqual(isolated["processing_kind"], "safe_public_template")
         self.assertEqual(
             isolated["last_error_code"],
-            "node_process_exit_1_repeated_needs_review",
+            "node_process_exit_1_repeated_safe_template_queued",
         )
         budget = self.repo.budget_status()
         self.assertEqual(budget["uncertainty_hold_count"], 2)
@@ -1811,7 +1880,7 @@ class RuntimeTest(unittest.TestCase):
             job["processing_key"], result=successful_result(route, **overrides), worker_id="worker"
         )
 
-    def test_three_modes_and_seller_chat_review_only(self) -> None:
+    def test_three_modes_and_seller_chat_safe_public_policy(self) -> None:
         with self.subTest("draft_only"):
             row = self._claim_and_complete("draft_only", "public_only")
             self.assertEqual(row["state"], "generated")
@@ -1820,9 +1889,10 @@ class RuntimeTest(unittest.TestCase):
             ("auto_safe", "public_only", "approved"),
             ("auto_safe", "wb_return", "approved"),
             ("auto_safe", "wb_support", "approved"),
+            ("auto_safe", "seller_chat", "approved"),
             ("auto_safe", "unknown_route", "needs_review"),
             ("auto_all", "unknown_route", "approved"),
-            ("auto_all", "seller_chat", "needs_review"),
+            ("auto_all", "seller_chat", "approved"),
         ):
             with self.subTest(mode=mode, route=route):
                 with TemporaryDirectory() as directory:
@@ -1840,6 +1910,11 @@ class RuntimeTest(unittest.TestCase):
                         job["processing_key"], result=successful_result(route), worker_id="worker"
                     )
                     self.assertEqual(stored["state"], expected)
+                    if route == "seller_chat":
+                        self.assertEqual(stored["final_route"], "public_only")
+                        self.assertIsNone(stored["case_code"])
+                        self.assertNotIn("чат продавца", stored["final_reply"].casefold())
+                        self.assertEqual(len(repo.get_feedback(outcome["feedback_id"])["publications"]), 1)
 
     def test_five_selector_states_and_force_off_precedence(self) -> None:
         self.assertFalse(self.repo.settings().master_enabled)

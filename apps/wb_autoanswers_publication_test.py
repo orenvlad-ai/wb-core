@@ -433,7 +433,7 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(self.transport.write_calls, [])
         self.assertEqual(self.repo.get_feedback("publish")["ai_jobs"][0]["state"], "needs_review")
 
-    def test_seller_chat_is_review_only_until_explicit_approval(self) -> None:
+    def test_seller_chat_is_transformed_to_safe_public_without_operator(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
         outcome = self.repo.upsert_feedback(feedback("chat"), source_stream="unanswered", run_kind="steady")
         job = self.repo.enqueue_processing("chat", trigger_source="steady_sync", actor_id="sync")
@@ -442,12 +442,13 @@ class PublicationTest(unittest.TestCase):
         result["final_reply"] = "Здравствуйте. Напишите, пожалуйста, в чат продавца по коду А1234."
         result["case_code"] = "А1234"
         stored = self.repo.complete_generation(job["processing_key"], result=result, worker_id="ai")
-        self.assertEqual(stored["state"], "needs_review")
-        self.assertEqual(self.repo.get_feedback("chat")["publications"], [])
-        publication = self.repo.approve_for_publication(
-            job["processing_key"], actor_id="reviewer", confirmed=True
-        )
-        self.assertEqual(publication["state"], "approved")
+        self.assertEqual(stored["state"], "approved")
+        self.assertEqual(stored["final_route"], "public_only")
+        self.assertIsNone(stored["case_code"])
+        self.assertNotIn("чат продавца", stored["final_reply"].casefold())
+        publications = self.repo.get_feedback("chat")["publications"]
+        self.assertEqual(len(publications), 1)
+        self.assertEqual(publications[0]["state"], "approved")
 
 
 if __name__ == "__main__":

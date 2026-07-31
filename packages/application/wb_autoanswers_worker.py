@@ -11,7 +11,10 @@ from packages.application.wb_autoanswers_node_bridge import (
     build_frozen_raw_input,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
-from packages.contracts.wb_autoanswers import PROCESSING_KIND_RATING_ONLY_TEMPLATE
+from packages.contracts.wb_autoanswers import (
+    PROCESSING_KIND_RATING_ONLY_TEMPLATE,
+    PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE,
+)
 
 
 class AutoanswersProcessingWorker:
@@ -52,6 +55,19 @@ class AutoanswersProcessingWorker:
                     "cost_usd": 0.0,
                     "model_calls": 0,
                     "processing_kind": PROCESSING_KIND_RATING_ONLY_TEMPLATE,
+                }
+            if str(claimed.get("processing_kind") or "") == PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE:
+                stored = self.repository.complete_safe_public_template(
+                    key,
+                    worker_id=self.worker_id,
+                )
+                return {
+                    "processing_key": key,
+                    "state": stored["state"],
+                    "route": stored["final_route"],
+                    "cost_usd": 0.0,
+                    "model_calls": 0,
+                    "processing_kind": PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE,
                 }
             media = self.media_processor.process(
                 feedback_id=str(claimed["feedback_id"]),
@@ -178,5 +194,43 @@ class AutoanswersProcessingWorker:
                     worker_id=self.worker_id,
                 )
             else:
+                if exc.code in {"reservation_missing", "stale_content_version"}:
+                    recovered = self.repository.recover_completed_node_result(
+                        key,
+                        actor_id=self.worker_id,
+                    )
+                    if recovered is not None:
+                        return {
+                            "processing_key": key,
+                            "state": recovered["state"],
+                            "route": recovered["final_route"],
+                            "cost_usd": float(recovered.get("actual_cost_usd") or 0),
+                            "model_calls": 0,
+                            "recovered_from_audit": True,
+                        }
+                    try:
+                        queued = self.repository.schedule_safe_public_recovery(
+                            key,
+                            error_code=exc.code,
+                            actor_id=self.worker_id,
+                        )
+                    except AutoanswersRuntimeError:
+                        # A content version can become stale between claim and
+                        # recovery.  Never convert that obsolete version into a
+                        # current public answer, and do not mask the original
+                        # processing boundary with a second recovery exception.
+                        self.repository.record_processing_terminal(
+                            key,
+                            error_code=exc.code,
+                            worker_id=self.worker_id,
+                        )
+                        raise exc
+                    return {
+                        "processing_key": key,
+                        "state": queued["state"],
+                        "error_code": exc.code,
+                        "safe_public_recovery": True,
+                        "model_calls": 0,
+                    }
                 self.repository.record_processing_terminal(key, error_code=exc.code, worker_id=self.worker_id)
             raise

@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -185,6 +186,21 @@ class ReleaseSafetyTest(unittest.TestCase):
             latch_args.source_fingerprint,
             "sha256:" + "b" * 64,
         )
+        backlog_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-backlog-recovery",
+                "dry-run",
+                "--expected-deployed-sha",
+                "a" * 40,
+                "--manifest-file",
+                "/tmp/wb-autoanswers-t0.json",
+            ]
+        )
+        self.assertIs(
+            backlog_args.handler,
+            hosted.run_autoanswers_backlog_recovery_command,
+        )
+        self.assertEqual(backlog_args.action, "dry-run")
 
     def test_remote_readonly_command_reasserts_force_off_and_has_no_write_worker(self) -> None:
         target = hosted.load_hosted_runtime_target(TARGET)
@@ -296,6 +312,79 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("apps/wb_autoanswers_lifecycle.py reconcile", command)
         self.assertNotIn("systemctl enable", command)
         self.assertNotIn("wb_autoanswers_worker.py", command)
+
+    def test_backlog_recovery_wrapper_streams_external_exact_scope_and_human_gate(self) -> None:
+        from apps.wb_autoanswers_backlog_recovery import _fingerprint
+
+        target = hosted.load_hosted_runtime_target(TARGET)
+        deployed_sha = "a" * 40
+        fingerprint = "sha256:" + "b" * 64
+        manifest = {
+            "contract": "wb_autoanswers_t0_manifest_v1",
+            "captured_at": "2026-08-01T12:00:00Z",
+            "items": [
+                {
+                    "feedback_id": "feedback-1",
+                    "wb_detail_content_hash": "c" * 64,
+                }
+            ],
+        }
+        manifest["manifest_sha256"] = _fingerprint(manifest)
+        captured: list[tuple[list[str], dict[str, object]]] = []
+        response = {
+            "contract": "wb_autoanswers_backlog_recovery_v1",
+            "status": "applied",
+            "manifest_sha256": manifest["manifest_sha256"],
+            "deployed_runtime": {"runtime_sha": deployed_sha},
+        }
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured.append((command, kwargs))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            manifest_path = temp / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            plan_path = temp / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "coverage_confirmed": True,
+                        "plan_fingerprint": fingerprint,
+                        "manifest_sha256": manifest["manifest_sha256"],
+                        "deployed_runtime": {"runtime_sha": deployed_sha},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(hosted.subprocess, "run", side_effect=fake_run):
+                result = hosted._run_remote_autoanswers_backlog_recovery(
+                    target,
+                    action="apply",
+                    expected_deployed_sha=deployed_sha,
+                    manifest_path=manifest_path,
+                    reviewed_plan_path=plan_path,
+                    fingerprint=fingerprint,
+                    approval_reference="github-pr-gate-comment-123",
+                    actor="release-train",
+                )
+        self.assertEqual(result["status"], "applied")
+        command = " ".join(captured[0][0])
+        self.assertIn("WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true", command)
+        self.assertIn("wb_autoanswers_backlog_recovery.py apply", command)
+        self.assertIn("--manifest-stdin", command)
+        self.assertIn("--expected-deployed-sha " + deployed_sha, command)
+        self.assertIn("--approval-reference github-pr-gate-comment-123", command)
+        self.assertEqual(json.loads(str(captured[0][1]["input"])), manifest)
+        self.assertNotIn("feedbacks/answer", command)
 
     def test_prefilter_skip_recovery_uses_repo_owned_bounded_runner(self) -> None:
         target = hosted.load_hosted_runtime_target(TARGET)

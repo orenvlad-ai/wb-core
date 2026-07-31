@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from packages.application.wb_autoanswers_publication import AutoanswersPublicationWorker
-from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
+from packages.application.wb_autoanswers_runtime import (
+    DEFAULT_POLICY_VERSION,
+    AutoanswersRepository,
+    AutoanswersRuntimeError,
+)
 from packages.application.wb_autoanswers_sync import FeedbackSyncError, WbFeedbackSyncService
 from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
 
@@ -58,6 +62,7 @@ class AutoanswersCoordinator:
         report: dict[str, Any] = {
             "tick": tick,
             "sync": [],
+            "full_unanswered_inventory": None,
             "rolling_admission": None,
             "reconciliation": None,
             "processing": None,
@@ -95,6 +100,32 @@ class AutoanswersCoordinator:
                     )
         except Exception as exc:
             report["errors"].append(_error_evidence("sync", exc))
+        try:
+            inventory_cursor = self.repository.sync_cursor(
+                "wb_feedback_full_unanswered_inventory"
+            )
+            inventory_active = bool(
+                (inventory_cursor or {}).get("cursor", {}).get("active")
+            )
+            if (
+                (inventory_active or tick % 12 == 0)
+                and self.repository.settings().policy_version == DEFAULT_POLICY_VERSION
+            ):
+                report["full_unanswered_inventory"] = (
+                    self.sync_service.full_unanswered_inventory_tick()
+                )
+        except FeedbackSyncError as exc:
+            report["errors"].append(
+                {
+                    "stage": "full_unanswered_inventory",
+                    "code": exc.code,
+                    "retryable": exc.retryable,
+                }
+            )
+        except Exception as exc:
+            report["errors"].append(
+                _error_evidence("full_unanswered_inventory", exc)
+            )
         try:
             self.repository.save_sync_cursor(
                 "wb_autoanswers_coordinator",

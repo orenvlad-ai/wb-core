@@ -566,6 +566,24 @@ Archived MCP compatibility publication gate:
   and verifies the retained legacy table set, copies the current isolated
   queues/settings/audit back in one transaction, proves every table digest and
   preserves all non-Autoanswers registry tables;
+- human-gated Autoanswers zero-backlog recovery uses only hosted
+  `autoanswers-backlog-recovery capture|dry-run|apply|readback`. Every action
+  is pinned to exact complete `.wb-core-runtime-sha` and deploy metadata;
+  external manifest/plan/evidence files stay outside the checkout and are
+  streamed to the active target. Apply alone receives mutation capability and
+  additionally requires the exact reviewed plan/fingerprint plus human-gate
+  reference. Capture, dry-run and readback use official WB GETs only; dry-run
+  and readback open SQLite with `mode=ro` and `PRAGMA query_only=ON`. The runner
+  has no WB write adapter and performs zero provider calls. The reviewed
+  fingerprint binds exact target job/publication/write/reservation/cost and
+  frozen-audit evidence, backup, pre-change digest and non-target invariants.
+  Apply is unavailable during an active reservation or unresolved
+  `budget_state_unknown` provider boundary; that uses the dedicated budget
+  lifecycle first. A persisted planned run resumes only across its own bounded
+  T0 detail-upsert prefix. Readback accepts only matched official list/count
+  zero, exact answered T0 details, current local answer observations, zero
+  local recovery tails, zero active reservations and zero unresolved provider
+  cost;
 - the same deploy quiet window runs
   `supplier_financial_source_migration_v1`: dry-run validates every existing
   bank-statement file against its recorded SHA-256, apply hard-links identical

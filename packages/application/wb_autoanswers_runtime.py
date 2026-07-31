@@ -42,6 +42,7 @@ from packages.contracts.wb_autoanswers import (
     NODE_BOUNDARY_VERSION,
     PROCESSING_KIND_FROZEN_AI,
     PROCESSING_KIND_RATING_ONLY_TEMPLATE,
+    PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE,
     PROMPT_BUNDLE_VERSION,
     ROUTE_RATING_ONLY_TEMPLATE,
     STATE_APPROVED,
@@ -65,7 +66,7 @@ from packages.contracts.wb_autoanswers import (
 from packages.application.sqlite_contention import connect_sqlite
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 AUTOANSWERS_STORE_SCHEMA_VERSION = 1
 AUTOANSWERS_DB_FILENAME = "wb_autoanswers_runtime.sqlite3"
 LEGACY_RUNTIME_DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -92,7 +93,8 @@ MAX_OPERATOR_MATERIALIZED_PROCESSING_JOBS = 100
 # path plus two rewrite/validator cycles.  Settlement releases the difference.
 DEFAULT_JOB_RESERVATION_USD = Decimal("0.10")
 DEFAULT_ESTIMATED_REVIEW_COST_USD = Decimal("0.03")
-DEFAULT_POLICY_VERSION = "owner-policy-2026-07-21-v3"
+DEFAULT_POLICY_VERSION = "owner-policy-2026-08-01-v4"
+PREVIOUS_POLICY_VERSION = "owner-policy-2026-07-21-v3"
 RATING_ONLY_TEMPLATE_POLICY_VERSION = "owner-policy-2026-07-21-v2"
 DEFAULT_LEASE_SECONDS = 300
 RECONCILIATION_STALL_THRESHOLD_SECONDS = 15 * 60
@@ -101,6 +103,7 @@ RECONCILIATION_ACTION_OUTCOMES = frozenset(
         "generation_queued",
         "regeneration_queued",
         "publication_queued",
+        "publication_rebound",
         "inflight_adopted",
     }
 )
@@ -119,11 +122,16 @@ RECONCILIATION_PRESERVED_OUTCOMES = frozenset(
 )
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v9"
+COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v10"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "wb_autoanswers_rating_only_policy_v2.json"
+)
+SAFE_PUBLIC_POLICY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "wb_autoanswers_safe_public_policy_v1.json"
 )
 
 
@@ -656,6 +664,56 @@ def rating_only_template(feedback_id: str, rating: int) -> dict[str, Any]:
         "reply": str(choices[index]),
         "policy_version": DEFAULT_POLICY_VERSION,
         "template_policy_version": RATING_ONLY_TEMPLATE_POLICY_VERSION,
+    }
+
+
+def _safe_public_policy() -> dict[str, Any]:
+    policy = json.loads(SAFE_PUBLIC_POLICY_PATH.read_text(encoding="utf-8"))
+    if (
+        policy.get("policy_version") != DEFAULT_POLICY_VERSION
+        or policy.get("contract") != "wb_autoanswers_safe_public_policy_v1"
+        or policy.get("route") != "public_only"
+        or policy.get("openai_calls") != 0
+    ):
+        raise AutoanswersRuntimeError(
+            "safe-public policy identity mismatch",
+            code="safe_public_policy_mismatch",
+        )
+    return policy
+
+
+def safe_public_template(feedback_id: str, rating: int) -> dict[str, Any]:
+    """Return a deterministic public acknowledgement with no operator route.
+
+    This server-owned policy is deliberately narrower than the frozen AI
+    bundle.  It is used only after an audited seller-chat decision or a
+    bounded technical failure, and never promises money, replacement, return,
+    compensation or a Wildberries decision.
+    """
+
+    normalized_rating = int(rating or 0)
+    policy = _safe_public_policy()
+    template_group = "positive" if normalized_rating >= 4 else "neutral"
+    choices = (policy.get("templates") or {}).get(template_group)
+    if not isinstance(choices, list) or not choices:
+        raise AutoanswersRuntimeError(
+            "safe-public template is unavailable",
+            code="safe_public_template_missing",
+        )
+    index = int(hashlib.sha256(str(feedback_id).encode("utf-8")).hexdigest(), 16) % len(choices)
+    reply = str(choices[index]).strip()
+    forbidden = [str(item) for item in policy.get("forbidden_patterns") or []]
+    if not reply or any(re.search(pattern, reply, flags=re.IGNORECASE) for pattern in forbidden):
+        raise AutoanswersRuntimeError(
+            "safe-public template violates its policy",
+            code="safe_public_template_unsafe",
+        )
+    return {
+        "route": "public_only",
+        "template_id": f"safe_public_{template_group}_v{index + 1}",
+        "reply": reply,
+        "policy_version": DEFAULT_POLICY_VERSION,
+        "openai_calls": 0,
     }
 
 
@@ -1332,7 +1390,7 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v9(conn)
+            self._migrate_schema_v10(conn)
             applied_at = iso_utc(self._now())
             conn.executemany(
                 """
@@ -2136,6 +2194,38 @@ class AutoanswersRepository:
             """
             CREATE INDEX IF NOT EXISTS idx_sv1_pub_jobs_processing_key
             ON sheet_vitrina_v1_wb_publication_jobs(processing_key)
+            """
+        )
+
+    @staticmethod
+    def _migrate_schema_v10(conn: sqlite3.Connection) -> None:
+        """Add fingerprint-bound backlog-recovery run evidence.
+
+        Policy v4 is intentionally not activated by this migration.  Existing
+        production settings remain on v3 until the separately authorized
+        canonical recovery runner applies an exact manifest.
+        """
+
+        AutoanswersRepository._migrate_schema_v9(conn)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs(
+                recovery_id TEXT PRIMARY KEY,
+                contract TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                plan_fingerprint TEXT NOT NULL UNIQUE,
+                pre_change_digest TEXT NOT NULL,
+                expected_feedback_count INTEGER NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('planned','applied')),
+                evidence_json TEXT NOT NULL,
+                actor_id TEXT,
+                created_at TEXT NOT NULL,
+                applied_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sv1_backlog_recovery_state
+            ON sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs(
+                state,created_at
+            );
             """
         )
 
@@ -3214,6 +3304,36 @@ class AutoanswersRepository:
                     (int(settings_row["policy_epoch"]), STATE_APPROVED, STATE_PUBLISHING),
                 ).fetchone()[0]
             )
+            backlog = conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS total,
+                  MIN(COALESCE(f.created_at_wb,f.first_seen_at)) AS oldest_created_at,
+                  MAX(COALESCE(f.created_at_wb,f.first_seen_at)) AS newest_created_at,
+                  SUM(CASE WHEN j.processing_key IS NULL THEN 1 ELSE 0 END) AS not_materialized,
+                  SUM(CASE WHEN j.state='needs_review' THEN 1 ELSE 0 END) AS needs_review,
+                  SUM(CASE WHEN j.state='terminal_error' THEN 1 ELSE 0 END) AS terminal_error,
+                  SUM(CASE WHEN j.final_route='seller_chat' THEN 1 ELSE 0 END) AS seller_chat,
+                  SUM(CASE WHEN COALESCE(j.last_error_code,p.last_error_code)='policy_epoch_stale' THEN 1 ELSE 0 END) AS policy_epoch_stale,
+                  SUM(CASE WHEN p.state='publish_pending_readback'
+                            OR (p.state='retryable_error' AND p.retry_stage='readback')
+                           THEN 1 ELSE 0 END) AS readback_pending,
+                  SUM(CASE WHEN j.state IN ('queued','processing','retryable_error','approved')
+                            OR p.state IN ('approved','publishing','publish_pending_readback')
+                           THEN 1 ELSE 0 END) AS active,
+                  SUM(CASE WHEN j.processing_kind=? AND j.state IN ('queued','processing')
+                           THEN 1 ELSE 0 END) AS safe_recovery_active
+                FROM sheet_vitrina_v1_wb_feedbacks f
+                LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+                  ON j.feedback_id=f.feedback_id
+                 AND j.content_version=f.content_version
+                 AND j.bundle_version=?
+                LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
+                  ON p.processing_key=j.processing_key
+                WHERE COALESCE(f.answer_text,'')=''
+                """,
+                (PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE, PROMPT_BUNDLE_VERSION),
+            ).fetchone()
         backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
         backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
         compressed = _verified_compressed_schema_backup_status(
@@ -3249,6 +3369,21 @@ class AutoanswersRepository:
             "publication_jobs": {str(row["state"]): int(row["count"]) for row in publication_rows},
             "claimable_ai_jobs": claimable_ai_jobs,
             "claimable_publication_writes": claimable_publication_writes,
+            "full_unanswered_backlog": {
+                "total": int(backlog["total"] or 0),
+                "oldest_created_at": backlog["oldest_created_at"],
+                "newest_created_at": backlog["newest_created_at"],
+                "active": int(backlog["active"] or 0),
+                "readback_pending": int(backlog["readback_pending"] or 0),
+                "safe_recovery_active": int(backlog["safe_recovery_active"] or 0),
+                "exact_non_auto_reasons": {
+                    "not_materialized": int(backlog["not_materialized"] or 0),
+                    "needs_review": int(backlog["needs_review"] or 0),
+                    "terminal_error": int(backlog["terminal_error"] or 0),
+                    "seller_chat": int(backlog["seller_chat"] or 0),
+                    "policy_epoch_stale": int(backlog["policy_epoch_stale"] or 0),
+                },
+            },
             "regeneration_required": regeneration_required,
             "reconciliation_sweeps": {str(row["state"]): int(row["count"]) for row in sweep_rows},
             "sync_cursors": [
@@ -6068,7 +6203,7 @@ class AutoanswersRepository:
             ).fetchone()
             settings = conn.execute(
                 """
-                SELECT max_reservation_per_review_usd
+                SELECT max_reservation_per_review_usd,policy_version
                 FROM sheet_vitrina_v1_wb_autoanswers_settings
                 WHERE singleton=1
                 """
@@ -6145,13 +6280,30 @@ class AutoanswersRepository:
                 (iso_utc(now), processing_key_value),
             )
             retry = attempt < max(1, int(max_attempts))
-            next_state = STATE_RETRYABLE_ERROR if retry else STATE_NEEDS_REVIEW
-            next_code = code if retry else f"{code}_repeated_needs_review"
+            safe_recovery = not retry and str(settings["policy_version"] or "") == DEFAULT_POLICY_VERSION
+            next_state = (
+                STATE_RETRYABLE_ERROR
+                if retry
+                else STATE_QUEUED
+                if safe_recovery
+                else STATE_NEEDS_REVIEW
+            )
+            next_code = (
+                code
+                if retry
+                else f"{code}_repeated_safe_template_queued"
+                if safe_recovery
+                else f"{code}_repeated_needs_review"
+            )
             conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
                 SET state=?,retry_stage=?,available_at=?,lease_owner=NULL,
-                    lease_until=NULL,last_error_code=?,completed_at=?,updated_at=?
+                    lease_until=NULL,last_error_code=?,completed_at=?,
+                    processing_kind=CASE WHEN ? THEN ? ELSE processing_kind END,
+                    regeneration_required=CASE WHEN ? THEN 0 ELSE regeneration_required END,
+                    regeneration_reason=CASE WHEN ? THEN NULL ELSE regeneration_reason END,
+                    updated_at=?
                 WHERE processing_key=?
                 """,
                 (
@@ -6161,7 +6313,11 @@ class AutoanswersRepository:
                     if retry
                     else iso_utc(now),
                     next_code,
-                    None if retry else iso_utc(now),
+                    None if retry or safe_recovery else iso_utc(now),
+                    int(safe_recovery),
+                    PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE,
+                    int(safe_recovery),
+                    int(safe_recovery),
                     iso_utc(now),
                     processing_key_value,
                 ),
@@ -6213,6 +6369,8 @@ class AutoanswersRepository:
                 event_type=(
                     "opaque_boundary_retry_scheduled"
                     if retry
+                    else "opaque_boundary_safe_public_queued"
+                    if safe_recovery
                     else "opaque_boundary_isolated_needs_review"
                 ),
                 actor_type="worker",
@@ -6481,8 +6639,94 @@ class AutoanswersRepository:
             )
         return stored
 
+    def complete_safe_public_template(
+        self,
+        processing_key_value: str,
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Complete a bounded technical recovery without a provider call."""
+
+        with closing(self._connect()) as conn:
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (_clean_text(processing_key_value),),
+            ).fetchone()
+            feedback = (
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                    (job["feedback_id"],),
+                ).fetchone()
+                if job is not None
+                else None
+            )
+        if job is None or str(job["state"]) != STATE_PROCESSING:
+            raise AutoanswersRuntimeError(
+                "safe-public job is not claimed",
+                code="job_not_processing",
+            )
+        if str(job["processing_kind"] or "") != PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE:
+            raise AutoanswersRuntimeError(
+                "job is not a safe-public recovery",
+                code="processing_kind_mismatch",
+            )
+        if (
+            feedback is None
+            or int(feedback["content_version"]) != int(job["content_version"])
+            or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
+            or feedback["answer_text"]
+        ):
+            raise AutoanswersRuntimeError(
+                "safe-public input is stale",
+                code="stale_content_version",
+            )
+        selected = safe_public_template(
+            str(job["feedback_id"]),
+            int(feedback["rating"] or 0),
+        )
+        stored = self.complete_generation(
+            processing_key_value,
+            result={
+                "final_route": selected["route"],
+                "final_reply": selected["reply"],
+                "case_code": None,
+                "pipeline_result": {
+                    "route": selected["route"],
+                    "template_id": selected["template_id"],
+                    "publication_action": "draft",
+                    "deterministic": True,
+                    "server_policy_contract": "wb_autoanswers_safe_public_policy_v1",
+                    "model_calls": 0,
+                },
+                "usage": {},
+                "hard_gates_passed": True,
+                "fallback_used": False,
+                "media_uncertain": False,
+                "node_contract_valid": True,
+            },
+            worker_id=worker_id,
+        )
+        now = self._now()
+        with self.transaction() as conn:
+            self._audit(
+                conn,
+                aggregate_type="processing_job",
+                aggregate_id=processing_key_value,
+                event_type="safe_public_template_completed",
+                actor_type="deterministic_policy",
+                actor_id=DEFAULT_POLICY_VERSION,
+                details={
+                    "template_id": selected["template_id"],
+                    "model_calls": 0,
+                    "source_error_code": job["last_error_code"],
+                },
+                at=now,
+            )
+        return stored
+
     def append_node_audit(self, processing_key_value: str, events: Sequence[Mapping[str, Any]]) -> None:
         now = self._now()
+        invocation_id = uuid4().hex
         with self.transaction() as conn:
             for index, event in enumerate(events):
                 self._audit(
@@ -6492,9 +6736,360 @@ class AutoanswersRepository:
                     event_type="frozen_node_event",
                     actor_type="node_pipeline",
                     actor_id=PROMPT_BUNDLE_VERSION,
-                    details={"index": index, "event": dict(event)},
+                    details={
+                        "invocation_id": invocation_id,
+                        "index": index,
+                        "event": dict(event),
+                    },
                     at=now,
                 )
+
+    @staticmethod
+    def _completed_node_evidence(
+        conn: sqlite3.Connection,
+        processing_key_value: str,
+    ) -> dict[str, Any] | None:
+        rows = conn.execute(
+            """
+            SELECT rowid,created_at,details_json
+            FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+            WHERE aggregate_id=? AND event_type='frozen_node_event'
+            ORDER BY rowid
+            """,
+            (_clean_text(processing_key_value),),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        current_batch = ""
+        route: str | None = None
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            invocation_id = _clean_text(details.get("invocation_id"))
+            try:
+                index = int(details.get("index"))
+            except (TypeError, ValueError):
+                index = -1
+            # New events carry an explicit invocation identity.  Legacy events
+            # are segmented by their index reset, which preserves the original
+            # append order even when multiple attempts share one timestamp.
+            batch = invocation_id or current_batch
+            if invocation_id:
+                if batch != current_batch:
+                    current_batch = batch
+                    route = None
+            elif not current_batch or index == 0:
+                current_batch = f"legacy:{row['rowid']}:{row['created_at']}"
+                route = None
+            event = details.get("event") if isinstance(details.get("event"), Mapping) else {}
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            if event.get("type") == "route_guard" and payload.get("final_route"):
+                route = _clean_text(payload.get("final_route"))
+            if event.get("type") == "job_complete":
+                reply = str(payload.get("final_reply") or "").strip()
+                outcome = str(payload.get("outcome") or "")
+                if route and reply and outcome in {"ready", "fallback"}:
+                    candidates.append(
+                        {
+                            "invocation_id": current_batch,
+                            "route": route,
+                            "reply": reply,
+                            "reply_sha256": final_reply_hash(reply),
+                            "outcome": outcome,
+                            "model_call_count": int(payload.get("model_call_count") or 0),
+                            "cost": payload.get("cost"),
+                        }
+                    )
+        return candidates[-1] if candidates else None
+
+    def recover_completed_node_result(
+        self,
+        processing_key_value: str,
+        *,
+        actor_id: str,
+    ) -> dict[str, Any] | None:
+        """Reuse an audited completed Node result without another provider call."""
+
+        key = _clean_text(processing_key_value)
+        now = self._now()
+        with self.transaction() as conn:
+            settings_row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+            ).fetchone()
+            if settings_row is None:
+                raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
+            settings = _autoanswers_settings_from_row(settings_row, env=self.env)
+            if settings.policy_version != DEFAULT_POLICY_VERSION:
+                return None
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (key,),
+            ).fetchone()
+            evidence = self._completed_node_evidence(conn, key)
+            feedback = (
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                    (job["feedback_id"],),
+                ).fetchone()
+                if job is not None
+                else None
+            )
+            publication = (
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?",
+                    (key,),
+                ).fetchone()
+                if job is not None
+                else None
+            )
+            if job is None or evidence is None or feedback is None:
+                return None
+            if (
+                evidence["outcome"] != "ready"
+                or int(feedback["content_version"]) != int(job["content_version"])
+                or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
+                or feedback["answer_text"]
+                or publication is not None
+            ):
+                return None
+            route = str(evidence["route"])
+            reply = str(evidence["reply"])
+            result: dict[str, Any] = {
+                "final_route": route,
+                "final_reply": reply,
+                "case_code": None,
+                "pipeline_result": {
+                    "route": route,
+                    "publication_action": "draft",
+                    "recovered_from_append_only_audit": True,
+                    "model_calls": evidence["model_call_count"],
+                },
+                "usage": {},
+                "hard_gates_passed": True,
+                "fallback_used": False,
+                "media_uncertain": False,
+                "node_contract_valid": True,
+            }
+            if settings.mode in {MODE_AUTO_SAFE, MODE_AUTO_ALL} and route == "seller_chat":
+                selected = safe_public_template(str(job["feedback_id"]), int(feedback["rating"] or 0))
+                result["server_policy_transform"] = {
+                    "contract": "wb_autoanswers_safe_public_policy_v1",
+                    "source_route": route,
+                    "source_reply_sha256": evidence["reply_sha256"],
+                    "source_case_code_present": False,
+                    "publication_route": selected["route"],
+                    "template_id": selected["template_id"],
+                    "operator_handoff": False,
+                    "model_calls": 0,
+                }
+                route = str(selected["route"])
+                reply = str(selected["reply"])
+                result["final_route"] = route
+                result["final_reply"] = reply
+                result["pipeline_result"] = {
+                    **dict(result["pipeline_result"]),
+                    "route": route,
+                    "source_route": "seller_chat",
+                }
+            reply_sha = final_reply_hash(reply)
+            next_state = STATE_GENERATED
+            review_reasons: list[str] = []
+            if settings.mode == MODE_AUTO_ALL or (
+                settings.mode == MODE_AUTO_SAFE and route in AUTO_SAFE_ROUTES
+            ):
+                next_state = STATE_APPROVED
+            elif settings.mode == MODE_AUTO_SAFE:
+                next_state = STATE_NEEDS_REVIEW
+                review_reasons.append("route_not_in_auto_safe_allowlist")
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state=?,enable_epoch=?,policy_epoch=?,policy_version=?,processing_kind=?,
+                    final_route=?,case_code=NULL,final_reply=?,final_reply_sha256=?,result_json=?,
+                    hard_gates_passed=1,fallback_used=0,media_uncertain=0,node_contract_valid=1,
+                    lease_owner=NULL,lease_until=NULL,regeneration_required=0,
+                    regeneration_reason=NULL,review_reasons_json=?,last_error_code=NULL,
+                    completed_at=?,updated_at=?
+                WHERE processing_key=?
+                """,
+                (
+                    next_state,
+                    settings.enable_epoch,
+                    settings.policy_epoch,
+                    settings.policy_version,
+                    PROCESSING_KIND_FROZEN_AI,
+                    route,
+                    reply,
+                    reply_sha,
+                    canonical_json(result),
+                    canonical_json(review_reasons),
+                    iso_utc(now),
+                    iso_utc(now),
+                    key,
+                ),
+            )
+            adopted = dict(job)
+            adopted.update(
+                {
+                    "enable_epoch": settings.enable_epoch,
+                    "policy_epoch": settings.policy_epoch,
+                    "policy_version": settings.policy_version,
+                    "final_route": route,
+                    "final_reply": reply,
+                    "final_reply_sha256": reply_sha,
+                }
+            )
+            if next_state == STATE_APPROVED:
+                self._create_publication_job(
+                    conn,
+                    job=adopted,
+                    reply=reply,
+                    reply_sha=reply_sha,
+                    request_source="automatic",
+                    requested_by=None,
+                    mode_at_enqueue=settings.mode,
+                    manual_edit_revision=None,
+                    at=now,
+                )
+            self._audit(
+                conn,
+                aggregate_type="processing_job",
+                aggregate_id=key,
+                event_type="node_result_recovered_without_provider_call",
+                actor_type="recovery",
+                actor_id=_clean_text(actor_id),
+                details={
+                    "source_invocation_id": evidence["invocation_id"],
+                    "source_reply_sha256": evidence["reply_sha256"],
+                    "reply_sha256": reply_sha,
+                    "route": route,
+                    "model_calls_replayed": 0,
+                    "source_model_calls": evidence["model_call_count"],
+                },
+                at=now,
+                previous_state=str(job["state"]),
+                next_state=next_state,
+            )
+            stored = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (key,),
+            ).fetchone()
+            return dict(stored)
+
+    def schedule_safe_public_recovery(
+        self,
+        processing_key_value: str,
+        *,
+        error_code: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Replace a proven non-ambiguous technical dead end with zero-cost work."""
+
+        settings = self.settings()
+        if settings.policy_version != DEFAULT_POLICY_VERSION:
+            raise AutoanswersRuntimeError(
+                "safe-public recovery policy is not active",
+                code="safe_public_policy_inactive",
+            )
+        code = _clean_text(error_code)
+        if code not in {"reservation_missing", "stale_content_version", "node_invalid_json_repeated"}:
+            raise AutoanswersRuntimeError(
+                "technical failure is not safe-template eligible",
+                code="safe_public_recovery_ineligible",
+            )
+        key = _clean_text(processing_key_value)
+        now = self._now()
+        with self.transaction() as conn:
+            job = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (key,),
+            ).fetchone()
+            feedback = (
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                    (job["feedback_id"],),
+                ).fetchone()
+                if job is not None
+                else None
+            )
+            if job is None or feedback is None:
+                raise AutoanswersRuntimeError("processing job not found", code="job_not_found")
+            if (
+                int(feedback["content_version"]) != int(job["content_version"])
+                or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
+                or feedback["answer_text"]
+            ):
+                raise AutoanswersRuntimeError("feedback is not current", code="stale_content_version")
+            publication = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?",
+                (key,),
+            ).fetchone()
+            if publication is not None:
+                raise AutoanswersRuntimeError(
+                    "publication evidence must be reconciled first",
+                    code="publication_already_exists",
+                )
+            reservation = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations WHERE processing_key=?",
+                (key,),
+            ).fetchone()
+            if reservation is not None and str(reservation["status"]) == "reserved" and reservation[
+                "provider_call_started_at"
+            ]:
+                raise AutoanswersRuntimeError(
+                    "provider outcome is ambiguous",
+                    code="provider_boundary_uncertain",
+                )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                SET reserved_usd=0,status=CASE WHEN status='reserved' THEN 'released' ELSE status END,
+                    expires_at=NULL,released_reason=CASE WHEN status='reserved' THEN 'safe_public_recovery' ELSE released_reason END,
+                    updated_at=?
+                WHERE processing_key=?
+                """,
+                (iso_utc(now), key),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET state=?,processing_kind=?,enable_epoch=?,policy_epoch=?,policy_version=?,
+                    trigger_source='bounded_safe_recovery',available_at=?,lease_owner=NULL,
+                    lease_until=NULL,retry_stage=NULL,last_error_code=?,completed_at=NULL,
+                    regeneration_required=0,regeneration_reason=NULL,updated_at=?
+                WHERE processing_key=?
+                """,
+                (
+                    STATE_QUEUED,
+                    PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE,
+                    settings.enable_epoch,
+                    settings.policy_epoch,
+                    settings.policy_version,
+                    iso_utc(now),
+                    code,
+                    iso_utc(now),
+                    key,
+                ),
+            )
+            self._audit(
+                conn,
+                aggregate_type="processing_job",
+                aggregate_id=key,
+                event_type="safe_public_recovery_queued",
+                actor_type="recovery",
+                actor_id=_clean_text(actor_id),
+                details={"source_error_code": code, "model_calls": 0},
+                at=now,
+                previous_state=str(job["state"]),
+                next_state=STATE_QUEUED,
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                    (key,),
+                ).fetchone()
+            )
 
     def complete_media_uncertainty(
         self,
@@ -6597,7 +7192,49 @@ class AutoanswersRepository:
             ).fetchone()
             stale = feedback is None or int(feedback["content_version"]) != int(job["content_version"])
             external_answer = bool(feedback and feedback["answer_text"])
-            result_json = canonical_json(dict(result))
+            stored_result = dict(result)
+            if (
+                settings.policy_version == DEFAULT_POLICY_VERSION
+                and settings.mode in {MODE_AUTO_SAFE, MODE_AUTO_ALL}
+                and route == "seller_chat"
+            ):
+                selected = safe_public_template(
+                    str(job["feedback_id"]),
+                    int(feedback["rating"] or 0) if feedback is not None else 0,
+                )
+                source_reply_sha = final_reply_hash(reply)
+                stored_result["server_policy_transform"] = {
+                    "contract": "wb_autoanswers_safe_public_policy_v1",
+                    "source_route": route,
+                    "source_reply_sha256": source_reply_sha,
+                    "source_case_code_present": bool(result.get("case_code")),
+                    "publication_route": selected["route"],
+                    "template_id": selected["template_id"],
+                    "operator_handoff": False,
+                    "model_calls": 0,
+                }
+                route = str(selected["route"])
+                reply = str(selected["reply"])
+                stored_result["final_route"] = route
+                stored_result["final_reply"] = reply
+                stored_result["case_code"] = None
+                stored_result["fallback_used"] = False
+                fallback_used = False
+                self._audit(
+                    conn,
+                    aggregate_type="processing_job",
+                    aggregate_id=processing_key_value,
+                    event_type="seller_chat_transformed_to_safe_public",
+                    actor_type="policy",
+                    actor_id=settings.policy_version,
+                    details={
+                        "source_reply_sha256": source_reply_sha,
+                        "template_id": selected["template_id"],
+                        "operator_handoff": False,
+                    },
+                    at=now,
+                )
+            result_json = canonical_json(stored_result)
             reply_sha = final_reply_hash(reply)
             conn.execute(
                 """
@@ -6612,7 +7249,7 @@ class AutoanswersRepository:
                 (
                     STATE_GENERATED,
                     route,
-                    _clean_text(result.get("case_code")) or None,
+                    _clean_text(stored_result.get("case_code")) or None,
                     reply,
                     reply_sha,
                     result_json,
@@ -8320,6 +8957,14 @@ class AutoanswersRepository:
                 if job is not None
                 else None
             )
+            active_policy_row = conn.execute(
+                "SELECT policy_version FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+            ).fetchone()
+            active_policy_version = (
+                str(active_policy_row["policy_version"] or "")
+                if active_policy_row is not None
+                else ""
+            )
             if feedback["answer_text"]:
                 if job is not None and str(job["state"]) != STATE_PUBLISHED:
                     conn.execute(
@@ -8448,6 +9093,108 @@ class AutoanswersRepository:
                 # A possible write is reconciled only by readback; policy
                 # transitions must never manufacture a second POST.
                 return acknowledge("readback_preserved", feedback)
+            elif (
+                active_policy_version == DEFAULT_POLICY_VERSION
+                and publication is not None
+                and not publication["write_started_at"]
+                and bool(job["final_reply"])
+                and str(job["final_reply_sha256"] or "")
+                == str(publication["normalized_reply_sha256"] or "")
+                and final_reply_hash(str(publication["exact_reply"] or ""))
+                == str(publication["normalized_reply_sha256"] or "")
+                and bool(job["hard_gates_passed"])
+                and bool(job["node_contract_valid"])
+                and not bool(job["fallback_used"])
+                and not bool(job["media_uncertain"])
+                and str(job["final_route"] or "") != "seller_chat"
+            ):
+                # The immutable reply and zero-write publication evidence can
+                # be rebound to the new epoch without another AI call or WB
+                # POST.  A rating-only reply whose classification later became
+                # content-bearing remains a safe generic acknowledgement, but
+                # is relabelled public_only so the current invariant is honest.
+                adopted_route = str(job["final_route"] or "")
+                if (
+                    adopted_route == ROUTE_RATING_ONLY_TEMPLATE
+                    and classification != CONTENT_CLASS_RATING_ONLY
+                ):
+                    adopted_route = "public_only"
+                try:
+                    adopted_result = json.loads(str(job["result_json"] or "{}"))
+                except json.JSONDecodeError:
+                    adopted_result = {}
+                if not isinstance(adopted_result, dict):
+                    adopted_result = {}
+                if adopted_route != str(job["final_route"] or ""):
+                    adopted_result["server_policy_rebind"] = {
+                        "contract": "wb_autoanswers_backlog_recovery_v1",
+                        "source_route": str(job["final_route"] or ""),
+                        "source_reply_sha256": str(job["final_reply_sha256"] or ""),
+                        "publication_route": adopted_route,
+                        "reason": "current_content_classification_is_not_rating_only",
+                        "operator_handoff": False,
+                        "model_calls": 0,
+                    }
+                    adopted_result["final_route"] = adopted_route
+                    adopted_result["final_reply"] = str(job["final_reply"] or "")
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                    SET state=?,enable_epoch=?,policy_epoch=?,policy_version=?,
+                        transition_run_id=?,final_route=?,result_json=?,regeneration_required=0,
+                        regeneration_reason=NULL,review_reasons_json='[]',
+                        last_error_code=NULL,updated_at=?
+                    WHERE processing_key=?
+                    """,
+                    (
+                        STATE_APPROVED,
+                        enable_epoch,
+                        policy_epoch,
+                        DEFAULT_POLICY_VERSION,
+                        transition_run_id,
+                        adopted_route,
+                        canonical_json(adopted_result),
+                        iso_utc(now),
+                        job["processing_key"],
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_publication_jobs
+                    SET state=?,policy_epoch=?,mode_at_enqueue=?,
+                        transition_run_id=?,last_error_code=NULL,available_at=?,
+                        lease_owner=NULL,lease_until=NULL,updated_at=?
+                    WHERE publication_key=?
+                    """,
+                    (
+                        STATE_APPROVED,
+                        policy_epoch,
+                        target_mode,
+                        transition_run_id,
+                        iso_utc(now),
+                        iso_utc(now),
+                        publication["publication_key"],
+                    ),
+                )
+                self._audit(
+                    conn,
+                    aggregate_type="publication_job",
+                    aggregate_id=str(publication["publication_key"]),
+                    event_type="publication_rebound_without_new_ai_or_post",
+                    actor_type="policy",
+                    actor_id=DEFAULT_POLICY_VERSION,
+                    details={
+                        "policy_epoch": policy_epoch,
+                        "reply_sha256": publication["normalized_reply_sha256"],
+                        "write_attempts": 0,
+                        "provider_calls": 0,
+                        "route": adopted_route,
+                    },
+                    at=now,
+                    previous_state=str(publication["state"]),
+                    next_state=STATE_APPROVED,
+                )
+                outcome = "publication_rebound"
             elif str(job["state"]) == STATE_SKIPPED:
                 # A frozen prefilter result is already a terminal, zero-cost
                 # evaluation for this immutable content/bundle identity.

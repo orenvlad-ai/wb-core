@@ -121,6 +121,21 @@ class SyncTest(unittest.TestCase):
         status = self.service.unanswered_reconciliation_status()
         self.assertTrue(status["matches"])
 
+    def test_full_unanswered_inventory_has_no_history_floor_and_materializes_old_rows(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        old = feedback("old-unanswered")
+        old["createdDate"] = "2025-08-04T10:00:00Z"
+        self.source.remote_unanswered = 1
+        self.source.pages = [[old]]
+        result = self.service.full_unanswered_inventory_tick()
+        self.assertTrue(result["window_complete"])
+        self.assertEqual(result["enqueued"], 1)
+        self.assertEqual(self.source.calls[-1]["date_from_ts"], 0)
+        self.assertEqual(self.source.calls[-1]["take"], 5000)
+        self.assertEqual(len(self.repo.get_feedback("old-unanswered")["ai_jobs"]), 1)
+        cursor = self.repo.sync_cursor("wb_feedback_full_unanswered_inventory")
+        self.assertFalse(cursor["cursor"]["active"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
