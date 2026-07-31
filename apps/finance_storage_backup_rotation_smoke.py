@@ -23,6 +23,7 @@ from packages.application.finance_raw_storage import (
     CONSUMER_ID,
     ensure_operational_schema,
     ensure_raw_schema,
+    storage_health,
 )
 from packages.application.finance_storage_backup_rotation import (
     DEFAULT_COPY_OVERHEAD_BYTES,
@@ -40,12 +41,99 @@ from packages.application.finance_storage_snapshot_retention import (
     _fingerprint,
 )
 from packages.application.storage_registry import (
+    StoreRegistry,
     atomic_write_manifest,
     build_manifest,
 )
 
 
 DEPLOYED_SHA = "a" * 40
+
+
+def _post_cutover_committed_event(raw: Path, operational: Path) -> None:
+    event_id = "post-cutover-event-1"
+    batch_id = "post-cutover-batch-1"
+    observed_at = "2026-07-31T01:00:00Z"
+    payload_sha256 = "sha256:" + "7" * 64
+    with closing(sqlite3.connect(raw)) as conn:
+        conn.execute(
+            "INSERT INTO finance_raw_ingest_batches("
+            "batch_id,source_identity,source_sha256,report_period,seller_id,"
+            "week_start,week_end,row_count,rows_digest,status,created_at,committed_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                batch_id,
+                "fixture:post-cutover",
+                "sha256:" + "6" * 64,
+                "2026-W31",
+                "fixture-seller",
+                "2026-07-27",
+                "2026-08-02",
+                0,
+                "sha256:" + "5" * 64,
+                "committed",
+                observed_at,
+                observed_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO finance_raw_outbox("
+            "event_id,batch_id,sequence_no,event_type,payload_json,payload_sha256,"
+            "created_at,published_at,attempt_count,last_error"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                event_id,
+                batch_id,
+                1,
+                "finance_batch_committed",
+                "{}",
+                payload_sha256,
+                observed_at,
+                observed_at,
+                1,
+                None,
+            ),
+        )
+        conn.execute(
+            "UPDATE finance_raw_consumer_cursors SET last_sequence_no=1,"
+            "last_event_id=?,updated_at=? WHERE consumer_id=?",
+            (event_id, observed_at, CONSUMER_ID),
+        )
+        conn.commit()
+    with closing(sqlite3.connect(operational)) as conn:
+        conn.execute(
+            "INSERT INTO finance_operational_inbox("
+            "event_id,consumer_id,sequence_no,event_type,payload_sha256,received_at"
+            ") VALUES(?,?,?,?,?,?)",
+            (
+                event_id,
+                CONSUMER_ID,
+                1,
+                "finance_batch_committed",
+                payload_sha256,
+                observed_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO finance_operational_receipts("
+            "consumer_id,event_id,sequence_no,source_revision,result_row_count,"
+            "result_digest,applied_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                CONSUMER_ID,
+                event_id,
+                1,
+                payload_sha256,
+                0,
+                "sha256:" + "4" * 64,
+                observed_at,
+            ),
+        )
+        conn.execute(
+            "UPDATE finance_operational_consumer_cursors SET last_sequence_no=1,"
+            "last_event_id=?,source_revision=?,updated_at=? WHERE consumer_id=?",
+            (event_id, payload_sha256, observed_at, CONSUMER_ID),
+        )
+        conn.commit()
 
 
 def _fixture(runtime: Path) -> tuple[Path, Path, Path]:
@@ -350,6 +438,12 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
                     "INSERT INTO backup_fixture_operational VALUES(2,'second')"
                 )
                 conn.commit()
+            _post_cutover_committed_event(raw, operational)
+            post_cutover_health = storage_health(StoreRegistry(runtime))
+            self.assertEqual(post_cutover_health["consumer_lag_events"], 0)
+            self.assertEqual(post_cutover_health["live_tail_cursor"], 0)
+            self.assertFalse(post_cutover_health["live_tail_applicable"])
+            self.assertEqual(post_cutover_health["live_tail_lag_events"], 0)
             second = rotation.build_plan(force_replacement=True)
             applied_second = rotation.apply(
                 reviewed_plan=second,
@@ -357,6 +451,21 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
                 approval_reference="smoke-human-gate",
             )
             self.assertNotEqual(first_id, applied_second["retained_backup_id"])
+            retained_second_manifest = json.loads(
+                (
+                    backup_root
+                    / "retained"
+                    / applied_second["retained_backup_id"]
+                    / "backup_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertFalse(
+                retained_second_manifest["restore_drill"]["live_tail_applicable"]
+            )
+            self.assertEqual(
+                retained_second_manifest["restore_drill"]["live_tail_lag_events"],
+                0,
+            )
             retained = [
                 path.name
                 for path in (backup_root / "retained").iterdir()
@@ -721,6 +830,63 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
             self.assertTrue(result["replacement_verified"])
             self.assertFalse(oldest.exists())
             self.assertFalse(newest.exists())
+
+    def test_shadow_state_must_remain_inactive_and_cas_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            runtime = Path(raw_tmp) / "runtime"
+            _fixture(runtime)
+            backup_root = runtime / "backups" / "finance-storage-split-snapshots"
+            backup_root.mkdir(parents=True)
+            shadow_path = runtime / ".finance-storage-shadow-ingest.json"
+            shadow_path.write_text(
+                json.dumps(
+                    {
+                        "contract_version": "wb_core_finance_shadow_ingest_state_v1",
+                        "enabled": False,
+                        "status": "inactive_after_cutover",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(shadow_path, 0o600)
+            rotation = _rotation(runtime, backup_root)
+            plan = rotation.build_plan(force_replacement=True)
+            self.assertFalse(plan["canonical_guard"]["shadow_state"]["enabled"])
+            shadow_path.write_text(
+                json.dumps(
+                    {
+                        "contract_version": "wb_core_finance_shadow_ingest_state_v1",
+                        "enabled": False,
+                        "status": "drifted_after_plan",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageBackupRotationError, "shadow state CAS drifted"
+            ):
+                rotation.apply(
+                    reviewed_plan=plan,
+                    expected_fingerprint=plan["fingerprint"],
+                    approval_reference="smoke-human-gate",
+                )
+            shadow_path.write_text(
+                json.dumps(
+                    {
+                        "contract_version": "wb_core_finance_shadow_ingest_state_v1",
+                        "enabled": True,
+                        "status": "unexpected_active_shadow",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                FinanceStorageBackupRotationError, "inactive shadow ingest"
+            ):
+                rotation.build_plan(force_replacement=True)
 
 
 if __name__ == "__main__":

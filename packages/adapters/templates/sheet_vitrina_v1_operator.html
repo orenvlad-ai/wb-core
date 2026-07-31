@@ -13882,6 +13882,7 @@
         const monolithCursors = String(health.cursor_contract || "") === "not_applicable_monolith";
         const lag = Number(health.consumer_lag_events || 0);
         const tailLag = Number(health.live_tail_lag_events || 0);
+        const tailApplicable = health.live_tail_applicable !== false;
         const mismatches = Number(health.shadow_mismatch_count || 0);
         const deadLetters = Number(health.actionable_dead_letters || 0);
         const safe = Boolean(health.rollback_ready) && lag === 0 && tailLag === 0 && mismatches === 0 && deadLetters === 0;
@@ -13902,7 +13903,9 @@
           "<li>Operational generation: <code>" + escapeHtml(String(operational.generation_id || "—")) + "</code>, schema <code>" + escapeHtml(String(operational.schema_revision || "—")) + "</code>, " + escapeHtml(formatBytes(operational.size_bytes)) + ".</li>" +
           "<li>" + (monolithCursors
             ? "Split cursors: не применимы для canonical monolith"
-            : "Cursor raw/operational: " + escapeHtml(String(health.raw_ack_cursor || 0)) + " / " + escapeHtml(String(health.operational_cursor || 0)) + "; consumer lag: " + escapeHtml(String(lag)) + "; live-tail cursor/lag: " + escapeHtml(String(health.live_tail_cursor || 0)) + " / " + escapeHtml(String(tailLag))) + "; mismatches: " + escapeHtml(String(mismatches)) + "; dead letters: " + escapeHtml(String(deadLetters)) + ".</li>" +
+            : "Cursor raw/operational: " + escapeHtml(String(health.raw_ack_cursor || 0)) + " / " + escapeHtml(String(health.operational_cursor || 0)) + "; consumer lag: " + escapeHtml(String(lag)) + "; " + (tailApplicable
+              ? "live-tail cursor/lag: " + escapeHtml(String(health.live_tail_cursor || 0)) + " / " + escapeHtml(String(tailLag))
+              : "live-tail: не применяется после cutover (исторический cursor: " + escapeHtml(String(health.live_tail_cursor || 0)) + ")")) + "; mismatches: " + escapeHtml(String(mismatches)) + "; dead letters: " + escapeHtml(String(deadLetters)) + ".</li>" +
           "<li>Свободная ёмкость: " + escapeHtml(formatBytes(filesystem.free_bytes)) + "; rollback: " + escapeHtml(health.rollback_ready ? "готов" : "не доказан") + "; cutover: " + escapeHtml(health.cutover_ready ? "готов" : "не разрешён/не готов") + ".</li>" +
           "<li>Finance backup: <code>" + escapeHtml(String(backup.retained_backup_id || "не активирован")) + "</code>; статус: " + escapeHtml(String(backup.status || "unknown")) + "; retained: " + escapeHtml(String(backup.retained_count || 0)) + " / " + escapeHtml(formatBytes(backup.retained_bytes)) + "; возраст/RPO: " + escapeHtml(String(backup.age_seconds === null || backup.age_seconds === undefined ? "—" : backup.age_seconds)) + " / " + escapeHtml(String(backup.rpo_seconds || "—")) + " сек.; next replacement: " + escapeHtml(backup.next_replacement_capacity ? "доступен" : "заблокирован") + ".</li>" +
           "<li>Backup success/failure: " + escapeHtml(String(backup.last_success && backup.last_success.at || "—")) + " / " + escapeHtml(String(backup.last_failure && backup.last_failure.at || "—")) + "; прогноз retained growth 30/90 дней: " + escapeHtml(formatBytes(backup.projected_30_day_growth_bytes)) + " / " + escapeHtml(formatBytes(backup.projected_90_day_growth_bytes)) + "; headroom 30/90 дней: " + escapeHtml(formatBytes(backup.projected_30_day_available_bytes)) + " / " + escapeHtml(formatBytes(backup.projected_90_day_available_bytes)) + "; blockers: " + escapeHtml((Array.isArray(backup.blockers) && backup.blockers.length) ? backup.blockers.join("; ") : "нет") + ".</li>" +

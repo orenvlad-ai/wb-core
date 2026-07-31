@@ -191,9 +191,15 @@ def _validate_finance_storage_card(
             f"{int(storage_health.get('raw_ack_cursor') or 0)} / "
             f"{int(storage_health.get('operational_cursor') or 0)}",
             f"consumer lag: {int(storage_health.get('consumer_lag_events') or 0)}",
-            "live-tail cursor/lag: "
-            f"{int(storage_health.get('live_tail_cursor') or 0)} / "
-            f"{int(storage_health.get('live_tail_lag_events') or 0)}",
+            (
+                "live-tail cursor/lag: "
+                f"{int(storage_health.get('live_tail_cursor') or 0)} / "
+                f"{int(storage_health.get('live_tail_lag_events') or 0)}"
+                if storage_health.get("live_tail_applicable") is not False
+                else "live-tail: не применяется после cutover "
+                "(исторический cursor: "
+                f"{int(storage_health.get('live_tail_cursor') or 0)})"
+            ),
             f"mismatches: {int(storage_health.get('shadow_mismatch_count') or 0)}",
             f"dead letters: {int(storage_health.get('actionable_dead_letters') or 0)}",
             "rollback: не доказан",

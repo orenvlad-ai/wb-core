@@ -93,7 +93,10 @@ The implementation is deliberately inert on deploy:
   reacquire a redundant schema DDL lock after its read phase proved the schema.
   Its live-tail bridge mirrors committed batches and outbox
   sequence into an unselected candidate with its own cursor; crash-before-event
-  rolls back, crash-after-commit retries as a no-op.
+  rolls back, crash-after-commit retries as a no-op. After the split is selected
+  at cutover that bridge cursor is historical migration evidence and is no
+  longer a canonical lag watermark; canonical zero-lag is then the exact
+  equality of latest outbox, raw acknowledgement and operational cursor.
 - `packages/application/finance_storage_migration.py` builds a coherent
   short-hold SQLite backup and then performs the full `integrity_check` and
   foreign-key check on that immutable copy outside the live database. Planning
