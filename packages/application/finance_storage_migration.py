@@ -3606,7 +3606,14 @@ class FinanceStorageShadowVerifier:
         *,
         table: str,
     ) -> LogicalDigest:
-        if table == "finance_raw_current_rows":
+        if (
+            table == "finance_raw_current_rows"
+            and conn.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='finance_raw_rows'"""
+            ).fetchone()
+            is not None
+        ):
             return _current_raw_rows_digest(conn)
         digest = hashlib.sha256()
         count = 0
