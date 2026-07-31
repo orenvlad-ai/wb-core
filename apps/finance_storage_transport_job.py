@@ -24,10 +24,16 @@ JOB_ID_RE = re.compile(r"[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 IDENTITY_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ALLOWED_ACTIONS = frozenset(
-    {"snapshot-create", "cutover-apply", "rollback-apply"}
+    {
+        "snapshot-create",
+        "snapshot-retention-apply",
+        "cutover-apply",
+        "rollback-apply",
+    }
 )
 TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
 MAX_TIMEOUT_SECONDS = 43_200
+MAX_RESUME_ATTEMPTS = 8
 
 
 def _utc_now() -> str:
@@ -133,6 +139,12 @@ def _pid_matches(pid: int, *, job_id: str) -> bool:
         return False
     proc_root = Path("/proc")
     if not proc_root.is_dir():
+        try:
+            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+            if waited_pid == pid:
+                return False
+        except ChildProcessError:
+            pass
         try:
             os.kill(pid, 0)
         except OSError:
@@ -269,10 +281,59 @@ def _status_payload(
         "created_at": status.get("created_at"),
         "started_at": status.get("started_at"),
         "completed_at": status.get("completed_at"),
+        "attempt": status.get("attempt"),
+        "previous_failure_digest": status.get("previous_failure_digest"),
         "exit_code": status.get("exit_code"),
         "error": status.get("error"),
         "result": result,
     }
+
+
+def _start_worker(
+    runtime: Path,
+    *,
+    job_id: str,
+    deployed_sha_file: Path,
+    status: Mapping[str, Any],
+) -> None:
+    attempt = int(status.get("attempt") or 1)
+    worker = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "worker",
+            "--runtime-dir",
+            str(runtime),
+            "--job-id",
+            job_id,
+            "--deployed-sha-file",
+            str(deployed_sha_file.resolve()),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    _write_json(
+        _job_dir(runtime, job_id) / "status.json",
+        {
+            "status": "running",
+            "pid": int(worker.pid),
+            "attempt": attempt,
+            "previous_failure_digest": str(
+                status.get("previous_failure_digest") or ""
+            ),
+            "created_at": status.get("created_at") or _utc_now(),
+            "started_at": _utc_now(),
+        },
+    )
+    for _ in range(100):
+        if _pid_matches(int(worker.pid), job_id=job_id):
+            break
+        if worker.poll() is not None:
+            break
+        time.sleep(0.01)
 
 
 def submit_job(
@@ -320,47 +381,103 @@ def submit_job(
             {
                 "status": "queued",
                 "pid": 0,
+                "attempt": 1,
+                "previous_failure_digest": "",
                 "created_at": _utc_now(),
             },
         )
-        worker = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "worker",
-                "--runtime-dir",
-                str(runtime),
-                "--job-id",
-                job_id,
-                "--deployed-sha-file",
-                str(deployed_sha_file.resolve()),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
+        _start_worker(
+            runtime,
+            job_id=job_id,
+            deployed_sha_file=deployed_sha_file,
+            status=_load_json(directory / "status.json", label="queued status"),
         )
-        _write_json(
-            directory / "status.json",
-            {
-                "status": "running",
-                "pid": int(worker.pid),
-                "created_at": _utc_now(),
-                "started_at": _utc_now(),
-            },
-        )
-        for _ in range(100):
-            if _pid_matches(int(worker.pid), job_id=job_id):
-                break
-            if worker.poll() is not None:
-                break
-            time.sleep(0.01)
     return _status_payload(
         runtime,
         job_id=job_id,
         deployed_sha=deployed_sha,
     )
+
+
+def resume_job(
+    runtime_dir: Path,
+    *,
+    job_id: str,
+    deployed_sha_file: Path,
+    request_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    runtime = runtime_dir.resolve()
+    deployed_sha = _deployed_sha(deployed_sha_file)
+    request = _validated_request(
+        request_payload,
+        job_id=job_id,
+        deployed_sha=deployed_sha,
+    )
+    if str(request.get("action") or "") != "snapshot-retention-apply":
+        raise RuntimeError(
+            "only exact post-cutover snapshot retention supports worker resume"
+        )
+    root = _job_root(runtime)
+    submit_lock = root / "submit.lock"
+    with submit_lock.open("a+b") as lock_handle:
+        os.chmod(submit_lock, 0o600)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        directory = _job_dir(runtime, job_id)
+        existing = _load_json(directory / "request.json", label="transport request")
+        if str(existing.get("request_identity") or "") != str(
+            request.get("request_identity") or ""
+        ):
+            raise RuntimeError("Finance transport resume request drifted")
+        status = _load_json(directory / "status.json", label="transport status")
+        state = str(status.get("status") or "")
+        if state in {"running", "queued", "succeeded"}:
+            return _status_payload(
+                runtime, job_id=job_id, deployed_sha=deployed_sha
+            )
+        failed_pid = int(status.get("pid") or 0)
+        worker_exit_deadline = time.monotonic() + 5.0
+        while _pid_matches(failed_pid, job_id=job_id):
+            if time.monotonic() >= worker_exit_deadline:
+                break
+            time.sleep(0.05)
+        if state != "failed" or _pid_matches(failed_pid, job_id=job_id):
+            raise RuntimeError(
+                "Finance transport resume requires one terminal failed worker"
+            )
+        attempt = int(status.get("attempt") or 1)
+        if attempt >= MAX_RESUME_ATTEMPTS:
+            raise RuntimeError("Finance transport resume attempt cap was reached")
+        if (directory / "result.json").exists():
+            raise RuntimeError(
+                "failed Finance transport job unexpectedly has a result"
+            )
+        failure_digest = _digest(status)
+        archived = directory / f"status-attempt-{attempt}.json"
+        if archived.exists():
+            if _load_json(archived, label="archived transport status") != status:
+                raise RuntimeError("archived Finance transport failure drifted")
+        else:
+            _write_json(archived, status)
+        archived_request = directory / f"request-attempt-{attempt}.json"
+        if archived_request.exists():
+            if _load_json(
+                archived_request, label="archived transport request"
+            ) != existing:
+                raise RuntimeError("archived Finance transport request drifted")
+        else:
+            _write_json(archived_request, existing)
+        _write_json(directory / "request.json", request)
+        _start_worker(
+            runtime,
+            job_id=job_id,
+            deployed_sha_file=deployed_sha_file,
+            status={
+                "attempt": attempt + 1,
+                "created_at": status.get("created_at"),
+                "previous_failure_digest": failure_digest,
+            },
+        )
+    return _status_payload(runtime, job_id=job_id, deployed_sha=deployed_sha)
 
 
 def run_worker(
@@ -444,6 +561,10 @@ def run_worker(
                     else "failed"
                 ),
                 "pid": os.getpid(),
+                "attempt": int(status.get("attempt") or 1),
+                "previous_failure_digest": str(
+                    status.get("previous_failure_digest") or ""
+                ),
                 "created_at": status.get("created_at"),
                 "started_at": started_at,
                 "completed_at": _utc_now(),
@@ -458,6 +579,10 @@ def run_worker(
             {
                 "status": "failed",
                 "pid": os.getpid(),
+                "attempt": int(status.get("attempt") or 1),
+                "previous_failure_digest": str(
+                    status.get("previous_failure_digest") or ""
+                ),
                 "created_at": status.get("created_at"),
                 "started_at": started_at,
                 "completed_at": _utc_now(),
@@ -472,19 +597,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "action",
-        choices=("submit", "status", "worker"),
+        choices=("submit", "resume", "status", "worker"),
     )
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--deployed-sha-file", type=Path, required=True)
     args = parser.parse_args()
-    if args.action == "submit":
+    if args.action in {"submit", "resume"}:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError(
                 "Finance transport submit requires a JSON object"
             )
-        result = submit_job(
+        handler = submit_job if args.action == "submit" else resume_job
+        result = handler(
             args.runtime_dir,
             job_id=args.job_id,
             deployed_sha_file=args.deployed_sha_file,

@@ -1,0 +1,13 @@
+[Unit]
+Description=WB Core verified Finance split backup replacement
+After=network.target wb-core-wb-finance-weekly.service
+RequiresMountsFor=/opt/wb-core-runtime/state/backups
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/finance_storage_backup_rotation.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha-file /opt/wb-core-runtime/app/.wb-core-runtime-sha
+TimeoutStartSec=43200
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

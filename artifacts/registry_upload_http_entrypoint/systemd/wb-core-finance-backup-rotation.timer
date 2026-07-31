@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core daily Finance backup due-check
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 Europe/Moscow
+AccuracySec=5m
+RandomizedDelaySec=15m
+Persistent=true
+Unit=wb-core-finance-backup-rotation.service
+
+[Install]
+WantedBy=timers.target

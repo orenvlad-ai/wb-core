@@ -1446,6 +1446,7 @@ class MigrationSmoke(unittest.TestCase):
             "durable_restore_resume": True,
             "restore_systemd_template": True,
             "durable_storage_transport": True,
+            "durable_storage_transport_resume": True,
         }
 
     def test_recovery_contract_and_pre_barrier_fail_closed_matrix(
@@ -1462,10 +1463,12 @@ class MigrationSmoke(unittest.TestCase):
         transitions = [
             str(item["transition"]) for item in contract["transitions"]
         ]
-        self.assertEqual(len(transitions), 22)
-        self.assertEqual(len(set(transitions)), 22)
+        self.assertEqual(len(transitions), 27)
+        self.assertEqual(len(set(transitions)), 27)
+        self.assertIn("snapshot_backup.transport_resume", transitions)
         self.assertIn("transport.hold_mutation", transitions)
         self.assertIn("candidate.abort", transitions)
+        self.assertIn("snapshot_backup.select", transitions)
         self.assertTrue(contract["fail_closed_default"])
         self.assertFalse(contract["second_restore_job_allowed"])
         self.assertTrue(

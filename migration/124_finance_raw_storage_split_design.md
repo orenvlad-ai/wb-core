@@ -1,13 +1,13 @@
 # Migration 124 — Finance raw and warehouse/cost storage split design
 
-Status: **repository implementation complete through the inert maintenance
-barrier, coherent-copy integrity gate, candidate/shadow/soak, atomic cutover and
-reconciled rollback-drill capabilities, including a global fail-closed Finance
-migration deploy lease and an explicit recovery-continuity contract**. The
-canonical production source
-remains the monolith until the staged runner is deployed and a fresh exact
-fingerprint receives separate human approval. Old-generation retirement is not
-implemented by this runner and remains a later independent gate.
+Status: **production split cutover and rollback drill completed by PR #884,
+deployed SHA `dc605b6e1255cedb5a884aa9e35990a060e50368`**. The selected canonical
+generation is `c54072027f14f90b374b`; raw/operational lag, pending outbox,
+mismatch and actionable dead-letter counts were zero at the fresh 2026-07-31
+readback. The original monolith and earlier `/dev/sdc1` generations remain
+protected rollback evidence. Their retirement is not implemented by this
+runner and remains a later independent human gate. Post-cutover full restore
+sets and migration-snapshot cleanup are owned by migration 128.
 
 ## Measured production boundary
 

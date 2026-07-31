@@ -43,7 +43,12 @@ FINANCE_STORAGE_SPLIT_MUTATION_TIMEOUT_SECONDS = 43_200.0
 FINANCE_STORAGE_TRANSPORT_GRACE_SECONDS = 120.0
 FINANCE_STORAGE_TRANSPORT_STATUS_POLL_SECONDS = 5.0
 FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
-    {"snapshot-create", "cutover-apply", "rollback-apply"}
+    {
+        "snapshot-create",
+        "snapshot-retention-apply",
+        "cutover-apply",
+        "rollback-apply",
+    }
 )
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
@@ -4940,6 +4945,9 @@ def run_finance_storage_split_command(args: argparse.Namespace) -> int:
             ),
             minimum_observation_seconds=minimum_observation_seconds,
             deploy_lease=deploy_lease,
+            resume_failed_transport=bool(
+                getattr(args, "finance_transport_resume", False)
+            ),
         )
     output = str(getattr(args, "output", "") or "").strip()
     if output:
@@ -4984,6 +4992,7 @@ def _run_remote_finance_storage_transport_job(
     reviewed_plan_json: str | None,
     deployed_sha: str,
     timeout_seconds: float,
+    resume_failed: bool = False,
 ) -> dict[str, Any]:
     if (
         action not in FINANCE_STORAGE_DURABLE_HOLD_ACTIONS
@@ -5078,7 +5087,7 @@ def _run_remote_finance_storage_transport_job(
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-                if action_name == "submit"
+                if action_name in {"submit", "resume"}
                 else None
             ),
             cwd=ROOT,
@@ -5095,7 +5104,7 @@ def _run_remote_finance_storage_transport_job(
     started_at = time.monotonic()
     last_transport_error = ""
     try:
-        submitted = remote_job("submit")
+        submitted = remote_job("resume" if resume_failed else "submit")
         if submitted.returncode != 0:
             last_transport_error = (
                 submitted.stderr.strip()
@@ -5200,10 +5209,15 @@ def _run_remote_finance_storage_split_action(
     rollback_candidate_evidence: str = "",
     deploy_lease: Mapping[str, Any] | None = None,
     recovery_action: str = "",
+    resume_failed_transport: bool = False,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"finance-storage-split-{action}"
     )
+    if resume_failed_transport and action != "snapshot-retention-apply":
+        raise ValueError(
+            "Finance transport resume is limited to snapshot-retention-apply"
+        )
     if action not in {
         "dry-run",
         "health",
@@ -5731,6 +5745,7 @@ def _run_remote_finance_storage_split_action(
             reviewed_plan_json=reviewed_plan_json,
             deployed_sha=deployed_sha,
             timeout_seconds=remote_timeout_seconds,
+            resume_failed=resume_failed_transport,
         )
         result = None
     else:
@@ -5925,12 +5940,43 @@ def _run_remote_finance_storage_split_action(
         )
     elif action == "snapshot-retention-apply" and (
         str(payload.get("status") or "") != "completed"
-        or int(payload.get("archived_snapshot_count") or 0) <= 0
+        or (
+            str(payload.get("strategy") or "")
+            == "post_cutover_atomic_replace_v1"
+            and (
+                payload.get("replacement_verified") is not True
+                or int(payload.get("retained_backup_count") or 0) != 1
+            )
+        )
+        or (
+            str(payload.get("strategy") or "")
+            != "post_cutover_atomic_replace_v1"
+            and int(payload.get("archived_snapshot_count") or 0) <= 0
+        )
         or payload.get("live_monolith_touched") is not False
         or payload.get("split_generation_touched") is not False
     ):
         raise RuntimeError(
             "Finance snapshot retention apply lacks exact terminal readback"
+        )
+    elif action == "snapshot-retention-readback" and (
+        str(payload.get("status") or "") != "readback_verified"
+        or payload.get("live_monolith_touched") is not False
+        or payload.get("split_generation_touched") is not False
+        or (
+            str(payload.get("strategy") or "")
+            == "post_cutover_atomic_replace_v1"
+            and (
+                payload.get("replacement_verified") is not True
+                or payload.get("restore_drill_verified") is not True
+                or int(payload.get("retained_backup_count") or 0) != 1
+                or int(payload.get("root_long_lived_snapshot_count") or 0) != 0
+                or int(payload.get("backup_legacy_snapshot_count") or 0) != 0
+            )
+        )
+    ):
+        raise RuntimeError(
+            "Finance snapshot retention readback lacks exact terminal proof"
         )
     elif action == "candidate-abort-apply" and (
         str(payload.get("status") or "") != "completed"
@@ -8297,8 +8343,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_snapshot_retention_plan = subparsers.add_parser(
         "finance-storage-snapshot-retention-plan",
         help=(
-            "Plan exact archive-first release of stale Finance coherent "
-            "snapshots to the dedicated backup device without mutation."
+            "Plan exact pre-cutover archival or post-cutover atomic Finance "
+            "backup replacement and superseded-snapshot release."
         ),
     )
     finance_storage_snapshot_retention_plan.add_argument(
@@ -8321,8 +8367,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     finance_storage_snapshot_retention_apply = subparsers.add_parser(
         "finance-storage-snapshot-retention-apply",
         help=(
-            "Archive exact stale Finance snapshots, verify bytes and durable "
-            "audit, then release only their root-filesystem copies."
+            "Apply one exact durable Finance snapshot/backup retention plan; "
+            "post-cutover selection precedes every superseded release."
         ),
     )
     finance_storage_snapshot_retention_apply.add_argument(
@@ -8350,11 +8396,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
         finance_storage_split_action="snapshot-retention-apply",
     )
 
+    finance_storage_snapshot_retention_resume = subparsers.add_parser(
+        "finance-storage-snapshot-retention-resume",
+        help=(
+            "Resume the same exact failed durable post-cutover Finance "
+            "retention job without creating a second request identity."
+        ),
+    )
+    finance_storage_snapshot_retention_resume.add_argument(
+        "--plan-file",
+        required=True,
+    )
+    finance_storage_snapshot_retention_resume.add_argument(
+        "--fingerprint",
+        required=True,
+    )
+    finance_storage_snapshot_retention_resume.add_argument(
+        "--approval-reference",
+        required=True,
+    )
+    finance_storage_snapshot_retention_resume.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10_000,
+    )
+    _add_finance_migration_deploy_lease_argument(
+        finance_storage_snapshot_retention_resume
+    )
+    finance_storage_snapshot_retention_resume.set_defaults(
+        handler=run_finance_storage_split_command,
+        finance_storage_split_action="snapshot-retention-apply",
+        finance_transport_resume=True,
+    )
+
     finance_storage_snapshot_retention_readback = subparsers.add_parser(
         "finance-storage-snapshot-retention-readback",
         help=(
-            "Independently verify archived stale snapshot bytes, terminal "
-            "transactions, released source copies and recovered capacity."
+            "Independently verify retained restore bytes, terminal "
+            "transactions, released superseded copies and recovered capacity."
         ),
     )
     finance_storage_snapshot_retention_readback.add_argument(

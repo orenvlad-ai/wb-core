@@ -177,6 +177,64 @@ _TRANSITIONS = (
         "command": "finance-storage-snapshot-retention-apply",
     },
     {
+        "transition": "snapshot_backup.transport_resume",
+        "persisted_store": (
+            "finance-storage-transport-jobs/<request-digest>/"
+            "request.json + status-attempt-<n>.json + status.json"
+        ),
+        "from": ("failed",),
+        "to": ("running", "succeeded"),
+        "recovery": (
+            "explicit_same_request_failed_worker_resume_max_eight_attempts"
+        ),
+        "command": "finance-storage-snapshot-retention-resume",
+    },
+    {
+        "transition": "snapshot_backup.pre_gc",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/transactions/"
+            "<plan-fingerprint>.json"
+        ),
+        "from": ("started",),
+        "to": ("pre_gc_complete",),
+        "recovery": "exact_candidate_sha_stat_pending_intent_resume",
+        "command": "finance-storage-snapshot-retention-apply",
+    },
+    {
+        "transition": "snapshot_backup.copy_verify",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/retained/"
+            ".<backup-id>.partial"
+        ),
+        "from": ("pre_gc_complete", "operational_copied", "raw_copied"),
+        "to": ("replacement_verified",),
+        "recovery": "same_plan_copy_integrity_logical_restore_resume",
+        "command": "finance-storage-snapshot-retention-apply",
+    },
+    {
+        "transition": "snapshot_backup.select",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/current.json"
+        ),
+        "from": ("replacement_verified",),
+        "to": ("current_selected",),
+        "recovery": "backup_manifest_fingerprint_atomic_selector_readback",
+        "command": "finance-storage-snapshot-retention-apply",
+    },
+    {
+        "transition": "snapshot_backup.post_gc",
+        "persisted_store": (
+            "backups/finance-storage-split-snapshots/transactions/"
+            "<plan-fingerprint>.json"
+        ),
+        "from": ("current_selected",),
+        "to": ("post_gc_complete", "completed"),
+        "recovery": (
+            "selected_current_preserved_exact_deletion_and_terminal_audit_resume"
+        ),
+        "command": "finance-storage-snapshot-retention-apply",
+    },
+    {
         "transition": "candidate.backfill",
         "persisted_store": (
             "generations/<id>/operational.sqlite3:"
@@ -422,6 +480,7 @@ def recovery_contract(
         "durable_restore_resume",
         "restore_systemd_template",
         "durable_storage_transport",
+        "durable_storage_transport_resume",
     )
     missing_capabilities = sorted(
         key
@@ -445,6 +504,7 @@ def recovery_contract(
         "transitions": [dict(item) for item in _TRANSITIONS],
         "fail_closed_default": True,
         "second_restore_job_allowed": False,
+        "snapshot_backup_transport_max_attempts": 8,
         "automatic_manifest_guessing_allowed": False,
     }
     payload["fingerprint"] = _fingerprint(payload)
@@ -984,9 +1044,19 @@ def validate_recovery_preflight(
                 f"{exact_action} requires the canonical monolith"
             )
     if exact_action == "snapshot-retention-apply":
-        if active.state != "monolith" or active.canonical_source != "monolith":
+        if not (
+            (
+                active.state == "monolith"
+                and active.canonical_source == "monolith"
+            )
+            or (
+                active.state == "cutover"
+                and active.canonical_source == "split"
+            )
+        ):
             raise FinanceStorageRecoveryContractError(
-                "snapshot-retention-apply requires the canonical monolith"
+                "snapshot-retention-apply requires a selected canonical "
+                "monolith or post-cutover split"
             )
     if exact_action == "apply" and snapshot is None:
         raise FinanceStorageRecoveryContractError(
@@ -1194,12 +1264,22 @@ def validate_recovery_preflight(
         "rollback-apply": "rollback.",
         "stale-writer-stop": "snapshot.",
     }[exact_action]
+    if (
+        exact_action == "snapshot-retention-apply"
+        and isinstance(reviewed_plan, Mapping)
+        and str(reviewed_plan.get("strategy") or "")
+        == "post_cutover_atomic_replace_v1"
+    ):
+        transition_prefix = "snapshot_backup."
     relevant_transitions = [
         item["transition"]
         for item in contract["transitions"]
         if str(item["transition"]).startswith(transition_prefix)
     ]
-    if exact_action in BARRIER_OWNING_ACTIONS:
+    if exact_action in BARRIER_OWNING_ACTIONS or (
+        exact_action == "snapshot-retention-apply"
+        and transition_prefix == "snapshot_backup."
+    ):
         relevant_transitions.insert(0, "transport.hold_mutation")
     evidence: dict[str, Any] = {
         "contract_version": RECOVERY_VALIDATION_VERSION,

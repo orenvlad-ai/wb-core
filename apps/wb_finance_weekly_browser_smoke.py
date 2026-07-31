@@ -201,6 +201,10 @@ def main() -> None:
             or "live-tail cursor/lag: 42 / 0" not in facts["storageHealth"]
             or "mismatches: 0" not in facts["storageHealth"]
             or "rollback: готов" not in facts["storageHealth"]
+            or "finance-backup-11111111111111111111" not in facts["storageHealth"]
+            or "next replacement: доступен" not in facts["storageHealth"]
+            or "прогноз retained growth 30/90 дней" not in facts["storageHealth"]
+            or "headroom 30/90 дней" not in facts["storageHealth"]
             or "success" not in facts["storageHealthTone"]
         ):
             raise AssertionError(
@@ -322,6 +326,22 @@ def _finance_payload() -> dict[str, object]:
             "shadow_mismatch_count": 0,
             "actionable_dead_letters": 0,
             "filesystem": {"free_bytes": 20_000_000_000},
+            "backup": {
+                "status": "healthy",
+                "retained_backup_id": "finance-backup-11111111111111111111",
+                "retained_count": 1,
+                "retained_bytes": 18_000_000_000,
+                "age_seconds": 3600,
+                "rpo_seconds": 604800,
+                "next_replacement_capacity": True,
+                "last_success": {"at": "2026-07-31T04:30:00Z"},
+                "last_failure": None,
+                "projected_30_day_growth_bytes": 0,
+                "projected_90_day_growth_bytes": 0,
+                "projected_30_day_available_bytes": 60_000_000_000,
+                "projected_90_day_available_bytes": 60_000_000_000,
+                "blockers": [],
+            },
             "rollback_ready": True,
             "cutover_ready": False,
         },

@@ -1048,7 +1048,11 @@ def main() -> None:
                 hosted_runtime.subprocess,
                 "run",
                 return_value=completed,
-            ) as run_mock:
+            ) as run_mock, mock.patch.object(
+                hosted_runtime,
+                "_run_remote_finance_storage_transport_job",
+                return_value=retention_payloads[action],
+            ) as transport_mock:
                 hosted_runtime._run_remote_finance_storage_split_action(
                     active_target,
                     action=action,
@@ -1070,7 +1074,16 @@ def main() -> None:
                     chunk_size=10_000,
                     deploy_lease=deploy_lease,
                 )
-            remote_command = " ".join(run_mock.call_args.args[0])
+            if action == "snapshot-retention-apply":
+                if transport_mock.call_count != 1:
+                    raise AssertionError(
+                        "Finance snapshot retention apply lost durable transport"
+                    )
+                remote_command = " ".join(
+                    transport_mock.call_args.kwargs["runner_args"]
+                )
+            else:
+                remote_command = " ".join(run_mock.call_args.args[0])
             for token in (
                 "apps/finance_storage_split.py",
                 "--deploy-lease-json",

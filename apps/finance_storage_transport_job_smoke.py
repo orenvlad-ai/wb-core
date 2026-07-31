@@ -18,6 +18,7 @@ from apps.finance_storage_transport_job import (
     REQUEST_CONTRACT,
     _digest,
     _status_payload,
+    resume_job,
     submit_job,
 )
 
@@ -29,17 +30,18 @@ def _request(
     *,
     repo_root: Path,
     stdin_text: str,
+    action: str = "rollback-apply",
 ) -> dict[str, object]:
     runner_args = [
         "python3",
         "apps/finance_storage_split.py",
-        "rollback-apply",
+        action,
     ]
     identity_without_job = {
         "contract_name": (
             "wb_core_finance_storage_transport_identity_v1"
         ),
-        "action": "rollback-apply",
+        "action": action,
         "deployed_sha": DEPLOYED_SHA,
         "runner_args": runner_args,
         "stdin_sha256": (
@@ -62,7 +64,7 @@ def _request(
         "job_id": job_id,
         "request_identity": _digest(identity),
         "identity": identity,
-        "action": "rollback-apply",
+        "action": action,
         "deployed_sha": DEPLOYED_SHA,
         "repo_root": str(repo_root),
         "runner_args": runner_args,
@@ -169,9 +171,83 @@ def main() -> None:
         )
         assert repeated["status"] == "succeeded"
         assert repeated["pid"] == terminal["pid"]
+
+        resume_repo = root / "resume-repo"
+        resume_apps = resume_repo / "apps"
+        resume_apps.mkdir(parents=True)
+        resume_runner = resume_apps / "finance_storage_split.py"
+        resume_runner.write_text(
+            "import json,sys\n"
+            "from pathlib import Path\n"
+            "payload=json.load(sys.stdin)\n"
+            "marker=Path('.resume-attempt')\n"
+            "if not marker.exists():\n"
+            " marker.write_text('failed',encoding='utf-8')\n"
+            " raise SystemExit(75)\n"
+            "print(json.dumps({'status':'completed','echo':payload}))\n",
+            encoding="utf-8",
+        )
+        resume_request = _request(
+            repo_root=resume_repo,
+            stdin_text=stdin_text,
+            action="snapshot-retention-apply",
+        )
+        resume_seed = str(resume_request["job_id"])
+        submit_job(
+            runtime,
+            job_id=resume_seed,
+            deployed_sha_file=marker,
+            request_payload=resume_request,
+        )
+        failed: dict[str, object] = {}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            failed = _status_payload(
+                runtime,
+                job_id=resume_seed,
+                deployed_sha=DEPLOYED_SHA,
+            )
+            if failed.get("terminal"):
+                break
+            time.sleep(0.05)
+        assert failed["worker_classification"] == "terminal_failed", failed
+        resumed = resume_job(
+            runtime,
+            job_id=resume_seed,
+            deployed_sha_file=marker,
+            request_payload=resume_request,
+        )
+        assert resumed["worker_classification"] == "active_worker", resumed
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            resumed = _status_payload(
+                runtime,
+                job_id=resume_seed,
+                deployed_sha=DEPLOYED_SHA,
+            )
+            if resumed.get("terminal"):
+                break
+            time.sleep(0.05)
+        assert resumed["worker_classification"] == "terminal_succeeded", resumed
+        assert resumed["attempt"] == 2, resumed
+        assert resumed["previous_failure_digest"]
+        assert (
+            runtime
+            / "finance-storage-transport-jobs"
+            / resume_seed
+            / "status-attempt-1.json"
+        ).is_file()
+        repeated_resume = resume_job(
+            runtime,
+            job_id=resume_seed,
+            deployed_sha_file=marker,
+            request_payload=resume_request,
+        )
+        assert repeated_resume["status"] == "succeeded", repeated_resume
     print(
         "finance_storage_transport_job_smoke: ok -> "
-        "one exact worker, disconnect-safe observation, request drift blocked"
+        "one exact worker, disconnect-safe observation, request drift blocked, "
+        "explicit same-job failed-worker resume"
     )
 
 
