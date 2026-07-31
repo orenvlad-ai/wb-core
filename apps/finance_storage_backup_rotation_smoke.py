@@ -242,7 +242,13 @@ def _legacy_root_snapshot(
     return root
 
 
-def _legacy_backup_archive(runtime: Path, backup_root: Path, identity: str) -> Path:
+def _legacy_backup_archive(
+    runtime: Path,
+    backup_root: Path,
+    identity: str,
+    *,
+    include_empty_wal: bool = False,
+) -> Path:
     source = _legacy_root_snapshot(runtime, identity)
     with closing(sqlite3.connect(source / "monolith.sqlite3")) as conn:
         conn.execute("CREATE TABLE padding(value BLOB)")
@@ -257,13 +263,21 @@ def _legacy_backup_archive(runtime: Path, backup_root: Path, identity: str) -> P
     )
     archive = backup_root / source.name
     archive.mkdir(parents=True)
-    for name in ("monolith.sqlite3", "snapshot_manifest.json"):
+    copied_names = ["monolith.sqlite3", "snapshot_manifest.json"]
+    if include_empty_wal:
+        wal = archive / "monolith.sqlite3-wal"
+        wal.write_bytes(b"")
+        os.chmod(wal, 0o600)
+        copied_names.append(wal.name)
+    for name in copied_names:
+        if name == "monolith.sqlite3-wal":
+            continue
         destination = archive / name
         destination.write_bytes((source / name).read_bytes())
         os.chmod(destination, 0o600)
     plan_fingerprint = "sha256:" + identity * 64
     declared = []
-    for name in ("monolith.sqlite3", "snapshot_manifest.json"):
+    for name in copied_names:
         path = archive / name
         declared.append(
             {
@@ -338,6 +352,32 @@ def _rotation(
 
 
 class FinanceStorageBackupRotationSmoke(unittest.TestCase):
+    def test_zero_byte_legacy_wal_is_verified_not_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            runtime = Path(raw_tmp) / "runtime"
+            _fixture(runtime)
+            backup_root = runtime / "backups" / "finance-storage-split-snapshots"
+            backup_root.mkdir(parents=True)
+            archive = _legacy_backup_archive(
+                runtime,
+                backup_root,
+                "9",
+                include_empty_wal=True,
+            )
+
+            plan = _rotation(runtime, backup_root).build_plan(
+                force_replacement=True
+            )
+
+            self.assertEqual(
+                [item["path"] for item in plan["inventory"]["backup_legacy"]],
+                [str(archive.resolve())],
+            )
+            self.assertNotIn(
+                str(archive.resolve()),
+                [item["path"] for item in plan["inventory"]["protected"]],
+            )
+
     def test_two_cycles_crash_resume_one_current_and_non_targets(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             runtime = Path(raw_tmp) / "runtime"

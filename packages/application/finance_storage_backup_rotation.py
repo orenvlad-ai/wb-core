@@ -971,7 +971,12 @@ class FinanceStorageBackupRotation:
             actual = actual_files.get(name)
             if (
                 actual is None
-                or int(actual["size_bytes"]) != int(expected.get("size_bytes") or -1)
+                or int(actual["size_bytes"])
+                != int(
+                    expected["size_bytes"]
+                    if "size_bytes" in expected
+                    else -1
+                )
                 or str(actual["sha256"]) != str(expected.get("sha256") or "")
             ):
                 raise FinanceStorageBackupRotationError(
