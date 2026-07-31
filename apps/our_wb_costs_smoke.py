@@ -156,6 +156,31 @@ def main() -> None:
         _assert_transit_supply_cost(runtime, expected_status="transit_confirmed", expected_per_unit=100.0)
         if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 0:
             raise AssertionError("repeated transit evidence materialization must be a no-op")
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "transit_enriched",
+                "amount": 0,
+                "currency": "RUB",
+                "amount_label": "0 ₽",
+                "is_transit": True,
+                "source": "seller_portal_browser",
+                "evidence_type": "network_json",
+                "confidence": "high",
+                "fetched_at": NOW,
+                "status": "success",
+                "error": "",
+                "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
+            raise AssertionError("confirmed zero transit evidence must version one canonical layer")
+        _assert_transit_supply_cost(
+            runtime,
+            expected_status="direct_zero_confirmed",
+            expected_per_unit=0.0,
+        )
         _seed_wb_supply(
             runtime,
             supply_id="transit_official",

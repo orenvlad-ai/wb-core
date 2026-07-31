@@ -4120,10 +4120,137 @@ class RegistryUploadDbBackedRuntime:
         created_at = str(record.get("created_at") or now).strip()
         if created_at:
             _validate_timestamp(created_at, field_name="created_at")
+        amount = _optional_float(record.get("amount"))
+        currency = str(record.get("currency") or "RUB").strip()[:16]
+        status = str(record.get("status") or "failed").strip()[:40]
+        source = str(record.get("source") or "seller_portal_browser").strip()[:80]
+        evidence_type = str(record.get("evidence_type") or "network_json").strip()[:80]
+        confidence = str(record.get("confidence") or "").strip()[:40]
+        fetched_at = str(record.get("fetched_at") or "").strip()
+        amount_label = str(record.get("amount_label") or "").strip()[:80]
+        error = _safe_runtime_error(record.get("error"))
+        endpoint = str(record.get("source_endpoint_path") or "").strip()[:260]
+        is_transit = 1 if record.get("is_transit", True) else 0
+        successful_fact = status == "success" and amount is not None and amount >= 0
+        fact_material = {
+            "supply_id": supply_id,
+            "amount": amount,
+            "currency": currency,
+            "is_transit": bool(is_transit),
+            "source": source,
+            "evidence_type": evidence_type,
+            "confidence": confidence,
+            "source_endpoint_path": endpoint,
+        }
+        source_revision = "sha256:" + hashlib.sha256(
+            json.dumps(
+                fact_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        attempt_material = {
+            **fact_material,
+            "fetched_at": fetched_at,
+            "status": status,
+            "error": error,
+            "attempted_at": now,
+        }
+        attempt_fingerprint = "sha256:" + hashlib.sha256(
+            json.dumps(
+                attempt_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        attempt_id = "wbtr_attempt_" + attempt_fingerprint.split(":", 1)[-1][:24]
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             conn.execute(
+                """
+                INSERT OR IGNORE INTO sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts(
+                    attempt_id,supply_id,amount,currency,amount_label,is_transit,
+                    source,evidence_type,confidence,fetched_at,status,error,
+                    source_endpoint_path,attempted_at,attempt_fingerprint
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    attempt_id,
+                    supply_id,
+                    amount,
+                    currency,
+                    amount_label,
+                    is_transit,
+                    source,
+                    evidence_type,
+                    confidence,
+                    fetched_at,
+                    status,
+                    error,
+                    endpoint,
+                    now,
+                    attempt_fingerprint,
+                ),
+            )
+            existing = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment WHERE supply_id=?",
+                (supply_id,),
+            ).fetchone()
+            existing_success = bool(
+                existing is not None
+                and str(existing["status"] or "") == "success"
+                and existing["amount"] is not None
+            )
+            unchanged_success = bool(
+                successful_fact
+                and existing_success
+                and str(existing["source_revision"] or "") == source_revision
+            )
+            if successful_fact and not unchanged_success:
+                next_revision = int(existing["success_revision"] or 0) + 1 if existing is not None else 1
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_wb_supply_transit_cost_enrichment(
+                        supply_id,amount,currency,amount_label,is_transit,source,
+                        evidence_type,confidence,fetched_at,status,error,
+                        source_endpoint_path,created_at,updated_at,
+                        last_attempt_status,last_attempt_error,last_attempt_at,
+                        source_revision,success_revision,recalculation_status,
+                        recalculation_error,recalculation_updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(supply_id) DO UPDATE SET
+                        amount=excluded.amount,currency=excluded.currency,
+                        amount_label=excluded.amount_label,is_transit=excluded.is_transit,
+                        source=excluded.source,evidence_type=excluded.evidence_type,
+                        confidence=excluded.confidence,fetched_at=excluded.fetched_at,
+                        status='success',error='',source_endpoint_path=excluded.source_endpoint_path,
+                        updated_at=excluded.updated_at,last_attempt_status=excluded.last_attempt_status,
+                        last_attempt_error=excluded.last_attempt_error,last_attempt_at=excluded.last_attempt_at,
+                        source_revision=excluded.source_revision,success_revision=excluded.success_revision,
+                        recalculation_status='awaiting_recalculation',recalculation_error='',
+                        recalculation_updated_at=excluded.recalculation_updated_at
+                    """,
+                    (
+                        supply_id,amount,currency,amount_label,is_transit,source,
+                        evidence_type,confidence,fetched_at,"success","",endpoint,
+                        created_at,now,status,error,now,source_revision,next_revision,
+                        "awaiting_recalculation","",now,
+                    ),
+                )
+            elif successful_fact or existing_success:
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_supply_transit_cost_enrichment
+                    SET last_attempt_status=?,last_attempt_error=?,last_attempt_at=?,updated_at=?
+                    WHERE supply_id=?
+                    """,
+                    (status, error, now, now, supply_id),
+                )
+            else:
+                conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_wb_supply_transit_cost_enrichment(
                     supply_id,
@@ -4138,12 +4265,13 @@ class RegistryUploadDbBackedRuntime:
                     status,
                     error,
                     source_endpoint_path,
-                    created_at,
-                    updated_at
+                    created_at,updated_at,last_attempt_status,last_attempt_error,
+                    last_attempt_at,source_revision,success_revision,
+                    recalculation_status,recalculation_error,recalculation_updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(supply_id) DO UPDATE SET
-                    amount = excluded.amount,
+                    amount = NULL,
                     currency = excluded.currency,
                     amount_label = excluded.amount_label,
                     is_transit = excluded.is_transit,
@@ -4154,27 +4282,107 @@ class RegistryUploadDbBackedRuntime:
                     status = excluded.status,
                     error = excluded.error,
                     source_endpoint_path = excluded.source_endpoint_path,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    last_attempt_status = excluded.last_attempt_status,
+                    last_attempt_error = excluded.last_attempt_error,
+                    last_attempt_at = excluded.last_attempt_at
                 """,
                 (
                     supply_id,
-                    _optional_float(record.get("amount")),
-                    str(record.get("currency") or "RUB").strip()[:16],
-                    str(record.get("amount_label") or "").strip()[:80],
-                    1 if record.get("is_transit", True) else 0,
-                    str(record.get("source") or "seller_portal_browser").strip()[:80],
-                    str(record.get("evidence_type") or "network_json").strip()[:80],
-                    str(record.get("confidence") or "").strip()[:40],
-                    str(record.get("fetched_at") or "").strip(),
-                    str(record.get("status") or "failed").strip()[:40],
-                    _safe_runtime_error(record.get("error")),
-                    str(record.get("source_endpoint_path") or "").strip()[:260],
-                    created_at,
-                    now,
+                    None,currency,amount_label,is_transit,source,evidence_type,
+                    confidence,fetched_at,status,error,endpoint,created_at,now,
+                    status,error,now,"",0,"","",now,
                 ),
             )
             conn.commit()
         return self.load_wb_supply_transit_cost_enrichment(supply_id) or {}
+
+    def update_wb_supply_transit_cost_recalculation_status(
+        self,
+        supply_id: str,
+        *,
+        status: str,
+        error: str = "",
+        updated_at: str,
+    ) -> dict[str, Any]:
+        normalized_id = str(supply_id or "").strip()
+        if not normalized_id:
+            raise ValueError("supply_id is required")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            changed = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_supply_transit_cost_enrichment
+                SET recalculation_status=?,recalculation_error=?,
+                    recalculation_updated_at=?,updated_at=?
+                WHERE supply_id=? AND status='success' AND amount IS NOT NULL
+                """,
+                (str(status)[:40], _safe_runtime_error(error), updated_at, updated_at, normalized_id),
+            )
+            if int(changed.rowcount or 0) != 1:
+                raise ValueError("successful transit fact is missing")
+            conn.commit()
+        return self.load_wb_supply_transit_cost_enrichment(normalized_id) or {}
+
+    def finalize_completed_wb_transit_cost_recalculations(
+        self,
+        *,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        """Finalize facts whose exact targeted queue completed downstream."""
+
+        _validate_timestamp(completed_at, field_name="completed_at")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            changed = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_supply_transit_cost_enrichment AS fact
+                SET recalculation_status='complete',recalculation_error='',
+                    recalculation_updated_at=?,updated_at=?
+                WHERE fact.status='success'
+                  AND fact.amount IS NOT NULL
+                  AND fact.recalculation_status IN (
+                      'awaiting_recalculation','queued'
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue AS queue
+                      WHERE queue.stable_source_id=(
+                          'wb_transit_cost:' || fact.supply_id
+                      )
+                        AND queue.source_revision=fact.source_revision
+                        AND queue.status='complete'
+                  )
+                """,
+                (completed_at, completed_at),
+            )
+            conn.commit()
+        return {
+            "status": "complete",
+            "changed_supply_count": int(changed.rowcount or 0),
+            "completed_at": completed_at,
+        }
+
+    def list_wb_supply_transit_cost_enrichment_attempts(
+        self,
+        *,
+        supply_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            if supply_id:
+                rows = conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts
+                       WHERE supply_id=? ORDER BY attempted_at,attempt_id""",
+                    (str(supply_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts
+                       ORDER BY attempted_at,attempt_id"""
+                ).fetchall()
+            return [dict(row) for row in rows]
 
     def list_wb_supply_transit_cost_enrichments(self) -> list[dict[str, Any]]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -9153,6 +9361,14 @@ def _wb_supply_transit_cost_enrichment_to_dict(row: sqlite3.Row) -> dict[str, An
         "source_endpoint_path": row["source_endpoint_path"] or "",
         "created_at": row["created_at"] or "",
         "updated_at": row["updated_at"] or "",
+        "last_attempt_status": row["last_attempt_status"] or row["status"] or "",
+        "last_attempt_error": row["last_attempt_error"] or row["error"] or "",
+        "last_attempt_at": row["last_attempt_at"] or row["updated_at"] or "",
+        "source_revision": row["source_revision"] or "",
+        "success_revision": int(row["success_revision"] or 0),
+        "recalculation_status": row["recalculation_status"] or "",
+        "recalculation_error": row["recalculation_error"] or "",
+        "recalculation_updated_at": row["recalculation_updated_at"] or "",
     }
 
 
@@ -10823,6 +11039,27 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            supply_id TEXT NOT NULL,
+            amount REAL,
+            currency TEXT NOT NULL DEFAULT 'RUB',
+            amount_label TEXT,
+            is_transit INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            confidence TEXT,
+            fetched_at TEXT,
+            status TEXT NOT NULL,
+            error TEXT,
+            source_endpoint_path TEXT,
+            attempted_at TEXT NOT NULL,
+            attempt_fingerprint TEXT NOT NULL UNIQUE
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts_by_supply
+        ON sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts(supply_id, attempted_at DESC);
+
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment_by_status
         ON sheet_vitrina_v1_wb_supply_transit_cost_enrichment(status, updated_at DESC);
 
@@ -11611,6 +11848,22 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_nullable_wb_transit_cost(conn)
+    for column_name, column_sql in (
+        ("last_attempt_status", "TEXT NOT NULL DEFAULT ''"),
+        ("last_attempt_error", "TEXT NOT NULL DEFAULT ''"),
+        ("last_attempt_at", "TEXT NOT NULL DEFAULT ''"),
+        ("source_revision", "TEXT NOT NULL DEFAULT ''"),
+        ("success_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("recalculation_status", "TEXT NOT NULL DEFAULT ''"),
+        ("recalculation_error", "TEXT NOT NULL DEFAULT ''"),
+        ("recalculation_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_wb_supply_transit_cost_enrichment",
+            column_name=column_name,
+            column_sql=column_sql,
+        )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_auto_update_state",

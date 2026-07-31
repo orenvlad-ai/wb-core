@@ -175,3 +175,18 @@ releases only older canary-scoped failures proven to have stopped before
 `mutation_running`; their deterministic owned temp/checkpoint paths and
 reservations are released, while any failed business mutation remains
 fail-closed.
+
+## Migration 127 historical publication
+
+The July recovery uses T1 because it mutates only exact functional-version,
+business-projection and ready-snapshot identities listed in each manifest.
+Batch A (`19..29`) and Batch B (`01..18` partial WB) have independent
+fingerprints, before-images, reconciliation and rollback. Batch B is gated on
+retained Batch A. The Seller Portal transit comparison is a third query-only
+submanifest; backup drift cannot be waived by the runner and creates no T1.
+
+The exact apply is allowed only after Release Train deploy and human approval
+bound to the deployed head, fingerprint, counts/aggregates, non-target digest
+and reversibility. A second successful run is T0. Finance raw/T3, full-store
+copies, adjacent-day backfill, global rebuild, writeoff and compensation are
+outside this contract.

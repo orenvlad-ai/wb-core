@@ -235,6 +235,11 @@ def _run(
                 finance_cost_recalculation = (
                     _recalculate_downstream_finance_cost(runtime)
                 )
+                transit_cost_replays = (
+                    runtime.finalize_completed_wb_transit_cost_recalculations(
+                        completed_at=block.timestamp_factory(),
+                    )
+                )
                 retention_after = _run_bounded_recovery_retention(runtime)
                 backup_result = result.get("recovery_policy")
                 return {
@@ -247,6 +252,7 @@ def _run(
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "wb_finance_cost_recalculation": finance_cost_recalculation,
+                    "wb_transit_cost_replays": transit_cost_replays,
                     "ff_state": ff_state,
                     "external_optimistic_recheck": recheck,
                     "diff": reviewed_plan.get("diff"),
@@ -345,6 +351,13 @@ def _run(
                     phase_timings_ms,
                     lambda: _recalculate_downstream_finance_cost(runtime),
                 )
+                transit_cost_replays = _run_sync_phase(
+                    "finalize_transit_cost_replays",
+                    phase_timings_ms,
+                    lambda: runtime.finalize_completed_wb_transit_cost_recalculations(
+                        completed_at=block.timestamp_factory(),
+                    ),
+                )
                 retention_after = _run_sync_phase(
                     "recovery_retention_after",
                     phase_timings_ms,
@@ -363,6 +376,7 @@ def _run(
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "wb_finance_cost_recalculation": finance_cost_recalculation,
+                    "wb_transit_cost_replays": transit_cost_replays,
                     "ff_state": ff_state,
                     "plan_fingerprint": plan["plan_fingerprint"],
                     "diff": plan["diff"],

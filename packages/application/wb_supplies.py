@@ -1088,7 +1088,7 @@ class WbSuppliesBlock:
                 logs.append(
                     _run_log(
                         self.timestamp_factory(),
-                        "Canonical cost/reservation reconciliation completed: "
+                        "Canonical transit cost materialization/replay enqueue completed: "
                         + json.dumps(reconciliation, ensure_ascii=False, sort_keys=True),
                     )
                 )
@@ -1098,7 +1098,7 @@ class WbSuppliesBlock:
                 logs.append(
                     _run_log(
                         self.timestamp_factory(),
-                        "Canonical cost/reservation reconciliation failed: "
+                        "Canonical transit cost materialization/replay enqueue failed: "
                         + reconciliation_error,
                     )
                 )
@@ -3199,6 +3199,21 @@ def _row_with_transit_cost_enrichment(
     result["seller_portal_transit_cost_fetched_at"] = str(enrichment.get("fetched_at") or "") if enrichment else ""
     result["seller_portal_transit_cost_status"] = status
     result["seller_portal_transit_cost_confidence"] = confidence
+    result["seller_portal_transit_cost_last_attempt_status"] = str(
+        enrichment.get("last_attempt_status") or status
+    ) if enrichment else ""
+    result["seller_portal_transit_cost_last_attempt_error"] = str(
+        enrichment.get("last_attempt_error") or ""
+    ) if enrichment else ""
+    result["seller_portal_transit_cost_last_attempt_at"] = str(
+        enrichment.get("last_attempt_at") or ""
+    ) if enrichment else ""
+    result["seller_portal_transit_cost_recalculation_status"] = str(
+        enrichment.get("recalculation_status") or ""
+    ) if enrichment else ""
+    result["seller_portal_transit_cost_recalculation_error"] = str(
+        enrichment.get("recalculation_error") or ""
+    ) if enrichment else ""
     official_cost = _optional_number(row.get("cost_total"))
     if official_cost is not None:
         result["effective_cost_total"] = official_cost
@@ -3285,6 +3300,10 @@ def _has_fresh_success_transit_cost(
     enrichment = _lookup_transit_cost_enrichment(row, enrichments)
     return bool(
         _is_canonical_seller_portal_transit_enrichment(enrichment)
+        and str(enrichment.get("last_attempt_status") or "success")
+        == "success"
+        and str(enrichment.get("recalculation_status") or "")
+        not in {"awaiting_recalculation", "recalculation_error"}
         and _is_recent_iso_timestamp(
             str(enrichment.get("fetched_at") or enrichment.get("updated_at") or ""),
             now_text=now_text,

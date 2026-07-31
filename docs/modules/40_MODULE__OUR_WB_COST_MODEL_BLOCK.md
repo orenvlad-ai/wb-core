@@ -120,3 +120,14 @@ The Partner V4 marketing/classifier recovery does not alter this resolver, its 0
 Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. In particular migration 109 does not edit the frozen opening map: append-only version/row/active audit supplies a bounded overlay and only already materialized exact-target daily cost rows are corrected with their quantities preserved. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models over its reviewed date scope. Before `2026-07-01` it publishes only the retrospective cost/true Proxy 3 read projection and never invents six-stage warehouse history; it removes only the centrally enumerated archived metric rows, preserves every other non-target snapshot cell/digest, pins the exact ready-snapshot manifest and is idempotent.
 
 Non-goals: accounting FIFO, event-based WB customer movements, Proxy 2 substitution before the boundary, marketing as a percentage, transit double count, Google Sheets/GAS truth or ad-hoc production SQL.
+
+## Late Seller Portal transit cost
+
+Late Seller Portal success materializes only explicitly named supplies. Full
+packed composition is the transit allocation denominator; accepted quantity
+is the accepted-capital multiplier. The stable fact revision enqueues replay
+from the supply's originating business date for exact affected SKU. The replay
+may update dependent WAC/capital/COGS/Finance/Proxy/Vitrina projections, but
+never quantity, reservation, FF debit or physical events and never performs a
+global/current-cost backcopy. An identical revision is T0; materialization or
+enqueue failure is durable and retryable.

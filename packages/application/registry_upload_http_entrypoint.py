@@ -168,6 +168,9 @@ from packages.application.warehouse_functional import (
     enqueue_warehouse_targeted_recalculation,
 )
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
+from packages.application.wb_transit_cost_replay import (
+    reconcile_completed_transit_costs,
+)
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
 from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
@@ -4909,18 +4912,12 @@ class RegistryUploadHttpEntrypoint:
         supply_ids: list[str],
     ) -> dict[str, Any]:
         """Consume saved Seller Portal evidence through canonical cost/FF paths."""
-
-        targets = sorted({str(value) for value in supply_ids if str(value)})
-        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=True):
-            materialized = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
-                opening_date="2026-07-01"
-            )
-            ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
-        return {
-            "target_supply_ids": targets,
-            "wb_supply_cost_layers_materialized": materialized,
-            "ff_stock_debits": dict(ff_state.get("ff_stock_debits") or {}),
-        }
+        return reconcile_completed_transit_costs(
+            runtime=self.runtime,
+            cost_block=self.our_wb_cost_block,
+            supply_ids=supply_ids,
+            timestamp_factory=self.activated_at_factory,
+        )
 
     def handle_wb_supplies_transit_cost_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.get_transit_cost_enrichment_status(params)
@@ -5074,6 +5071,11 @@ class RegistryUploadHttpEntrypoint:
                         verified_backup=economics_backup,
                     )
                 )
+                transit_cost_replays = (
+                    self.runtime.finalize_completed_wb_transit_cost_recalculations(
+                        completed_at=self.activated_at_factory(),
+                    )
+                )
             except Exception as exc:
                 self.warehouse_functional_block.record_failed_sync(exc)
                 raise
@@ -5093,6 +5095,7 @@ class RegistryUploadHttpEntrypoint:
             "active_version": result.get("active_version"),
             "sync": result.get("sync"),
             "proxy_targeted_recalculation": proxy_recalculation,
+            "wb_transit_cost_replays": transit_cost_replays,
             "functional_economics_publication": {
                 "plan_fingerprint": economics_publication.get("plan_fingerprint"),
                 "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),

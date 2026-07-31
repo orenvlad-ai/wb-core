@@ -118,3 +118,11 @@ or proportional capital with conservation. Event insert/delete,
 certification and official WB/WAC changes enqueue the projection in the same
 transaction. A complete candidate atomically replaces only its date/SKU/TOTAL
 rows; failure preserves last-good current rows.
+
+Migration 127 publishes exact July history through that same owned seam. For
+`2026-07-19..29` the six-stage SKU/TOTAL rows come from exact functional
+versions. For `2026-07-01..18` only persisted WB quantity/WAC/capital is
+available: the other five stages and all-stage totals carry explicit
+unavailable presentation/provenance and remain blank. The facade never infers
+them from a neighboring or current snapshot and never converts missing to
+zero.

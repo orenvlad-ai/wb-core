@@ -114,6 +114,23 @@ def _check_runtime_merge_and_background_job() -> None:
             synced_at=synced_at,
             warnings=[],
         )
+        missing_transit = _normalize_supply_row(
+            raw_list={"supplyID": 40422318, "statusID": 3, "supplyDate": "2026-07-02T00:00:00+03:00"},
+            raw_detail={
+                "supplyID": 40422318,
+                "statusID": 3,
+                "warehouseName": "Новосемейкино",
+                "transitWarehouseName": "Чехов 1",
+                "quantity": 100,
+                "acceptanceCost": 0,
+                "paidAcceptanceCoefficient": 0,
+            },
+            raw_goods=None,
+            raw_package=None,
+            warehouse_by_id={},
+            synced_at=synced_at,
+            warnings=[],
+        )
         official_transit = _normalize_supply_row(
             raw_list={"supplyID": 50000001, "statusID": 3, "supplyDate": "2026-07-03T00:00:00+03:00"},
             raw_detail={
@@ -146,7 +163,11 @@ def _check_runtime_merge_and_background_job() -> None:
             synced_at=synced_at,
             warnings=[],
         )
-        runtime.save_wb_supply_rows(rows=[unknown_transit, official_transit, unknown_non_transit], warehouses=[], synced_at=synced_at)
+        runtime.save_wb_supply_rows(
+            rows=[unknown_transit, missing_transit, official_transit, unknown_non_transit],
+            warehouses=[],
+            synced_at=synced_at,
+        )
         runtime.upsert_wb_supply_transit_cost_enrichment(
             {
                 "supply_id": "50000001",
@@ -186,14 +207,23 @@ def _check_runtime_merge_and_background_job() -> None:
             raise AssertionError(f"official cost must win over Seller Portal cache: {before_rows['50000001']}")
 
         response = block.start_transit_cost_enrichment(
-            {"supply_ids": ["40422317", "50000001", "60000001"], "limit": 10, "force": False}
+            {
+                "supply_ids": ["40422317", "40422318", "50000001", "60000001"],
+                "limit": 10,
+                "force": False,
+            }
         )
-        if response.get("accepted") is not True or response.get("candidate_count") != 1:
-            raise AssertionError(f"only missing transit official-cost-null row must be candidate, got {response}")
+        if response.get("accepted") is not True or response.get("candidate_count") != 2:
+            raise AssertionError(f"only missing transit official-cost-null rows must be candidates, got {response}")
         run_id = str(response["run_id"])
         run = _wait_run(block, run_id)
-        if run.get("status") != "success" or run.get("success_count") != 1 or run.get("processed_count") != 1:
-            raise AssertionError(f"fake transit cost run must succeed once, got {run}")
+        if (
+            run.get("status") != "partial"
+            or run.get("success_count") != 1
+            or run.get("not_found_count") != 1
+            or run.get("processed_count") != 2
+        ):
+            raise AssertionError(f"mixed transit cost run must preserve partial success, got {run}")
         if reconciled_supply_ids != [["40422317"]]:
             raise AssertionError(
                 "successful cost evidence must trigger one bounded canonical "
@@ -209,6 +239,141 @@ def _check_runtime_merge_and_background_job() -> None:
             or enriched.get("seller_portal_transit_cost_display") != "10 164 ₽"
         ):
             raise AssertionError(f"Seller Portal cost must fill only effective fields: {json.dumps(enriched, ensure_ascii=False)}")
+        successful_fact = runtime.load_wb_supply_transit_cost_enrichment(
+            "40422317"
+        ) or {}
+        missing_fact = runtime.load_wb_supply_transit_cost_enrichment(
+            "40422318"
+        ) or {}
+        if (
+            missing_fact.get("status") != "not_found"
+            or missing_fact.get("amount") is not None
+            or successful_fact.get("status") != "success"
+        ):
+            raise AssertionError(
+                "mixed outcomes must persist successes without converting missing to zero"
+            )
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "40422317",
+                "amount": 10164.0,
+                "currency": "RUB",
+                "amount_label": "10 164 ₽",
+                "is_transit": True,
+                "source": "seller_portal_browser",
+                "evidence_type": "network_json",
+                "confidence": "high",
+                "fetched_at": "2026-06-27T01:00:00Z",
+                "status": "success",
+                "error": "",
+                "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                "created_at": "2026-06-27T01:00:00Z",
+                "updated_at": "2026-06-27T01:00:00Z",
+            }
+        )
+        identical_fact = runtime.load_wb_supply_transit_cost_enrichment(
+            "40422317"
+        ) or {}
+        if (
+            identical_fact.get("source_revision")
+            != successful_fact.get("source_revision")
+            or identical_fact.get("success_revision")
+            != successful_fact.get("success_revision")
+        ):
+            raise AssertionError(
+                "an identical later success must be a T0 canonical fact"
+            )
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "40422317",
+                "amount": None,
+                "currency": "RUB",
+                "amount_label": "",
+                "is_transit": True,
+                "source": "seller_portal_browser",
+                "evidence_type": "network_json",
+                "confidence": "none",
+                "fetched_at": "2026-06-28T00:00:00Z",
+                "status": "session_expired",
+                "error": "Seller Portal session expired",
+                "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                "created_at": "2026-06-28T00:00:00Z",
+                "updated_at": "2026-06-28T00:00:00Z",
+            }
+        )
+        preserved = runtime.load_wb_supply_transit_cost_enrichment(
+            "40422317"
+        ) or {}
+        if (
+            preserved.get("status") != "success"
+            or preserved.get("amount") != successful_fact.get("amount")
+            or preserved.get("source_revision")
+            != successful_fact.get("source_revision")
+            or preserved.get("last_attempt_status") != "session_expired"
+            or "expired" not in str(preserved.get("last_attempt_error") or "")
+        ):
+            raise AssertionError(
+                "failed attempt must preserve the last successful transit fact: "
+                + json.dumps(preserved, ensure_ascii=False, sort_keys=True)
+            )
+        attempts = runtime.list_wb_supply_transit_cost_enrichment_attempts(
+            supply_id="40422317"
+        )
+        if [item.get("status") for item in attempts] != [
+            "success",
+            "success",
+            "session_expired",
+        ]:
+            raise AssertionError(
+                "transit attempts must stay append-only and independently auditable"
+            )
+        displayed = block.list_supplies({"size_filter": "all", "limit": 100})
+        displayed_row = {
+            row["wb_supply_id"]: row for row in displayed["rows"]
+        }["40422317"]
+        if (
+            displayed_row.get("effective_cost_total") != 10164.0
+            or displayed_row.get(
+                "seller_portal_transit_cost_last_attempt_status"
+            )
+            != "session_expired"
+        ):
+            raise AssertionError(
+                "UI row must expose saved amount together with last-attempt error"
+            )
+        retry_ids = {
+            str(item.get("supply_id") or "")
+            for item in block._select_transit_cost_enrichment_candidates(
+                {"supply_ids": ["40422317"], "limit": 10, "force": False}
+            )
+        }
+        if retry_ids != {"40422317"}:
+            raise AssertionError(
+                "a preserved success with a failed latest attempt must remain retryable"
+            )
+        runtime.upsert_wb_supply_transit_cost_enrichment(
+            {
+                "supply_id": "70000001",
+                "amount": 0.0,
+                "currency": "RUB",
+                "amount_label": "0 ₽",
+                "is_transit": True,
+                "source": "seller_portal_browser",
+                "evidence_type": "network_json",
+                "confidence": "high",
+                "fetched_at": "2026-06-28T01:00:00Z",
+                "status": "success",
+                "error": "",
+                "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                "created_at": "2026-06-28T01:00:00Z",
+                "updated_at": "2026-06-28T01:00:00Z",
+            }
+        )
+        confirmed_zero = runtime.load_wb_supply_transit_cost_enrichment(
+            "70000001"
+        ) or {}
+        if confirmed_zero.get("status") != "success" or confirmed_zero.get("amount") != 0.0:
+            raise AssertionError("confirmed zero must remain distinct from missing/error")
 
 
 def _wait_run(block: WbSuppliesBlock, run_id: str) -> dict[str, Any]:

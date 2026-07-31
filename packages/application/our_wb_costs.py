@@ -344,7 +344,17 @@ class OurWbCostBlock:
             daily_state_rows_materialized=daily_count,
         )
 
-    def materialize_wb_supply_cost_layers(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> int:
+    def materialize_wb_supply_cost_layers(
+        self,
+        *,
+        opening_date: str = OUR_WB_COST_OPENING_DATE,
+        supply_ids: Iterable[str] | None = None,
+    ) -> int:
+        target_supply_ids = {
+            str(value).strip()
+            for value in (supply_ids or [])
+            if str(value or "").strip()
+        }
         ff_overlay_block = FulfillmentServicesBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
         ff_overlays = ff_overlay_block.approved_overlay_by_supply()
         transit_enrichments = {
@@ -369,8 +379,11 @@ class OurWbCostBlock:
             ).fetchall()
             for row in rows:
                 supply = _wb_supply_row_to_dict(row)
+                supply_id = str(supply.get("supply_id") or "")
+                if target_supply_ids and supply_id not in target_supply_ids:
+                    continue
                 transit_enrichment = transit_enrichments.get(
-                    str(supply.get("supply_id") or "")
+                    supply_id
                 )
                 if transit_enrichment is not None:
                     supply.update(
@@ -393,7 +406,6 @@ class OurWbCostBlock:
                 goods = _parse_wb_goods(supply.get("raw_goods_json"))
                 if not goods:
                     continue
-                supply_id = str(supply.get("supply_id") or "")
                 overlay = ff_overlays.get(supply_id)
                 supply_qty = _sum_positive(_wb_good_packed_quantity(item).qty for item in goods)
                 # Allocation of supply-specific expenses is always based on the
@@ -1692,9 +1704,11 @@ def _wb_supply_row_to_dict(row: Any) -> dict[str, Any]:
 def _canonical_seller_portal_transit_enrichment(
     item: Mapping[str, Any],
 ) -> bool:
+    amount = _optional_float(item.get("amount"))
     return bool(
         str(item.get("status") or "") == "success"
-        and _positive_number(item.get("amount")) > 0
+        and amount is not None
+        and amount >= 0
         and str(item.get("currency") or "").upper() == "RUB"
         and bool(item.get("is_transit"))
         and str(item.get("source") or "") == SELLER_PORTAL_TRANSIT_COST_SOURCE
