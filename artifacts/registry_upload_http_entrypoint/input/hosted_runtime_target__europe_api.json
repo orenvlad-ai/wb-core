@@ -104,7 +104,7 @@
     {
       "name": "wb-core-finance-backup-rotation.timer",
       "enable": true,
-      "restart": false
+      "restart": true
     },
     {
       "name": "wb-core-warehouse-functional-sync.service",

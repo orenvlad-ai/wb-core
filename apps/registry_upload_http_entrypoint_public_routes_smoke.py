@@ -476,6 +476,23 @@ def main() -> None:
     }
     if not required_spp_units.issubset(eu_managed_units):
         raise AssertionError(f"EU target missing repo-owned SPP scheduler units: {required_spp_units - eu_managed_units}")
+    finance_backup_timer = next(
+        (
+            item
+            for item in eu_print_plan["deploy_plan"]["managed_systemd_units"]
+            if isinstance(item, dict)
+            and item.get("name") == "wb-core-finance-backup-rotation.timer"
+        ),
+        None,
+    )
+    if finance_backup_timer is None:
+        raise AssertionError("EU target missing repo-owned Finance backup timer")
+    if finance_backup_timer.get("enable") is not True:
+        raise AssertionError("Finance backup timer must remain enabled")
+    if finance_backup_timer.get("restart") is not True:
+        raise AssertionError(
+            "Finance backup timer must start on deploy after first-policy activation"
+        )
     eu_plan_routes = eu_print_plan["deploy_plan"]["nginx_public_routes"]
     if eu_plan_routes["server_names"] != ["89.191.226.88", "api.selleros.pro"]:
         raise AssertionError("EU print-plan must expose current domain and IP server_names")
