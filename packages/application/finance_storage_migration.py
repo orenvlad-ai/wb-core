@@ -4473,15 +4473,101 @@ class FinanceStorageCutover:
             raise FinanceStorageMigrationError(
                 "Finance cutover approval reference is required"
             )
-        if (
-            str(reviewed_plan.get("candidate_plan_fingerprint") or "")
-            != self.candidate_plan_fingerprint
-            or str(reviewed_plan.get("deployed_sha") or "")
-            != self.deployed_sha
-        ):
+        if str(
+            reviewed_plan.get("candidate_plan_fingerprint") or ""
+        ) != self.candidate_plan_fingerprint:
             raise FinanceStorageMigrationError(
                 "reviewed Finance cutover identity does not match the runner"
             )
+        candidate, raw_path, operational_path = self._candidate()
+        active = self.registry.load()
+        exact_post_manifest = bool(
+            active.state == "cutover"
+            and active.canonical_source == "split"
+            and active.generation_epoch == candidate.generation_epoch
+            and active.raw.generation_id == candidate.raw.generation_id
+            and active.raw.relative_path == candidate.raw.relative_path
+            and active.operational.generation_id
+            == candidate.operational.generation_id
+            and active.operational.relative_path
+            == candidate.operational.relative_path
+            and active.source_fingerprint == candidate.source_fingerprint
+        )
+        reviewed_deployed_sha = str(
+            reviewed_plan.get("deployed_sha") or ""
+        )
+        recovery_deploy = (
+            exact_post_manifest
+            and reviewed_deployed_sha != self.deployed_sha
+        )
+        if reviewed_deployed_sha != self.deployed_sha and not recovery_deploy:
+            raise FinanceStorageMigrationError(
+                "reviewed Finance cutover identity does not match the runner"
+            )
+        hold_evidence = self._hold_evidence(reviewed_plan)
+        if exact_post_manifest:
+            evidence_path = (
+                operational_path.parent / "cutover_evidence.json"
+            )
+            if evidence_path.is_file():
+                existing = _load_private_json(
+                    evidence_path,
+                    label="cutover result evidence",
+                )
+                if (
+                    str(existing.get("contract_version") or "")
+                    != CUTOVER_RESULT_CONTRACT
+                    or str(existing.get("status") or "")
+                    != "cutover_complete"
+                    or str(existing.get("plan_fingerprint") or "")
+                    != exact_fingerprint
+                    or str(
+                        (existing.get("manifest") or {}).get(
+                            "manifest_sha256"
+                        )
+                        or ""
+                    )
+                    != active.manifest_sha256
+                    or existing.get("global_manifest_switched")
+                    is not True
+                    or existing.get("old_monolith_retained") is not True
+                    or existing.get("retirement_authorized") is not False
+                ):
+                    raise FinanceStorageMigrationError(
+                        "persisted Finance cutover evidence is stale or ambiguous"
+                    )
+                return {
+                    **existing,
+                    "idempotent": True,
+                    "continuity_classification": (
+                        "exact_post_manifest_recovery_deploy_readback"
+                        if recovery_deploy
+                        else "exact_post_manifest_result_readback"
+                    ),
+                    "original_deployed_sha": reviewed_deployed_sha,
+                    "recovery_deployed_sha": self.deployed_sha,
+                    "hold_evidence": hold_evidence,
+                    "evidence_path": str(evidence_path),
+                }
+            if recovery_deploy:
+                raise FinanceStorageMigrationError(
+                    "recovery deploy requires persisted exact cutover evidence"
+                )
+            return {
+                "contract_version": CUTOVER_RESULT_CONTRACT,
+                "status": "cutover_complete",
+                "idempotent": True,
+                "continuity_classification": (
+                    "exact_post_manifest_readback"
+                ),
+                "manifest": manifest_payload(active),
+                "global_manifest_switched": True,
+                "canonical_source": "split",
+                "old_monolith_retained": (
+                    self.runtime_dir / MONOLITH_FILENAME
+                ).is_file(),
+                "retirement_authorized": False,
+            }
         current_generation_filesystem = self._generation_filesystem()
         planned_generation_filesystem = (
             reviewed_plan.get("capacity") or {}
@@ -4506,41 +4592,7 @@ class FinanceStorageCutover:
                 "Finance generation filesystem capacity is insufficient "
                 "before cutover"
             )
-        hold_evidence = self._hold_evidence(reviewed_plan)
-        candidate, raw_path, operational_path = self._candidate()
-        active = self.registry.load()
         if active.state != "monolith" or active.canonical_source != "monolith":
-            if (
-                active.state == "cutover"
-                and active.canonical_source == "split"
-                and active.generation_epoch
-                == candidate.generation_epoch
-                and active.raw.generation_id
-                == candidate.raw.generation_id
-                and active.raw.relative_path
-                == candidate.raw.relative_path
-                and active.operational.generation_id
-                == candidate.operational.generation_id
-                and active.operational.relative_path
-                == candidate.operational.relative_path
-                and active.source_fingerprint
-                == candidate.source_fingerprint
-            ):
-                return {
-                    "contract_version": CUTOVER_RESULT_CONTRACT,
-                    "status": "cutover_complete",
-                    "idempotent": True,
-                    "continuity_classification": (
-                        "exact_post_manifest_readback"
-                    ),
-                    "manifest": manifest_payload(active),
-                    "global_manifest_switched": True,
-                    "canonical_source": "split",
-                    "old_monolith_retained": (
-                        self.runtime_dir / MONOLITH_FILENAME
-                    ).is_file(),
-                    "retirement_authorized": False,
-                }
             raise FinanceStorageMigrationError(
                 "canonical generation changed before cutover"
             )

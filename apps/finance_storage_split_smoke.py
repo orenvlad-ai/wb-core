@@ -84,6 +84,7 @@ from packages.application.storage_registry import (
 
 
 DEPLOYED_SHA = "a" * 40
+RECOVERY_DEPLOYED_SHA = "b" * 40
 
 
 def _digest_json(value: object) -> str:
@@ -1293,12 +1294,14 @@ class MigrationSmoke(unittest.TestCase):
         candidate.apply.assert_called_once_with()
 
     @staticmethod
-    def _recovery_lease() -> dict[str, object]:
+    def _recovery_lease(
+        deployed_sha: str = DEPLOYED_SHA,
+    ) -> dict[str, object]:
         return {
             "lease": {
                 "lease_id": "finance-split-recovery-smoke",
                 "task_id": "finance-recovery-hardening-smoke",
-                "deployed_sha": DEPLOYED_SHA,
+                "deployed_sha": deployed_sha,
                 "window_id": "finance-recovery-hardening-window",
                 "phase": "offline-rehearsal",
                 "revision": 1,
@@ -3028,6 +3031,99 @@ class MigrationSmoke(unittest.TestCase):
                 approval_reference="fixture-human-gate",
             )
             self.assertTrue(retry["idempotent"])
+            with self.assertRaisesRegex(
+                FinanceStorageRecoveryContractError,
+                "deployed SHA does not match",
+            ):
+                validate_recovery_preflight(
+                    runtime,
+                    action="cutover-apply",
+                    phase="mutation",
+                    deployed_sha=RECOVERY_DEPLOYED_SHA,
+                    approval_reference="fixture-recovery-deploy",
+                    expected_fingerprint=fingerprint,
+                    deploy_lease=self._recovery_lease(
+                        RECOVERY_DEPLOYED_SHA
+                    ),
+                    runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                    restore_job_contract=(
+                        "business_data_maintenance_restore_job_v1"
+                    ),
+                    restore_max_resume_sequence=3,
+                    downstream_capabilities=(
+                        self._recovery_capabilities()
+                    ),
+                    reviewed_plan=cutover_plan,
+                    candidate_manifest_path=candidate_manifest_path,
+                )
+            selected_after_cutover = StoreRegistry(runtime).load(
+                require_files=True
+            )
+            persisted_cutover_evidence = {
+                **cutover_result,
+                "plan_fingerprint": fingerprint,
+                "manifest": manifest_payload(selected_after_cutover),
+                "global_manifest_switched": True,
+                "canonical_source": "split",
+                "old_monolith_retained": True,
+                "retirement_authorized": False,
+            }
+            _atomic_write_json(
+                candidate_manifest_path.parent
+                / "cutover_evidence.json",
+                persisted_cutover_evidence,
+            )
+            recovery_preflight = validate_recovery_preflight(
+                runtime,
+                action="cutover-apply",
+                phase="mutation",
+                deployed_sha=RECOVERY_DEPLOYED_SHA,
+                approval_reference="fixture-recovery-deploy",
+                expected_fingerprint=fingerprint,
+                deploy_lease=self._recovery_lease(
+                    RECOVERY_DEPLOYED_SHA
+                ),
+                runner_contracts=EXPECTED_RUNNER_CONTRACTS,
+                restore_job_contract=(
+                    "business_data_maintenance_restore_job_v1"
+                ),
+                restore_max_resume_sequence=3,
+                downstream_capabilities=(
+                    self._recovery_capabilities()
+                ),
+                reviewed_plan=cutover_plan,
+                candidate_manifest_path=candidate_manifest_path,
+            )
+            self.assertEqual(
+                recovery_preflight[
+                    "post_manifest_recovery_deploy"
+                ]["status"],
+                "exact_cutover_evidence_readback",
+            )
+            recovery_cutover = FinanceStorageCutover(
+                runtime,
+                candidate_manifest_path=candidate_manifest_path,
+                candidate_plan_fingerprint=candidate_plan["fingerprint"],
+                deployed_sha=RECOVERY_DEPLOYED_SHA,
+            )
+            recovery_result = recovery_cutover.apply(
+                reviewed_plan=cutover_plan,
+                expected_fingerprint=fingerprint,
+                approval_reference="fixture-recovery-deploy",
+            )
+            self.assertTrue(recovery_result["idempotent"])
+            self.assertEqual(
+                recovery_result["continuity_classification"],
+                "exact_post_manifest_recovery_deploy_readback",
+            )
+            self.assertEqual(
+                recovery_result["original_deployed_sha"],
+                DEPLOYED_SHA,
+            )
+            self.assertEqual(
+                recovery_result["recovery_deployed_sha"],
+                RECOVERY_DEPLOYED_SHA,
+            )
             selected = StoreRegistry(runtime)
             manifest = selected.load(require_files=True)
             self.assertEqual(manifest.state, "cutover")
