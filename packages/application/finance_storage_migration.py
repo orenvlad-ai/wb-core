@@ -128,6 +128,77 @@ def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+_CURRENT_RAW_SCOPE_SQL = """
+    SELECT DISTINCT seller_id,week_start,week_end
+      FROM finance_raw_rows
+     ORDER BY seller_id,week_start,week_end
+"""
+_CURRENT_RAW_DIGEST_SQL = """
+    SELECT seller_id,week_start,week_end,report_id,rrd_id,row_hash
+      FROM finance_raw_current_rows
+     WHERE seller_id=? AND week_start=? AND week_end=?
+     ORDER BY report_id,rrd_id,row_hash
+"""
+_CURRENT_RAW_COPY_SQL = """
+    SELECT seller_id,report_id,rrd_id,report_type,week_start,
+           week_end,nm_id,vendor_code,barcode,doc_type_name,
+           seller_oper_name,row_hash,raw_json,first_seen_at,
+           updated_at
+      FROM finance_raw_current_rows
+     WHERE seller_id=? AND week_start=? AND week_end=?
+     ORDER BY report_id,rrd_id,row_hash
+"""
+
+
+def _current_raw_scopes(
+    connection: sqlite3.Connection,
+) -> list[tuple[str, str, str]]:
+    return [
+        (str(row[0]), str(row[1]), str(row[2]))
+        for row in connection.execute(
+            _CURRENT_RAW_SCOPE_SQL
+        ).fetchall()
+    ]
+
+
+def _current_raw_rows_digest(
+    connection: sqlite3.Connection,
+) -> LogicalDigest:
+    digest = hashlib.sha256()
+    count = 0
+    for scope in _current_raw_scopes(connection):
+        for row in connection.execute(
+            _CURRENT_RAW_DIGEST_SQL,
+            scope,
+        ):
+            digest.update(
+                (
+                    _canonical_json([str(value) for value in row])
+                    + "\n"
+                ).encode("utf-8")
+            )
+            count += 1
+    return LogicalDigest(
+        row_count=count,
+        digest="sha256:" + digest.hexdigest(),
+    )
+
+
+def _current_raw_row_chunks(
+    connection: sqlite3.Connection,
+    *,
+    chunk_size: int = 10_000,
+) -> Iterator[list[sqlite3.Row]]:
+    size = max(1, int(chunk_size))
+    for scope in _current_raw_scopes(connection):
+        cursor = connection.execute(
+            _CURRENT_RAW_COPY_SQL,
+            scope,
+        )
+        while rows := cursor.fetchmany(size):
+            yield rows
+
+
 def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
     """Bind approval to stable source/scope facts, not volatile runtime counters.
 
@@ -3535,6 +3606,15 @@ class FinanceStorageShadowVerifier:
         *,
         table: str,
     ) -> LogicalDigest:
+        if (
+            table == "finance_raw_current_rows"
+            and conn.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='finance_raw_rows'"""
+            ).fetchone()
+            is not None
+        ):
+            return _current_raw_rows_digest(conn)
         digest = hashlib.sha256()
         count = 0
         for row in conn.execute(
@@ -4982,15 +5062,7 @@ class FinanceStorageRollback:
         destination.execute("DELETE FROM wb_finance_weekly_raw_rows")
         digest = hashlib.sha256()
         count = 0
-        cursor = source.execute(
-            """SELECT seller_id,report_id,rrd_id,report_type,week_start,
-                      week_end,nm_id,vendor_code,barcode,doc_type_name,
-                      seller_oper_name,row_hash,raw_json,first_seen_at,
-                      updated_at
-               FROM finance_raw_current_rows
-               ORDER BY seller_id,week_start,week_end,report_id,rrd_id"""
-        )
-        while rows := cursor.fetchmany(10_000):
+        for rows in _current_raw_row_chunks(source):
             destination.execute("BEGIN IMMEDIATE")
             for row in rows:
                 destination.execute(
