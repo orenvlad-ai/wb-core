@@ -97,6 +97,11 @@ file identities, openers, count/byte/age limits and before/projected capacity.
 Unknown, foreign, corrupt or drifted artifacts are recorded as protected and
 are never deletion candidates. New inventory, selector, mount, manifest,
 source identity or candidate SHA/stat drift fails before mutation.
+Legacy archive byte validation preserves a declared zero-byte value instead of
+treating it as a missing field. This matters for valid, fully hashed empty
+SQLite WAL sidecars: their exact zero length and empty-file SHA-256 are checked
+like every other file, while a genuinely missing size or mismatched hash still
+classifies the whole archive as protected and blocks deletion.
 
 Apply performs one durable transaction:
 
@@ -155,8 +160,10 @@ cycles, one-current/temporary-two invariants, zero steady-state growth,
 integrity/FK/logical/restore readback, every copy/verify/select crash boundary,
 concurrent-worker rejection, missing-mount/root-fallback rejection, ENOSPC
 projection, file-digest drift before mutation, protected unknown files and a
-corrupted new backup preserving the already-selected current. It also proves
-that the original monolith and all generation paths are unchanged.
+corrupted new backup preserving the already-selected current. It additionally
+proves that an exact zero-byte legacy WAL is verified rather than falsely
+classified as corrupt. The original monolith and all generation paths remain
+unchanged.
 
 The writer inventory classifies this as the only post-cutover full split
 restore-set writer. Hosted apply uses the existing durable Finance transport
