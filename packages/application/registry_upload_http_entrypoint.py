@@ -307,13 +307,15 @@ SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[st
 PromoArtifactGcRunner = Callable[..., dict[str, Any]]
 SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_job_id", default="")
 WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY = "metric_presentation"
-WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION = 1
-WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 3
+WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION = 2
+WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION = 3
+WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 4
 WEB_VITRINA_METRIC_DISPLAY_STATUSES = {"shown", "collapsed", "hidden"}
 WEB_VITRINA_SKU_METRIC_SELECTION_MODES = {"manual", "preset"}
 WEB_VITRINA_SKU_METRIC_PRESET_LIMIT = 40
 WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT = 500
 WEB_VITRINA_SKU_METRIC_HIGHLIGHT_LIMIT = 6
+WEB_VITRINA_LOGICAL_METRIC_KEY_LIMIT = 400
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -7600,7 +7602,11 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
     seen_anchors: set[str] = set()
     for token in source.get("expanded_anchors") if isinstance(source.get("expanded_anchors"), list) else []:
         normalized_token = str(token or "").strip()
-        if normalized_token and len(normalized_token) <= 260 and normalized_token not in seen_anchors:
+        if (
+            normalized_token
+            and len(normalized_token) <= WEB_VITRINA_LOGICAL_METRIC_KEY_LIMIT
+            and normalized_token not in seen_anchors
+        ):
             expanded_anchors.append(normalized_token)
             seen_anchors.add(normalized_token)
 
@@ -7693,16 +7699,70 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
     migrations_source = source.get("migrations")
     migrations = migrations_source if isinstance(migrations_source, Mapping) else {}
     incident_effective_shown_v1 = bool(
-        source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+        source_version >= WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION
         and migrations.get("incident_effective_shown_v1")
     )
     sku_presets_seeded_v1 = bool(
-        source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+        source_version >= WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION
         and migrations.get("sku_presets_seeded_v1")
     )
 
+    if source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION:
+        raw_presentation = source.get("presentation")
+        presentation_source = raw_presentation if isinstance(raw_presentation, Mapping) else {}
+        presentation_order: list[str] = []
+        seen_presentation_order: set[str] = set()
+        raw_presentation_order = presentation_source.get("order")
+        for raw_logical_metric_id in (
+            raw_presentation_order if isinstance(raw_presentation_order, list) else []
+        ):
+            logical_metric_id = str(raw_logical_metric_id or "").strip()
+            if (
+                logical_metric_id
+                and len(logical_metric_id) <= WEB_VITRINA_LOGICAL_METRIC_KEY_LIMIT
+                and logical_metric_id not in seen_presentation_order
+            ):
+                presentation_order.append(logical_metric_id)
+                seen_presentation_order.add(logical_metric_id)
+
+        presentation_display: dict[str, str] = {}
+        raw_presentation_display = presentation_source.get("display")
+        if isinstance(raw_presentation_display, Mapping):
+            for raw_logical_metric_id, raw_status in raw_presentation_display.items():
+                logical_metric_id = str(raw_logical_metric_id or "").strip()
+                status = str(raw_status or "").strip()
+                if (
+                    logical_metric_id
+                    and len(logical_metric_id) <= WEB_VITRINA_LOGICAL_METRIC_KEY_LIMIT
+                    and status in WEB_VITRINA_METRIC_DISPLAY_STATUSES
+                ):
+                    presentation_display[logical_metric_id] = status
+
+        return {
+            "version": WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION,
+            "presentation": {
+                "order": presentation_order,
+                "display": presentation_display,
+                "manual": bool(presentation_source.get("manual")),
+            },
+            "expanded_anchors": expanded_anchors,
+            "sku_presets": sku_presets,
+            "sku_highlight_metric_keys": sku_highlight_metric_keys,
+            "sku_metric_selection": {
+                "mode": selection_mode,
+                "preset_id": selection_preset_id,
+                "all": bool(selection_source.get("all", True)),
+                "metric_keys": selection_metric_keys,
+            },
+            "migrations": {
+                "incident_effective_shown_v1": incident_effective_shown_v1,
+                "sku_presets_seeded_v1": sku_presets_seeded_v1,
+                "unified_presentation_v1": bool(migrations.get("unified_presentation_v1")),
+            },
+        }
+
     return {
-        "version": WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION,
+        "version": WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION,
         "scopes": scopes,
         "expanded_anchors": expanded_anchors,
         "sku_presets": sku_presets,

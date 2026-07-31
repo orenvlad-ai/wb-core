@@ -30,6 +30,43 @@ CONFIG_A = {
     "expanded_anchors": ["total::avg_ctr_current"],
 }
 
+CONFIG_V4 = {
+    "version": 4,
+    "presentation": {
+        "order": [
+            "pair::total_orderSum::orderSum",
+            "sku::buyer_price_rub",
+            "pair::total_orderSum::orderSum",
+        ],
+        "display": {
+            "pair::total_orderSum::orderSum": "collapsed",
+            "sku::buyer_price_rub": "hidden",
+            "sku::invalid": "unsupported",
+        },
+        "manual": True,
+    },
+    "expanded_anchors": ["pair::total_orderSum::orderSum"],
+    "sku_presets": [
+        {
+            "preset_id": "focus",
+            "name": "Фокус",
+            "metric_keys": ["orderSum", "buyer_price_rub"],
+        }
+    ],
+    "sku_highlight_metric_keys": ["orderSum", "buyer_price_rub"],
+    "sku_metric_selection": {
+        "mode": "preset",
+        "preset_id": "focus",
+        "all": False,
+        "metric_keys": [],
+    },
+    "migrations": {
+        "incident_effective_shown_v1": True,
+        "sku_presets_seeded_v1": True,
+        "unified_presentation_v1": True,
+    },
+}
+
 
 def main() -> None:
     with TemporaryDirectory(prefix="sheet-vitrina-user-config-") as tmp:
@@ -133,6 +170,30 @@ def main() -> None:
         if "2026-04-20" in sanitized_raw or "2026-04-24" in sanitized_raw or "legacy" in sanitized_raw:
             raise AssertionError(f"legacy period fields must not survive server user-config sanitization, got {sanitized}")
 
+        unified = entrypoint.handle_sheet_web_vitrina_user_config_save_request(
+            user_key="operator-c",
+            payload={"base_revision": 0, "config": CONFIG_V4},
+        )
+        unified_config = unified["config"]
+        if (
+            unified.get("schema_version") != 2
+            or unified_config.get("version") != 4
+            or unified_config.get("presentation", {}).get("order")
+            != ["pair::total_orderSum::orderSum", "sku::buyer_price_rub"]
+            or unified_config.get("presentation", {}).get("display")
+            != {
+                "pair::total_orderSum::orderSum": "collapsed",
+                "sku::buyer_price_rub": "hidden",
+            }
+            or not unified_config.get("presentation", {}).get("manual")
+            or not unified_config.get("migrations", {}).get("unified_presentation_v1")
+            or unified_config.get("sku_presets") != CONFIG_V4["sku_presets"]
+            or unified_config.get("sku_metric_selection", {}).get("preset_id") != "focus"
+            or unified_config.get("sku_highlight_metric_keys")
+            != ["orderSum", "buyer_price_rub"]
+        ):
+            raise AssertionError(f"v4 unified config must preserve related SKU preferences, got {unified}")
+
     print(
         {
             "status": "ok",
@@ -145,6 +206,7 @@ def main() -> None:
                 "sanitize",
                 "sku_highlight_sanitize",
                 "legacy_period_drop",
+                "unified_v4",
             ],
         }
     )

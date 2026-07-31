@@ -49,8 +49,8 @@ from packages.application.web_vitrina_view_model import build_web_vitrina_view_m
 
 STORAGE_KEY = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
 TOTAL_ORDER_SUM_SELECTOR = (
-    '[data-metric-display-select][data-metric-config-scope="total"]'
-    '[data-metric-config-key="total_orderSum"]'
+    '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
+    "[data-metric-display-select]"
 )
 RETIRED_METRIC_KEYS = frozenset(
     (*INCIDENT_STOCK_FACT_METRIC_KEYS, *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS)
@@ -72,8 +72,11 @@ def main() -> None:
         {
             "status": "ok",
             "checks": [
-                "v3_sanitizer",
-                "local_migration",
+                "v3_v4_sanitizer",
+                "local_migration_total_basis",
+                "local_migration_scope_only_preserved",
+                "local_migration_related_preferences_preserved",
+                "local_migration_idempotent",
                 "server_priority",
                 "retired_metric_sanitation",
                 "reload",
@@ -162,6 +165,46 @@ def _check_server_config_sanitizer() -> None:
     ):
         raise AssertionError(f"legacy config must retain narrow client migration evidence, got {legacy}")
 
+    unified = _sanitize_web_vitrina_metric_presentation_config(
+        {
+            "version": 4,
+            "presentation": {
+                "order": [
+                    "pair::total_orderSum::orderSum",
+                    "pair::total_orderSum::orderSum",
+                    "",
+                    "x" * 401,
+                    "sku::ctr",
+                ],
+                "display": {
+                    "pair::total_orderSum::orderSum": "hidden",
+                    "sku::ctr": "collapsed",
+                    "sku::bad": "invalid",
+                },
+                "manual": True,
+            },
+            "expanded_anchors": ["pair::total_orderSum::orderSum"],
+            "migrations": {
+                "incident_effective_shown_v1": True,
+                "sku_presets_seeded_v1": True,
+                "unified_presentation_v1": True,
+            },
+        }
+    )
+    if (
+        unified.get("version") != 4
+        or unified.get("presentation", {}).get("order")
+        != ["pair::total_orderSum::orderSum", "sku::ctr"]
+        or unified.get("presentation", {}).get("display")
+        != {
+            "pair::total_orderSum::orderSum": "hidden",
+            "sku::ctr": "collapsed",
+        }
+        or not unified.get("presentation", {}).get("manual")
+        or not unified.get("migrations", {}).get("unified_presentation_v1")
+    ):
+        raise AssertionError(f"server sanitizer must preserve bounded v4 unified config, got {unified}")
+
 
 def _run_checks(browser, server: "FixtureServer") -> None:
     local_candidate = {
@@ -183,8 +226,16 @@ def _run_checks(browser, server: "FixtureServer") -> None:
                 "manual": True,
             },
             "sku": {
-                "order": ["wb_stock_fact_qty", "cost_price_rub", "proxy_profit_rub"],
+                "order": [
+                    "avg_price_seller_discounted",
+                    "avg_addToCartConversion",
+                    "wb_stock_fact_qty",
+                    "cost_price_rub",
+                    "proxy_profit_rub",
+                ],
                 "display": {
+                    "avg_price_seller_discounted": "collapsed",
+                    "avg_addToCartConversion": "hidden",
                     "wb_stock_fact_qty": "collapsed",
                     "cost_price_rub": "hidden",
                 },
@@ -192,6 +243,20 @@ def _run_checks(browser, server: "FixtureServer") -> None:
             },
         },
         "expanded_anchors": ["sku::wb_stock_fact_qty", "total::avg_cost_price_rub"],
+        "sku_presets": [
+            {
+                "preset_id": "saved",
+                "name": "Сохранённый",
+                "metric_keys": ["avg_price_seller_discounted"],
+            }
+        ],
+        "sku_highlight_metric_keys": ["avg_price_seller_discounted"],
+        "sku_metric_selection": {
+            "mode": "preset",
+            "preset_id": "saved",
+            "all": False,
+            "metric_keys": [],
+        },
     }
     context = browser.new_context()
     page = context.new_page()
@@ -205,13 +270,38 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     page.wait_for_selector(TOTAL_ORDER_SUM_SELECTOR)
     _wait_for_server_save_count(server, 1)
     migrated = server.user_config["config"]
+    migrated_display = migrated.get("presentation", {}).get("display", {})
+    migrated_total_order_sum = next(
+        (
+            status
+            for logical_id, status in migrated_display.items()
+            if "total_orderSum" in logical_id
+        ),
+        "",
+    )
     if (
-        migrated.get("version") != 3
-        or migrated["scopes"]["total"]["display"].get("total_orderSum") != "hidden"
+        migrated.get("version") != 4
+        or migrated_total_order_sum != "hidden"
+        or migrated.get("presentation", {}).get("order", [None])[0]
+        != "total::total_orderSum"
+        or migrated_display.get("sku::avg_price_seller_discounted") != "collapsed"
+        or migrated_display.get("sku::avg_addToCartConversion") != "hidden"
         or not migrated.get("migrations", {}).get("incident_effective_shown_v1")
-        or [preset.get("name") for preset in migrated.get("sku_presets", [])] != ["Анализ"]
+        or not migrated.get("migrations", {}).get("unified_presentation_v1")
+        or [preset.get("name") for preset in migrated.get("sku_presets", [])] != ["Сохранённый"]
+        or migrated.get("sku_highlight_metric_keys") != ["avg_price_seller_discounted"]
+        or migrated.get("sku_metric_selection", {}).get("preset_id") != "saved"
     ):
         raise AssertionError(f"valid localStorage must migrate once when server config is missing, got {migrated}")
+    save_count_after_migration = server.save_count
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.wait_for_timeout(700)
+    if server.save_count != save_count_after_migration:
+        raise AssertionError(
+            "versioned unified migration must be idempotent after its first persisted save, "
+            f"before={save_count_after_migration}, after={server.save_count}"
+        )
     _assert_retired_metrics_absent(page, migrated)
     context.close()
 
@@ -258,8 +348,8 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     _wait_for_server_save_count(server, 1)
     if stale_page.locator(TOTAL_ORDER_SUM_SELECTOR).input_value() != "shown":
         raise AssertionError("stale localStorage must not hide total_orderSum when server config exists")
-    if server.user_config["config"].get("version") != 3:
-        raise AssertionError("server v2 metric config must migrate in place to v3")
+    if server.user_config["config"].get("version") != 4:
+        raise AssertionError("server v2 metric config must migrate in place to v4")
     _assert_retired_metrics_absent(stale_page, server.user_config["config"])
 
     stale_page.select_option(TOTAL_ORDER_SUM_SELECTOR, "hidden")
@@ -283,7 +373,10 @@ def _run_checks(browser, server: "FixtureServer") -> None:
 
 def _assert_retired_metrics_absent(page, config: object | None = None) -> None:
     for metric_key in RETIRED_METRIC_KEYS:
-        selector = f'[data-metric-config-key="{metric_key}"]'
+        selector = (
+            f'[data-total-metric-key="{metric_key}"],'
+            f'[data-sku-metric-key="{metric_key}"]'
+        )
         if page.locator(selector).count():
             raise AssertionError(f"retired metric leaked into settings/picker: {metric_key}")
     if config is None:
@@ -295,7 +388,10 @@ def _assert_retired_metrics_absent(page, config: object | None = None) -> None:
 
 
 def _open_metrics(page) -> None:
-    page.locator("[data-metrics-presentation]").evaluate("node => node.open = true")
+    modal = page.locator("[data-metrics-presentation]")
+    if modal.get_attribute("hidden") is not None:
+        page.locator("[data-metrics-settings-open]").click()
+    page.wait_for_selector("[data-metrics-presentation]:not([hidden])", timeout=5000)
 
 
 def _wait_for_server_save_count(server: "FixtureServer", expected: int) -> None:
@@ -310,6 +406,8 @@ def _wait_for_server_save_count(server: "FixtureServer", expected: int) -> None:
 
 
 def _open_sku_metric_picker(page) -> None:
+    if page.locator("[data-metrics-presentation]").get_attribute("hidden") is None:
+        page.locator("[data-metrics-settings-close]").first.click()
     if page.locator("[data-filters-rail]").get_attribute("hidden") is not None:
         page.locator("[data-filters-toggle]").click()
     if page.locator("[data-sku-metric-panel]").get_attribute("hidden") is not None:
@@ -470,8 +568,8 @@ def _check_sku_metric_presets(page, server: "FixtureServer") -> None:
 
     _open_metrics(page)
     sku_display_selector = (
-        '[data-metric-display-select][data-metric-config-scope="sku"]'
-        f'[data-metric-config-key="{focus_metric_key}"]'
+        f'[data-metric-config-row][data-sku-metric-key="{focus_metric_key}"] '
+        "[data-metric-display-select]"
     )
     save_before = server.save_count
     page.select_option(sku_display_selector, "hidden")
@@ -712,7 +810,7 @@ class FixtureServer:
                     payload = {
                         "status": server.user_config.get("status"),
                         "config_key": "metric_presentation",
-                        "schema_version": 1 if server.user_config.get("status") == "ok" else 0,
+                        "schema_version": 2 if server.user_config.get("status") == "ok" else 0,
                         "revision": server.user_config.get("revision", 0),
                         "updated_at": server.user_config.get("updated_at", ""),
                         "config": server.user_config.get("config"),
@@ -753,7 +851,7 @@ class FixtureServer:
                         {
                             "status": "ok",
                             "config_key": "metric_presentation",
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "revision": server.user_config["revision"],
                             "updated_at": server.user_config["updated_at"],
                             "config": server.user_config["config"],

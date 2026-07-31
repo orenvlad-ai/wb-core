@@ -2568,19 +2568,30 @@
       font-weight: 500;
     }
 
-    .metrics-presentation-panel {
-      margin: 6px 0;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--panel-bg);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+    .metrics-settings-button {
+      min-height: 30px;
+      padding-inline: 10px;
+      white-space: nowrap;
     }
 
-    .metrics-presentation-panel[hidden] {
+    .metrics-presentation-modal-backdrop[hidden] {
       display: none;
     }
 
-    .metrics-presentation-summary,
+    .metrics-presentation-modal.operator-modal-card {
+      display: flex;
+      flex-direction: column;
+      width: min(920px, calc(100vw - 40px));
+      max-height: min(820px, calc(100vh - 40px));
+      overflow: hidden;
+    }
+
+    .metrics-presentation-heading {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
     .activity-summary {
       display: flex;
       align-items: center;
@@ -2596,12 +2607,10 @@
       user-select: none;
     }
 
-    .metrics-presentation-summary::-webkit-details-marker,
     .activity-summary::-webkit-details-marker {
       display: none;
     }
 
-    .collapsible-disclosure,
     .activity-disclosure {
       display: grid;
       flex: 0 0 22px;
@@ -2614,7 +2623,6 @@
       background: var(--panel-subtle);
     }
 
-    .collapsible-disclosure::before,
     .activity-disclosure::before {
       content: ">";
       font-size: 12px;
@@ -2623,19 +2631,16 @@
       transition: transform 150ms ease;
     }
 
-    .metrics-presentation-panel[open] .collapsible-disclosure::before,
     .activity-panel[open] .activity-disclosure::before {
       transform: rotate(90deg) translateX(1px);
     }
 
-    .metrics-presentation-summary:hover .collapsible-disclosure,
     .activity-summary:hover .activity-disclosure {
       border-color: rgba(139, 92, 246, 0.44);
       color: var(--accent);
     }
 
     .metrics-presentation-count {
-      margin-left: auto;
       color: var(--muted);
       font-size: 11px;
       font-weight: 600;
@@ -2644,9 +2649,13 @@
     .metrics-presentation-body {
       display: grid;
       gap: 8px;
+      flex: 1 1 auto;
+      min-height: 0;
       border-top: 1px solid var(--border);
       background: var(--control-bg);
       padding: 8px;
+      overflow: auto;
+      overscroll-behavior: contain;
     }
 
     .metrics-presentation-empty {
@@ -2658,7 +2667,7 @@
 
     .metrics-config-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
       gap: 8px;
       min-width: 0;
     }
@@ -2667,12 +2676,10 @@
       display: flex;
       flex-direction: column;
       min-width: 0;
-      max-height: min(66vh, 620px);
       border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.018);
-      overflow: auto;
-      overscroll-behavior: contain;
+      overflow: visible;
     }
 
     .metrics-config-scope-head {
@@ -2716,8 +2723,7 @@
     }
 
     .metrics-config-selection-toggle,
-    .metrics-config-bulk-select,
-    .metrics-config-sync-total {
+    .metrics-config-bulk-select {
       min-height: 24px;
       border: 1px solid var(--border);
       border-radius: 5px;
@@ -2734,30 +2740,16 @@
       cursor: pointer;
     }
 
-    .metrics-config-sync-total {
-      padding: 3px 8px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-
     .metrics-config-selection-toggle:hover,
-    .metrics-config-bulk-select:hover:not(:disabled),
-    .metrics-config-sync-total:hover:not(:disabled) {
+    .metrics-config-bulk-select:hover:not(:disabled) {
       border-color: rgba(139, 92, 246, 0.44);
       background: rgba(139, 92, 246, 0.08);
     }
 
     .metrics-config-selection-toggle:focus-visible,
-    .metrics-config-bulk-select:focus-visible,
-    .metrics-config-sync-total:focus-visible {
+    .metrics-config-bulk-select:focus-visible {
       outline: 2px solid var(--accent-focus);
       outline-offset: 2px;
-    }
-
-    .metrics-config-sync-total:disabled {
-      color: var(--muted);
-      cursor: not-allowed;
-      opacity: 0.62;
     }
 
     .metrics-config-bulk-select {
@@ -2872,6 +2864,26 @@
       font-size: 12px;
       font-weight: 650;
       color: currentColor;
+    }
+
+    .metrics-config-scope-badge {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      min-height: 17px;
+      padding: 0 5px;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.08);
+      color: var(--muted-strong);
+      font-size: 9.5px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      line-height: 1;
+    }
+
+    .metrics-presentation-actions {
+      flex: 0 0 auto;
     }
 
     .metrics-config-drag-handle {
@@ -3033,8 +3045,9 @@
     }
 
     @media (max-width: 980px) {
-      .metrics-config-grid {
-        grid-template-columns: minmax(0, 1fr);
+      .metrics-presentation-modal.operator-modal-card {
+        width: min(920px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
       }
     }
 
@@ -4991,11 +5004,6 @@
         flex: 0 0 auto;
       }
 
-      .metrics-config-grid.scope-count-2,
-      .metrics-config-grid.scope-count-many {
-        grid-template-columns: 1fr;
-      }
-
       .table-control-toolbar {
         flex-wrap: wrap;
         align-items: flex-end;
@@ -5133,7 +5141,26 @@
       }
 
       .metrics-config-row {
-        grid-template-columns: minmax(150px, 1fr) minmax(76px, 0.5fr) minmax(96px, 0.5fr);
+        grid-template-columns: minmax(132px, 1fr) minmax(68px, 0.5fr) minmax(92px, 0.6fr);
+      }
+
+      .metrics-presentation-modal-backdrop.operator-modal-backdrop {
+        padding: 8px;
+      }
+
+      .metrics-presentation-modal.operator-modal-card {
+        width: calc(100vw - 16px);
+        max-height: calc(100vh - 16px);
+      }
+
+      .metrics-config-scope-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .metrics-config-scope-actions {
+        width: 100%;
+        justify-content: flex-end;
       }
 
       .table-object-indicator {
@@ -5314,6 +5341,7 @@
               </div>
               <span class="table-load-action-cluster">
                 <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-controls="table-filters-rail">Фильтры</button>
+                <button class="button secondary metrics-settings-button" type="button" data-metrics-settings-open aria-label="Настроить метрики" aria-haspopup="dialog" aria-controls="metrics-presentation-dialog">Настроить метрики</button>
                 <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
                 <div class="top-progress" data-global-progress hidden>
                   <span class="top-progress-pulse" aria-hidden="true"></span>
@@ -5386,17 +5414,6 @@
     </section>
 
     <section class="summary-grid" data-summary-grid></section>
-
-    <details class="metrics-presentation-panel" data-metrics-presentation>
-      <summary class="metrics-presentation-summary">
-        <span class="collapsible-disclosure" aria-hidden="true"></span>
-        <span class="metrics-presentation-title">Метрики</span>
-        <span class="metrics-presentation-count" data-metrics-presentation-summary>настройки не загружены</span>
-      </summary>
-      <div class="metrics-presentation-body" data-metrics-presentation-body>
-        <p class="metrics-presentation-empty">Настройки метрик появятся после загрузки таблицы.</p>
-      </div>
-    </details>
 
     <details class="activity-panel" data-activity-block>
       <summary class="activity-summary" data-activity-summary>
@@ -6406,6 +6423,25 @@
     </section>
   </div>
 
+  <div class="metrics-presentation-modal-backdrop operator-modal-backdrop" data-metrics-presentation hidden>
+    <section class="metrics-presentation-modal operator-modal-card" id="metrics-presentation-dialog" role="dialog" aria-modal="true" aria-labelledby="metrics-presentation-title" aria-describedby="metrics-presentation-summary">
+      <div class="ads-modal-head">
+        <div class="metrics-presentation-heading">
+          <h3 class="ads-modal-title" id="metrics-presentation-title">Настроить метрики</h3>
+          <span class="metrics-presentation-count" id="metrics-presentation-summary" data-metrics-presentation-summary>настройки не загружены</span>
+        </div>
+        <button class="button ghost" type="button" data-metrics-settings-close>Закрыть</button>
+      </div>
+      <div class="metrics-presentation-body" data-metrics-presentation-body>
+        <p class="metrics-presentation-empty">Настройки метрик появятся после загрузки таблицы.</p>
+      </div>
+      <div class="ads-modal-actions metrics-presentation-actions">
+        <button class="button secondary" type="button" data-metrics-settings-reset>Сбросить отображение</button>
+        <button class="button primary" type="button" data-metrics-settings-close>Готово</button>
+      </div>
+    </section>
+  </div>
+
   <div class="sku-management-modal-backdrop operator-modal-backdrop" data-sku-management-modal hidden>
     <section class="sku-management-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="sku-management-modal-title">
       <div class="ads-modal-head"><h3 class="ads-modal-title" id="sku-management-modal-title" data-sku-modal-title>Подтверждение изменения SKU</h3><button class="button ghost" type="button" data-sku-modal-cancel>Закрыть</button></div>
@@ -6613,6 +6649,8 @@
     const metricsPresentationPanelNode = document.querySelector("[data-metrics-presentation]");
     const metricsPresentationBodyNode = document.querySelector("[data-metrics-presentation-body]");
     const metricsPresentationSummaryNode = document.querySelector("[data-metrics-presentation-summary]");
+    const metricsSettingsOpenButton = document.querySelector("[data-metrics-settings-open]");
+    const metricsSettingsResetButton = document.querySelector("[data-metrics-settings-reset]");
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
     const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
@@ -6812,9 +6850,11 @@
 
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
-    const METRIC_PRESENTATION_VERSION = 3;
+    const METRIC_PRESENTATION_VERSION = 4;
+    const METRIC_PRESENTATION_LEGACY_VERSIONS = new Set([2, 3]);
     const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
     const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
+    const UNIFIED_PRESENTATION_MIGRATION = "unified_presentation_v1";
     const DEFAULT_SKU_METRIC_PRESET_ID = "analysis";
     const SKU_METRIC_HIGHLIGHT_PALETTE = [
       {name: "синий", color: "#3b82f6"},
@@ -7121,13 +7161,16 @@
         storageKey: "",
         scopes: [],
         optionByKey: new Map(),
-        scopeByKey: {},
-        orderByScope: {},
-        displayByScope: {},
-        manualByScope: {},
+        logicalMetrics: [],
+        logicalById: new Map(),
+        logicalIdByScopedKey: new Map(),
+        unifiedOrder: [],
+        unifiedDisplay: {},
+        unifiedManual: false,
         expandedAnchors: new Set(),
-        selectionModeByScope: {},
-        selectionByScope: {},
+        selectionMode: false,
+        selection: new Set(),
+        modalOpener: null,
         skuPresets: [],
         highlightMetricKeys: [],
         skuMetricSelection: {
@@ -7138,7 +7181,8 @@
         },
         migrations: {
           incidentEffectiveShownV1: false,
-          skuPresetsSeededV1: false
+          skuPresetsSeededV1: false,
+          unifiedPresentationV1: false
         },
         presetEditor: {
           open: false,
@@ -7549,6 +7593,27 @@
       metricsPresentationBodyNode.addEventListener("dragover", handleMetricPresentationDragOver);
       metricsPresentationBodyNode.addEventListener("drop", handleMetricPresentationDrop);
       metricsPresentationBodyNode.addEventListener("dragend", handleMetricPresentationDragEnd);
+    }
+    if (metricsSettingsOpenButton) {
+      metricsSettingsOpenButton.addEventListener("click", openMetricPresentationModal);
+    }
+    if (metricsSettingsResetButton) {
+      metricsSettingsResetButton.addEventListener("click", function() {
+        resetMetricPresentationToDefault(state.composition);
+        renderMetricPresentationPanel(state.composition);
+        renderTable();
+      });
+    }
+    if (metricsPresentationPanelNode) {
+      metricsPresentationPanelNode.addEventListener("click", function(event) {
+        if (
+          event.target === metricsPresentationPanelNode
+          || event.target.closest("[data-metrics-settings-close]")
+        ) {
+          event.preventDefault();
+          closeMetricPresentationModal();
+        }
+      });
     }
     if (tableBodyNode) {
       tableBodyNode.addEventListener("click", function(event) {
@@ -8177,6 +8242,34 @@
         }
       }, true);
       document.addEventListener("keydown", function(event) {
+        if (metricsPresentationPanelNode && !metricsPresentationPanelNode.hidden) {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            closeMetricPresentationModal();
+            return;
+          }
+          if (event.key === "Tab") {
+            const focusable = Array.from(metricsPresentationPanelNode.querySelectorAll(
+              'button:not([disabled]):not([hidden]), input:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+            )).filter(function(node) { return node.offsetParent !== null; });
+            if (focusable.length) {
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (!metricsPresentationPanelNode.contains(document.activeElement)) {
+                event.preventDefault();
+                (event.shiftKey ? last : first).focus();
+              } else if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }
+            return;
+          }
+        }
         if (skuPresetModalNode && !skuPresetModalNode.hidden) {
           if (event.key === "Escape") {
             event.preventDefault();
@@ -9797,22 +9890,58 @@
       return metricPresentationScopeIdFromRowKind((row && row.row_kind) || "");
     }
 
+    function scopedMetricLookupKey(scopeId, metricKey) {
+      return String(scopeId || "") + "::" + String(metricKey || "");
+    }
+
+    function deterministicMetricAnalogCandidates(metricKey) {
+      const source = String(metricKey || "");
+      const queue = [source];
+      const result = [];
+      const seen = new Set();
+      while (queue.length) {
+        const candidate = String(queue.shift() || "");
+        if (!candidate || seen.has(candidate)) {
+          continue;
+        }
+        seen.add(candidate);
+        result.push(candidate);
+        if (candidate.indexOf("total_") === 0) {
+          queue.push(candidate.slice("total_".length));
+        }
+        if (candidate.indexOf("avg_") === 0) {
+          queue.push(candidate.slice("avg_".length));
+        }
+        if (candidate.endsWith("_total")) {
+          queue.push(candidate.slice(0, -"_total".length));
+        }
+      }
+      return result;
+    }
+
     function buildMetricPresentationModel(payload) {
       const optionByKey = new Map();
+      const optionByScopedKey = new Map();
+      const catalogOptions = [];
       metricFilterOptions(payload).forEach(function(option) {
         const metricKey = String((option && option.value) || "");
         if (!metricKey || metricKey === ALL_VALUE) {
           return;
         }
         const scopeId = String(option.scope_group_id || "sku");
-        optionByKey.set(metricKey, {
+        const normalizedOption = {
           metricKey: metricKey,
           label: String(option.label || metricKey),
           scopeId: scopeId,
           scopeLabel: metricPresentationScopeLabel(scopeId, option.scope_group_label),
           sectionId: String(option.section_id || "section:unsectioned"),
           sectionLabel: String(option.section_label || "Без секции")
-        });
+        };
+        catalogOptions.push(normalizedOption);
+        optionByScopedKey.set(scopedMetricLookupKey(scopeId, metricKey), normalizedOption);
+        if (!optionByKey.has(metricKey) || scopeId === "total") {
+          optionByKey.set(metricKey, normalizedOption);
+        }
       });
 
       const scopesById = new Map();
@@ -9833,22 +9962,39 @@
         if (!normalizedMetricKey) {
           return;
         }
-        const option = optionByKey.get(normalizedMetricKey) || {};
-        const normalizedScopeId = String(scopeId || option.scopeId || "sku");
+        const normalizedScopeId = String(
+          scopeId || (optionByKey.get(normalizedMetricKey) || {}).scopeId || "sku"
+        );
+        const scopedOption = optionByScopedKey.get(
+          scopedMetricLookupKey(normalizedScopeId, normalizedMetricKey)
+        );
+        const genericOption = optionByKey.get(normalizedMetricKey);
+        const option = scopedOption || (
+          genericOption && genericOption.scopeId === normalizedScopeId
+            ? genericOption
+            : {}
+        );
         const scope = ensureScope(normalizedScopeId, option.scopeLabel || (fallback && fallback.scopeLabel));
         if (!scope.metricSet.has(normalizedMetricKey)) {
           scope.metricSet.add(normalizedMetricKey);
           scope.metricKeys.push(normalizedMetricKey);
         }
-        if (!optionByKey.has(normalizedMetricKey)) {
-          optionByKey.set(normalizedMetricKey, {
+        if (!scopedOption) {
+          const fallbackOption = {
             metricKey: normalizedMetricKey,
             label: String((fallback && fallback.label) || normalizedMetricKey),
             scopeId: normalizedScopeId,
             scopeLabel: metricPresentationScopeLabel(normalizedScopeId, fallback && fallback.scopeLabel),
             sectionId: String((fallback && fallback.sectionId) || "section:unsectioned"),
             sectionLabel: String((fallback && fallback.sectionLabel) || "Без секции")
-          });
+          };
+          optionByScopedKey.set(
+            scopedMetricLookupKey(normalizedScopeId, normalizedMetricKey),
+            fallbackOption
+          );
+          if (!optionByKey.has(normalizedMetricKey) || normalizedScopeId === "total") {
+            optionByKey.set(normalizedMetricKey, fallbackOption);
+          }
         }
       }
 
@@ -9867,8 +10013,8 @@
         });
       });
 
-      optionByKey.forEach(function(option, metricKey) {
-        addMetricToScope(option.scopeId, metricKey, {
+      catalogOptions.forEach(function(option) {
+        addMetricToScope(option.scopeId, option.metricKey, {
           label: option.label,
           scopeLabel: option.scopeLabel,
           sectionId: option.sectionId,
@@ -9891,7 +10037,152 @@
         }
         return String(left.label || "").localeCompare(String(right.label || ""), "ru");
       });
-      return {scopes: scopes, optionByKey: optionByKey};
+
+      const totalScope = scopes.find(function(scope) { return scope.scopeId === "total"; }) || {metricKeys: []};
+      const skuScope = scopes.find(function(scope) { return scope.scopeId === "sku"; }) || {metricKeys: []};
+      const totalOrder = (totalScope.metricKeys || []).slice();
+      const skuOrder = (skuScope.metricKeys || []).slice();
+      const skuSet = new Set(skuOrder);
+      const candidatesByTotal = new Map();
+      const totalsBySku = new Map();
+      totalOrder.forEach(function(totalMetricKey) {
+        const candidates = deterministicMetricAnalogCandidates(totalMetricKey).filter(function(candidate) {
+          return skuSet.has(candidate);
+        });
+        candidatesByTotal.set(totalMetricKey, candidates);
+        candidates.forEach(function(skuMetricKey) {
+          if (!totalsBySku.has(skuMetricKey)) {
+            totalsBySku.set(skuMetricKey, []);
+          }
+          totalsBySku.get(skuMetricKey).push(totalMetricKey);
+        });
+      });
+
+      const skuByTotal = new Map();
+      const totalBySku = new Map();
+      totalOrder.forEach(function(totalMetricKey) {
+        const candidates = candidatesByTotal.get(totalMetricKey) || [];
+        if (candidates.length !== 1) {
+          return;
+        }
+        const skuMetricKey = candidates[0];
+        if ((totalsBySku.get(skuMetricKey) || []).length !== 1) {
+          return;
+        }
+        skuByTotal.set(totalMetricKey, skuMetricKey);
+        totalBySku.set(skuMetricKey, totalMetricKey);
+      });
+
+      function optionFor(scopeId, metricKey) {
+        const option = optionByScopedKey.get(
+          scopedMetricLookupKey(scopeId, metricKey)
+        ) || optionByKey.get(metricKey) || {};
+        return {
+          label: String(option.label || metricKey),
+          sectionId: String(option.sectionId || "section:unsectioned"),
+          sectionLabel: String(option.sectionLabel || "Без секции"),
+          scopeId: scopeId
+        };
+      }
+
+      const logicalById = new Map();
+      const logicalIdByScopedKey = new Map();
+      const logicalMetrics = [];
+      function registerLogicalMetric(record) {
+        logicalMetrics.push(record);
+        logicalById.set(record.logicalId, record);
+        if (record.totalKey) {
+          logicalIdByScopedKey.set(scopedMetricLookupKey("total", record.totalKey), record.logicalId);
+        }
+        if (record.skuKey) {
+          logicalIdByScopedKey.set(scopedMetricLookupKey("sku", record.skuKey), record.logicalId);
+        }
+      }
+
+      totalOrder.forEach(function(totalMetricKey) {
+        const skuMetricKey = skuByTotal.get(totalMetricKey) || "";
+        const option = optionFor("total", totalMetricKey);
+        registerLogicalMetric({
+          logicalId: skuMetricKey
+            ? "pair::" + totalMetricKey + "::" + skuMetricKey
+            : "total::" + totalMetricKey,
+          label: option.label,
+          sectionId: option.sectionId,
+          sectionLabel: option.sectionLabel,
+          availability: skuMetricKey ? "common" : "total",
+          totalKey: totalMetricKey,
+          skuKey: skuMetricKey
+        });
+      });
+
+      const skuOnlyRecords = skuOrder.filter(function(skuMetricKey) {
+        return !totalBySku.has(skuMetricKey);
+      }).map(function(skuMetricKey) {
+        const option = optionFor("sku", skuMetricKey);
+        return {
+          logicalId: "sku::" + skuMetricKey,
+          label: option.label,
+          sectionId: option.sectionId,
+          sectionLabel: option.sectionLabel,
+          availability: "sku",
+          totalKey: "",
+          skuKey: skuMetricKey
+        };
+      });
+      skuOnlyRecords.forEach(function(record) {
+        const skuIndex = skuOrder.indexOf(record.skuKey);
+        let precedingLogicalId = "";
+        for (let index = skuIndex - 1; index >= 0; index -= 1) {
+          const previousSkuKey = skuOrder[index];
+          const previousTotalKey = totalBySku.get(previousSkuKey);
+          if (previousTotalKey) {
+            precedingLogicalId = logicalIdByScopedKey.get(
+              scopedMetricLookupKey("total", previousTotalKey)
+            ) || "";
+            break;
+          }
+        }
+        let followingLogicalId = "";
+        if (!precedingLogicalId) {
+          for (let index = skuIndex + 1; index < skuOrder.length; index += 1) {
+            const nextSkuKey = skuOrder[index];
+            const nextTotalKey = totalBySku.get(nextSkuKey);
+            if (nextTotalKey) {
+              followingLogicalId = logicalIdByScopedKey.get(
+                scopedMetricLookupKey("total", nextTotalKey)
+              ) || "";
+              break;
+            }
+          }
+        }
+        let insertIndex = logicalMetrics.length;
+        if (precedingLogicalId) {
+          insertIndex = logicalMetrics.findIndex(function(item) {
+            return item.logicalId === precedingLogicalId;
+          }) + 1;
+          while (
+            insertIndex < logicalMetrics.length
+            && logicalMetrics[insertIndex].availability === "sku"
+          ) {
+            insertIndex += 1;
+          }
+        } else if (followingLogicalId) {
+          insertIndex = logicalMetrics.findIndex(function(item) {
+            return item.logicalId === followingLogicalId;
+          });
+        }
+        logicalMetrics.splice(insertIndex < 0 ? logicalMetrics.length : insertIndex, 0, record);
+        logicalById.set(record.logicalId, record);
+        logicalIdByScopedKey.set(scopedMetricLookupKey("sku", record.skuKey), record.logicalId);
+      });
+
+      return {
+        scopes: scopes,
+        optionByKey: optionByKey,
+        logicalMetrics: logicalMetrics,
+        logicalById: logicalById,
+        logicalIdByScopedKey: logicalIdByScopedKey
+      };
     }
 
     function readPersistedMetricPresentation(storageKey) {
@@ -9914,16 +10205,26 @@
       const candidateVersion = Number(candidate && candidate.version);
       if (
         !candidate
-        || (candidateVersion !== 2 && candidateVersion !== METRIC_PRESENTATION_VERSION)
-        || !candidate.scopes
-        || typeof candidate.scopes !== "object"
+        || (
+          !METRIC_PRESENTATION_LEGACY_VERSIONS.has(candidateVersion)
+          && candidateVersion !== METRIC_PRESENTATION_VERSION
+        )
+      ) {
+        return null;
+      }
+      const candidateScopes = candidate.scopes && typeof candidate.scopes === "object"
+        ? candidate.scopes
+        : {};
+      if (
+        candidateVersion < METRIC_PRESENTATION_VERSION
+        && !Object.keys(candidateScopes).length
       ) {
         return null;
       }
       const scopes = {};
-      Object.keys(candidate.scopes).forEach(function(scopeId) {
+      Object.keys(candidateScopes).forEach(function(scopeId) {
         const normalizedScopeId = String(scopeId || "").trim();
-        const savedScope = candidate.scopes[scopeId];
+        const savedScope = candidateScopes[scopeId];
         if (!normalizedScopeId || !savedScope || typeof savedScope !== "object") {
           return;
         }
@@ -9950,6 +10251,22 @@
           display: display,
           manual: !!savedScope.manual
         };
+      });
+      const rawPresentation = candidate.presentation && typeof candidate.presentation === "object"
+        ? candidate.presentation
+        : {};
+      const presentationOrder = uniqueLogicalMetricIds(rawPresentation.order, 500);
+      const presentationDisplay = {};
+      const rawPresentationDisplay = rawPresentation.display && typeof rawPresentation.display === "object"
+        ? rawPresentation.display
+        : {};
+      Object.keys(rawPresentationDisplay).forEach(function(logicalMetricId) {
+        const normalizedLogicalMetricId = String(logicalMetricId || "").trim().slice(0, 400);
+        if (normalizedLogicalMetricId) {
+          presentationDisplay[normalizedLogicalMetricId] = normalizeMetricDisplayStatus(
+            rawPresentationDisplay[logicalMetricId]
+          );
+        }
       });
       const skuPresets = [];
       const seenPresetIds = new Set();
@@ -9990,6 +10307,11 @@
       return {
         version: candidateVersion,
         scopes: scopes,
+        presentation: {
+          order: presentationOrder,
+          display: presentationDisplay,
+          manual: !!rawPresentation.manual
+        },
         expanded_anchors: expandedAnchors,
         sku_presets: skuPresets,
         sku_highlight_metric_keys: uniqueMetricKeys(
@@ -10004,7 +10326,7 @@
         },
         migrations: {
           incidentEffectiveShownV1: !!(
-            candidateVersion >= METRIC_PRESENTATION_VERSION
+            candidateVersion >= 3
             && candidate.migrations
             && (
               candidate.migrations[INCIDENT_EFFECTIVE_SHOWN_MIGRATION]
@@ -10012,11 +10334,19 @@
             )
           ),
           skuPresetsSeededV1: !!(
-            candidateVersion >= METRIC_PRESENTATION_VERSION
+            candidateVersion >= 3
             && candidate.migrations
             && (
               candidate.migrations[SKU_PRESETS_SEEDED_MIGRATION]
               || candidate.migrations.skuPresetsSeededV1
+            )
+          ),
+          unifiedPresentationV1: !!(
+            candidateVersion >= METRIC_PRESENTATION_VERSION
+            && candidate.migrations
+            && (
+              candidate.migrations[UNIFIED_PRESENTATION_MIGRATION]
+              || candidate.migrations.unifiedPresentationV1
             )
           )
         }
@@ -10031,6 +10361,23 @@
           return true;
         }
         const normalized = String(metricKey || "").trim().slice(0, 160);
+        if (normalized && !seen.has(normalized)) {
+          result.push(normalized);
+          seen.add(normalized);
+        }
+        return false;
+      });
+      return result;
+    }
+
+    function uniqueLogicalMetricIds(candidate, limit) {
+      const result = [];
+      const seen = new Set();
+      (Array.isArray(candidate) ? candidate : []).some(function(logicalMetricId) {
+        if (result.length >= Number(limit || 500)) {
+          return true;
+        }
+        const normalized = String(logicalMetricId || "").trim().slice(0, 400);
         if (normalized && !seen.has(normalized)) {
           result.push(normalized);
           seen.add(normalized);
@@ -10164,29 +10511,25 @@
     }
 
     function metricDisplayStatusForScope(scopeId, metricKey) {
-      const normalizedScopeId = String(scopeId || "");
-      const normalizedMetricKey = String(metricKey || "");
-      const scopeDisplay = state.metricPresentation.displayByScope[normalizedScopeId] || {};
-      return normalizeMetricDisplayStatus(scopeDisplay[normalizedMetricKey] || "shown");
+      const logicalMetricId = state.metricPresentation.logicalIdByScopedKey.get(
+        scopedMetricLookupKey(scopeId, metricKey)
+      ) || "";
+      return unifiedMetricDisplayStatus(logicalMetricId);
     }
 
     function setMetricDisplayStatusForScope(scopeId, metricKey, status) {
-      const normalizedScopeId = String(scopeId || "");
-      const normalizedMetricKey = String(metricKey || "");
-      if (!normalizedScopeId || !normalizedMetricKey) {
+      const logicalMetricId = state.metricPresentation.logicalIdByScopedKey.get(
+        scopedMetricLookupKey(scopeId, metricKey)
+      ) || "";
+      if (!logicalMetricId) {
         return;
       }
-      if (!state.metricPresentation.displayByScope[normalizedScopeId]) {
-        state.metricPresentation.displayByScope[normalizedScopeId] = {};
-      }
-      state.metricPresentation.displayByScope[normalizedScopeId][normalizedMetricKey] = normalizeMetricDisplayStatus(status);
+      state.metricPresentation.unifiedDisplay[logicalMetricId] = normalizeMetricDisplayStatus(status);
     }
 
     function markMetricPresentationScopeManual(scopeId) {
-      const normalizedScopeId = String(scopeId || "");
-      if (normalizedScopeId) {
-        state.metricPresentation.manualByScope[normalizedScopeId] = true;
-      }
+      void scopeId;
+      state.metricPresentation.unifiedManual = true;
     }
 
     function metricDisplayStatusLabel(status) {
@@ -10201,7 +10544,103 @@
     }
 
     function metricPresentationAnchorToken(scopeId, metricKey) {
-      return String(scopeId || "sku") + "::" + String(metricKey || "");
+      return state.metricPresentation.logicalIdByScopedKey.get(
+        scopedMetricLookupKey(scopeId, metricKey)
+      ) || "";
+    }
+
+    function unifiedMetricDefaultOrder(model) {
+      return (model.logicalMetrics || []).map(function(record) {
+        return record.logicalId;
+      });
+    }
+
+    function unifiedOrderFromLegacy(model, persisted) {
+      const defaultOrder = unifiedMetricDefaultOrder(model);
+      const totalLogicalIds = (model.scopes.find(function(scope) {
+        return scope.scopeId === "total";
+      }) || {metricKeys: []}).metricKeys.map(function(metricKey) {
+        return model.logicalIdByScopedKey.get(scopedMetricLookupKey("total", metricKey)) || "";
+      }).filter(Boolean);
+      const legacyScopes = persisted && persisted.scopes ? persisted.scopes : {};
+      const savedTotal = legacyScopes.total || {};
+      const savedTotalKeys = sanitizeMetricOrder(
+        savedTotal.order,
+        (model.scopes.find(function(scope) {
+          return scope.scopeId === "total";
+        }) || {metricKeys: []}).metricKeys
+      );
+      const totalBackbone = savedTotalKeys.map(function(metricKey) {
+        return model.logicalIdByScopedKey.get(scopedMetricLookupKey("total", metricKey)) || "";
+      }).filter(Boolean);
+      const result = totalBackbone.length ? totalBackbone : totalLogicalIds;
+      defaultOrder.forEach(function(logicalMetricId) {
+        const record = model.logicalById.get(logicalMetricId);
+        if (!record || record.availability !== "sku" || result.indexOf(logicalMetricId) !== -1) {
+          return;
+        }
+        const defaultIndex = defaultOrder.indexOf(logicalMetricId);
+        let precedingId = "";
+        for (let index = defaultIndex - 1; index >= 0; index -= 1) {
+          const candidate = model.logicalById.get(defaultOrder[index]);
+          if (candidate && candidate.availability !== "sku") {
+            precedingId = candidate.logicalId;
+            break;
+          }
+        }
+        let insertIndex = precedingId ? result.indexOf(precedingId) + 1 : 0;
+        if (insertIndex <= 0 && precedingId) {
+          insertIndex = result.length;
+        }
+        while (
+          insertIndex < result.length
+          && (model.logicalById.get(result[insertIndex]) || {}).availability === "sku"
+        ) {
+          insertIndex += 1;
+        }
+        result.splice(insertIndex, 0, logicalMetricId);
+      });
+      return sanitizeMetricOrder(result, defaultOrder);
+    }
+
+    function unifiedDisplayFromLegacy(model, persisted, requiresIncidentEffectiveMigration) {
+      const legacyScopes = persisted && persisted.scopes ? persisted.scopes : {};
+      const totalDisplay = (legacyScopes.total || {}).display || {};
+      const skuDisplay = (legacyScopes.sku || {}).display || {};
+      const display = {};
+      (model.logicalMetrics || []).forEach(function(record) {
+        const sourceKey = record.totalKey || record.skuKey;
+        const sourceDisplay = record.totalKey ? totalDisplay : skuDisplay;
+        const savedStatus = Object.prototype.hasOwnProperty.call(sourceDisplay, sourceKey)
+          ? sourceDisplay[sourceKey]
+          : defaultMetricDisplayStatus(sourceKey);
+        display[record.logicalId] = (
+          requiresIncidentEffectiveMigration && isIncidentEffectiveStockMetricKey(sourceKey)
+        ) ? "shown" : normalizeMetricDisplayStatus(savedStatus);
+      });
+      return display;
+    }
+
+    function normalizedExpandedLogicalAnchors(model, persisted) {
+      const allowed = new Set(unifiedMetricDefaultOrder(model));
+      const result = new Set();
+      (Array.isArray(persisted && persisted.expanded_anchors) ? persisted.expanded_anchors : []).forEach(function(token) {
+        const normalized = String(token || "");
+        if (allowed.has(normalized)) {
+          result.add(normalized);
+          return;
+        }
+        const parts = normalized.split("::");
+        const scopeId = parts.shift() || "";
+        const metricKey = parts.join("::");
+        const logicalMetricId = model.logicalIdByScopedKey.get(
+          scopedMetricLookupKey(scopeId, metricKey)
+        ) || "";
+        if (logicalMetricId && allowed.has(logicalMetricId)) {
+          result.add(logicalMetricId);
+        }
+      });
+      return result;
     }
 
     function initializeMetricPresentation(payload, options) {
@@ -10222,49 +10661,68 @@
       const requiresSkuPresetSeedMigration = !!(
         persisted && (!persisted.migrations || !persisted.migrations.skuPresetsSeededV1)
       );
-      const previousSelectionModeByScope = state.metricPresentation.selectionModeByScope || {};
-      const previousSelectionByScope = state.metricPresentation.selectionByScope || {};
-      const scopeByKey = {};
+      const requiresUnifiedMigration = !!(
+        persisted
+        && (
+          Number(persisted.version || 0) < METRIC_PRESENTATION_VERSION
+          || !persisted.migrations
+          || !persisted.migrations.unifiedPresentationV1
+        )
+      );
+      const previousSelectionMode = !!state.metricPresentation.selectionMode;
+      const previousSelection = state.metricPresentation.selection instanceof Set
+        ? state.metricPresentation.selection
+        : new Set();
       state.metricPresentation.storageKey = storageKey;
       state.metricPresentation.scopes = model.scopes;
       state.metricPresentation.optionByKey = model.optionByKey;
-      state.metricPresentation.orderByScope = {};
-      state.metricPresentation.displayByScope = {};
-      state.metricPresentation.manualByScope = {};
-      state.metricPresentation.expandedAnchors = new Set();
-      state.metricPresentation.selectionModeByScope = {};
-      state.metricPresentation.selectionByScope = {};
-      model.scopes.forEach(function(scope) {
-        const scopeId = scope.scopeId;
-        const savedScope = persisted && persisted.scopes ? (persisted.scopes[scopeId] || {}) : {};
-        const defaultOrder = scope.metricKeys.slice();
-        const order = sanitizeMetricOrder(savedScope.order, defaultOrder);
-        state.metricPresentation.orderByScope[scopeId] = order;
-        state.metricPresentation.displayByScope[scopeId] = {};
-        state.metricPresentation.manualByScope[scopeId] = !!(savedScope && savedScope.manual);
-        defaultOrder.forEach(function(metricKey) {
-          scopeByKey[metricKey] = scopeId;
-          const savedDisplay = requiresIncidentEffectiveMigration && isIncidentEffectiveStockMetricKey(metricKey)
-            ? "shown"
-            : savedScope.display && Object.prototype.hasOwnProperty.call(savedScope.display, metricKey)
-            ? savedScope.display[metricKey]
-            : defaultMetricDisplayStatus(metricKey);
-          setMetricDisplayStatusForScope(scopeId, metricKey, savedDisplay);
+      state.metricPresentation.logicalMetrics = model.logicalMetrics;
+      state.metricPresentation.logicalById = model.logicalById;
+      state.metricPresentation.logicalIdByScopedKey = model.logicalIdByScopedKey;
+      const defaultOrder = unifiedMetricDefaultOrder(model);
+      const persistedPresentation = persisted && persisted.presentation
+        ? persisted.presentation
+        : {};
+      state.metricPresentation.unifiedOrder = (
+        !forceDefault && persisted && Number(persisted.version) >= METRIC_PRESENTATION_VERSION
+      )
+        ? sanitizeMetricOrder(persistedPresentation.order, defaultOrder)
+        : (!forceDefault && persisted ? unifiedOrderFromLegacy(model, persisted) : defaultOrder);
+      state.metricPresentation.unifiedDisplay = (
+        !forceDefault && persisted && Number(persisted.version) >= METRIC_PRESENTATION_VERSION
+      )
+        ? {}
+        : unifiedDisplayFromLegacy(model, forceDefault ? null : persisted, requiresIncidentEffectiveMigration);
+      if (!forceDefault && persisted && Number(persisted.version) >= METRIC_PRESENTATION_VERSION) {
+        defaultOrder.forEach(function(logicalMetricId) {
+          const record = model.logicalById.get(logicalMetricId) || {};
+          const sourceKey = record.totalKey || record.skuKey || "";
+          state.metricPresentation.unifiedDisplay[logicalMetricId] =
+            persistedPresentation.display
+            && Object.prototype.hasOwnProperty.call(persistedPresentation.display, logicalMetricId)
+              ? normalizeMetricDisplayStatus(persistedPresentation.display[logicalMetricId])
+              : defaultMetricDisplayStatus(sourceKey);
         });
-        if (!forceDefault && previousSelectionModeByScope[scopeId]) {
-          const previousSelection = previousSelectionByScope[scopeId] instanceof Set
-            ? previousSelectionByScope[scopeId]
-            : new Set();
-          const allowed = new Set(defaultOrder);
-          state.metricPresentation.selectionModeByScope[scopeId] = true;
-          state.metricPresentation.selectionByScope[scopeId] = new Set(
-            Array.from(previousSelection).filter(function(metricKey) {
-              return allowed.has(metricKey);
-            })
-          );
-        }
-      });
-      state.metricPresentation.scopeByKey = scopeByKey;
+      }
+      state.metricPresentation.unifiedManual = !!(
+        !forceDefault
+        && persisted
+        && (
+          Number(persisted.version) >= METRIC_PRESENTATION_VERSION
+            ? persistedPresentation.manual
+            : ((persisted.scopes || {}).total || {}).manual
+        )
+      );
+      state.metricPresentation.expandedAnchors = normalizedExpandedLogicalAnchors(
+        model,
+        forceDefault ? null : persisted
+      );
+      state.metricPresentation.selectionMode = !forceDefault && previousSelectionMode;
+      state.metricPresentation.selection = state.metricPresentation.selectionMode
+        ? new Set(Array.from(previousSelection).filter(function(logicalMetricId) {
+            return model.logicalById.has(logicalMetricId);
+          }))
+        : new Set();
       state.metricPresentation.skuPresets = (
         preservedSkuPresets
         || (persisted && persisted.sku_presets)
@@ -10288,32 +10746,17 @@
         skuPresetsSeededV1: !!(
           preservedSkuPresets
           || (persisted && persisted.migrations && persisted.migrations.skuPresetsSeededV1)
-        )
+        ),
+        unifiedPresentationV1: true
       };
       ensureDefaultSkuMetricPreset();
-      if (!forceDefault && shouldAutoSyncSkuPresentationFromTotal(persisted)) {
-        applySkuMetricPresentationFromTotal({manual: false, render: false, persist: false});
-      }
-
-      const allowedAnchors = new Set();
-      model.scopes.forEach(function(scope) {
-        (scope.metricKeys || []).forEach(function(metricKey) {
-          allowedAnchors.add(metricPresentationAnchorToken(scope.scopeId, metricKey));
-        });
-      });
-      (Array.isArray(persisted && persisted.expanded_anchors) ? persisted.expanded_anchors : []).forEach(function(token) {
-        const normalized = String(token || "");
-        if (allowedAnchors.has(normalized)) {
-          state.metricPresentation.expandedAnchors.add(normalized);
-        }
-      });
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation({skipServer: true});
       if (
         persistedCandidate.source === "local_migration"
         || requiresIncidentEffectiveMigration
         || requiresSkuPresetSeedMigration
-        || (persisted && Number(persisted.version) < METRIC_PRESENTATION_VERSION)
+        || requiresUnifiedMigration
       ) {
         persistMetricPresentation({
           serverBaseRevision: persistedCandidate.source === "local_migration"
@@ -10325,21 +10768,17 @@
     }
 
     function buildMetricPresentationPersistedPayload() {
-      const scopes = {};
-      (state.metricPresentation.scopes || []).forEach(function(scope) {
-        const display = {};
-        (scope.metricKeys || []).forEach(function(metricKey) {
-          display[metricKey] = metricDisplayStatusForScope(scope.scopeId, metricKey);
-        });
-        scopes[scope.scopeId] = {
-          order: (state.metricPresentation.orderByScope[scope.scopeId] || scope.metricKeys || []).slice(),
-          display: display,
-          manual: !!(state.metricPresentation.manualByScope || {})[scope.scopeId]
-        };
+      const display = {};
+      metricPresentationUnifiedOrder().forEach(function(logicalMetricId) {
+        display[logicalMetricId] = unifiedMetricDisplayStatus(logicalMetricId);
       });
       return {
         version: METRIC_PRESENTATION_VERSION,
-        scopes: scopes,
+        presentation: {
+          order: metricPresentationUnifiedOrder(),
+          display: display,
+          manual: !!state.metricPresentation.unifiedManual
+        },
         expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || []),
         sku_presets: (state.metricPresentation.skuPresets || []).map(function(preset) {
           return {
@@ -10360,7 +10799,8 @@
         },
         migrations: {
           incident_effective_shown_v1: true,
-          sku_presets_seeded_v1: true
+          sku_presets_seeded_v1: true,
+          unified_presentation_v1: true
         }
       };
     }
@@ -10530,248 +10970,123 @@
       persistMetricPresentation();
     }
 
-    function metricPresentationScopes() {
-      return (state.metricPresentation.scopes || []).map(function(scope) {
-        return {
-          scopeId: scope.scopeId,
-          label: scope.label,
-          metricKeys: metricPresentationScopeOrder(scope.scopeId)
-        };
-      }).filter(function(scope) {
-        return scope.metricKeys.length > 0;
+    function metricPresentationUnifiedOrder() {
+      const defaultOrder = (state.metricPresentation.logicalMetrics || []).map(function(record) {
+        return record.logicalId;
       });
+      return sanitizeMetricOrder(state.metricPresentation.unifiedOrder, defaultOrder);
+    }
+
+    function unifiedMetricDisplayStatus(logicalMetricId) {
+      const normalizedLogicalMetricId = String(logicalMetricId || "");
+      if (!normalizedLogicalMetricId) {
+        return "shown";
+      }
+      return normalizeMetricDisplayStatus(
+        state.metricPresentation.unifiedDisplay[normalizedLogicalMetricId] || "shown"
+      );
     }
 
     function metricPresentationScopeOrder(scopeId) {
-      const scope = (state.metricPresentation.scopes || []).find(function(item) {
-        return item.scopeId === scopeId;
-      });
-      const defaultOrder = scope ? scope.metricKeys : [];
-      return sanitizeMetricOrder(state.metricPresentation.orderByScope[scopeId] || defaultOrder, defaultOrder);
+      const normalizedScopeId = String(scopeId || "");
+      return metricPresentationUnifiedOrder().map(function(logicalMetricId) {
+        const record = state.metricPresentation.logicalById.get(logicalMetricId) || {};
+        return normalizedScopeId === "total" ? record.totalKey : record.skuKey;
+      }).filter(Boolean);
     }
 
     function metricPresentationDefaultOrder(scopeId) {
-      const scope = (state.metricPresentation.scopes || []).find(function(item) {
-        return item.scopeId === scopeId;
-      });
-      return scope ? (scope.metricKeys || []).slice() : [];
-    }
-
-    function persistedScopeHasCustomPresentation(savedScope, defaultOrder) {
-      if (!savedScope || typeof savedScope !== "object") {
-        return false;
-      }
-      const savedOrder = sanitizeMetricOrder(savedScope.order, defaultOrder);
-      const display = savedScope.display && typeof savedScope.display === "object" ? savedScope.display : {};
-      const hasDisplayOverride = Object.keys(display).some(function(metricKey) {
-        return normalizeMetricDisplayStatus(display[metricKey]) !== "shown";
-      });
-      return !!savedScope.manual || hasDisplayOverride || !sameColumnList(savedOrder, defaultOrder);
-    }
-
-    function shouldAutoSyncSkuPresentationFromTotal(persisted) {
-      const totalDefaultOrder = metricPresentationDefaultOrder("total");
-      const skuDefaultOrder = metricPresentationDefaultOrder("sku");
-      if (!totalDefaultOrder.length || !skuDefaultOrder.length) {
-        return false;
-      }
-      const scopes = persisted && persisted.scopes && typeof persisted.scopes === "object" ? persisted.scopes : {};
-      const totalIsCustom = persistedScopeHasCustomPresentation(scopes.total, totalDefaultOrder);
-      const skuIsCustom = !!(scopes.sku && scopes.sku.manual);
-      return totalIsCustom && !skuIsCustom;
-    }
-
-    function normalizedMetricAnalogText(value) {
-      return String(value || "")
-        .toLowerCase()
-        .replace(/ё/g, "е")
-        .replace(/\btotal\b/g, " ")
-        .replace(/\bavg\b/g, " ")
-        .replace(/\bвсего\b/g, " ")
-        .replace(/\bсредн(яя|ий|ее|ие|их|юю|его|ему)?\b/g, " ")
-        .replace(/[₽%()/:,;.\[\]{}<>_+\-–—→]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function metricAnalogKeyCandidates(metricKey) {
-      const key = String(metricKey || "");
-      const candidates = [];
-      function add(candidate) {
-        const normalized = String(candidate || "");
-        if (normalized && candidates.indexOf(normalized) === -1) {
-          candidates.push(normalized);
-        }
-      }
-      add(key);
-      if (key.indexOf("total_") === 0) {
-        add(key.slice("total_".length));
-      }
-      if (key.endsWith("_total")) {
-        add(key.slice(0, -"_total".length));
-      }
-      if (key.indexOf("total_") === 0 && key.endsWith("_total")) {
-        add(key.slice("total_".length, -"_total".length));
-      }
-      return candidates;
-    }
-
-    function buildSkuMetricAnalogMapFromTotal() {
-      const totalOrder = metricPresentationScopeOrder("total");
-      const skuOrder = metricPresentationScopeOrder("sku");
-      const skuSet = new Set(skuOrder);
-      const usedSku = new Set();
-      const skuBySectionSignature = new Map();
-      skuOrder.forEach(function(metricKey) {
-        const option = state.metricPresentation.optionByKey.get(metricKey) || {};
-        const signature = String(option.sectionId || "") + "::" + normalizedMetricAnalogText(option.label || metricKey);
-        if (!skuBySectionSignature.has(signature)) {
-          skuBySectionSignature.set(signature, []);
-        }
-        skuBySectionSignature.get(signature).push(metricKey);
-      });
-      const result = {};
-      totalOrder.forEach(function(totalMetricKey) {
-        let matched = "";
-        const keyCandidates = metricAnalogKeyCandidates(totalMetricKey);
-        for (let index = 0; index < keyCandidates.length; index += 1) {
-          const candidate = keyCandidates[index];
-          if (skuSet.has(candidate) && !usedSku.has(candidate)) {
-            matched = candidate;
-            break;
-          }
-        }
-        if (!matched) {
-          const option = state.metricPresentation.optionByKey.get(totalMetricKey) || {};
-          const signature = String(option.sectionId || "") + "::" + normalizedMetricAnalogText(option.label || totalMetricKey);
-          const possible = (skuBySectionSignature.get(signature) || []).filter(function(metricKey) {
-            return !usedSku.has(metricKey);
-          });
-          if (possible.length === 1) {
-            matched = possible[0];
-          }
-        }
-        if (matched) {
-          result[totalMetricKey] = matched;
-          usedSku.add(matched);
-        }
-      });
-      return result;
-    }
-
-    function deriveSkuPresentationFromTotal() {
-      const totalOrder = metricPresentationScopeOrder("total");
-      const skuOrder = metricPresentationScopeOrder("sku");
-      const analogByTotal = buildSkuMetricAnalogMapFromTotal();
-      const usedSku = new Set();
-      const nextOrder = [];
-      const displayUpdates = {};
-      totalOrder.forEach(function(totalMetricKey) {
-        const skuMetricKey = analogByTotal[totalMetricKey];
-        if (!skuMetricKey || usedSku.has(skuMetricKey)) {
-          return;
-        }
-        usedSku.add(skuMetricKey);
-        nextOrder.push(skuMetricKey);
-        displayUpdates[skuMetricKey] = metricDisplayStatusForScope("total", totalMetricKey);
-      });
-      skuOrder.forEach(function(metricKey) {
-        if (!usedSku.has(metricKey)) {
-          usedSku.add(metricKey);
-          nextOrder.push(metricKey);
-        }
-      });
-      return {
-        order: nextOrder,
-        displayUpdates: displayUpdates,
-        matchedCount: Object.keys(displayUpdates).length,
-        unmatchedCount: skuOrder.length - Object.keys(displayUpdates).length
-      };
-    }
-
-    function applySkuMetricPresentationFromTotal(options) {
-      const normalizedOptions = options || {};
-      const derived = deriveSkuPresentationFromTotal();
-      if (!derived.order.length) {
-        return derived;
-      }
-      state.metricPresentation.orderByScope.sku = derived.order;
-      Object.keys(derived.displayUpdates).forEach(function(metricKey) {
-        setMetricDisplayStatusForScope("sku", metricKey, derived.displayUpdates[metricKey]);
-      });
-      if (normalizedOptions.manual) {
-        markMetricPresentationScopeManual("sku");
-      }
-      pruneExpandedMetricPresentationAnchors();
-      if (state.composition) {
-        refreshSkuMetricFilterState(state.composition);
-      }
-      if (normalizedOptions.persist !== false) {
-        persistMetricPresentation();
-      }
-      if (normalizedOptions.render) {
-        renderMetricPresentationPanel(state.composition);
-        renderTable();
-      }
-      return derived;
+      const normalizedScopeId = String(scopeId || "");
+      return (state.metricPresentation.logicalMetrics || []).map(function(record) {
+        return normalizedScopeId === "total" ? record.totalKey : record.skuKey;
+      }).filter(Boolean);
     }
 
     function captureMetricPresentationScrollState() {
       if (!metricsPresentationBodyNode) {
         return {};
       }
-      const result = {};
-      metricsPresentationBodyNode.querySelectorAll("[data-metrics-config-scope-table]").forEach(function(node) {
-        const scopeId = String(node.getAttribute("data-metrics-config-scope") || "");
-        if (scopeId) {
-          result[scopeId] = {
-            scrollTop: node.scrollTop || 0,
-            maxHeight: node.style.maxHeight || ""
-          };
-        }
-      });
-      return result;
+      return {bodyScrollTop: metricsPresentationBodyNode.scrollTop || 0};
     }
 
     function restoreMetricPresentationScrollState(scrollState) {
       if (!metricsPresentationBodyNode || !scrollState) {
         return;
       }
-      Object.keys(scrollState).forEach(function(scopeId) {
-        const selector = '[data-metrics-config-scope-table][data-metrics-config-scope="' + cssEscape(scopeId) + '"]';
-        const node = metricsPresentationBodyNode.querySelector(selector);
-        if (node) {
-          const scopeState = scrollState[scopeId] || {};
-          if (scopeState.maxHeight) {
-            node.style.maxHeight = scopeState.maxHeight;
-          }
-          node.scrollTop = scopeState.scrollTop || 0;
+      metricsPresentationBodyNode.scrollTop = Number(scrollState.bodyScrollTop || 0);
+    }
+
+    function openMetricPresentationModal() {
+      if (!metricsPresentationPanelNode) {
+        return;
+      }
+      closeAllFloatingControls();
+      if (skuPresetModalNode && !skuPresetModalNode.hidden) {
+        closeSkuPresetModal();
+      }
+      state.metricPresentation.modalOpener = document.activeElement;
+      renderMetricPresentationPanel(state.composition);
+      metricsPresentationPanelNode.hidden = false;
+      window.setTimeout(function() {
+        const closeButton = metricsPresentationPanelNode.querySelector("[data-metrics-settings-close]");
+        if (closeButton) {
+          closeButton.focus();
         }
-      });
+      }, 0);
+    }
+
+    function closeMetricPresentationModal() {
+      if (!metricsPresentationPanelNode || metricsPresentationPanelNode.hidden) {
+        return;
+      }
+      const opener = state.metricPresentation.modalOpener;
+      state.metricPresentation.modalOpener = null;
+      state.metricPresentation.selectionMode = false;
+      state.metricPresentation.selection = new Set();
+      metricsPresentationPanelNode.hidden = true;
+      if (opener && typeof opener.focus === "function") {
+        opener.focus();
+      }
     }
 
     function renderMetricPresentationPanel(payload) {
+      void payload;
       if (!metricsPresentationPanelNode || !metricsPresentationBodyNode || !metricsPresentationSummaryNode) {
         return;
       }
       const scrollState = captureMetricPresentationScrollState();
-      const scopes = metricPresentationScopes();
-      const totalCount = scopes.reduce(function(count, scope) {
-        return count + scope.metricKeys.length;
-      }, 0);
+      const logicalMetrics = metricPresentationUnifiedOrder().map(function(logicalMetricId) {
+        return state.metricPresentation.logicalById.get(logicalMetricId);
+      }).filter(Boolean);
+      const totalCount = logicalMetrics.length;
       let collapsedCount = 0;
       let hiddenCount = 0;
-      scopes.forEach(function(scope) {
-        (scope.metricKeys || []).forEach(function(metricKey) {
-          const status = metricDisplayStatusForScope(scope.scopeId, metricKey);
-          if (status === "collapsed") {
-            collapsedCount += 1;
-          } else if (status === "hidden") {
-            hiddenCount += 1;
-          }
-        });
+      let commonCount = 0;
+      let totalOnlyCount = 0;
+      let skuOnlyCount = 0;
+      logicalMetrics.forEach(function(record) {
+        const status = unifiedMetricDisplayStatus(record.logicalId);
+        if (status === "collapsed") {
+          collapsedCount += 1;
+        } else if (status === "hidden") {
+          hiddenCount += 1;
+        }
+        if (record.availability === "common") {
+          commonCount += 1;
+        } else if (record.availability === "total") {
+          totalOnlyCount += 1;
+        } else if (record.availability === "sku") {
+          skuOnlyCount += 1;
+        }
       });
-      const summaryParts = totalCount ? ["Настроено: " + totalCount] : ["метрики не загружены"];
+      const summaryParts = totalCount
+        ? [
+            totalCount + " метрик",
+            commonCount + " общих",
+            totalOnlyCount + " только Итого",
+            skuOnlyCount + " только SKU"
+          ]
+        : ["метрики не загружены"];
       if (totalCount && collapsedCount) {
         summaryParts.push("Свернуто: " + collapsedCount);
       }
@@ -10779,13 +11094,13 @@
         summaryParts.push("Скрыто: " + hiddenCount);
       }
       metricsPresentationSummaryNode.textContent = summaryParts.join(" · ");
-      if (!scopes.length) {
+      if (!logicalMetrics.length) {
         metricsPresentationBodyNode.innerHTML = '<p class="metrics-presentation-empty">Метрики появятся после загрузки таблицы.</p>';
         return;
       }
       metricsPresentationBodyNode.innerHTML = [
-        '<div class="metrics-config-grid" data-metrics-config-grid data-metrics-config-scope-count="' + escapeHtml(String(scopes.length)) + '">',
-        scopes.map(renderMetricConfigScopeTable).join(""),
+        '<div class="metrics-config-grid" data-metrics-config-grid data-metrics-config-scope-count="1">',
+        renderUnifiedMetricConfigTable(logicalMetrics),
         "</div>"
       ].join("");
       restoreMetricPresentationScrollState(scrollState);
@@ -10794,23 +11109,22 @@
       });
     }
 
-    function renderMetricConfigScopeTable(scope) {
-      const rows = (scope.metricKeys || []).map(function(metricKey) {
-        return renderMetricConfigRow(scope, metricKey);
+    function renderUnifiedMetricConfigTable(logicalMetrics) {
+      const rows = logicalMetrics.map(function(record) {
+        return renderUnifiedMetricConfigRow(record);
       }).join("");
-      const selectionActive = metricPresentationSelectionMode(scope.scopeId);
-      const selectedCount = metricPresentationSelectedKeys(scope.scopeId).length;
+      const selectionActive = metricPresentationSelectionMode();
+      const selectedCount = metricPresentationSelectedKeys().length;
       return [
-        '<section class="metrics-config-scope-table" data-metrics-config-scope-table data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '">',
+        '<section class="metrics-config-scope-table" data-metrics-config-scope-table data-metrics-config-scope="unified">',
         '<div class="metrics-config-scope-head">',
         '<div class="metrics-config-scope-title-group">',
-        '<h3 class="metrics-config-scope-title">' + escapeHtml(scope.label) + '</h3>',
-        '<span class="metrics-config-scope-meta">' + escapeHtml(String((scope.metricKeys || []).length)) + ' метрик' + (selectionActive ? " · выбрано " + String(selectedCount) : "") + '</span>',
+        '<h3 class="metrics-config-scope-title">Единый список</h3>',
+        '<span class="metrics-config-scope-meta">' + escapeHtml(String(logicalMetrics.length)) + ' метрик' + (selectionActive ? " · выбрано " + String(selectedCount) : "") + '</span>',
         "</div>",
         '<div class="metrics-config-scope-actions">',
-        scope.scopeId === "sku" ? '<button class="metrics-config-sync-total" type="button" data-metric-sync-from-total data-metric-config-scope="sku" title="Скопировать порядок и отображение из Итого только для SKU">Как Итого</button>' : "",
-        '<button class="metrics-config-selection-toggle" type="button" data-metric-selection-toggle data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-pressed="' + (selectionActive ? "true" : "false") + '">' + (selectionActive ? "Готово" : "Выбрать") + "</button>",
-        '<select class="metrics-config-bulk-select" data-metric-bulk-display data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-label="' + escapeHtml("Массовое отображение: " + scope.label) + '"' + (!selectionActive || selectedCount <= 0 ? " disabled" : "") + '>',
+        '<button class="metrics-config-selection-toggle" type="button" data-metric-selection-toggle aria-pressed="' + (selectionActive ? "true" : "false") + '">' + (selectionActive ? "Готово" : "Выбрать") + "</button>",
+        '<select class="metrics-config-bulk-select" data-metric-bulk-display aria-label="Массовое отображение метрик"' + (!selectionActive || selectedCount <= 0 ? " disabled" : "") + '>',
         '<option value="">Отображение</option>',
         ["shown", "collapsed", "hidden"].map(function(candidate) {
           return '<option value="' + escapeHtml(candidate) + '">' + escapeHtml(metricDisplayStatusLabel(candidate)) + "</option>";
@@ -10818,7 +11132,7 @@
         "</select>",
         "</div>",
         "</div>",
-        '<div class="metrics-config-table" role="table" aria-label="' + escapeHtml("Метрики " + scope.label) + '">',
+        '<div class="metrics-config-table" role="table" aria-label="Единая настройка метрик">',
         '<div class="metrics-config-row is-header" role="row">',
         '<span role="columnheader">Метрика</span>',
         '<span role="columnheader">Группа</span>',
@@ -10830,23 +11144,33 @@
       ].join("");
     }
 
-    function renderMetricConfigRow(scope, metricKey) {
-      const option = state.metricPresentation.optionByKey.get(metricKey) || {label: metricKey, sectionLabel: "Без секции"};
-      const label = String(option.label || metricKey);
-      const groupLabel = String(option.sectionLabel || "Без секции");
-      const status = metricDisplayStatusForScope(scope.scopeId, metricKey);
-      const selectionActive = metricPresentationSelectionMode(scope.scopeId);
-      const selected = metricPresentationSelectionSet(scope.scopeId).has(metricKey);
+    function renderUnifiedMetricConfigRow(record) {
+      const logicalMetricId = String(record.logicalId || "");
+      const label = String(record.label || logicalMetricId);
+      const groupLabel = String(record.sectionLabel || "Без секции");
+      const status = unifiedMetricDisplayStatus(logicalMetricId);
+      const selectionActive = metricPresentationSelectionMode();
+      const selected = metricPresentationSelectionSet().has(logicalMetricId);
+      const availabilityLabel = record.availability === "sku"
+        ? "SKU"
+        : (record.availability === "total" ? "Итого" : "");
+      const availabilityDescription = record.availability === "sku"
+        ? "Доступна только для SKU"
+        : (record.availability === "total" ? "Доступна только в строке Итого" : "");
+      const availabilityBadge = availabilityLabel
+        ? '<span class="metrics-config-scope-badge" title="' + escapeHtml(availabilityDescription) + '" aria-label="' + escapeHtml(availabilityDescription) + '">' + escapeHtml(availabilityLabel) + "</span>"
+        : "";
       return [
-        '<div class="metrics-config-row' + (selected ? " is-selected" : "") + '" role="row" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" data-metric-display-status="' + escapeHtml(status) + '" data-metric-selection-active="' + (selectionActive ? "true" : "false") + '" data-metric-selected="' + (selected ? "true" : "false") + '">',
+        '<div class="metrics-config-row' + (selected ? " is-selected" : "") + '" role="row" data-metric-config-row="' + escapeHtml(logicalMetricId) + '" data-metric-config-scope="unified" data-metric-config-key="' + escapeHtml(logicalMetricId) + '" data-logical-metric-id="' + escapeHtml(logicalMetricId) + '" data-total-metric-key="' + escapeHtml(record.totalKey || "") + '" data-sku-metric-key="' + escapeHtml(record.skuKey || "") + '" data-metric-availability="' + escapeHtml(record.availability || "") + '" data-metric-display-status="' + escapeHtml(status) + '" data-metric-selection-active="' + (selectionActive ? "true" : "false") + '" data-metric-selected="' + (selected ? "true" : "false") + '">',
         '<span class="metrics-config-main" role="cell">',
-        selectionActive ? '<input class="metrics-config-select-checkbox" type="checkbox" data-metric-selection-checkbox data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" aria-label="' + escapeHtml("Выбрать: " + label) + '"' + (selected ? " checked" : "") + ">" : "",
-        '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="Перетащить метрику" data-metric-drag-handle data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Перетащить метрику">⋮⋮</span>',
+        selectionActive ? '<input class="metrics-config-select-checkbox" type="checkbox" data-metric-selection-checkbox data-metric-config-key="' + escapeHtml(logicalMetricId) + '" aria-label="' + escapeHtml("Выбрать: " + label) + '"' + (selected ? " checked" : "") + ">" : "",
+        '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="' + escapeHtml("Перетащить метрику: " + label) + '" data-metric-drag-handle data-metric-config-key="' + escapeHtml(logicalMetricId) + '" title="Перетащить метрику">⋮⋮</span>',
         '<span class="metrics-config-accent" aria-hidden="true"></span>',
         '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        availabilityBadge,
         "</span>",
         '<span class="metrics-config-group-badge" role="cell" title="' + escapeHtml(groupLabel) + '">' + escapeHtml(groupLabel) + '</span>',
-        '<select class="metrics-config-display-select" role="cell" data-metric-display-select data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" aria-label="' + escapeHtml("Отображение: " + label) + '">',
+        '<select class="metrics-config-display-select" role="cell" data-metric-display-select data-metric-config-key="' + escapeHtml(logicalMetricId) + '" aria-label="' + escapeHtml("Отображение: " + label) + '">',
         ["shown", "collapsed", "hidden"].map(function(candidate) {
           return '<option value="' + escapeHtml(candidate) + '"' + (candidate === status ? " selected" : "") + ">" + escapeHtml(metricDisplayStatusLabel(candidate)) + "</option>";
         }).join(""),
@@ -10856,25 +11180,18 @@
     }
 
     function handleMetricPresentationClick(event) {
-      const syncFromTotal = event.target.closest("[data-metric-sync-from-total]");
-      if (syncFromTotal) {
-        event.preventDefault();
-        applySkuMetricPresentationFromTotal({manual: true, render: true, persist: true});
-        return;
-      }
       const toggle = event.target.closest("[data-metric-selection-toggle]");
       if (!toggle) {
         return;
       }
       event.preventDefault();
-      toggleMetricPresentationSelectionMode(String(toggle.getAttribute("data-metric-config-scope") || ""));
+      toggleMetricPresentationSelectionMode();
     }
 
     function handleMetricPresentationChange(event) {
       const checkbox = event.target.closest("[data-metric-selection-checkbox]");
       if (checkbox) {
         updateMetricPresentationSelection(
-          String(checkbox.getAttribute("data-metric-config-scope") || ""),
           String(checkbox.getAttribute("data-metric-config-key") || ""),
           !!checkbox.checked
         );
@@ -10883,7 +11200,6 @@
       const bulkSelect = event.target.closest("[data-metric-bulk-display]");
       if (bulkSelect) {
         applyBulkMetricDisplayStatus(
-          String(bulkSelect.getAttribute("data-metric-config-scope") || ""),
           String(bulkSelect.value || "")
         );
         return;
@@ -10893,7 +11209,6 @@
         return;
       }
       updateMetricDisplayStatus(
-        String(select.getAttribute("data-metric-config-scope") || ""),
         String(select.getAttribute("data-metric-config-key") || ""),
         String(select.value || "shown")
       );
@@ -10908,19 +11223,21 @@
       if (!row) {
         return;
       }
-      const scopeId = String(row.getAttribute("data-metric-config-scope") || "");
-      const metricKey = String(row.getAttribute("data-metric-config-key") || "");
-      const selectedKeys = metricPresentationSelectedKeys(scopeId);
-      const draggedKeys = selectedKeys.indexOf(metricKey) !== -1 ? selectedKeys : [metricKey];
+      const logicalMetricId = String(row.getAttribute("data-metric-config-key") || "");
+      const selectedKeys = metricPresentationSelectedKeys();
+      const draggedKeys = selectedKeys.indexOf(logicalMetricId) !== -1
+        ? selectedKeys
+        : [logicalMetricId];
       metricPresentationDragState = {
         type: "metric",
-        scopeId: scopeId,
-        metricKey: metricKey,
-        metricKeys: draggedKeys
+        logicalMetricId: logicalMetricId,
+        logicalMetricIds: draggedKeys
       };
       if (metricsPresentationBodyNode) {
         draggedKeys.forEach(function(key) {
-          const draggedRow = metricsPresentationBodyNode.querySelector('[data-metric-config-row="' + cssEscape(key) + '"][data-metric-config-scope="' + cssEscape(scopeId) + '"]');
+          const draggedRow = metricsPresentationBodyNode.querySelector(
+            '[data-metric-config-row="' + cssEscape(key) + '"]'
+          );
           if (draggedRow) {
             draggedRow.classList.add("is-dragging");
           }
@@ -10928,7 +11245,7 @@
       }
       if (event.dataTransfer) {
         event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", metricPresentationDragState.metricKey);
+        event.dataTransfer.setData("text/plain", logicalMetricId);
       }
     }
 
@@ -10953,10 +11270,9 @@
         return;
       }
       event.preventDefault();
-      moveMetricsInPresentationByDrag(
-        metricPresentationDragState.scopeId,
-        metricPresentationDragState.metricKeys,
-        target.metricKey,
+      moveLogicalMetricsInPresentationByDrag(
+        metricPresentationDragState.logicalMetricIds,
+        target.logicalMetricId,
         target.placement
       );
       metricPresentationDragState = null;
@@ -10984,13 +11300,12 @@
       if (!row || row.classList.contains("is-header")) {
         return null;
       }
-      const scopeId = String(row.getAttribute("data-metric-config-scope") || "");
-      const metricKey = String(row.getAttribute("data-metric-config-key") || "");
-      const dragKeys = metricPresentationDragState.metricKeys || [metricPresentationDragState.metricKey];
+      const logicalMetricId = String(row.getAttribute("data-metric-config-key") || "");
+      const dragKeys = metricPresentationDragState.logicalMetricIds
+        || [metricPresentationDragState.logicalMetricId];
       if (
-        !metricKey ||
-        dragKeys.indexOf(metricKey) !== -1 ||
-        scopeId !== metricPresentationDragState.scopeId
+        !logicalMetricId
+        || dragKeys.indexOf(logicalMetricId) !== -1
       ) {
         return null;
       }
@@ -10998,79 +11313,74 @@
       return {
         type: "metric",
         node: row,
-        scopeId: scopeId,
-        metricKey: metricKey,
+        logicalMetricId: logicalMetricId,
         placement: event.clientY < rect.top + rect.height / 2 ? "before" : "after"
       };
     }
 
-    function metricPresentationSelectionMode(scopeId) {
-      return !!state.metricPresentation.selectionModeByScope[String(scopeId || "")];
+    function metricPresentationSelectionMode() {
+      return !!state.metricPresentation.selectionMode;
     }
 
-    function metricPresentationSelectionSet(scopeId) {
-      const normalizedScopeId = String(scopeId || "");
-      if (!state.metricPresentation.selectionByScope[normalizedScopeId]) {
-        state.metricPresentation.selectionByScope[normalizedScopeId] = new Set();
+    function metricPresentationSelectionSet() {
+      if (!(state.metricPresentation.selection instanceof Set)) {
+        state.metricPresentation.selection = new Set();
       }
-      return state.metricPresentation.selectionByScope[normalizedScopeId];
+      return state.metricPresentation.selection;
     }
 
-    function metricPresentationSelectedKeys(scopeId) {
-      const selected = metricPresentationSelectionSet(scopeId);
-      const order = metricPresentationScopeOrder(scopeId);
-      return order.filter(function(metricKey) {
-        return selected.has(metricKey);
+    function metricPresentationSelectedKeys() {
+      const selected = metricPresentationSelectionSet();
+      return metricPresentationUnifiedOrder().filter(function(logicalMetricId) {
+        return selected.has(logicalMetricId);
       });
     }
 
-    function toggleMetricPresentationSelectionMode(scopeId) {
-      const normalizedScopeId = String(scopeId || "");
-      if (!normalizedScopeId) {
-        return;
-      }
-      const nextValue = !metricPresentationSelectionMode(normalizedScopeId);
-      state.metricPresentation.selectionModeByScope[normalizedScopeId] = nextValue;
+    function toggleMetricPresentationSelectionMode() {
+      const nextValue = !metricPresentationSelectionMode();
+      state.metricPresentation.selectionMode = nextValue;
       if (!nextValue) {
-        state.metricPresentation.selectionByScope[normalizedScopeId] = new Set();
+        state.metricPresentation.selection = new Set();
       } else {
-        metricPresentationSelectionSet(normalizedScopeId);
+        metricPresentationSelectionSet();
       }
       renderMetricPresentationPanel(state.composition);
     }
 
-    function updateMetricPresentationSelection(scopeId, metricKey, selected) {
-      const normalizedScopeId = String(scopeId || "");
-      const normalizedMetricKey = String(metricKey || "");
-      if (!metricPresentationSelectionMode(normalizedScopeId) || metricPresentationScopeOrder(normalizedScopeId).indexOf(normalizedMetricKey) === -1) {
+    function updateMetricPresentationSelection(logicalMetricId, selected) {
+      const normalizedLogicalMetricId = String(logicalMetricId || "");
+      if (
+        !metricPresentationSelectionMode()
+        || metricPresentationUnifiedOrder().indexOf(normalizedLogicalMetricId) === -1
+      ) {
         return;
       }
-      const selection = metricPresentationSelectionSet(normalizedScopeId);
+      const selection = metricPresentationSelectionSet();
       if (selected) {
-        selection.add(normalizedMetricKey);
+        selection.add(normalizedLogicalMetricId);
       } else {
-        selection.delete(normalizedMetricKey);
+        selection.delete(normalizedLogicalMetricId);
       }
       renderMetricPresentationPanel(state.composition);
     }
 
-    function applyBulkMetricDisplayStatus(scopeId, status) {
+    function applyBulkMetricDisplayStatus(status) {
       const normalizedStatus = normalizeMetricDisplayStatus(status);
-      if (!status || !metricPresentationSelectionMode(scopeId)) {
+      if (!status || !metricPresentationSelectionMode()) {
         renderMetricPresentationPanel(state.composition);
         return;
       }
-      const selectedKeys = metricPresentationSelectedKeys(scopeId);
+      const selectedKeys = metricPresentationSelectedKeys();
       if (!selectedKeys.length) {
         renderMetricPresentationPanel(state.composition);
         return;
       }
-      selectedKeys.forEach(function(metricKey) {
-        setMetricDisplayStatusForScope(scopeId, metricKey, normalizedStatus);
+      selectedKeys.forEach(function(logicalMetricId) {
+        state.metricPresentation.unifiedDisplay[logicalMetricId] = normalizedStatus;
       });
-      markMetricPresentationScopeManual(scopeId);
+      state.metricPresentation.unifiedManual = true;
       pruneExpandedMetricPresentationAnchors();
-      if (String(scopeId || "") === "sku" && state.composition) {
+      if (state.composition) {
         refreshSkuMetricFilterState(state.composition);
       }
       persistMetricPresentation();
@@ -11078,18 +11388,19 @@
       renderTable();
     }
 
-    function updateMetricDisplayStatus(scopeId, metricKey, status) {
-      if (!scopeId || !metricKey) {
+    function updateMetricDisplayStatus(logicalMetricId, status) {
+      const normalizedLogicalMetricId = String(logicalMetricId || "");
+      if (!normalizedLogicalMetricId) {
         return;
       }
-      const order = metricPresentationScopeOrder(scopeId);
-      if (order.indexOf(metricKey) === -1) {
+      if (metricPresentationUnifiedOrder().indexOf(normalizedLogicalMetricId) === -1) {
         return;
       }
-      setMetricDisplayStatusForScope(scopeId, metricKey, status);
-      markMetricPresentationScopeManual(scopeId);
+      state.metricPresentation.unifiedDisplay[normalizedLogicalMetricId] =
+        normalizeMetricDisplayStatus(status);
+      state.metricPresentation.unifiedManual = true;
       pruneExpandedMetricPresentationAnchors();
-      if (String(scopeId || "") === "sku" && state.composition) {
+      if (state.composition) {
         refreshSkuMetricFilterState(state.composition);
       }
       persistMetricPresentation();
@@ -11097,30 +11408,30 @@
       renderTable();
     }
 
-    function moveMetricInPresentationByDrag(scopeId, metricKey, targetMetricKey, placement) {
-      moveMetricsInPresentationByDrag(scopeId, [metricKey], targetMetricKey, placement);
-    }
-
-    function moveMetricsInPresentationByDrag(scopeId, metricKeys, targetMetricKey, placement) {
-      const movingKeys = Array.isArray(metricKeys) ? metricKeys.map(function(metricKey) {
-        return String(metricKey || "");
+    function moveLogicalMetricsInPresentationByDrag(logicalMetricIds, targetLogicalMetricId, placement) {
+      const movingKeys = Array.isArray(logicalMetricIds) ? logicalMetricIds.map(function(logicalMetricId) {
+        return String(logicalMetricId || "");
       }).filter(Boolean) : [];
-      if (!scopeId || !movingKeys.length || !targetMetricKey || movingKeys.indexOf(targetMetricKey) !== -1) {
+      if (
+        !movingKeys.length
+        || !targetLogicalMetricId
+        || movingKeys.indexOf(targetLogicalMetricId) !== -1
+      ) {
         return;
       }
-      const order = metricPresentationScopeOrder(scopeId);
+      const order = metricPresentationUnifiedOrder();
       const movingSet = new Set(movingKeys);
-      const sourceMetrics = order.filter(function(metricKey) {
-        return movingSet.has(metricKey);
+      const sourceMetrics = order.filter(function(logicalMetricId) {
+        return movingSet.has(logicalMetricId);
       });
-      const targetIndex = order.indexOf(targetMetricKey);
+      const targetIndex = order.indexOf(targetLogicalMetricId);
       if (!sourceMetrics.length || targetIndex < 0) {
         return;
       }
-      const remaining = order.filter(function(metricKey) {
-        return !movingSet.has(metricKey);
+      const remaining = order.filter(function(logicalMetricId) {
+        return !movingSet.has(logicalMetricId);
       });
-      let insertIndex = remaining.indexOf(targetMetricKey);
+      let insertIndex = remaining.indexOf(targetLogicalMetricId);
       if (insertIndex < 0) {
         return;
       }
@@ -11128,10 +11439,10 @@
         insertIndex += 1;
       }
       remaining.splice.apply(remaining, [insertIndex, 0].concat(sourceMetrics));
-      state.metricPresentation.orderByScope[scopeId] = remaining;
-      markMetricPresentationScopeManual(scopeId);
+      state.metricPresentation.unifiedOrder = remaining;
+      state.metricPresentation.unifiedManual = true;
       pruneExpandedMetricPresentationAnchors();
-      if (String(scopeId || "") === "sku" && state.composition) {
+      if (state.composition) {
         refreshSkuMetricFilterState(state.composition);
       }
       persistMetricPresentation();
@@ -11144,6 +11455,9 @@
         return;
       }
       const token = metricPresentationAnchorToken(scopeId, metricKey);
+      if (!token) {
+        return;
+      }
       if (state.metricPresentation.expandedAnchors.has(token)) {
         state.metricPresentation.expandedAnchors.delete(token);
       } else {
@@ -11153,14 +11467,19 @@
       renderTable();
     }
 
+    function logicalMetricHasCollapsedChildren(logicalMetricId) {
+      const record = state.metricPresentation.logicalById.get(logicalMetricId) || {};
+      return !!(
+        (record.totalKey && metricAnchorCollapsedMetricKeys("total", record.totalKey).length)
+        || (record.skuKey && metricAnchorCollapsedMetricKeys("sku", record.skuKey).length)
+      );
+    }
+
     function pruneExpandedMetricPresentationAnchors() {
       const retained = new Set();
-      (state.metricPresentation.expandedAnchors || new Set()).forEach(function(token) {
-        const parts = String(token || "").split("::");
-        const scopeId = parts.shift() || "";
-        const metricKey = parts.join("::");
-        if (metricAnchorCollapsedMetricKeys(scopeId, metricKey).length) {
-          retained.add(token);
+      (state.metricPresentation.expandedAnchors || new Set()).forEach(function(logicalMetricId) {
+        if (logicalMetricHasCollapsedChildren(logicalMetricId)) {
+          retained.add(logicalMetricId);
         }
       });
       state.metricPresentation.expandedAnchors = retained;
