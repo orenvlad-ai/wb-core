@@ -202,11 +202,15 @@ def run_flow(
         if leaked_table:
             raise AssertionError(f"retired metrics leaked into table: {leaked_table}")
 
-        page.locator("[data-metrics-presentation]").evaluate("node => node.open = true")
+        page.locator("[data-metrics-settings-open]").click()
+        page.wait_for_selector("[data-metrics-presentation]:not([hidden])", timeout=10000)
         page.wait_for_selector("[data-metric-config-row]", timeout=10000)
         settings_keys = set(
-            page.locator("[data-metric-config-key]").evaluate_all(
-                "nodes => nodes.map(node => node.getAttribute('data-metric-config-key') || '').filter(Boolean)"
+            page.locator("[data-metric-config-row]").evaluate_all(
+                """nodes => nodes.flatMap(node => [
+                  node.getAttribute('data-total-metric-key') || '',
+                  node.getAttribute('data-sku-metric-key') || ''
+                ]).filter(Boolean)"""
             )
         )
         leaked_settings = sorted(settings_keys & RETIRED_KEYS)
@@ -215,6 +219,7 @@ def run_flow(
                 f"retired metrics leaked into settings: {leaked_settings}"
             )
 
+        page.locator("[data-metrics-settings-close]").first.click()
         filters_toggle = page.locator("[data-filters-toggle]")
         filters_toggle.click()
         page.locator("[data-sku-metric-toggle]").click()
