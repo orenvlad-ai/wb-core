@@ -248,6 +248,8 @@ def _legacy_backup_archive(
     identity: str,
     *,
     include_empty_wal: bool = False,
+    include_shm: bool = False,
+    captured_unverified: bool = False,
 ) -> Path:
     source = _legacy_root_snapshot(runtime, identity)
     with closing(sqlite3.connect(source / "monolith.sqlite3")) as conn:
@@ -257,6 +259,8 @@ def _legacy_backup_archive(
     manifest_path = source / "snapshot_manifest.json"
     snapshot_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     snapshot_manifest.pop("evidence_fingerprint", None)
+    if captured_unverified:
+        snapshot_manifest["status"] = "captured_unverified"
     snapshot_manifest["evidence_fingerprint"] = _fingerprint(snapshot_manifest)
     manifest_path.write_text(
         json.dumps(snapshot_manifest, sort_keys=True), encoding="utf-8"
@@ -269,8 +273,13 @@ def _legacy_backup_archive(
         wal.write_bytes(b"")
         os.chmod(wal, 0o600)
         copied_names.append(wal.name)
+    if include_shm:
+        shm = archive / "monolith.sqlite3-shm"
+        shm.write_bytes(b"\0" * 32768)
+        os.chmod(shm, 0o600)
+        copied_names.append(shm.name)
     for name in copied_names:
-        if name == "monolith.sqlite3-wal":
+        if name in {"monolith.sqlite3-wal", "monolith.sqlite3-shm"}:
             continue
         destination = archive / name
         destination.write_bytes((source / name).read_bytes())
@@ -290,7 +299,7 @@ def _legacy_backup_archive(
         "contract_version": ARCHIVE_CONTRACT,
         "status": "archive_verified",
         "snapshot_id": source.name,
-        "snapshot_status": "integrity_verified",
+        "snapshot_status": snapshot_manifest["status"],
         "snapshot_deployed_sha": "b" * 40,
         "snapshot_evidence_fingerprint": snapshot_manifest["evidence_fingerprint"],
         "archived_by_deployed_sha": DEPLOYED_SHA,
@@ -335,6 +344,7 @@ def _legacy_backup_archive(
 def _rotation(
     runtime: Path, backup_root: Path, **overrides: object
 ) -> FinanceStorageBackupRotation:
+    deployed_sha = str(overrides.pop("deployed_sha", DEPLOYED_SHA))
     options = {
         "backup_root": backup_root,
         "require_distinct_device": False,
@@ -348,7 +358,7 @@ def _rotation(
         "minimum_replacement_interval_seconds": 0,
     }
     options.update(overrides)
-    return FinanceStorageBackupRotation(runtime, deployed_sha=DEPLOYED_SHA, **options)
+    return FinanceStorageBackupRotation(runtime, deployed_sha=deployed_sha, **options)
 
 
 class FinanceStorageBackupRotationSmoke(unittest.TestCase):
@@ -363,7 +373,21 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
                 backup_root,
                 "9",
                 include_empty_wal=True,
+                include_shm=True,
+                captured_unverified=True,
             )
+            sidecars_before = {
+                path.name: (
+                    path.stat().st_ino,
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+                for path in (
+                    archive / "monolith.sqlite3-wal",
+                    archive / "monolith.sqlite3-shm",
+                )
+            }
 
             plan = _rotation(runtime, backup_root).build_plan(
                 force_replacement=True
@@ -376,6 +400,124 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
             self.assertNotIn(
                 str(archive.resolve()),
                 [item["path"] for item in plan["inventory"]["protected"]],
+            )
+            self.assertEqual(
+                sidecars_before,
+                {
+                    path.name: (
+                        path.stat().st_ino,
+                        path.stat().st_size,
+                        path.stat().st_mtime_ns,
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                    for path in (
+                        archive / "monolith.sqlite3-wal",
+                        archive / "monolith.sqlite3-shm",
+                    )
+                },
+            )
+            self.assertEqual(
+                plan["inventory"]["backup_legacy"][0]["integrity_readback"][
+                    "integrity_check"
+                ],
+                "ok",
+            )
+
+    def test_new_deploy_terminalizes_only_zero_mutation_started_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            runtime = Path(raw_tmp) / "runtime"
+            _fixture(runtime)
+            backup_root = runtime / "backups" / "finance-storage-split-snapshots"
+            backup_root.mkdir(parents=True)
+            old_rotation = _rotation(
+                runtime,
+                backup_root,
+                deployed_sha="c" * 40,
+            )
+            old_plan = old_rotation.build_plan(force_replacement=True)
+            transactions_root = backup_root / "transactions"
+            transactions_root.mkdir()
+            old_transaction_path = transactions_root / (
+                old_plan["fingerprint"].removeprefix("sha256:") + ".json"
+            )
+            old_transaction = {
+                "contract_version": (
+                    "wb_core_finance_storage_backup_transaction_v1"
+                ),
+                "strategy": "post_cutover_atomic_replace_v1",
+                "plan_fingerprint": old_plan["fingerprint"],
+                "backup_id": old_plan["backup_id"],
+                "deployed_sha": "c" * 40,
+                "approval_reference": "old-failed-apply",
+                "transaction_path": str(old_transaction_path.resolve()),
+                "reviewed_plan": old_plan,
+                "phase": "started",
+                "completed_deletions": [],
+                "deletion_receipts": {},
+                "pending_deletion": "",
+                "copy_proofs": {},
+                "updated_at": "2026-07-31T00:00:00Z",
+            }
+            old_transaction_path.write_text(
+                json.dumps(old_transaction, sort_keys=True), encoding="utf-8"
+            )
+            os.chmod(old_transaction_path, 0o600)
+
+            rotation = _rotation(runtime, backup_root)
+            old_transaction["copy_proofs"] = {"operational": {"copied": True}}
+            old_transaction_path.write_text(
+                json.dumps(old_transaction, sort_keys=True), encoding="utf-8"
+            )
+            blocked = rotation.build_plan(force_replacement=True)
+            self.assertFalse(blocked["apply_allowed_by_machine_preflight"])
+            self.assertIn(
+                "non_terminal_transaction_requires_exact_resume",
+                {item["code"] for item in blocked["blockers"]},
+            )
+            old_transaction["copy_proofs"] = {}
+            old_transaction_path.write_text(
+                json.dumps(old_transaction, sort_keys=True), encoding="utf-8"
+            )
+            plan = rotation.build_plan(force_replacement=True)
+            self.assertTrue(plan["apply_allowed_by_machine_preflight"])
+            self.assertEqual(
+                [
+                    item["source_plan_fingerprint"]
+                    for item in plan[
+                        "pre_mutation_transaction_terminalizations"
+                    ]
+                ],
+                [old_plan["fingerprint"]],
+            )
+            applied = rotation.apply(
+                reviewed_plan=plan,
+                expected_fingerprint=plan["fingerprint"],
+                approval_reference="smoke-human-gate",
+            )
+            self.assertEqual(
+                applied["superseded_pre_mutation_transactions"][0][
+                    "terminal_status"
+                ],
+                "superseded_before_mutation",
+            )
+            terminal = json.loads(
+                old_transaction_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(terminal["phase"], "completed")
+            self.assertEqual(
+                terminal["terminal_status"], "superseded_before_mutation"
+            )
+            self.assertEqual(terminal["completed_deletions"], [])
+            self.assertEqual(terminal["copy_proofs"], {})
+            readback = rotation.readback(
+                reviewed_plan=plan,
+                expected_fingerprint=plan["fingerprint"],
+            )
+            self.assertEqual(
+                readback["superseded_pre_mutation_transactions"][0][
+                    "source_plan_fingerprint"
+                ],
+                old_plan["fingerprint"],
             )
 
     def test_two_cycles_crash_resume_one_current_and_non_targets(self) -> None:

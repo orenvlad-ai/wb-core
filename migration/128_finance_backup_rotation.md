@@ -102,6 +102,11 @@ treating it as a missing field. This matters for valid, fully hashed empty
 SQLite WAL sidecars: their exact zero length and empty-file SHA-256 are checked
 like every other file, while a genuinely missing size or mismatched hash still
 classifies the whole archive as protected and blocks deletion.
+Integrity fallback for a legacy `captured_unverified` archive additionally
+requires an absent or exactly empty WAL and opens the closed main database with
+SQLite `immutable=1`. The query-only plan therefore cannot create or refresh a
+WAL/SHM read-mark after capturing the candidate identity. A non-empty WAL,
+symlink or non-file sidecar remains protected rather than being ignored.
 
 Apply performs one durable transaction:
 
@@ -153,6 +158,16 @@ preceding failed status, reuses the same request/job identity, rejects a live
 or ambiguous worker and caps the complete attempt chain at eight. Other
 Finance mutation actions retain their observe-only transport behavior.
 
+An apply that fails before every candidate release and before every copy may
+leave only a `phase=started` runner transaction. A later deterministic plan
+may terminalize that sidecar as `superseded_before_mutation` under the same
+exclusive lock only when exact file SHA/stat, embedded plan/deployed SHA,
+empty deletion intent/receipts, empty copy proofs, absent result/audit and
+absent partial/final replacement paths all read back. The terminalization is
+atomic, audited, idempotent and independently verified; it removes no snapshot
+or backup bytes. Any transaction that reached a deletion, copy, manifest,
+selection or unknown state remains exact-resume-only and fail-closed.
+
 ## Verification matrix
 
 `apps/finance_storage_backup_rotation_smoke.py` proves two complete replacement
@@ -162,8 +177,10 @@ concurrent-worker rejection, missing-mount/root-fallback rejection, ENOSPC
 projection, file-digest drift before mutation, protected unknown files and a
 corrupted new backup preserving the already-selected current. It additionally
 proves that an exact zero-byte legacy WAL is verified rather than falsely
-classified as corrupt. The original monolith and all generation paths remain
-unchanged.
+classified as corrupt, that fallback integrity does not mutate WAL/SHM
+identity, and that only a proven zero-mutation `started` transaction can be
+terminalized by a subsequent reviewed plan. The original monolith and all
+generation paths remain unchanged.
 
 The writer inventory classifies this as the only post-cutover full split
 restore-set writer. Hosted apply uses the existing durable Finance transport
