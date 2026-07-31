@@ -296,12 +296,29 @@ def _logical_inventory(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     }
 
 
-def _sqlite_readback(path: Path, *, include_logical: bool) -> dict[str, Any]:
+def _sqlite_readback(
+    path: Path,
+    *,
+    include_logical: bool,
+    immutable: bool = False,
+) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise FinanceStorageBackupRotationError(f"SQLite backup is unsafe: {path}")
+    if immutable:
+        wal_path = Path(str(path) + "-wal")
+        if wal_path.is_symlink() or (
+            wal_path.exists()
+            and (not wal_path.is_file() or wal_path.stat().st_size != 0)
+        ):
+            raise FinanceStorageBackupRotationError(
+                f"immutable SQLite readback requires an absent or empty WAL: {path}"
+            )
     connection: sqlite3.Connection | None = None
     try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        immutable_query = "&immutable=1" if immutable else ""
+        connection = sqlite3.connect(
+            f"file:{path}?mode=ro{immutable_query}", uri=True
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         query_only = int(connection.execute("PRAGMA query_only").fetchone()[0])
@@ -488,6 +505,31 @@ def _audit_contains(
             and str(payload.get("event") or "") == "finance_backup_rotation_completed"
             and str(payload.get("plan_fingerprint") or "") == plan_fingerprint
             and str(payload.get("result_fingerprint") or "") == result_fingerprint
+        ):
+            return True
+    return False
+
+
+def _audit_contains_supersession(
+    path: Path, *, source_plan_fingerprint: str, target_plan_fingerprint: str
+) -> bool:
+    if not path.is_file():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise FinanceStorageBackupRotationError(
+                "Finance backup audit contains invalid JSON"
+            ) from exc
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("event")
+            == "finance_backup_pre_mutation_transaction_superseded"
+            and payload.get("source_plan_fingerprint")
+            == source_plan_fingerprint
+            and payload.get("target_plan_fingerprint")
+            == target_plan_fingerprint
         ):
             return True
     return False
@@ -885,7 +927,9 @@ class FinanceStorageBackupRotation:
         integrity = None
         if candidate["snapshot_status"] != "integrity_verified":
             integrity = _sqlite_readback(
-                path / "monolith.sqlite3", include_logical=False
+                path / "monolith.sqlite3",
+                include_logical=False,
+                immutable=True,
             )
         files: list[dict[str, Any]] = []
         for item in candidate["files"]:
@@ -1009,7 +1053,9 @@ class FinanceStorageBackupRotation:
         integrity = None
         if status != "integrity_verified":
             integrity = _sqlite_readback(
-                path / "monolith.sqlite3", include_logical=False
+                path / "monolith.sqlite3",
+                include_logical=False,
+                immutable=True,
             )
         captured_at = str(
             archive_manifest.get("verified_at")
@@ -1322,6 +1368,133 @@ class FinanceStorageBackupRotation:
                     )
         return legacy, retained, protected
 
+    def _pre_mutation_transaction_plan(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        terminalizations: list[dict[str, Any]] = []
+        blockers: list[dict[str, Any]] = []
+        if not self.transactions_root.exists():
+            return terminalizations, blockers
+        if self.transactions_root.is_symlink() or not self.transactions_root.is_dir():
+            return terminalizations, [
+                {"code": "finance_backup_transaction_inventory_unsafe"}
+            ]
+        for path in sorted(self.transactions_root.iterdir(), key=lambda item: item.name):
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or re.fullmatch(r"[0-9a-f]{64}\.json", path.name) is None
+            ):
+                blockers.append(
+                    {
+                        "code": "finance_backup_transaction_inventory_unsafe",
+                        "path": str(path),
+                    }
+                )
+                continue
+            try:
+                transaction = _load_json(
+                    path, label="Finance backup transaction inventory"
+                )
+            except FinanceStorageSnapshotRetentionError as exc:
+                blockers.append(
+                    {
+                        "code": "finance_backup_transaction_inventory_unsafe",
+                        "path": str(path),
+                        "reason": str(exc),
+                    }
+                )
+                continue
+            if transaction.get("phase") == "completed":
+                continue
+            reviewed_plan = transaction.get("reviewed_plan")
+            reviewed_stable = (
+                {
+                    key: value
+                    for key, value in reviewed_plan.items()
+                    if key not in {"fingerprint", "deploy_lease"}
+                }
+                if isinstance(reviewed_plan, Mapping)
+                else {}
+            )
+            replacement = (
+                dict(reviewed_plan.get("replacement") or {})
+                if isinstance(reviewed_plan, Mapping)
+                else {}
+            )
+            source_fingerprint = str(transaction.get("plan_fingerprint") or "")
+            source_deployed_sha = str(transaction.get("deployed_sha") or "")
+            destination_paths = [
+                Path(str(replacement.get(key) or ""))
+                for key in ("destination_partial", "destination_final")
+                if str(replacement.get(key) or "")
+            ]
+            safely_superseded_before_mutation = (
+                transaction.get("contract_version") == TRANSACTION_CONTRACT
+                and transaction.get("strategy") == STRATEGY
+                and transaction.get("phase") == "started"
+                and _FINGERPRINT_RE.fullmatch(source_fingerprint) is not None
+                and path.name
+                == f"{source_fingerprint.removeprefix('sha256:')}.json"
+                and _SHA_RE.fullmatch(source_deployed_sha) is not None
+                and str(transaction.get("transaction_path") or "")
+                == str(path.resolve())
+                and isinstance(reviewed_plan, Mapping)
+                and reviewed_plan.get("fingerprint") == source_fingerprint
+                and reviewed_plan.get("deployed_sha") == source_deployed_sha
+                and reviewed_plan.get("contract_version") == PLAN_CONTRACT
+                and reviewed_plan.get("mode") == "snapshot_retention_dry_run"
+                and reviewed_plan.get("strategy") == STRATEGY
+                and reviewed_plan.get("runtime_dir") == str(self.runtime_dir)
+                and reviewed_plan.get("snapshot_root") == str(self.snapshot_root)
+                and reviewed_plan.get("archive_root") == str(self.backup_root)
+                and reviewed_plan.get("apply_allowed_by_machine_preflight") is True
+                and not list(reviewed_plan.get("blockers") or [])
+                and _fingerprint(reviewed_stable) == source_fingerprint
+                and transaction.get("backup_id") == reviewed_plan.get("backup_id")
+                and _BACKUP_ID_RE.fullmatch(
+                    str(transaction.get("backup_id") or "")
+                )
+                is not None
+                and bool(str(transaction.get("approval_reference") or "").strip())
+                and not list(transaction.get("completed_deletions") or [])
+                and not dict(transaction.get("deletion_receipts") or {})
+                and not str(transaction.get("pending_deletion") or "")
+                and not dict(transaction.get("copy_proofs") or {})
+                and not isinstance(transaction.get("result"), Mapping)
+                and transaction.get("audit_recorded") is not True
+                and not any(path.exists() or path.is_symlink() for path in destination_paths)
+            )
+            if not safely_superseded_before_mutation:
+                blockers.append(
+                    {
+                        "code": "non_terminal_transaction_requires_exact_resume",
+                        "path": str(path.resolve()),
+                        "plan_fingerprint": source_fingerprint,
+                        "deployed_sha": source_deployed_sha,
+                        "phase": str(transaction.get("phase") or ""),
+                    }
+                )
+                continue
+            identity = _file_identity(path, include_sha256=True)
+            item_stat = path.stat()
+            identity.update(
+                {"uid": int(item_stat.st_uid), "gid": int(item_stat.st_gid)}
+            )
+            terminalizations.append(
+                {
+                    "path": str(path.resolve()),
+                    "transaction_identity": identity,
+                    "source_plan_fingerprint": source_fingerprint,
+                    "source_deployed_sha": source_deployed_sha,
+                    "phase": "started",
+                    "completed_deletions": [],
+                    "copy_proofs": {},
+                    "terminalization_allowed": True,
+                }
+            )
+        return terminalizations, blockers
+
     @staticmethod
     def _source_changed(guard: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
         source = dict(current.get("source_identity") or {})
@@ -1353,6 +1526,9 @@ class FinanceStorageBackupRotation:
         device = self._device_guard()
         root_legacy, root_protected = self._root_inventory()
         backup_legacy, retained, backup_protected = self._backup_inventory()
+        transaction_terminalizations, transaction_blockers = (
+            self._pre_mutation_transaction_plan()
+        )
         current = self._current()
         current_candidate = dict(current["candidate"]) if current else None
         retained_by_id = {item["artifact_id"]: item for item in retained}
@@ -1469,6 +1645,7 @@ class FinanceStorageBackupRotation:
         )
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
+        blockers.extend(transaction_blockers)
         if retained and current_candidate is None:
             blockers.append(
                 {
@@ -1602,6 +1779,9 @@ class FinanceStorageBackupRotation:
             },
             "pre_publish_deletions": pre_delete,
             "post_publish_deletions": post_delete,
+            "pre_mutation_transaction_terminalizations": (
+                transaction_terminalizations
+            ),
             "openers": openers,
             "capacity": {
                 "root_before": root_capacity,
@@ -2395,6 +2575,153 @@ class FinanceStorageBackupRotation:
             )
         return selector
 
+    def _terminalize_superseded_pre_mutation_transaction(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        target_plan_fingerprint: str,
+    ) -> dict[str, Any]:
+        raw_path = Path(str(candidate.get("path") or ""))
+        if raw_path.is_symlink():
+            raise FinanceStorageBackupRotationError(
+                "superseded Finance transaction path became a symlink"
+            )
+        path = raw_path.resolve()
+        source_plan_fingerprint = str(
+            candidate.get("source_plan_fingerprint") or ""
+        )
+        source_deployed_sha = str(candidate.get("source_deployed_sha") or "")
+        receipt = {
+            "path": str(path),
+            "source_plan_fingerprint": source_plan_fingerprint,
+            "source_deployed_sha": source_deployed_sha,
+            "terminal_status": "superseded_before_mutation",
+        }
+        if (
+            path.parent != self.transactions_root
+            or re.fullmatch(r"[0-9a-f]{64}\.json", path.name) is None
+            or path.name
+            != f"{source_plan_fingerprint.removeprefix('sha256:')}.json"
+            or candidate.get("terminalization_allowed") is not True
+            or _FINGERPRINT_RE.fullmatch(source_plan_fingerprint) is None
+            or _SHA_RE.fullmatch(source_deployed_sha) is None
+        ):
+            raise FinanceStorageBackupRotationError(
+                "superseded Finance transaction escapes the exact allowlist"
+            )
+        transaction = _load_json(
+            path, label="superseded Finance backup transaction"
+        )
+        if transaction.get("phase") == "completed":
+            if (
+                transaction.get("terminal_status")
+                != "superseded_before_mutation"
+                or transaction.get("superseded_by_plan_fingerprint")
+                != target_plan_fingerprint
+                or transaction.get("superseded_by_deployed_sha")
+                != self.deployed_sha
+                or list(transaction.get("completed_deletions") or [])
+                or dict(transaction.get("copy_proofs") or {})
+            ):
+                raise FinanceStorageBackupRotationError(
+                    "completed superseded Finance transaction is ambiguous"
+                )
+        else:
+            expected_identity = dict(candidate.get("transaction_identity") or {})
+            current_identity = _file_identity(path, include_sha256=True)
+            item_stat = path.stat()
+            current_identity.update(
+                {"uid": int(item_stat.st_uid), "gid": int(item_stat.st_gid)}
+            )
+            reviewed_plan = transaction.get("reviewed_plan")
+            reviewed_stable = (
+                {
+                    key: value
+                    for key, value in reviewed_plan.items()
+                    if key not in {"fingerprint", "deploy_lease"}
+                }
+                if isinstance(reviewed_plan, Mapping)
+                else {}
+            )
+            if (
+                current_identity != expected_identity
+                or transaction.get("contract_version") != TRANSACTION_CONTRACT
+                or transaction.get("strategy") != STRATEGY
+                or transaction.get("phase") != "started"
+                or transaction.get("plan_fingerprint")
+                != source_plan_fingerprint
+                or transaction.get("deployed_sha") != source_deployed_sha
+                or str(transaction.get("transaction_path") or "") != str(path)
+                or not isinstance(reviewed_plan, Mapping)
+                or reviewed_plan.get("fingerprint") != source_plan_fingerprint
+                or reviewed_plan.get("deployed_sha") != source_deployed_sha
+                or reviewed_plan.get("contract_version") != PLAN_CONTRACT
+                or reviewed_plan.get("mode") != "snapshot_retention_dry_run"
+                or reviewed_plan.get("strategy") != STRATEGY
+                or reviewed_plan.get("runtime_dir") != str(self.runtime_dir)
+                or reviewed_plan.get("snapshot_root") != str(self.snapshot_root)
+                or reviewed_plan.get("archive_root") != str(self.backup_root)
+                or reviewed_plan.get("apply_allowed_by_machine_preflight") is not True
+                or list(reviewed_plan.get("blockers") or [])
+                or _fingerprint(reviewed_stable) != source_plan_fingerprint
+                or transaction.get("backup_id") != reviewed_plan.get("backup_id")
+                or _BACKUP_ID_RE.fullmatch(
+                    str(transaction.get("backup_id") or "")
+                )
+                is None
+                or not str(transaction.get("approval_reference") or "").strip()
+                or list(transaction.get("completed_deletions") or [])
+                or dict(transaction.get("deletion_receipts") or {})
+                or str(transaction.get("pending_deletion") or "")
+                or dict(transaction.get("copy_proofs") or {})
+                or isinstance(transaction.get("result"), Mapping)
+                or transaction.get("audit_recorded") is True
+            ):
+                raise FinanceStorageBackupRotationError(
+                    "superseded Finance transaction CAS drifted"
+                )
+            replacement = dict(reviewed_plan.get("replacement") or {})
+            for key in ("destination_partial", "destination_final"):
+                replacement_path = Path(str(replacement.get(key) or ""))
+                if replacement_path.exists() or replacement_path.is_symlink():
+                    raise FinanceStorageBackupRotationError(
+                        "superseded Finance transaction owns replacement bytes"
+                    )
+            transaction["phase"] = "completed"
+            transaction["terminal_status"] = "superseded_before_mutation"
+            transaction["superseded_by_plan_fingerprint"] = (
+                target_plan_fingerprint
+            )
+            transaction["superseded_by_deployed_sha"] = self.deployed_sha
+            transaction["completed_at"] = _utc_now()
+            transaction["updated_at"] = _utc_now()
+            _atomic_write_json(path, transaction)
+        if not _audit_contains_supersession(
+            self.audit_path,
+            source_plan_fingerprint=source_plan_fingerprint,
+            target_plan_fingerprint=target_plan_fingerprint,
+        ):
+            _append_audit(
+                self.audit_path,
+                {
+                    "event": (
+                        "finance_backup_pre_mutation_transaction_superseded"
+                    ),
+                    "recorded_at": _utc_now(),
+                    "source_plan_fingerprint": source_plan_fingerprint,
+                    "source_deployed_sha": source_deployed_sha,
+                    "target_plan_fingerprint": target_plan_fingerprint,
+                    "target_deployed_sha": self.deployed_sha,
+                    "completed_deletions": [],
+                    "copy_proofs": {},
+                },
+            )
+        if transaction.get("terminal_audit_recorded") is not True:
+            transaction["terminal_audit_recorded"] = True
+            transaction["updated_at"] = _utc_now()
+            _atomic_write_json(path, transaction)
+        return receipt
+
     def _write_policy(
         self,
         *,
@@ -2468,6 +2795,16 @@ class FinanceStorageBackupRotation:
                 raise FinanceStorageBackupRotationError(
                     "protected monolith/generation identity drifted before apply"
                 )
+            superseded_transaction_receipts = [
+                self._terminalize_superseded_pre_mutation_transaction(
+                    candidate,
+                    target_plan_fingerprint=expected_fingerprint,
+                )
+                for candidate in reviewed_plan.get(
+                    "pre_mutation_transaction_terminalizations"
+                )
+                or []
+            ]
             transaction: dict[str, Any] = {
                 "contract_version": TRANSACTION_CONTRACT,
                 "strategy": STRATEGY,
@@ -2482,6 +2819,9 @@ class FinanceStorageBackupRotation:
                 "deletion_receipts": {},
                 "pending_deletion": "",
                 "copy_proofs": {},
+                "superseded_pre_mutation_transactions": (
+                    superseded_transaction_receipts
+                ),
                 "updated_at": _utc_now(),
             }
             transaction_preexisted = transaction_path.exists()
@@ -2497,6 +2837,7 @@ class FinanceStorageBackupRotation:
                     "deployed_sha",
                     "approval_reference",
                     "transaction_path",
+                    "superseded_pre_mutation_transactions",
                 ):
                     if existing.get(key) != transaction.get(key):
                         raise FinanceStorageBackupRotationError(
@@ -2725,6 +3066,9 @@ class FinanceStorageBackupRotation:
                 "removed_artifacts": removed,
                 "removed_artifact_count": len(removed),
                 "archived_snapshot_count": len(removed),
+                "superseded_pre_mutation_transactions": (
+                    superseded_transaction_receipts
+                ),
                 "released_allocated_bytes": sum(
                     int(item.get("released_allocated_bytes") or 0) for item in removed
                 ),
@@ -2906,6 +3250,49 @@ class FinanceStorageBackupRotation:
             raise FinanceStorageBackupRotationError(
                 "post-rotation policy/health readback is not healthy"
             )
+        terminalized_transactions: list[dict[str, Any]] = []
+        for item in reviewed_plan.get(
+            "pre_mutation_transaction_terminalizations"
+        ) or []:
+            path = Path(str(item.get("path") or "")).resolve()
+            transaction = _load_json(
+                path, label="terminalized Finance backup transaction"
+            )
+            if (
+                path.parent != self.transactions_root
+                or transaction.get("phase") != "completed"
+                or transaction.get("terminal_status")
+                != "superseded_before_mutation"
+                or transaction.get("superseded_by_plan_fingerprint")
+                != expected_fingerprint
+                or transaction.get("superseded_by_deployed_sha")
+                != self.deployed_sha
+                or transaction.get("terminal_audit_recorded") is not True
+                or list(transaction.get("completed_deletions") or [])
+                or dict(transaction.get("copy_proofs") or {})
+                or not _audit_contains_supersession(
+                    self.audit_path,
+                    source_plan_fingerprint=str(
+                        item.get("source_plan_fingerprint") or ""
+                    ),
+                    target_plan_fingerprint=expected_fingerprint,
+                )
+            ):
+                raise FinanceStorageBackupRotationError(
+                    "superseded pre-mutation transaction readback is incomplete"
+                )
+            terminalized_transactions.append(
+                {
+                    "path": str(path),
+                    "source_plan_fingerprint": str(
+                        item.get("source_plan_fingerprint") or ""
+                    ),
+                    "source_deployed_sha": str(
+                        item.get("source_deployed_sha") or ""
+                    ),
+                    "terminal_status": "superseded_before_mutation",
+                }
+            )
         payload: dict[str, Any] = {
             "contract_version": RESULT_CONTRACT,
             "status": "readback_verified",
@@ -2918,6 +3305,9 @@ class FinanceStorageBackupRotation:
             "retained_backup_bytes": candidate["total_bytes"],
             "replacement_verified": True,
             "restore_drill_verified": True,
+            "superseded_pre_mutation_transactions": (
+                terminalized_transactions
+            ),
             "source_manifest_sha256": manifest["source_manifest_sha256"],
             "restore_manifest_sha256": restore_selected.manifest_sha256,
             "active_manifest_sha256": guard["manifest_sha256"],
