@@ -141,3 +141,64 @@ only correction path. It is deployment-inert and separately human-gated:
 
 New answers that appear after capture are outside that fingerprint and require a
 fresh manifest/plan gate; they are never silently widened into an approved apply.
+
+## Ordinary admission race and recurrence prevention
+
+Post-recovery production observation exposed two official unanswered rows with
+no local processing aggregate. They were not evidence that the bounded
+recovery manifest had omitted another incident class. The GET-only timer and
+active worker share the same observation store, and the timer can win the first
+read while its process-local `WB_AUTOANSWERS_FORCE_OFF=true` is in effect. The
+old admission rule required both that first observation and an effective active
+process, so it persisted the content version without an `auto_eligible_epoch`.
+The later active worker saw unchanged content and could never materialize it.
+An obsolete sweep from an earlier policy epoch could not provide rolling
+admission for the current policy epoch, leaving a durable `not_materialized`
+tail.
+
+The corrected ordinary contract separates persisted owner intent from
+process-local capability. A new steady observation records the current enable
+epoch when persisted `master_enabled=true`, mode is automatic, the row is
+unresolved and no current sweep owns admission. Force-off still makes
+`auto_enqueue=false`, and the readonly entrypoint still has no provider or WB
+writer import. On a later effective active observation, unchanged content is
+enqueued exactly once when the current epoch matches and no exact
+feedback-version processing job exists. The deterministic processing key and
+existing unique constraint make replay idempotent. A row first seen while the
+persisted owner master is OFF or mode is manual remains ineligible, preserving
+the explicit capped-history boundary.
+
+Strict publication GET readback now also persists a non-empty observed answer
+into the canonical feedback observation in the same transaction as the
+publication result. Immutable content-version truth is not rewritten; only the
+WB observation, local answer projection, hash-only audit and last-seen source
+advance. This prevents newly published old reviews from remaining locally
+unanswered outside the 48-hour answered steady window, without another
+provider call, WB POST or processed-inventory recovery manifest.
+
+## Bounded recovery closure and live-arrival SLO
+
+Terminal recovery acceptance is cohort- and cutoff-bound rather than a demand
+that a live marketplace queue remain literally empty while customers continue
+to submit reviews:
+
+- the original recovery cohort is closed only when all 59/59 IDs have a real
+  answer confirmed by official detail GET;
+- every official row present at the recorded closure cutoff must be processed
+  and detail-GET reconciled;
+- `needs_review`, `terminal_error`, `policy_epoch_stale`, unpublished
+  `seller_chat`, ambiguous write and unresolved provider-cost tails are zero;
+- Autoanswers is left active with its exact prior owner intent and limits;
+- during the following 15-minute observation, new arrivals do not enlarge the
+  recovery cohort or reset its progress. Each must gain durable ordinary
+  admission/materialization or other real pipeline output within the module's
+  documented 15-minute stall boundary, unless a visible budget/rate/retry
+  pause explains the delay;
+- a new arrival is a terminal failure only when it actually violates that SLO
+  or enters a forbidden tail, not merely because it appeared after cutoff.
+
+The two production `not_materialized` rows are therefore live canaries for the
+ordinary path and must complete acquisition, generation, publication and
+strict GET readback after the corrected active worker is deployed. The
+diagnostic two-row recovery manifest remains unapplied evidence; using it would
+mask rather than prove prevention of recurrence.

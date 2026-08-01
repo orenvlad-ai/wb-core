@@ -76,6 +76,51 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(second["enqueued"], 0)
         self.assertEqual(len(self.repo.get_feedback("new")["ai_jobs"]), 1)
 
+    def test_force_off_sync_first_is_materialized_by_active_sync_without_content_change(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        readonly_repo = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env={"WB_AUTOANSWERS_FORCE_OFF": "true"},
+        )
+        active_repo = AutoanswersRepository(
+            runtime_dir=Path(self.temp.name),
+            now_factory=self.clock,
+            env={"WB_AUTOANSWERS_FORCE_OFF": "false"},
+        )
+        readonly_source = FakeReadSource()
+        readonly_source.pages = [[feedback("readonly-won-race")]]
+        active_source = FakeReadSource()
+        active_source.pages = [
+            [feedback("readonly-won-race")],
+            [feedback("readonly-won-race")],
+        ]
+        readonly_service = WbFeedbackSyncService(
+            repository=readonly_repo,
+            source=readonly_source,
+            now_factory=self.clock,
+            page_size=2,
+        )
+        active_service = WbFeedbackSyncService(
+            repository=active_repo,
+            source=active_source,
+            now_factory=self.clock,
+            page_size=2,
+        )
+
+        first = readonly_service.steady_sync_tick(is_answered=False)
+        second = active_service.steady_sync_tick(is_answered=False)
+        replay = active_service.steady_sync_tick(is_answered=False)
+
+        self.assertEqual(first["enqueued"], 0)
+        self.assertEqual(second["upserted"], 0)
+        self.assertEqual(second["enqueued"], 1)
+        self.assertEqual(replay["enqueued"], 0)
+        self.assertEqual(
+            len(active_repo.get_feedback("readonly-won-race")["ai_jobs"]),
+            1,
+        )
+
     def test_manual_mode_steady_sync_never_creates_ai_jobs(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
         self.source.pages = [[feedback("manual-new")], [feedback("manual-new")]]

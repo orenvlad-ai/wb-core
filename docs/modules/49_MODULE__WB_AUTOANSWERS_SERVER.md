@@ -202,6 +202,14 @@ result of every sync tick plus its provider/writer-free import boundary. It does
 not compare store-wide AI/publication queue totals, because the independently
 scheduled worker can legitimately advance those shared queues during the same
 GET window; that concurrent progress is not attributed to the readonly sync.
+When persisted owner intent is enabled in an automatic mode, a first steady
+observation made by this force-off reader records the current `enable_epoch`
+but still cannot enqueue. The next active worker observation materializes the
+same unchanged feedback version if and only if no exact processing job exists.
+This closes the reader/worker acquisition race without granting the readonly
+process an AI/provider/publication capability. Persisted owner OFF and manual
+mode do not record that eligibility, so later enablement still requires the
+normal capped history transition rather than silently adopting old reviews.
 
 Entering `draft_only`, `auto_safe` or `auto_all` requires an actor-bound expiring preview over unanswered history from `2026-01-01`. It reports exact total, `content_bearing`, `rating_only`, indeterminate/manual-review rows, current content drafts, content requiring OpenAI or regeneration, expected WB writes per category, zero-cost templates, cost, content/full ETA, hourly/daily/monthly caps and the mandatory run cap. Preview and apply share one immutable membership/classification snapshot; that initial snapshot remains the owner-confirmed audit proof.
 
@@ -266,7 +274,28 @@ contention evidence. A budget-free automatic bucket with no claimable action
 or real output for 15 minutes is surfaced as a stall; ordinary budget,
 rate-limit and retry-backoff pauses remain ordinary pauses.
 
+The ordinary active worker timer has a one-minute cadence and observes both
+steady streams on every successful tick; the no-history-floor unanswered
+inventory is additionally started every 12 ticks and resumes page by page.
+For an enabled automatic mode with no explicit budget/rate/retry pause, a new
+official unanswered row must therefore acquire durable epoch eligibility and
+an exact processing job on its first successful active observation, and must
+show admission or real pipeline output inside the existing 15-minute stall
+boundary. A force-off reader winning the first observation does not restart
+that SLO: the active worker's unchanged re-observation is sufficient. A fresh
+arrival during an observation window is a new ordinary member, not an
+extension of an earlier recovery cohort; it fails acceptance only when it is
+actually stuck beyond this SLO or enters a forbidden terminal/review/stale or
+ambiguous-write tail.
+
 Current valid drafts are reused, in-flight jobs are not duplicated, stale results are quarantined, existing WB answers skip permanently, and published answers are never recreated. Downgrades immediately invalidate old-epoch pre-write claims without making preserved work terminal.
+
+The mandatory publication detail GET also persists every non-empty observed
+WB answer into the feedback observation in the same SQLite transaction that
+records the publication readback outcome. It preserves the immutable content
+version, updates only WB observation truth, appends hash-only audit evidence
+and remains idempotent. A crash cannot leave a confirmed publication with a
+locally unanswered feedback row, and replay never performs a second WB POST.
 
 ## Budgets and OpenAI UI
 
