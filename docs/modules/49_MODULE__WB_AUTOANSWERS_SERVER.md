@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Schema v9 adds the explicit publication processing-key lookup used by the operator status aggregate, preventing one settings read from multiplying a full publication scan across the active reconciliation scope; schema-v8 acknowledgements and all execution evidence remain unchanged."
+update_note: "Schema v10 adds a fingerprint-bound backlog recovery ledger; policy v4 removes automatic seller-chat/operator tails, safely rebinds unstarted publications, recovers durable terminal evidence and adds a full unanswered inventory without changing the frozen v1.4.2 bundle."
 ---
 
 # WB Autoanswers Server v1
@@ -60,7 +60,7 @@ Frozen identity:
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
 | Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
 | Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
-| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py`, `apps/wb_autoanswers_reconciliation_recovery.py` |
+| Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py`, `apps/wb_autoanswers_reconciliation_recovery.py`, `apps/wb_autoanswers_backlog_recovery.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
 | Backend/UI | `registry_upload_http_entrypoint.py`, `sheet_vitrina_v1_web_vitrina.html` |
 
@@ -124,6 +124,15 @@ Migration preserves every feedback, job, publication, budget, audit and run
 row. A regression test disables automatic indexes and requires the
 production-shaped join plan to use this named index.
 
+Schema v10 preserves that index and adds only
+`sheet_vitrina_v1_wb_autoanswers_backlog_recovery_runs`. Each row binds the T0
+manifest hash, plan fingerprint, pre-change digest, expected count, resumable
+`planned/applied` state and sanitized evidence. Final reconciliation remains a
+query-only evidence payload and canonical GitHub comment rather than a hidden
+readback write. The additive
+migration deliberately leaves existing production settings on policy v3;
+policy v4 is activated only by the separately authorized exact-manifest runner.
+
 `content_version_hash` includes text, pros, cons, rating, tags, product identity and stable media identity. It excludes answers, `wasViewed`, WB service state and temporary media query/fragment signatures. `wb_observation_hash` owns those service observations. Therefore signed-link rotation and WB state/readback changes do not create a paid semantic version.
 If WB later returns content equal to an older immutable version after an
 intermediate change, sync reuses that existing `(feedback_id,
@@ -136,15 +145,22 @@ Processing idempotency is `feedback_id | content_version | 1.4.2`. Publication i
 
 ## Sync and modes
 
-Initial history begins at `2026-01-01`. Answered, unanswered and archive streams use durable cursors; backfill never creates AI jobs. Steady sync has a 48-hour overlap and upserts before eligibility decisions. `429`, `5xx` and transport failures do not advance an incomplete cursor.
+Initial historical backfill begins at `2026-01-01`. Answered, unanswered and archive streams use durable cursors; backfill never creates AI jobs. Steady sync has a 48-hour overlap and upserts before eligibility decisions. In addition, policy v4 runs a periodic full official unanswered inventory from `dateFrom=0`, with a 5000-row resumable page and no history floor. That inventory closes old/missing-ingestion gaps and admits newly materialized current unanswered versions through the ordinary idempotent queue. `429`, `5xx` and transport failures do not advance an incomplete cursor.
 
 The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has highest priority:
 
 - `off`: readonly sync/UI/readback continue; worker timer, new AI claims and new WB writes stop;
 - `manual`: readonly sync and worker run, but only explicit generate/regenerate/review/publish jobs are serviced;
 - `draft_only`: eligible scoped reviews receive reusable drafts, never publication;
-- `auto_safe`: only `public_only`, `wb_return`, `wb_support` and the exact owner-approved `rating_only_template` may auto-publish;
-- `auto_all`: every route that passes all hard gates may publish, except `seller_chat`, fallback, unsafe, stale, external-answer or media-uncertain results.
+- `auto_safe`: `public_only`, `wb_return`, `wb_support`, the exact owner-approved `rating_only_template`, and a seller-chat result transformed by the zero-cost policy-v4 safe-public contract may auto-publish;
+- `auto_all`: every route that passes all hard gates may publish; `seller_chat` never waits for an operator and is deterministically replaced with a `public_only` acknowledgement before enqueue. Fallback, unsafe, stale, external-answer and media-uncertain artifacts still fail closed.
+
+The frozen v1.4.2 bundle and its routing evidence remain unchanged. Policy v4
+stores the source `seller_chat` route/reply hash/case-code presence in audit and
+an immutable job revision, then publishes only a server-owned deterministic
+acknowledgement from `wb_autoanswers_safe_public_policy_v1`. That text contains
+no chat handoff or case code and promises no money, replacement, compensation,
+return approval or WB decision. The transform performs zero OpenAI calls.
 
 The dedicated lifecycle maps those modes to two components. Readonly sync is
 enabled for every mode except a global master pause; the worker is enabled for
@@ -215,7 +231,12 @@ Reconciliation selects candidates action-first. Exact automatic actions in the
 current priority bucket are considered before lower-value preserved/unchanged
 bookkeeping, even when the preserved row is an older 1-star publication.
 Terminal/human-only rows remain visible evidence but are excluded from the
-automatic barrier. Sweep progress is rebuilt from unique acknowledgements,
+automatic barrier. Under policy v4 they are also actionable: a completed Node
+`job_complete` is restored from append-only audit without another provider
+call; a proven non-ambiguous technical dead end becomes the deterministic
+zero-cost safe-public processing kind; and an unstarted immutable publication
+with the same exact reply is rebound to the current epoch without regeneration
+or a WB write. Sweep progress is rebuilt from unique acknowledgements,
 not per-tick return counts: a restart or repeated candidate is idempotent and
 cannot report another synthetic `+N/min`. The runtime exposes acknowledged,
 action/preserved/unchanged, remaining, recent delta rate, ETA, repeated-batch
@@ -275,11 +296,14 @@ does not discard the review. The runtime releases the active reservation,
 appends one maximum-reservation uncertainty hold for that exact attempt and
 stores only return code, byte counts and SHA-256 diagnostics; raw child output
 is not persisted. Attempt one becomes `retryable_error` with bounded backoff.
-A second opaque failure appends its own hold and becomes
-`needs_review/*_repeated_needs_review`. The contained result is returned to the
-worker coordinator, so an isolated, durably recorded failure does not make the
-whole oneshot exit. Existing quota, budget and other stronger pause reasons are
-never cleared by this path. Valid partial usage follows the existing failed-cost
+A second opaque failure appends its own hold. Under policy v4 it becomes a
+queued `safe_public_template` job rather than a permanent `needs_review` tail;
+the next bounded worker tick produces a deterministic zero-cost reply. Older
+policy epochs retain their fail-closed review behavior until the separately
+authorized policy activation. The contained result is returned to the worker
+coordinator, so an isolated, durably recorded failure does not make the whole
+oneshot exit. Existing quota, budget and other stronger pause reasons are never
+cleared by this path. Valid partial usage follows the existing failed-cost
 event path instead. Both legacy and per-attempt holds count against the same
 global and transition-run caps.
 
@@ -333,10 +357,13 @@ transaction separately proves its non-target snapshot unchanged; later normal
 queue progress does not invalidate readback. Replay is a confirmed no-op.
 
 Policy reconciliation never sends an immutable publication aggregate back
-through regeneration. Existing `needs_review`/terminal evidence is adopted
-before regeneration checks; any other unpublished publication-bound
-regeneration candidate remains unchanged and receives only an exact preserved
-acknowledgement for explicit operator handling. A clean scheduler tick may
+through regeneration. Under policy v4 an exact unstarted publication whose
+reply hash still matches the valid processing artifact is rebound in place to
+the current policy epoch and `approved`, with zero provider calls and zero WB
+writes. If a generic rating-only reply became content-bearing, the exact reply
+is preserved and its route is honestly relabelled `public_only`; no duplicate
+publication aggregate is created. Write-started rows remain readback-only, and
+truly unsafe or mismatched artifacts remain fail-closed. A clean scheduler tick may
 release only a prior reconciliation-stage
 `worker_error/publication_already_exists` presentation latch (including the
 legacy stage-less form), and only after exact current-run scope readback proves
@@ -361,13 +388,19 @@ Validated photos, preview and frames are encoded as review-specific classifier i
 
 Before any POST, the repository atomically rechecks effective ON, current `policy_epoch`, permission, content version/hash, no external WB answer, exact reply/hash, frozen identity, JSON contract, hard gates, final guard, no fallback/media uncertainty/regeneration requirement and idempotency. Manual publication additionally requires current manual mode, preserved reviewed edit revision and permission readback.
 
-`seller_chat` is review-only, requires exactly one deterministic case code, and its public text cannot ask for photo, video, screenshot, label, proof or other materials. No money, replacement, compensation, return approval or WB decision promise is introduced by server policy.
+In explicit `manual` mode, the frozen `seller_chat` draft retains its exact
+single case-code and final-guard requirements. In automatic modes policy v4
+never publishes that draft: it archives the source evidence and replaces the
+publication artifact with the deterministic `public_only` acknowledgement
+described above. Therefore automatic handling has no operator/chat handoff and
+cannot ask for materials or promise money, replacement, compensation, return
+approval or a WB decision.
 
 Exact publication evidence is committed before transport. Every HTTP success/error/timeout goes to `publish_pending_readback`; 204 alone is never proof. Exact normalized detail readback is the only path to `published`. Missing/different/external answers go to review. A possible write is never blindly repeated.
 
 ## UI and API
 
-Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v4`; local list/filter/detail/settings expose the canonical classification, rolling membership/current-priority evidence, exact all/content progress counters and server-owned lifecycle. Settings GET includes `settings_revision` and the authoritative operator-limit bounds. Every settings POST requires `expected_policy_epoch`; a global-limit mutation additionally requires the exact `expected_settings_revision`. The server hashes the complete persisted settings projection, rejects a stale epoch or revision, performs a fresh repository read after the write and returns only exact requested fields in `confirmed_limits`. The client reports success only when that readback equals every requested value. Automated apply additionally requires its preview and cannot be combined with a global-limit mutation. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
+Legacy `GET /v1/sheet-vitrina-v1/feedbacks` is unchanged. Autoanswers responses use additive contract `wb_autoanswers_server_v5`; local list/filter/detail/settings expose the canonical classification, rolling membership/current-priority evidence, exact all/content progress counters, full local unanswered total/oldest age, active/readback counts and exact non-auto reason buckets (`not_materialized`, `needs_review`, `terminal_error`, `seller_chat`, `policy_epoch_stale`). The full-inventory cursor records the latest remote count and local reconciliation result. Settings GET includes `settings_revision` and the authoritative operator-limit bounds. Every settings POST requires `expected_policy_epoch`; a global-limit mutation additionally requires the exact `expected_settings_revision`. The server hashes the complete persisted settings projection, rejects a stale epoch or revision, performs a fresh repository read after the write and returns only exact requested fields in `confirmed_limits`. The client reports success only when that readback equals every requested value. Automated apply additionally requires its preview and cannot be combined with a global-limit mutation. A successful result includes the persisted settings/run/cap readback plus lifecycle state. A partial systemd failure is an error, and a successfully enabled timer without a fresh tick is explicitly pending/starting. Additive routes include local list/detail/settings/sync, automated transition preview, manual generate/regenerate/edit, review approval and authenticated private media GET.
 
 The first `Отзывы → Отзывы` screen reads SQLite immediately, defaults to 50 rows and uses server pagination/filters, including `Без ответа Wildberries`, server-side `Ответ системы` states and `content_bearing`/`rating_only`/`indeterminate` classification. Table system replies remain in a fixed-height dark internal scroller with a copy-only button. Missing replies have a compact neutral state. The obsolete independent `Исторический backlog` control is hidden and disabled; its legacy backend routes fail closed so it cannot bypass the capped preview-bound transition action.
 
@@ -413,21 +446,21 @@ Every mutation requires JSON, same-origin CSRF evidence and the relevant capabil
 
 ## Deploy, verification and rollback
 
-Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. The deploy-only quiet window records active Autoanswers timers, stops the worker/readonly timers and registry HTTP service, then copies all legacy Autoanswers tables from one query-only snapshot into a candidate isolated store. It verifies every table row count and deterministic row digest, foreign keys, integrity and an unchanged source `data_version`, fsyncs a `prepared` manifest before the atomic store rename, and restores the registry plus exactly the previously active timers; interrupted one-shot executions resume idempotently on those timers. An interrupted publish is accepted only after full store re-verification. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries. Legacy main-DB tables are retained for bounded rollback.
+Deploy verifies Node >=20, npm, ffmpeg, lockfile install and all frozen hashes. The deploy-only quiet window records active Autoanswers timers, stops the worker/readonly timers and registry HTTP service, then copies all legacy Autoanswers tables from one query-only snapshot into a candidate isolated store. It verifies every table row count and deterministic row digest, foreign keys, integrity and an unchanged source `data_version`, fsyncs a `prepared` manifest before the atomic store rename, and restores the registry plus exactly the previously active timers; interrupted one-shot executions resume idempotently on those timers. Schema v10 preserves the v9 publication lookup index and adds only the recovery ledger; it does not activate policy v4. An interrupted publish is accepted only after full store re-verification. Existing feature mode, `policy_epoch`, transition run, immutable initial membership, cap and all owner-published data/audit remain unchanged; migration must never infer Autoanswers intent from legacy generic owner-policy entries. Legacy main-DB tables are retained for bounded rollback.
 
-Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation takes exclusive locking and checkpoints its committed WAL into the main snapshot before hashing or compression. It then compresses only that owned stable snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v9 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
+Lifecycle `status` is strictly observational: if the target schema is absent (including an absent database), it reports `schema_preparation_required` from read-only inspection and never constructs the schema-owning repository. Only `prepare-deploy` may apply additive DDL. If a complete raw current-schema pre-deploy snapshot remains after an interrupted capacity run, the next preparation takes exclusive locking and checkpoints its committed WAL into the main snapshot before hashing or compression. It then compresses only that owned stable snapshot, verifies SQLite integrity, zstd integrity, archive hash and exact decompressed SHA-256, publishes the v10 manifest, reads it back through the canonical verifier, and only then removes the raw snapshot and its sidecars. A failed verification leaves the raw source recoverable.
 
 If the live volume cannot hold a second raw database and neither a current nor
 older recoverable Autoanswers backup exists, `prepare-deploy` keeps the
 repo-owned service quiet window, acquires exclusive SQLite locking, checkpoints
 the WAL, verifies the stable source, and streams that exact main-database image
-directly to the private v8 zstd archive. The source database is never removed or
+directly to the private current-schema zstd archive. The source database is never removed or
 rewritten. Schema migration remains blocked until the zstd frame, archive hash,
 exact decompressed source SHA-256, manifest and canonical verifier readback all
 succeed; failed output from the attempt is removed while the source remains
 unchanged.
 
-After that current v9 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v9 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
+After that current v10 restore proof, capacity recovery may remove only the minimum exact older autoanswers archive+manifest pairs needed to restore the 256 MiB operational headroom. Each candidate is confined to an older `wb_autoanswers_schema_vN` directory, must match its manifest size/hash/integrity contract, and is bound into a private cleanup audit before unlink. Unrelated files and the current v10 backup are never candidates. Cleanup stops after the first sufficient pair; failure to reach headroom remains fail-closed.
 
 Required local checks:
 
@@ -446,17 +479,39 @@ PYTHONPATH=. python3 -m unittest \
   apps.wb_autoanswers_incident_regression_test \
   apps.wb_autoanswers_reconciliation_recovery_test \
   apps.wb_autoanswers_ui_browser_test \
-  apps.wb_autoanswers_rolling_recovery_test
+  apps.wb_autoanswers_rolling_recovery_test \
+  apps.wb_autoanswers_backlog_recovery_test
 PYTHONPATH=. python3 apps/business_data_maintenance_status_smoke.py
 python3 -m compileall -q apps packages
 ```
 
 Production acceptance preserves the already confirmed feature intent and exact
-transition run/cap. After deploy it runs exact query-only recovery planning,
-applies only fingerprint-bound candidates after verified backup proof, and
-reads back the recovery invariants. It reconciles any
-`budget_state_unknown`, resumes through the dedicated lifecycle, proves both
-component readbacks and a fresh scheduler tick, then observes ordinary queue
+transition run/cap. After deploy the hosted
+`autoanswers-backlog-recovery capture` command captures or reuses an exact
+`wb_autoanswers_t0_manifest_v1` from a full paginated official unanswered list
+plus one detail GET per feedback. `wb_autoanswers_backlog_recovery_v1` dry-run
+binds that manifest, every current detail hash, current DB/job/publication/
+reservation/cost evidence, one exact complete frozen audit invocation per
+recoverable result, verified v10 backup and exact complete deployed SHA. It is
+not apply-ready while `budget_state_unknown`, unresolved provider-cost evidence
+or an active reservation exists; that state is reconciled through the existing
+dedicated budget lifecycle before a fresh reviewed plan.
+Apply additionally requires the external reviewed plan, exact fingerprint and
+human-gate reference, persists a resumable `planned` ledger before
+materializing every exact T0 detail, increments the policy epoch once,
+activates policy v4 and mutates only the exact T0 cohort. An interrupted apply
+resumes only from the same reviewed state plus a deterministic prefix of its
+own exact T0 detail upserts. The runner itself
+performs zero WB POSTs and zero provider calls; ordinary workers retain
+POST/readback semantics. Its strictly query-only readback re-fetches the full
+list and every exact T0 detail and reports reconciled only when list and count
+both match at zero, every T0 answer is present, DB/API observations are current,
+and not-materialized, review, terminal, stale-policy, unpublished seller-chat,
+ambiguous-write and active-pipeline tails are all zero. It also requires zero
+active reservations, zero unresolved provider-cost boundaries and no
+`budget_state_unknown` latch. The resulting external payload is bound into the
+canonical post-apply GitHub reconciliation comment. Codex then proves both
+component readbacks and a fresh scheduler tick, and observes ordinary queue
 movement without synthetic OpenAI/WB writes. It must show a feedback version
 first observed after the initial run start being automatically admitted,
 selected at the next safe claim ahead of lower/rating-only work, published

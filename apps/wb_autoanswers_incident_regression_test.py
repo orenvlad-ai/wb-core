@@ -1106,7 +1106,7 @@ class IncidentRegressionTest(unittest.TestCase):
         )
         self.assertIsNone(self.repo.claim_processing_job(worker_id="blocked"))
 
-    def test_publication_bound_review_reconciliation_is_idempotent_and_releases_only_its_latch(self) -> None:
+    def test_publication_bound_review_rebinds_without_new_cost_or_write_and_releases_latch(self) -> None:
         self.repo.update_settings(
             master_enabled=True,
             mode="auto_all",
@@ -1206,11 +1206,7 @@ class IncidentRegressionTest(unittest.TestCase):
             worker_id="reconcile",
             batch_size=25,
         )
-        self.assertEqual(status["progress"]["review_required_preserved"], 4)
-        self.assertEqual(
-            status["progress"]["publication_bound_regeneration_preserved"],
-            1,
-        )
+        self.assertEqual(status["progress"]["publication_rebound"], 5)
         self.repo.record_scheduler_tick(errors=[])
         progress = self.repo.progress_status()
         self.assertNotEqual(progress["stop_reason"], "worker_error")
@@ -1245,16 +1241,17 @@ class IncidentRegressionTest(unittest.TestCase):
                 """
                 SELECT COUNT(*)
                 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_acknowledgements
-                    WHERE sweep_id=? AND outcome IN (
-                        'review_required_preserved',
-                        'publication_bound_regeneration_preserved'
-                    )
+                    WHERE sweep_id=? AND outcome='publication_rebound'
                 """,
                 (applied["sweep"]["sweep_id"],),
             ).fetchone()[0]
         self.assertEqual(after, tuple(before))
         self.assertEqual(latch_audits, 1)
-        self.assertEqual(rows, identity_before)
+        self.assertTrue(all(row[0] == "approved" for row in rows))
+        self.assertTrue(all(row[3] == "approved" for row in rows))
+        self.assertTrue(all(row[1] == applied["settings"].policy_epoch for row in rows))
+        self.assertTrue(all(row[4] == applied["settings"].policy_epoch for row in rows))
+        self.assertNotEqual(rows, identity_before)
         self.assertEqual(acknowledgements, 5)
         self.repo.record_scheduler_tick(errors=[])
         with sqlite3.connect(self.repo.db_path) as conn:

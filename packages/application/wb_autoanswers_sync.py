@@ -253,6 +253,118 @@ class WbFeedbackSyncService:
             )
             raise error from exc
 
+    def full_unanswered_inventory_tick(self) -> dict[str, Any]:
+        """Reconcile one full official unanswered-list page without a date floor.
+
+        The ordinary overlapping stream is optimized for new work.  This
+        independent inventory sweep prevents an old unanswered row from being
+        permanently invisible because of a historical backfill boundary.
+        """
+
+        now = self._now()
+        stream_key = "wb_feedback_full_unanswered_inventory"
+        stored = self.repository.sync_cursor(stream_key)
+        cursor = dict(stored["cursor"]) if stored else {}
+        if not cursor.get("active"):
+            cursor = {
+                "active": True,
+                "skip": 0,
+                "window_end": iso_utc(now),
+                "started_at": iso_utc(now),
+                "remote_count_at_start": int(self.source.count_unanswered()),
+            }
+        window_end = parse_timestamp(cursor.get("window_end"))
+        if window_end is None:
+            raise FeedbackSyncError(
+                "invalid full-inventory cursor",
+                code="invalid_full_inventory_cursor",
+                retryable=False,
+            )
+        run_id = self.repository.start_sync_run(
+            run_kind="reconciliation",
+            source_stream="unanswered_full_inventory",
+            cursor=cursor,
+        )
+        try:
+            page = self.source.fetch_feedbacks_page(
+                date_from_ts=0,
+                date_to_ts=int(window_end.timestamp()),
+                is_answered=False,
+                take=5000,
+                skip=int(cursor.get("skip") or 0),
+            )
+            upserted = 0
+            enqueued = 0
+            for row in page.rows:
+                outcome = self.repository.upsert_feedback(
+                    row,
+                    source_stream="unanswered_full_inventory",
+                    run_kind="steady",
+                    sync_run_id=run_id,
+                )
+                upserted += int(
+                    outcome["is_new"]
+                    or outcome["content_changed"]
+                    or outcome["observation_changed"]
+                )
+                if outcome["auto_enqueue"]:
+                    self.repository.enqueue_processing(
+                        outcome["feedback_id"],
+                        content_version=outcome["content_version"],
+                        trigger_source="full_unanswered_inventory",
+                        actor_id="wb-full-unanswered-inventory",
+                    )
+                    enqueued += 1
+            if page.has_more:
+                next_cursor = {
+                    **cursor,
+                    "skip": int(cursor.get("skip") or 0) + page.take,
+                }
+                successful = False
+            else:
+                next_cursor = {
+                    "active": False,
+                    "skip": 0,
+                    "completed_at": iso_utc(now),
+                    "remote_count_at_start": int(
+                        cursor.get("remote_count_at_start") or len(page.rows)
+                    ),
+                    "local_unanswered_after": self.repository.local_unanswered_count(),
+                }
+                successful = True
+            self.repository.save_sync_cursor(
+                stream_key,
+                cursor=next_cursor,
+                watermark_at=iso_utc(window_end),
+                successful=successful,
+            )
+            self.repository.finish_sync_run(
+                run_id,
+                state="succeeded",
+                discovered_count=len(page.rows),
+                upserted_count=upserted,
+                cursor=next_cursor,
+            )
+            return {
+                "run_id": run_id,
+                "rows": len(page.rows),
+                "upserted": upserted,
+                "enqueued": enqueued,
+                "window_complete": successful,
+                "cursor": next_cursor,
+            }
+        except Exception as exc:
+            error = self._map_error(exc)
+            self.repository.finish_sync_run(
+                run_id,
+                state="retryable_error" if error.retryable else "terminal_error",
+                discovered_count=0,
+                upserted_count=0,
+                cursor=cursor,
+                error_code=error.code,
+            )
+            raise error from exc
+
     def reconcile_archive_tick(
         self,
         *,

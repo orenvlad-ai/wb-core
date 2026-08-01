@@ -33,6 +33,7 @@ WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 AUTOANSWERS_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
+AUTOANSWERS_BACKLOG_RECOVERY_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_READ_TIMEOUT_SECONDS = 3600.0
 FINANCE_CANONICAL_MUTATION_TIMEOUT_SECONDS = 7200.0
 FINANCE_CANONICAL_TRANSPORT_GRACE_SECONDS = 60.0
@@ -2406,6 +2407,208 @@ def run_autoanswers_budget_reconciliation_command(
     )
     _print_json({"target_id": target.target_id, "result": payload})
     return 0
+
+
+def _external_json_path(value: str, *, label: str) -> Path:
+    path = Path(str(value)).resolve()
+    if path == ROOT or ROOT in path.parents:
+        raise ValueError(f"{label} must stay outside the Git checkout")
+    return path
+
+
+def _load_autoanswers_t0_manifest(path: Path) -> dict[str, Any]:
+    from apps.wb_autoanswers_backlog_recovery import validate_manifest
+
+    if not path.is_file():
+        raise ValueError("Autoanswers T0 manifest file does not exist")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    manifest = payload.get("manifest") if isinstance(payload, Mapping) else None
+    if manifest is None:
+        manifest = payload
+    return validate_manifest(manifest)
+
+
+def _run_remote_autoanswers_backlog_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    expected_deployed_sha: str,
+    manifest_path: Path | None = None,
+    reviewed_plan_path: Path | None = None,
+    fingerprint: str = "",
+    approval_reference: str = "",
+    actor: str = "release-train",
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"autoanswers-backlog-recovery-{action}",
+    )
+    if action not in {"capture", "dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Autoanswers backlog recovery action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="autoanswers-backlog-recovery-apply",
+            dry_run=False,
+        )
+    deployed_sha = str(expected_deployed_sha).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
+        raise ValueError("Autoanswers backlog recovery requires --expected-deployed-sha")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Autoanswers backlog recovery requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("Autoanswers backlog recovery requires the hosted environment file")
+
+    manifest: dict[str, Any] | None = None
+    manifest_json: str | None = None
+    if action != "capture":
+        if manifest_path is None:
+            raise ValueError(f"Autoanswers backlog recovery {action} requires --manifest-file")
+        manifest = _load_autoanswers_t0_manifest(manifest_path)
+        manifest_json = json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    runner_args = [
+        "python3",
+        "apps/wb_autoanswers_backlog_recovery.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--expected-deployed-sha",
+        deployed_sha,
+    ]
+    if manifest is not None:
+        runner_args.append("--manifest-stdin")
+    if action == "apply":
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None:
+            raise ValueError("Autoanswers backlog recovery apply requires --fingerprint")
+        if reviewed_plan_path is None or not reviewed_plan_path.is_file():
+            raise ValueError(
+                "Autoanswers backlog recovery apply requires --reviewed-plan-file"
+            )
+        reviewed_payload = json.loads(reviewed_plan_path.read_text(encoding="utf-8"))
+        reviewed_plan = (
+            reviewed_payload.get("result")
+            if isinstance(reviewed_payload, Mapping)
+            and isinstance(reviewed_payload.get("result"), Mapping)
+            else reviewed_payload
+        )
+        if (
+            not isinstance(reviewed_plan, Mapping)
+            or reviewed_plan.get("coverage_confirmed") is not True
+            or str(reviewed_plan.get("plan_fingerprint") or "") != fingerprint
+            or str(reviewed_plan.get("manifest_sha256") or "")
+            != str(manifest["manifest_sha256"])
+            or str(
+                (reviewed_plan.get("deployed_runtime") or {}).get("runtime_sha")
+                if isinstance(reviewed_plan.get("deployed_runtime"), Mapping)
+                else ""
+            )
+            != deployed_sha
+        ):
+            raise ValueError("reviewed Autoanswers backlog plan does not match exact apply scope")
+        if not str(approval_reference).strip():
+            raise ValueError(
+                "Autoanswers backlog recovery apply requires --approval-reference"
+            )
+        runner_args.extend(
+            [
+                "--expected-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                str(approval_reference).strip(),
+                "--actor",
+                str(actor).strip() or "release-train",
+            ]
+        )
+    shell = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "/usr/bin/env WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
+        + " ".join(shlex.quote(item) for item in runner_args)
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        input=manifest_json,
+        cwd=ROOT,
+        timeout=AUTOANSWERS_BACKLOG_RECOVERY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    allowed_returncodes = {0, 2} if action == "readback" else {0}
+    if result.returncode not in allowed_returncodes:
+        raise RuntimeError(
+            f"Autoanswers backlog recovery {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Autoanswers backlog recovery returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Autoanswers backlog recovery returned a non-object payload")
+    if action == "dry-run" and payload.get("coverage_confirmed") is not True:
+        raise RuntimeError("Autoanswers backlog recovery dry-run is not apply-ready")
+    return payload
+
+
+def run_autoanswers_backlog_recovery_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.action)
+    manifest_path = (
+        _external_json_path(str(args.manifest_file), label="Autoanswers T0 manifest")
+        if str(args.manifest_file or "").strip()
+        else None
+    )
+    reviewed_plan_path = (
+        _external_json_path(
+            str(args.reviewed_plan_file),
+            label="Autoanswers reviewed recovery plan",
+        )
+        if str(args.reviewed_plan_file or "").strip()
+        else None
+    )
+    payload = _run_remote_autoanswers_backlog_recovery(
+        target,
+        action=action,
+        expected_deployed_sha=str(args.expected_deployed_sha),
+        manifest_path=manifest_path,
+        reviewed_plan_path=reviewed_plan_path,
+        fingerprint=str(args.fingerprint or ""),
+        approval_reference=str(args.approval_reference or ""),
+        actor=str(args.actor or "release-train"),
+    )
+    if str(args.output or "").strip():
+        output_path = _external_json_path(
+            str(args.output),
+            label="Autoanswers backlog recovery evidence",
+        )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"autoanswers-backlog-recovery-{action}",
+            "result": payload,
+        }
+    )
+    return 0 if payload.get("status") != "pending" else 2
 
 
 def _run_remote_autoanswers_prefilter_skip_recovery(
@@ -8294,6 +8497,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_budget_reconciliation.add_argument("--fingerprint", default="")
     autoanswers_budget_reconciliation.set_defaults(
         handler=run_autoanswers_budget_reconciliation_command
+    )
+
+    autoanswers_backlog_recovery = subparsers.add_parser(
+        "autoanswers-backlog-recovery",
+        help=(
+            "Capture, plan, explicitly apply or query-only reconcile an exact "
+            "Autoanswers unanswered T0 cohort."
+        ),
+    )
+    autoanswers_backlog_recovery.add_argument(
+        "action",
+        choices=("capture", "dry-run", "apply", "readback"),
+    )
+    autoanswers_backlog_recovery.add_argument(
+        "--expected-deployed-sha",
+        required=True,
+    )
+    autoanswers_backlog_recovery.add_argument("--manifest-file", default="")
+    autoanswers_backlog_recovery.add_argument("--reviewed-plan-file", default="")
+    autoanswers_backlog_recovery.add_argument("--fingerprint", default="")
+    autoanswers_backlog_recovery.add_argument("--approval-reference", default="")
+    autoanswers_backlog_recovery.add_argument("--actor", default="release-train")
+    autoanswers_backlog_recovery.add_argument("--output", default="")
+    autoanswers_backlog_recovery.set_defaults(
+        handler=run_autoanswers_backlog_recovery_command
     )
 
     autoanswers_prefilter_skip_recovery = subparsers.add_parser(

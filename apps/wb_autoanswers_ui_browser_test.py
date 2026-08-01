@@ -43,6 +43,24 @@ class _FakeContext:
         self.request = _FakeRequest(outcomes)
 
 
+def _route_unrelated_warehouse_options(route: object) -> None:
+    """Keep Autoanswers UI acceptance isolated from a live WB warehouse GET."""
+
+    route.fulfill(
+        status=200,
+        content_type="application/json; charset=utf-8",
+        body=json.dumps(
+            {
+                "snapshot_date": "2026-08-01",
+                "fetched_at": "2026-08-01T00:00:00Z",
+                "pagination_complete": True,
+                "raw_rows_digest": "sha256:fixture",
+                "options": [],
+            }
+        ),
+    )
+
+
 class AutoanswersUiBrowserTest(unittest.TestCase):
     def test_production_json_get_retries_only_transient_connection_reset(self) -> None:
         context = _FakeContext(
@@ -166,6 +184,10 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 context.route(
                     "**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
                     route_settings,
+                )
+                context.route(
+                    "**/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options",
+                    _route_unrelated_warehouse_options,
                 )
                 page = context.new_page()
                 page.goto(
@@ -355,6 +377,10 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                     "**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
                     route_settings,
                 )
+                context.route(
+                    "**/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options",
+                    _route_unrelated_warehouse_options,
+                )
                 page = context.new_page()
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
                 page.on(
@@ -515,6 +541,10 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 browser = playwright.chromium.launch(headless=True)
                 context = browser.new_context(viewport={"width": 1440, "height": 900})
                 context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base_url)
+                context.route(
+                    "**/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options",
+                    _route_unrelated_warehouse_options,
+                )
                 page = context.new_page()
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
                 page.on(
