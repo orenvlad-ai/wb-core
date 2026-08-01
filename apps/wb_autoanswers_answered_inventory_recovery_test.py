@@ -155,7 +155,8 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
         with patch(
             "apps.wb_autoanswers_answered_inventory_recovery._verified_backup",
             return_value=verified,
-        ), patch(
+            autospec=True,
+        ) as verified_backup, patch(
             "apps.wb_autoanswers_answered_inventory_recovery._lifecycle_pause_snapshot",
             return_value=paused,
         ):
@@ -181,6 +182,7 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
                 actor="test",
                 approval_reference="test-gate",
             )
+        verified_backup.assert_called_with(self.runtime_dir)
         self.assertEqual(applied["status"], "applied")
         self.assertFalse(applied["idempotent"])
         self.assertEqual(
@@ -243,6 +245,7 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
         with patch(
             "apps.wb_autoanswers_answered_inventory_recovery._verified_backup",
             return_value={"verified": True},
+            autospec=True,
         ), patch(
             "apps.wb_autoanswers_answered_inventory_recovery._lifecycle_pause_snapshot",
             return_value={"confirmed": False},
