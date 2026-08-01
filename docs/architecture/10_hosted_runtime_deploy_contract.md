@@ -584,6 +584,19 @@ Archived MCP compatibility publication gate:
   zero, exact answered T0 details, current local answer observations, zero
   local recovery tails, zero active reservations and zero unresolved provider
   cost;
+- stale local answered observations discovered by that terminal readback use
+  only hosted `autoanswers-answered-inventory-recovery
+  capture|dry-run|apply|readback`. The deployment-inert runner captures the
+  complete official answered inventory twice at bounded GET pace, binds stable
+  content/answer hashes and the deployed SHA, and selects exact local
+  missing/divergent observations in query-only dry-run. Apply requires the
+  reviewed external manifest/plan/fingerprint plus a fresh human approval
+  reference, resumes through the schema-v10 ledger, performs only canonical
+  feedback-observation upserts and preserves settings plus all
+  job/publication/WB-write/cost/reservation counts. It has no provider or WB
+  write capability. Query-only readback proves every target answer and exact
+  equality between local empty-answer IDs and the fresh official unanswered
+  inventory; new remote answers outside the manifest are not admitted;
 - the same deploy quiet window runs
   `supplier_financial_source_migration_v1`: dry-run validates every existing
   bank-statement file against its recorded SHA-256, apply hard-links identical
