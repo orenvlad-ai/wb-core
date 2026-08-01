@@ -288,6 +288,16 @@ extension of an earlier recovery cohort; it fails acceptance only when it is
 actually stuck beyond this SLO or enters a forbidden terminal/review/stale or
 ambiguous-write tail.
 
+The ordinary path also contains a bounded upgrade bridge for rows already
+persisted by the pre-fix race with a NULL eligibility epoch. An unchanged row
+is adopted only when its first observation is strictly newer than the current
+settings revision, owner intent is still automatic, no current sweep or exact
+processing job exists and the official row remains unresolved. A semantic
+content change observed while automatic intent is active is likewise a new
+eligible version. Rows observed before the current settings revision while
+owner OFF or manual remain outside automatic history and still require the
+normal capped transition.
+
 Current valid drafts are reused, in-flight jobs are not duplicated, stale results are quarantined, existing WB answers skip permanently, and published answers are never recreated. Downgrades immediately invalidate old-epoch pre-write claims without making preserved work terminal.
 
 The mandatory publication detail GET also persists every non-empty observed

@@ -121,6 +121,64 @@ class SyncTest(unittest.TestCase):
             1,
         )
 
+    def test_active_sync_adopts_pre_fix_null_epoch_observed_under_current_settings(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.clock.advance(1)
+        observed = self.repo.upsert_feedback(
+            feedback("pre-fix-null-epoch"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.assertIsNotNone(observed["auto_eligible_epoch"])
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_feedbacks
+                SET auto_eligible_epoch=NULL
+                WHERE feedback_id='pre-fix-null-epoch'
+                """
+            )
+
+        self.source.pages = [[feedback("pre-fix-null-epoch")]]
+        replay = self.service.steady_sync_tick(is_answered=False)
+
+        self.assertEqual(replay["upserted"], 0)
+        self.assertEqual(replay["enqueued"], 1)
+        detail = self.repo.get_feedback("pre-fix-null-epoch")
+        with self.repo.transaction() as conn:
+            eligible_epoch = conn.execute(
+                """
+                SELECT auto_eligible_epoch
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id='pre-fix-null-epoch'
+                """
+            ).fetchone()[0]
+        self.assertEqual(eligible_epoch, self.repo.settings().enable_epoch)
+        self.assertEqual(len(detail["ai_jobs"]), 1)
+
+    def test_active_sync_does_not_adopt_null_epoch_seen_before_current_settings(self) -> None:
+        self.source.pages = [[feedback("owner-off-null-epoch")]]
+        first = self.service.steady_sync_tick(is_answered=False)
+        self.assertEqual(first["enqueued"], 0)
+        self.clock.advance(1)
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.source.pages = [[feedback("owner-off-null-epoch")]]
+
+        replay = self.service.steady_sync_tick(is_answered=False)
+
+        self.assertEqual(replay["enqueued"], 0)
+        detail = self.repo.get_feedback("owner-off-null-epoch")
+        with self.repo.transaction() as conn:
+            eligible_epoch = conn.execute(
+                """
+                SELECT auto_eligible_epoch
+                FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE feedback_id='owner-off-null-epoch'
+                """
+            ).fetchone()[0]
+        self.assertIsNone(eligible_epoch)
+        self.assertEqual(detail["ai_jobs"], [])
+
     def test_manual_mode_steady_sync_never_creates_ai_jobs(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
         self.source.pages = [[feedback("manual-new")], [feedback("manual-new")]]

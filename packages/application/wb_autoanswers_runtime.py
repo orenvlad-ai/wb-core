@@ -2789,6 +2789,23 @@ class AutoanswersRepository:
             automatic_mode = str(settings["mode"]) != MODE_MANUAL
             persistent_automatic_intent = bool(settings["master_enabled"]) and automatic_mode
             effective_on = persistent_automatic_intent and not _force_off_from_env(self.env)
+            current_processing_exists = conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (processing_key(feedback_id, content_version),),
+            ).fetchone() is not None
+            first_seen = (
+                parse_timestamp(current["first_seen_at"])
+                if current is not None
+                else None
+            )
+            settings_updated_at = parse_timestamp(settings["updated_at"])
+            legacy_current_settings_observation = bool(
+                current is not None
+                and current["auto_eligible_epoch"] is None
+                and first_seen is not None
+                and settings_updated_at is not None
+                and first_seen > settings_updated_at
+            )
             eligible_epoch: int | None = None
             if (
                 is_new
@@ -2800,6 +2817,22 @@ class AutoanswersRepository:
                 eligible_epoch = int(settings["enable_epoch"])
             elif current is not None and current["auto_eligible_epoch"] is not None:
                 eligible_epoch = int(current["auto_eligible_epoch"])
+            elif (
+                run_kind == "steady"
+                and persistent_automatic_intent
+                and active_sweep is None
+                and not officially_resolved
+                and not current_processing_exists
+                and (content_changed or legacy_current_settings_observation)
+            ):
+                # Upgrade bridge for observations persisted by the pre-fix
+                # reader/worker race.  A legacy NULL is adopted only when its
+                # first observation is strictly newer than the current
+                # settings revision, or when this active observation creates
+                # a new semantic content version.  Rows observed while owner
+                # OFF/manual precede the later settings revision and keep the
+                # capped-history boundary.
+                eligible_epoch = int(settings["enable_epoch"])
 
             first_seen_at = iso_utc(now) if is_new else str(current["first_seen_at"])
             conn.execute(
@@ -2936,10 +2969,6 @@ class AutoanswersRepository:
                     },
                     at=now,
                 )
-            current_processing_exists = conn.execute(
-                "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
-                (processing_key(feedback_id, content_version),),
-            ).fetchone() is not None
         return {
             "feedback_id": feedback_id,
             "is_new": is_new,
