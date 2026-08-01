@@ -263,6 +263,26 @@ class FakeBuyerSource:
             "account_confirmed": self.session_status == "valid",
         }
 
+    def check_spp_capability(self) -> Mapping[str, Any]:
+        session = self.check_session()
+        if not bool(session.get("valid")):
+            return {
+                **session,
+                "capability": "authenticated_buyer_price",
+                "capability_status": "blocked_by_auth",
+                "capability_valid": False,
+                "price": {},
+            }
+        price = dict(self.fetch_authenticated_buyer_price(PRIMARY_NM))
+        return {
+            **session,
+            "capability": "authenticated_buyer_price",
+            "capability_status": "available" if price.get("status") == "ok" else str(price.get("status") or "unavailable"),
+            "capability_valid": price.get("status") == "ok",
+            "validation_nm_id": PRIMARY_NM,
+            "price": price,
+        }
+
     def ensure_session(self, *, auto_recover: bool = True) -> Mapping[str, Any]:
         self.ensure_calls += 1
         if auto_recover and self.auto_recovery_status == "valid":
@@ -1011,13 +1031,15 @@ def _run_http_smoke() -> None:
         runtime_dir = Path(tmp) / "runtime"
         runtime = _seed_runtime(runtime_dir)
         source = FakeSppPricesSource()
-        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source))
+        buyer_source = FakeBuyerSource(source)
+        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source), buyer_source=buyer_source)
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
             now_factory=lambda: NOW,
             activated_at_factory=lambda: "2026-07-07T07:00:00Z",
             spp_tester_block=block,
+            buyer_session_block=buyer_source,  # type: ignore[arg-type]
             buyer_session_recovery_controller=FakeBuyerRecoveryController(),  # type: ignore[arg-type]
         )
         config = RegistryUploadHttpEntrypointConfig(

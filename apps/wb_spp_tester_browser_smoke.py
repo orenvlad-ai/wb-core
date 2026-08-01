@@ -150,32 +150,31 @@ def main() -> None:
                 page.locator('[data-unified-tab-button="prices"]').click()
                 page.locator('[data-prices-subtab="spp-test"]').click()
                 page.wait_for_function(
-                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Ждём SMS/действие')",
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Не установлена')",
                     timeout=7000,
                 )
                 panel = page.locator('[data-prices-subpanel="spp-test"]')
-                if panel.locator("[data-wb-buyer-session-launcher]").count() != 0:
-                    raise AssertionError("buyer session UI must expose only check/install actions, not a permanent launcher button")
+                if panel.locator("[data-wb-buyer-session-install], [data-wb-buyer-session-launcher]").count() != 0:
+                    raise AssertionError("SPP monitoring UI must not expose buyer recovery or launcher controls")
                 page.locator("[data-spp-test-nm]").select_option(str(PRIMARY_NM))
                 if not page.locator("[data-spp-test-plan]").is_disabled():
                     raise AssertionError("invalid buyer session must disable manual plan before any write")
-                if "Установить сессию" not in (page.locator("[data-spp-test-plan]").get_attribute("title") or ""):
-                    raise AssertionError("invalid buyer session plan gate must name the install action")
+                if "Настройки → Источники и сессии" not in (page.locator("[data-spp-test-plan]").get_attribute("title") or ""):
+                    raise AssertionError("invalid buyer session plan gate must point to centralized settings")
                 page.locator("[data-spp-schedule-enabled]").check()
                 if not page.locator("[data-spp-schedule-save]").is_disabled():
                     raise AssertionError("invalid buyer session must disable enabling the schedule")
-                if "Установить сессию" not in (page.locator("[data-spp-schedule-save]").get_attribute("title") or ""):
-                    raise AssertionError("invalid buyer session schedule gate must name the install action")
-                first_run_id = str((server.buyer_recovery._payload("") or {}).get("run_id") or "")
+                if "Настройки → Источники и сессии" not in (page.locator("[data-spp-schedule-save]").get_attribute("title") or ""):
+                    raise AssertionError("invalid buyer session schedule gate must point to centralized settings")
                 page.reload(wait_until="domcontentloaded")
                 page.locator('[data-unified-tab-button="prices"]').click()
                 page.locator('[data-prices-subtab="spp-test"]').click()
                 page.wait_for_function(
-                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Ждём SMS/действие')",
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Не установлена')",
                     timeout=7000,
                 )
-                if server.buyer_recovery.start_calls != 1 or first_run_id != "buyer-recovery-test":
-                    raise AssertionError("reload must attach to the existing buyer recovery run without starting a duplicate")
+                if server.buyer_recovery.start_calls != 0:
+                    raise AssertionError("SPP page must never start buyer recovery on open or reload")
                 page.close()
 
             with _LocalSppUiServer(
@@ -189,11 +188,11 @@ def main() -> None:
                 page.locator('[data-unified-tab-button="prices"]').click()
                 page.locator('[data-prices-subtab="spp-test"]').click()
                 page.wait_for_function(
-                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Действует')",
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Истекла')",
                     timeout=7000,
                 )
-                if server.buyer_recovery.start_calls != 1 or server.buyer_recovery.launcher_calls != 0:
-                    raise AssertionError("saved-account auto recovery must complete once without creating/downloading a noVNC launcher")
+                if server.buyer_recovery.start_calls != 0 or server.buyer_recovery.launcher_calls != 0:
+                    raise AssertionError("SPP page must not auto-recover or download a noVNC launcher")
                 page.close()
         finally:
             browser.close()
@@ -204,6 +203,10 @@ def _prepare_spp_page(page, base_url: str) -> None:
     page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
     page.locator('[data-unified-tab-button="prices"]').click()
     page.locator('[data-prices-subtab="spp-test"]').click()
+    page.wait_for_function(
+        "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Маршрут доступен')",
+        timeout=7000,
+    )
     page.locator("[data-spp-test-nm]").select_option(str(PRIMARY_NM))
     page.wait_for_function(
         "() => document.querySelector('[data-spp-test-baseline]')?.innerText.includes('900')",
@@ -226,8 +229,7 @@ def _prepare_spp_page(page, base_url: str) -> None:
     panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
     for expected in (
         "Покупательская сессия",
-        "Проверить сессию",
-        "Установить сессию",
+        "Проверить",
         "Автопроверка",
         "Ежедневно",
         "Оренбург",
@@ -243,6 +245,8 @@ def _prepare_spp_page(page, base_url: str) -> None:
     ):
         if expected not in panel_text:
             raise AssertionError(f"SPP tester panel missing text {expected!r}: {panel_text}")
+    if page.locator("[data-wb-buyer-session-install], [data-wb-buyer-session-launcher]").count() != 0:
+        raise AssertionError("SPP tester must remain monitoring-only for buyer authentication")
     if "План и измерения" not in panel_text and "Результат:" not in panel_text:
         raise AssertionError(f"SPP tester panel missing current/last job heading: {panel_text}")
     if "Текущие цены" not in page.locator("[data-prices-panel]").inner_text():

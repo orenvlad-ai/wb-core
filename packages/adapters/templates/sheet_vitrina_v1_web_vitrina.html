@@ -1842,7 +1842,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       min-width: 0;
       width: 100%;
     }
@@ -1853,6 +1853,8 @@
       justify-content: flex-start;
       flex: 1 1 0;
       min-width: 0;
+      gap: 6px;
+      flex-wrap: wrap;
     }
 
     .table-heading-right {
@@ -1864,7 +1866,7 @@
       min-width: 0;
       max-width: 100%;
       margin-left: auto;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       text-align: right;
     }
 
@@ -5280,14 +5282,10 @@
           <div class="table-heading-row">
             <div class="table-heading-left">
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
-              <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>Учитывается политика инцидентов</span>
-              <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Полученный снимок</span>
+              <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>С инцидентами</span>
+              <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <span class="seller-top-session tone-neutral" data-seller-top-session title="сессия" aria-label="сессия">
-                <span class="seller-top-session-label" data-seller-top-session-label>сессия</span>
-                <span class="seller-top-session-separator" data-seller-top-session-separator aria-hidden="true">|</span>
-              </span>
               <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
                 <div class="toolbar-field toolbar-field-range">
@@ -5341,7 +5339,7 @@
               </div>
               <span class="table-load-action-cluster">
                 <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-controls="table-filters-rail">Фильтры</button>
-                <button class="button secondary metrics-settings-button" type="button" data-metrics-settings-open aria-label="Настроить метрики" aria-haspopup="dialog" aria-controls="metrics-presentation-dialog">Настроить метрики</button>
+                <button class="button secondary metrics-settings-button" type="button" data-metrics-settings-open aria-label="Настроить метрики" aria-haspopup="dialog" aria-controls="metrics-presentation-dialog">Метрики</button>
                 <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
                 <div class="top-progress" data-global-progress hidden>
                   <span class="top-progress-pulse" aria-hidden="true"></span>
@@ -6015,8 +6013,7 @@
               <span class="spp-test-field">Последняя проверка<strong>—</strong></span>
             </div>
             <div class="spp-test-actions">
-              <button class="button secondary" type="button" data-wb-buyer-session-check>Проверить сессию</button>
-              <button class="button primary" type="button" data-wb-buyer-session-install>Установить сессию</button>
+              <button class="button secondary" type="button" data-wb-buyer-session-check>Проверить</button>
               <span class="research-result-note" data-wb-buyer-session-note></span>
             </div>
             <p class="research-error" data-wb-buyer-session-error></p>
@@ -7853,15 +7850,9 @@
         runSourceGroupRefresh(groupButton.getAttribute("data-refresh-source-group") || "");
         return;
       }
-      const sessionCheckButton = event.target.closest("[data-session-check]");
-      if (sessionCheckButton) {
-        runSellerSessionCheck();
-        return;
-      }
-      const sessionInstallButton = event.target.closest("[data-session-install]");
-      if (sessionInstallButton) {
-        event.preventDefault();
-        runSellerRecoveryStart({openActivityPanel: true});
+      const groupCheckButton = event.target.closest("[data-check-source-group]");
+      if (groupCheckButton) {
+        loadPageComposition({includeSourceStatus: true});
         return;
       }
     });
@@ -8742,7 +8733,7 @@
       if (wbIncidentStatus) wbIncidentStatus.value = String(policy.policy_status || policy.status || (active ? "active" : "disabled"));
       if (wbIncidentPolicyBadge) {
         const badge = policy.badge || {};
-        wbIncidentPolicyBadge.textContent = String(badge.label || (active ? "Учитывается политика инцидентов" : "Политика инцидентов не активна"));
+        wbIncidentPolicyBadge.textContent = String(active ? "С инцидентами" : "Политика инцидентов не активна");
         wbIncidentPolicyBadge.className = "status-pill " + (active ? "tone-warning" : "tone-neutral");
         wbIncidentPolicyBadge.title = String(badge.detail || "");
       }
@@ -8776,9 +8767,7 @@
       if (!vitrinaIncidentPolicyBadge || !badge || typeof badge !== "object") return;
       const active = Boolean(badge.active);
       vitrinaIncidentPolicyBadge.hidden = !active;
-      vitrinaIncidentPolicyBadge.textContent = String(
-        badge.label || "Учитывается политика инцидентов"
-      );
+      vitrinaIncidentPolicyBadge.textContent = "С инцидентами";
       vitrinaIncidentPolicyBadge.title = String(badge.detail || "");
     }
 
@@ -8794,9 +8783,11 @@
         vitrinaIncidentQualityBadge.removeAttribute("title");
         return;
       }
-      vitrinaIncidentQualityBadge.textContent = String(
-        quality.label || "Полученный снимок"
+      const snapshotAt = formatTimestampDisplay(
+        quality.snapshot_at,
+        {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}
       );
+      vitrinaIncidentQualityBadge.textContent = "Снимок:" + (snapshotAt ? " " + snapshotAt : "");
       vitrinaIncidentQualityBadge.title = String(
         quality.detail || "Рассчитано по полученному снимку, полнота WB не подтверждена"
       );
@@ -12035,15 +12026,13 @@
         '<div class="activity-group-header">',
         '<span class="activity-group-main">',
         '<span>' + escapeHtml(group.label || groupId) + '</span>',
-        renderSellerSessionState(group),
-        renderSellerRecoveryState(group),
         '<span class="activity-group-updated">Последнее обновление: ' + escapeHtml(updatedText) + '</span>',
         renderGroupActionState(actionState),
         '</span>',
         '<span class="activity-group-actions">',
         renderGroupDateControl(group),
-        '<button class="button secondary activity-group-button" type="button" data-refresh-source-group="' + escapeHtml(groupId) + '">Обновить группу</button>',
-        renderSellerSessionControls(group),
+        '<button class="button secondary activity-group-button" type="button" data-check-source-group="' + escapeHtml(groupId) + '">Проверить</button>',
+        '<button class="button secondary activity-group-button" type="button" data-refresh-source-group="' + escapeHtml(groupId) + '">Повторить сбор</button>',
         '</span>',
         '</div>',
         '</td></tr>'
@@ -12087,45 +12076,6 @@
       return [
         '<span class="activity-group-run-state tone-' + escapeHtml(normalizeTone(actionState.tone || "neutral")) + '" data-group-action-state title="' + escapeHtml(titleParts.join(" · ")) + '">',
         escapeHtml(actionState.label),
-        '</span>'
-      ].join("");
-    }
-
-    function renderSellerSessionState(group) {
-      if (!group.session_controls) {
-        return "";
-      }
-      const status = state.sellerSession.statusLabel
-        ? ("Сессия: " + state.sellerSession.statusLabel + (state.sellerSession.checkedAt ? " · проверено " + formatTimestampDisplay(state.sellerSession.checkedAt) : ""))
-        : "Сессия: не проверялась";
-      const tone = normalizeTone(state.sellerSession.tone || "neutral");
-      return '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>';
-    }
-
-    function renderSellerRecoveryState(group) {
-      if (!group.session_controls) {
-        return "";
-      }
-      const recovery = state.sellerRecovery || {};
-      const label = recovery.statusLabel || "не запускалось";
-      const runId = String(recovery.runId || "").trim();
-      const marker = recovery.finalMarker ? (" · финал: " + recovery.finalMarker) : "";
-      const runText = runId ? (" · " + runId) : "";
-      const detail = [recovery.summary, recovery.reason].filter(Boolean).join(" · ");
-      const title = [runId ? ("run_id: " + runId) : "", detail].filter(Boolean).join(" · ");
-      return '<span class="seller-session-state tone-' + escapeHtml(normalizeTone(recovery.tone || "neutral")) + '" data-session-recovery-state title="' + escapeHtml(title) + '">' +
-        escapeHtml("Recovery: " + label + runText + marker) +
-        "</span>";
-    }
-
-    function renderSellerSessionControls(group) {
-      if (!group.session_controls) {
-        return "";
-      }
-      return [
-        '<span class="seller-session-controls" data-seller-session-controls>',
-        '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
-        '<button class="button secondary seller-session-button" type="button" data-session-install>Установить сессию</button>',
         '</span>'
       ].join("");
     }
@@ -20375,11 +20325,7 @@
         return;
       }
       if (event.target.closest("[data-wb-buyer-session-check]")) {
-        loadWbBuyerSession({force: true, autoRecover: true});
-        return;
-      }
-      if (event.target.closest("[data-wb-buyer-session-install]")) {
-        startWbBuyerRecovery({replace: false});
+        loadWbBuyerSession({force: true});
         return;
       }
       if (event.target.closest("[data-spp-test-start]")) {
@@ -20434,7 +20380,7 @@
       loadProcessMonitoring({silent: true});
       if ((!state.prices.sppTest.buyerSessionLoaded || (options && options.refreshBuyerSession))
           && !state.prices.sppTest.buyerSessionLoading) {
-        resumeWbBuyerSessionLifecycle();
+        loadWbBuyerSession({force: !!(options && options.refreshBuyerSession)});
       }
       loadSppTestStatus({silent: true});
       if (!state.prices.sppTest.scheduleLoaded) {
@@ -20496,11 +20442,11 @@
         }
         state.prices.sppTest.buyerSession = payload || null;
         state.prices.sppTest.buyerSessionLoaded = true;
-        state.prices.sppTest.buyerSessionNote = payload && payload.valid ? "Сессия подтверждена." : "Сессия недействительна. Запускаем безопасное автовосстановление…";
-        if (payload && payload.valid && state.prices.sppTest.selectedNmId) {
+        state.prices.sppTest.buyerSessionNote = payload && payload.capability_valid
+          ? "Buyer-сессия и маршрут авторизованной цены подтверждены."
+          : "Проверка не пройдена. Восстановите сессию в Настройки → Источники и сессии.";
+        if (payload && payload.capability_valid && state.prices.sppTest.selectedNmId) {
           loadSppBaseline(state.prices.sppTest.selectedNmId);
-        } else if (payload && !payload.valid && (!options || options.autoRecover !== false)) {
-          window.setTimeout(function() { startWbBuyerRecovery({replace: false}); }, 0);
         }
       } catch (error) {
         state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, status_label: "Ошибка проверки"};
@@ -20624,24 +20570,23 @@
       const status = String(session.status || "");
       const recoveryStatus = String(recovery.stage || recovery.status || "");
       const recoveryActive = !!recovery.running || recoveryStatus === "validating_session";
+      const capabilityValid = session.capability_valid === true;
       const label = state.prices.sppTest.buyerSessionLoading
-        ? "Проверяем сессию"
-        : (recoveryActive ? wbBuyerRecoveryStatusLabel(recovery) : (session.status_label || (status === "valid" ? "Действует" : "Не проверена")));
+        ? "Проверяем маршрут"
+        : (capabilityValid ? "Маршрут доступен" : (session.status_label || (status === "valid" ? "Сессия есть, маршрут не подтверждён" : "Не проверена")));
       if (wbBuyerSessionStateNode) {
         wbBuyerSessionStateNode.textContent = label;
-        wbBuyerSessionStateNode.className = "prices-badge " + (status === "valid" && !recoveryActive ? "success" : (recoveryActive ? "warning" : "error"));
+        wbBuyerSessionStateNode.className = "prices-badge " + (capabilityValid ? "success" : "error");
       }
       if (wbBuyerSessionMetaNode) {
         wbBuyerSessionMetaNode.innerHTML = [
-          sppTestFact("Статус", label),
-          sppTestFact("Последняя проверка", formatTimestampDisplay(session.checked_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
+          sppTestFact("Авторизация", session.valid === true ? "Подтверждена" : (session.status_label || session.status || "—")),
+          sppTestFact("Capability", String(session.capability_status || "не проверена")),
+          sppTestFact("Проверочный nmID", session.validation_nm_id || "—"),
+          sppTestFact("Последняя проверка", formatTimestampDisplay(session.capability_checked_at || session.checked_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
         ].join("");
       }
-      if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading || !!recovery.running;
-      if (wbBuyerSessionInstallButton) {
-        wbBuyerSessionInstallButton.disabled = state.prices.sppTest.buyerRecoveryStarting || !!recovery.running;
-        wbBuyerSessionInstallButton.textContent = state.prices.sppTest.buyerRecoveryStarting ? "Запуск…" : "Установить сессию";
-      }
+      if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading;
       if (wbBuyerSessionNoteNode) wbBuyerSessionNoteNode.textContent = state.prices.sppTest.buyerSessionNote || "";
       if (wbBuyerSessionErrorNode) wbBuyerSessionErrorNode.textContent = state.prices.sppTest.buyerSessionError || "";
     }
@@ -20716,7 +20661,7 @@
         if (baseline) {
           baseline._writeEnabled = !!payload.write_enabled;
           baseline._sppTestEnabled = !!payload.spp_test_enabled;
-          if (baseline.buyerSession) {
+          if (baseline.buyerSession && !state.prices.sppTest.buyerSessionLoaded) {
             state.prices.sppTest.buyerSession = baseline.buyerSession;
             state.prices.sppTest.buyerSessionLoaded = true;
           }
@@ -20886,7 +20831,7 @@
         sppScheduleSaveButton.disabled = state.prices.sppTest.scheduleSaving || (enablingSchedule && !sppBuyerSessionValid());
         sppScheduleSaveButton.textContent = state.prices.sppTest.scheduleSaving ? "Сохранение…" : "Сохранить расписание";
         sppScheduleSaveButton.title = enablingSchedule && !sppBuyerSessionValid()
-          ? "Покупательская сессия недействительна — Установить сессию"
+          ? "Восстановите Buyer-сессию в Настройки → Источники и сессии"
           : "";
       }
       if (sppScheduleMetaNode) {
@@ -21103,7 +21048,7 @@
         }
         state.prices.sppTest.plan = payload.plan || null;
         state.prices.sppTest.activeJob = payload.active_job || null;
-        if (payload.buyer_session) {
+        if (payload.buyer_session && !state.prices.sppTest.buyerSessionLoaded) {
           state.prices.sppTest.buyerSession = payload.buyer_session;
           state.prices.sppTest.buyerSessionLoaded = true;
         }
@@ -21201,7 +21146,7 @@
         return {canStart: false, reason: "выберите SKU/nmID"};
       }
       if (!sppBuyerSessionValid()) {
-        return {canStart: false, reason: "Покупательская сессия недействительна — Установить сессию"};
+        return {canStart: false, reason: "Восстановите Buyer-сессию в Настройки → Источники и сессии"};
       }
       if (!sppTestInputsAreValid()) {
         return {canStart: false, reason: "диапазон невалиден"};
@@ -21236,7 +21181,7 @@
 
     function sppBuyerSessionValid() {
       const session = state.prices.sppTest.buyerSession || {};
-      return session.status === "valid" && session.valid === true;
+      return session.status === "valid" && session.valid === true && session.capability_valid === true;
     }
 
     function renderSppTest() {
@@ -21284,7 +21229,7 @@
       if (sppTestPlanButton) {
         sppTestPlanButton.disabled = state.prices.sppTest.planLoading || !state.prices.sppTest.selectedNmId || !sppBuyerSessionValid();
         sppTestPlanButton.textContent = state.prices.sppTest.planLoading ? "План…" : "Построить план";
-        sppTestPlanButton.title = !sppBuyerSessionValid() ? "Покупательская сессия недействительна — Установить сессию" : "";
+        sppTestPlanButton.title = !sppBuyerSessionValid() ? "Восстановите Buyer-сессию в Настройки → Источники и сессии" : "";
       }
       if (sppTestStartButton) {
         const eligibility = sppTestStartEligibility();
@@ -22737,7 +22682,7 @@
         const policy=((state.skuManagement.meta||{}).warehouse_exclusion||{});
         const names=(policy.names||[]);
         skuManagementWarehouseExclusionSummaryNode.textContent=policy.active&&names.length
-          ? "Учитывается политика инцидентов · Не участвуют: "+names.join(", ")
+          ? "С инцидентами · Не участвуют: "+names.join(", ")
           : "Политика инцидентов не активна · operational остаток равен факту.";
       }
       renderSkuManagementColumns();

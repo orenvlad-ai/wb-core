@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import socket
 import sys
 from tempfile import TemporaryDirectory
@@ -431,17 +432,18 @@ def main() -> None:
                 "data-loading-table-head",
                 "data-loading-table-body",
                 "Загрузка данных",
-                "Обновить группу",
-                "data-seller-top-session",
-                "Проверить сессию",
-                "Установить сессию",
-                "seller_recovery_status_path",
+                "Повторить сбор",
+                "С инцидентами",
+                "Снимок:",
+                ">Метрики</button>",
                 "Лог",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
-            if "Восстановить сессию" in page_html or "data-session-recovery-start" in page_html or "data-session-launcher" in page_html:
-                raise AssertionError("web-vitrina page must not render legacy recovery/launcher session controls")
+            if re.search(r'<[^>]+data-seller-top-session(?:=|\s|>)', page_html):
+                raise AssertionError("web-vitrina page must not render a top Seller-session badge")
+            if re.search(r'<(?:button|a)[^>]+data-session-(?:check|install|recovery-start|launcher)', page_html):
+                raise AssertionError("web-vitrina page must not render session/recovery controls")
             if "data-retry-button" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed refresh button")
             if "Фильтры и настройки" in page_html or "Search/select/sort и выбор видимых столбцов" in page_html or "Сбросить фильтры" in page_html:

@@ -341,6 +341,7 @@ def _check_runtime_merge_and_background_job() -> None:
             raise AssertionError(
                 "UI row must expose saved amount together with last-attempt error"
             )
+        block.timestamp_factory = lambda: "2026-06-29T00:00:00Z"
         retry_ids = {
             str(item.get("supply_id") or "")
             for item in block._select_transit_cost_enrichment_candidates(
@@ -374,6 +375,66 @@ def _check_runtime_merge_and_background_job() -> None:
         ) or {}
         if confirmed_zero.get("status") != "success" or confirmed_zero.get("amount") != 0.0:
             raise AssertionError("confirmed zero must remain distinct from missing/error")
+        autonomous = block.collect_all_due_transit_costs(batch_limit=10, max_batches=3)
+        coverage = autonomous.get("coverage") or {}
+        if (
+            autonomous.get("status") != "awaiting_recalculation"
+            or coverage.get("eligible") != 2
+            or coverage.get("confirmed") != 1
+            or coverage.get("pending") != 1
+            or coverage.get("waiting_backoff") != 1
+            or coverage.get("auth_status") != "valid"
+            or coverage.get("route_status") != "available"
+            or coverage.get("fresh_confirmed") != 1
+            or coverage.get("freshness_status") != "stale"
+            or coverage.get("overall_status") != "degraded"
+        ):
+            raise AssertionError(
+                "autonomous global collection must expose layered coverage truth: "
+                + json.dumps(autonomous, ensure_ascii=False, sort_keys=True)
+            )
+        if set(block.transit_cost_source.calls[-1]) != {"40422317", "40422318"}:
+            raise AssertionError(
+                "autonomous collection must use the global eligible scope, not the visible list"
+            )
+        runtime.create_wb_supply_transit_cost_enrichment_run(
+            run_id="failed-transit-run",
+            status="running",
+            phase="browser_network_json",
+            started_at="2026-06-29T01:00:00Z",
+            candidate_count=1,
+        )
+        runtime.update_wb_supply_transit_cost_enrichment_run(
+            "failed-transit-run",
+            status="failed",
+            phase="collector_failed",
+            updated_at="2026-06-29T01:00:01Z",
+            completed_at="2026-06-29T01:00:01Z",
+            last_error="collector failed after an older success",
+        )
+        failed_coverage = block.transit_cost_coverage()
+        if failed_coverage.get("collector_status") != "error":
+            raise AssertionError(
+                "an older successful fact must not hide the latest failed collector run"
+            )
+        runtime.create_wb_supply_transit_cost_enrichment_run(
+            run_id="orphaned-transit-run",
+            status="running",
+            phase="browser_network_json",
+            started_at="2026-06-29T00:00:00Z",
+            candidate_count=1,
+        )
+        block.timestamp_factory = lambda: "2026-06-29T03:00:01Z"
+        replacement = block.collect_transit_costs({"limit": 10, "force": False})
+        orphan = runtime.load_wb_supply_transit_cost_enrichment_run("orphaned-transit-run") or {}
+        if (
+            orphan.get("status") != "failed"
+            or orphan.get("phase") != "orphan_reconciled"
+            or replacement.get("status") == "single_flight_joined"
+        ):
+            raise AssertionError(
+                "stale process-owned runs must be reconciled before the next autonomous batch"
+            )
 
 
 def _wait_run(block: WbSuppliesBlock, run_id: str) -> dict[str, Any]:

@@ -214,8 +214,8 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 - uploadID/status polling after commit;
 - row-level WB error overlay after status/detail readback.
 
-`Проверка СПП` renders a minimal operator surface:
-- automatic buyer-session check/recovery lifecycle with reload-safe `run_id` attachment and human-only noVNC escalation;
+`Проверка СПП` renders a minimal monitoring/testing surface:
+- an exact authenticated buyer-price capability check; invalid auth/capability points to centralized `Настройки → Источники и сессии` and never starts recovery or exposes noVNC/launcher controls locally;
 - `Автопроверка` above manual inputs with one daily schedule, explicit future-live-change consent, `Asia/Yekaterinburg — Оренбург`, next run and last automatic status;
 - SKU/nmID selector sourced from current price rows / active registry;
 - baseline card with seller price, discount, discounted price, public buyer price, current `SPP-прокси`, quarantine and `editableSizePrice`;

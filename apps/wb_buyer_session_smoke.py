@@ -38,6 +38,7 @@ from packages.adapters.wb_buyer_session import (  # noqa: E402
     extract_authenticated_price_from_network_payload,
 )
 from packages.application.wb_spp_tester import _stable_buyer_pair  # noqa: E402
+from packages.application.wb_buyer_session import WbBuyerSessionBlock  # noqa: E402
 
 
 NM_ID = 210183919
@@ -119,6 +120,19 @@ def _run_profile_adapter_smoke() -> None:
         mismatch = adapter.check_session()
         if mismatch.get("status") != "wrong_account":
             raise AssertionError(f"a real stable account-id mismatch must be blocked: {mismatch}")
+        session_result["identity_material"] = {"user_id": "stable-account-id"}
+        capability = WbBuyerSessionBlock(adapter=adapter).check_spp_capability()
+        if (
+            capability.get("status") != "valid"
+            or capability.get("capability") != "authenticated_buyer_price"
+            or capability.get("capability_status") != "available"
+            or capability.get("capability_valid") is not True
+            or capability.get("validation_nm_id") != NM_ID
+        ):
+            raise AssertionError(
+                "buyer health must validate the exact authenticated-price capability: "
+                + json.dumps(capability, ensure_ascii=False, sort_keys=True)
+            )
 
         if not calls or any(path != config.persistent_profile_dir for path, _nm_id, _headless in calls):
             raise AssertionError(f"all session/price operations must use one user_data_dir: {calls}")

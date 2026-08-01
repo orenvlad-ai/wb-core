@@ -43,6 +43,10 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_operation_previews"
   - "sheet_vitrina_v1_ff_stock_operations"
   - "sheet_vitrina_v1_ff_stock_operation_lines"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs"
+  - "sheet_vitrina_v1_source_health_status"
 related_endpoints: []
 related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
@@ -137,6 +141,11 @@ update_note: "Обновлён под current temporal closure seam, plan-report
     - durable operation headers in `sheet_vitrina_v1_ff_stock_operations` with operation/source type, idempotency `source_key`, source object id/label, actor, warnings/diagnostics, SKU/quantity totals and optional source Excel metadata/blob;
     - signed quantity lines in `sheet_vitrina_v1_ff_stock_operation_lines` keyed by operation and `nm_id`;
     - current ФФ balance is read as grouped `SUM(quantity_delta)` over durable lines and is not persisted as an editable snapshot.
+  - server-owned WB supply transit-cost state:
+    - canonical last successful value and current recalculation state in `sheet_vitrina_v1_wb_supply_transit_cost_enrichment`;
+    - append-only attempt accounting and classified errors in `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_attempts` without destroying the last successful value;
+    - single-flight batch-run lifecycle in `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs`, including bounded totals and latest run error;
+    - sanitized cached source/capability observations in `sheet_vitrina_v1_source_health_status`; this cache accelerates the Settings monitoring surface but does not replace Seller Portal or WB Buyer session storage and is not independent authentication truth.
   - trade document files:
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
     - supplier shipment invoice documents may reference existing `<runtime_dir>/supplier_invoices/files/...` paths to preserve backward-compatible invoice downloads;

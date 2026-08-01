@@ -40,6 +40,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/check"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
   - "POST /v1/sheet-vitrina-v1/wb-cost/recalculate"
   - "GET /v1/sheet-vitrina-v1/wb-cost/status"
@@ -83,7 +84,7 @@ related_docs:
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Ordinary sync now fetches bounded recent historical status slices `5/6` in addition to active `1..4`, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, gives fresh list/detail/goods evidence priority over stale cached detail on overlapping status/accepted quantity fields, and returns diagnostics such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`. Overlay selector options include only calculation-eligible statuses 3/4/6; statuses 1/2/5 and `Допринято` stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. Sync/backfill/detail enrichment ensures the ФФ stock ledger WB auto-writeoff checkpoint before debiting, captures baseline-known cache/source/supply keys, then creates idempotent internal writeoffs only for post-checkpoint statuses 3/4/5/6 from goods composition, skipping statuses 1/2 and `Допринято` (`virtual_type_id=5` or `type_label=Допринято`). A separate non-UI v2 runner is hard-bounded to WB supply `40561872` and may bypass only the exact ordinary blocker pair `wb_supply_before_auto_writeoff_checkpoint` + `wb_supply_before_ledger_activation` after a fingerprinted dry-run, integrity-checked backup and atomic cache/goods/status/checkpoint/activation/nomenclature/balance/total recheck; ordinary sync/backfill/detail/pre-activation semantics and checkpoint/activation rows remain unchanged. The table names effective cost as `Транзит`, adds active approved-only `Услуги ФФ`, and shows `₽/шт` for both using accepted/known/planned quantity denominators. `Услуги ФФ` includes allocated STORAGE amounts and shows `в т.ч. хранение` when storage exists. Deleted, failed, unmatched and duplicate Fulfillment uploads do not affect the overlay. Fulfillment upload data is server-owned operator payment-validation truth only, not official WB evidence, not final product cost, not 1C cost truth and not ЕБД metric truth. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Official WB supplies sync remains read-only and independent from Seller Portal success, but every ordinary official sync and every hourly/manual warehouse sync now runs a bounded process-owned global transit-cost collector. Candidate scope is all due eligible supplies, never the visible UI page. Durable canonical amount + append-only attempt evidence preserve last success across errors; stale active runs reconcile, identical work is single-flight, failures use taxonomy/backoff, successful amounts enqueue canonical targeted recalculation. List/status UI exposes separate Seller auth, exact supply-cost route, collector, freshness and coverage truth; local `Проверить` is route-specific and `Повторить сбор` is global. Login/recovery live only in central settings."
 ---
 
 > Functional boundary: bounded reconciliation `31 500 / 31 477` ниже сохраняется как immutable incident evidence. Она не задаёт текущий `FF → WB`: active quantity после functional cutover всегда `max(fresh packed − fresh accepted, 0)`, final difference идёт только в pooled positive discrepancy, а WB quantity приходит только из complete official stocks snapshot.
@@ -101,7 +102,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - lead: `Read-only список поставок WB API / FBW Supplies`.
 - The UI is read-only. It does not create, update, delete or draft WB supplies.
 - Official WB API remains canonical for supply list/status/route/quantity evidence.
-- Seller Portal is used only by the post-sync transit-cost enrichment job and only as a supplemental read-only source for missing transit cost. It is not part of the backend official sync route, does not run on page open, and does not use FBS APIs.
+- Seller Portal remains a supplemental read-only source and never changes whether official WB sync succeeded. After a successful ordinary official sync and inside hourly/manual warehouse sync, the backend runs the process-owned autonomous global collector; it does not run merely because the page opened and it does not use FBS APIs.
 - Fulfillment uploads are not official WB evidence. They are operator-uploaded runtime truth for service expenses and PDF payment validation only; failed uploads, unmatched rows, duplicate rows and deleted uploads must not affect the WB supplies list overlay.
 - Management proxy WB cost layers are not official WB evidence and not strict accounting FIFO. They classify supply transit as `direct_zero_confirmed`, `transit_confirmed`, `transit_missing` or `unknown_route`, then combine SKU-level ФФ cost, WB transit, accepted Fulfillment services and allocated storage into `our_wb_unit_cost_rub`. Direct supplies with no transit marker and official/detail zero acceptance cost are confirmed zero transit, not missing transit; this explicitly covers supply patterns like `40431461`.
 - ФФ stock ledger writeoffs are internal runtime movements only. They do not mutate WB, do not promote WB supplies cache into ЕБД metric truth, and use goods composition quantity because ФФ sent the planned composition regardless of later WB accepted quantity.
@@ -153,7 +154,7 @@ Tables:
 - `sheet_vitrina_v1_wb_supplies_sync_runs`: per-run progress for `incremental_refresh`, `full_backfill` and explicit missing-critical enrichment requests: status/phase, offset/limit, pages/raw/upserted/new/changed/unchanged/enriched/failed counters, `may_have_more`, last error and compact sanitized logs.
 - `sheet_vitrina_v1_wb_supplies_warehouses`: cached warehouse dictionary/options.
 - `sheet_vitrina_v1_wb_supply_transit_cost_enrichment`: supplemental Seller Portal facts keyed by `supply_id`, with `amount`, `currency`, `amount_label`, `is_transit`, `source=seller_portal_browser`, `evidence_type=network_json`, `confidence`, `fetched_at`, `status`, sanitized `error`, sanitized `source_endpoint_path`, `created_at` and `updated_at`.
-- `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs`: background run state for explicit transit-cost enrichment jobs, with counters for processed/success/not-found/failed/session-expired rows, sanitized last error, compact logs and optional lock status.
+- `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs`: durable process/job state for autonomous and explicit runs, including auth-required, route-unavailable, collector-unavailable and lock-busy counters. Append-only attempts carry the exact finer-grained error taxonomy; stale `queued/running` rows older than two hours reconcile as `orphan_reconciled`, and a current active row is joined as single-flight instead of starting duplicate work.
 - `sheet_vitrina_v1_wb_supply_cost_layers`: management proxy cost-by-supply/SKU rows keyed by `wb_supply_id + nm_id + version`, current-row partial unique index, explicit `transit_cost_status`, source ФФ layer ids, Fulfillment upload id, per-unit transit/services/storage components, `our_wb_unit_cost_rub`, `source_status`, component JSON, `inputs_hash` and supersession fields. This table is recomputable/idempotent and does not mutate WB official evidence.
 - `sheet_vitrina_v1_fulfillment_service_uploads` and `sheet_vitrina_v1_fulfillment_service_lines`: server-owned Fulfillment upload/line persistence. The WB supplies block reads only fully valid uploads through the approved overlay provider and never treats them as WB official raw evidence.
 - `sheet_vitrina_v1_ff_stock_operations` and `sheet_vitrina_v1_ff_stock_operation_lines`: internal ФФ stock ledger writeoffs are created idempotently with source key `wb_supply_debit:<cache_key or supply_id>` for eligible statuses `3/4/5/6`; statuses `1/2` and `Допринято` are skipped.
@@ -201,7 +202,7 @@ Response shape:
 - `rows`.
 - `sync_state`;
 - `active_run` when a backfill/latest run is still queued/running.
-- `transit_cost_enrichment` meta with source/evidence boundary and active run status.
+- `transit_cost_enrichment` meta includes source/evidence boundary, latest/active run and global `coverage`: eligible/confirmed/pending/retry_due/waiting_backoff/errors, taxonomy, last success/attempt/error, plus separate `auth_status`, exact `route_status`, `collector_status`, `freshness_status` and strict `overall_status`.
 
 Rows expose Seller Portal enrichment as supplemental fields:
 - `seller_portal_transit_cost`;
@@ -295,25 +296,32 @@ Starts a separate read-only background Seller Portal browser/network-json enrich
 Body:
 - optional `supply_ids`;
 - optional `list_params`;
-- optional `limit`, default `50`, max `100`;
+- optional `limit`, default `50`, max `250`;
 - optional `force`, default `false`.
 
 Candidate rules:
 - cached WB supply rows only;
 - transit rows only: `has_transit_cost_marker=true` or transit warehouse evidence is present;
 - official `cost_total` must be unknown;
-- existing fresh/success Seller Portal enrichment is skipped unless `force=true`; MVP freshness TTL is 24 hours from `fetched_at`/`updated_at`;
-- explicit ids/list params prioritize the current visible/filter scope; otherwise newest missing/stale transit rows are selected server-side.
+- existing fresh/success Seller Portal enrichment is skipped unless `force=true`; MVP freshness TTL is 24 hours from the latest successful attempt (or canonical `fetched_at` when a later attempt failed);
+- a same-value successful revalidation remains a T0 canonical fact (no artificial business revision) but its successful attempt time refreshes collector freshness and prevents immediate duplicate collection;
+- without explicit `supply_ids` or diagnostic `list_params`, candidate selection is global over every eligible cached supply and ignores visible filters, pagination and offsets. Autonomous sync always uses this global mode. A 24-hour fresh success is skipped; failures use status-specific backoff (`lock_busy`, auth/session, route/collector, response/search/payload and not-found) unless a route-specific manual check uses `force=true`.
 
 The worker uses the shared Seller Portal storage-state path/lock contract, navigates to `/supplies-management/all-supplies`, searches by supply id, waits for `listSupplies` and `supply/cost` network JSON, joins by `data.{supplyID}`, and extracts `costInSupplierCurrency.amountWithVat` before falling back to `cost`.
+
+Hosted `warehouse-functional hourly-sync|manual-sync` calls the synchronous process-owned collector after official supply refresh and before downstream cost materialization. It runs at most four global batches of 250 candidates per invocation, so shutdown cannot orphan a daemon-only worker; unfinished/backed-off items remain durable for the next scheduled run. An ordinary protected WB-supplies sync invokes the same global collector. `sync-apply` does not add a pre-recheck mutation because its reviewed-plan optimistic boundary must remain exact.
 
 `apps/ff_reservations_transit_cost_recovery.py` remains a legacy read-only diagnostic; its apply entrypoint is disabled because it copied the monolithic database and incorrectly gated physical movement on positive transit evidence. The reviewed production path is `apps/warehouse_cost_unified_recovery.py`: its query-only dry-run pins the explicit supplies and exact compositions, projects physical availability independently from cost, and its exact-fingerprint apply performs idempotent physical debits plus one targeted cost publication under the shared lock. Missing transit stays an explicit cost-freshness state and never a physical reservation reason.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status?run_id=...`
 
-Returns run status/counters, sanitized last error and current Seller Portal automation lock/session status when available. Session expiration is a controlled status, not a crash.
+Returns latest/requested run status, sanitized lock/error evidence and the global layered coverage contract. Session expiration is a controlled classified status, not a crash.
 
-The operator UI may orchestrate this route after a successful `POST .../wb-supplies/sync`, but the routes remain separate. `POST .../wb-supplies/sync` must not become browser/session dependent.
+`POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/check`
+
+Forces one exact `supply/cost` route candidate and returns the ordinary run contract. It is read-only, route-specific, and not a generic Seller login/session probe. The UI polls the status route only while this bounded check is active.
+
+`POST .../wb-supplies/sync` keeps official WB success independent from the supplemental result but now includes `transit_cost_collection` after a successful official sync. Collector errors lower transit health and remain visible without converting the official sync itself to failure.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 
@@ -401,7 +409,7 @@ Cost fields:
 - for transit rows with `acceptanceCost = 0` and no explicit total/transit cost, `cost_total = null`, `cost_display = —`, and `has_transit_cost_marker = true`;
 - the UI must not render `0 ₽` for unknown transit cost.
 - for non-transit accepted rows where official detail has `paidAcceptanceCoefficient = 0` and no explicit `acceptanceCost`, `cost_total = 0` with evidence `paidAcceptanceCoefficient.free_accepted_non_transit`; the UI renders `0 ₽` and coefficient `Бесплатно`.
-- Seller Portal transit-cost enrichment adds supplemental `seller_portal_transit_cost*` and `effective_cost*` fields only after an explicit enrichment run; official `cost_total` stays unchanged.
+- Seller Portal transit-cost collection adds supplemental `seller_portal_transit_cost*` and `effective_cost*` fields automatically after due sync collection or an explicit retry/check; official `cost_total` stays unchanged. A failed later attempt preserves the canonical last-success amount and stores its own status/error/attempt time.
 - `effective_cost_total` is official `cost_total` first, then successful Seller Portal `supply/cost` amount for missing transit cost, then `null`.
 - `effective_cost_source` is `official_wb_api`, `seller_portal_browser` or `unknown`; UI/debug text must keep this provenance available.
 
@@ -495,12 +503,12 @@ First open behavior:
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
 
 Buttons:
-- `Обновить поставки` = one primary operator action. It first runs incremental latest-window official WB API refresh including active `1..4` and bounded recent historical `5/6` status slices; after that official stage succeeds, the UI reloads the list/overlay options and calls the separate Seller Portal transit-cost enrichment route for missing transit costs in the current list scope. It does not scan all offsets and does not re-enrich historical rows outside the bounded recent `5/6` slice unless explicitly requested.
-- the final UI message separates `Поставки WB обновлены` from `Стоимость транзита: success/partial/session_expired/lock_busy/...`;
+- `Обновить поставки` runs incremental official WB API refresh and the backend then collects all due eligible transit costs globally before returning. The list filters remain presentation-only. `Повторить сбор` invokes the same global eligible scope; `Проверить` forces one exact supply-cost route candidate and is not a generic login probe.
+- the UI reports official sync separately from transit collection status and renders Seller auth, exact supply-cost route, collector, freshness, coverage, last success/attempt and the latest classified error. Green requires every mandatory layer; auth valid alone is never transit success.
 - official sync failure stops the flow and does not launch Seller Portal enrichment;
 - Seller Portal `session_expired`, automation lock busy, partial failure or no-candidate states are rendered as transit-cost stage messages and do not turn the completed official sync into a failed refresh;
 - page open / cache read does not trigger transit-cost enrichment;
-- Seller Portal session recovery remains the existing shared `Действия и состояния` / `Проверка и восстановление Seller-сессии` contour, using canonical `/opt/wb-web-bot/storage_state.json` and the shared `seller_portal_automation.lock.json`.
+- Seller Portal recovery UI lives only in `Настройки → Источники и сессии`, using canonical `/opt/wb-web-bot/storage_state.json` and the shared `seller_portal_automation.lock.json`; the supplies page links there and does not duplicate relogin or launcher controls.
 - `Загрузить всю историю` = one-time full backfill job; UI polls `sync-status` and shows offset/pages/fetched/upserted/enriched counters and last error.
 - A separate transit-cost refresh button is not part of the primary UI. The backend route remains available for diagnostics and smokes.
 

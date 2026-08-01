@@ -4727,6 +4727,10 @@ class RegistryUploadDbBackedRuntime:
             "not_found_count",
             "failed_count",
             "session_expired_count",
+            "auth_required_count",
+            "route_unavailable_count",
+            "collector_unavailable_count",
+            "lock_busy_count",
             "last_error",
             "lock_status_json",
             "logs_json",
@@ -4792,6 +4796,72 @@ class RegistryUploadDbBackedRuntime:
                 """
             ).fetchone()
             return _wb_supply_transit_cost_run_to_dict(row) if row else None
+
+    def load_latest_wb_supply_transit_cost_enrichment_run(self) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs
+                ORDER BY started_at DESC, updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return _wb_supply_transit_cost_run_to_dict(row) if row else None
+
+    def save_source_health_status(
+        self,
+        source_key: str,
+        *,
+        payload: Mapping[str, Any],
+        checked_at: str,
+    ) -> dict[str, Any]:
+        normalized_key = str(source_key or "").strip()
+        if not normalized_key:
+            raise ValueError("source_key is required")
+        _validate_timestamp(checked_at, field_name="checked_at")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_source_health_status(
+                    source_key,payload_json,checked_at
+                ) VALUES(?,?,?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    checked_at=excluded.checked_at
+                """,
+                (
+                    normalized_key,
+                    json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
+                    checked_at,
+                ),
+            )
+            conn.commit()
+        return self.load_source_health_status(normalized_key) or {}
+
+    def load_source_health_status(self, source_key: str) -> dict[str, Any] | None:
+        normalized_key = str(source_key or "").strip()
+        if not normalized_key:
+            return None
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT payload_json,checked_at
+                FROM sheet_vitrina_v1_source_health_status
+                WHERE source_key=?
+                """,
+                (normalized_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = _loads_json_object(row["payload_json"])
+            payload.setdefault("source_key", normalized_key)
+            payload["checked_at"] = str(row["checked_at"] or "")
+            return payload
 
     def save_supplier_shipment_upload(
         self,
@@ -9386,6 +9456,10 @@ def _wb_supply_transit_cost_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "not_found_count": row["not_found_count"] or 0,
         "failed_count": row["failed_count"] or 0,
         "session_expired_count": row["session_expired_count"] or 0,
+        "auth_required_count": row["auth_required_count"] or 0,
+        "route_unavailable_count": row["route_unavailable_count"] or 0,
+        "collector_unavailable_count": row["collector_unavailable_count"] or 0,
+        "lock_busy_count": row["lock_busy_count"] or 0,
         "last_error": row["last_error"] or "",
         "lock_status": _loads_json_object(row["lock_status_json"]),
         "logs": _loads_json_list(row["logs_json"]),
@@ -11076,9 +11150,19 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             not_found_count INTEGER DEFAULT 0,
             failed_count INTEGER DEFAULT 0,
             session_expired_count INTEGER DEFAULT 0,
+            auth_required_count INTEGER DEFAULT 0,
+            route_unavailable_count INTEGER DEFAULT 0,
+            collector_unavailable_count INTEGER DEFAULT 0,
+            lock_busy_count INTEGER DEFAULT 0,
             last_error TEXT,
             lock_status_json TEXT,
             logs_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_source_health_status (
+            source_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            checked_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
@@ -11773,6 +11857,18 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             table_name="sheet_vitrina_v1_wb_supplies",
             column_name=column_name,
             column_sql=column_sql,
+        )
+    for column_name in (
+        "auth_required_count",
+        "route_unavailable_count",
+        "collector_unavailable_count",
+        "lock_busy_count",
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs",
+            column_name=column_name,
+            column_sql="INTEGER NOT NULL DEFAULT 0",
         )
     for column_name, column_sql in (
         ("backfill_complete", "INTEGER DEFAULT 0"),

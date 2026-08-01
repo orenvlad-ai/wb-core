@@ -16,11 +16,14 @@ related_modules:
   - "packages/adapters/spp_proxy_block.py"
   - "packages/application/spp_proxy_block.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
-related_tables: []
+related_tables:
+  - "sheet_vitrina_v1_source_health_status"
 related_endpoints:
   - "GET https://www.wildberries.ru/catalog/{nmId}/detail.aspx [anonymous current-only]"
   - "GET https://card.wb.ru/cards/v4/detail?...&nm={nmId} [anonymous current-only fallback]"
   - "public WB card API fallback [anonymous current-only]"
+  - "GET /v1/sheet-vitrina-v1/settings/sources-sessions"
+  - "POST /v1/sheet-vitrina-v1/settings/sources-sessions/spp-proxy/check"
 related_runners:
   - "apps/spp_proxy_source_smoke.py"
   - "apps/sheet_vitrina_v1_spp_proxy_integration_smoke.py"
@@ -29,7 +32,7 @@ related_docs:
   - "05_MODULE__SPP_BLOCK.md"
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Добавлен отдельный current-only public-card source для `SPP-прокси`; текущий `spp` сохраняет прежний смысл."
+update_note: "`SPP-прокси` remains an anonymous current-only public-card source. Central settings expose its cached availability/freshness and an exact anonymous route check without session/login/recovery UI; authenticated SPP capability stays a separate WB Buyer contour."
 ---
 
 # 1. Идентификатор и статус
@@ -117,3 +120,7 @@ update_note: "Добавлен отдельный current-only public-card sourc
 Module 42 `Цены -> Проверка СПП` additionally owns a dedicated persistent authenticated Wildberries buyer session and shows its personalized buyer price as the primary test fact. That session, its account fingerprint and its price result are not inputs to this global module. This module remains anonymous, current-only and independently refreshable; module 42 keeps its anonymous observation only as an explicit control and never uses it as fallback for a missing authenticated result.
 
 When module 42 needs that control under the authenticated buyer destination, it creates a separate per-read anonymous adapter for the validated `dest`. This does not change `WB_PUBLIC_CARD_DEST`, the long-lived module 35 adapter or global `spp_proxy` semantics.
+
+# 9. Central source health
+
+`Настройки → Источники и сессии` renders `WB Card / SPP Proxy` as a source with `authorization_required=false`. The initial read is cached server-side. A live read-only probe runs only after the 180-second TTL or an explicit `Проверить`, is deduplicated in the browser, stores only sanitized availability/coverage evidence in `sheet_vitrina_v1_source_health_status`, and never exposes an install, relogin, launcher or noVNC action.

@@ -39,6 +39,7 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
+from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
@@ -2168,7 +2169,39 @@ class RegistryUploadHttpEntrypoint:
         return self.spp_tester_block.save_schedule(payload, actor=actor)
 
     def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
-        return self.buyer_session_block.check_session()
+        payload = self.buyer_session_block.check_spp_capability()
+        checked_at = str(
+            (payload.get("price") or {}).get("measured_at")
+            if isinstance(payload.get("price"), Mapping)
+            else ""
+        ) or str(payload.get("checked_at") or "") or self.activated_at_factory()
+        try:
+            checked_at = (
+                _timestamp_as_utc(checked_at)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            checked_at = self.activated_at_factory()
+        cached = self.runtime.save_source_health_status(
+            "wb_buyer_spp_capability",
+            payload={
+                "status": str(payload.get("capability_status") or "unknown"),
+                "valid": bool(payload.get("capability_valid")),
+                "session_status": str(payload.get("status") or "unknown"),
+                "session_status_label": str(payload.get("status_label") or ""),
+                "session_valid": bool(payload.get("valid")),
+                "session_fingerprint": str(payload.get("session_fingerprint") or "")[:64],
+                "reason": str((payload.get("price") or {}).get("reason") or payload.get("reason") or "")
+                if isinstance(payload.get("price"), Mapping)
+                else str(payload.get("reason") or ""),
+                "validation_nm_id": payload.get("validation_nm_id"),
+                "account_confirmed": bool(payload.get("account_confirmed")),
+            },
+            checked_at=checked_at,
+        )
+        return {**payload, "capability_checked_at": str(cached.get("checked_at") or checked_at)}
 
     def handle_wb_buyer_session_recovery_status_request(
         self,
@@ -2865,8 +2898,147 @@ class RegistryUploadHttpEntrypoint:
         *,
         launcher_download_path: str,
     ) -> dict[str, Any]:
-        return self.seller_portal_recovery.check_session(
+        payload = self.seller_portal_recovery.check_session(
             launcher_download_path=launcher_download_path,
+        )
+        checked_at = str(
+            (payload.get("current_storage_probe") or {}).get("checked_at")
+            if isinstance(payload.get("current_storage_probe"), Mapping)
+            else ""
+        ) or str(payload.get("updated_at") or "") or self.activated_at_factory()
+        try:
+            checked_at = (
+                _timestamp_as_utc(checked_at)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            checked_at = self.activated_at_factory()
+        self.runtime.save_source_health_status(
+            "seller_portal_auth",
+            payload={
+                "session_status": str(payload.get("status") or payload.get("session_status") or "unknown"),
+                "session_status_label": str(payload.get("status_label") or payload.get("session_status_label") or ""),
+                "organization_confirmed": bool(payload.get("organization_confirmed")),
+                "expected_supplier_label": str(payload.get("expected_supplier_label") or ""),
+                "expected_supplier_id": str(payload.get("expected_supplier_id") or ""),
+                "current_supplier_id": str(payload.get("current_supplier_id") or ""),
+                "reason": str(payload.get("reason") or payload.get("message") or ""),
+            },
+            checked_at=checked_at,
+        )
+        return payload
+
+    def handle_sources_sessions_status_request(
+        self,
+        *,
+        seller_launcher_download_path: str,
+        buyer_launcher_download_path: str,
+    ) -> dict[str, Any]:
+        """Return cached server-side source/session truth without live probes."""
+
+        seller_run = self.handle_seller_portal_recovery_status_request(
+            launcher_download_path=seller_launcher_download_path,
+            with_probe=False,
+        )
+        seller_cached = self.runtime.load_source_health_status(
+            "seller_portal_auth"
+        ) or {}
+        seller = {**seller_run, **seller_cached}
+        buyer = self.handle_wb_buyer_session_recovery_status_request(
+            launcher_download_path=buyer_launcher_download_path,
+            with_probe=False,
+        )
+        public_probe = self.runtime.load_source_health_status("spp_proxy") or {}
+        buyer_capability = self.runtime.load_source_health_status(
+            "wb_buyer_spp_capability"
+        ) or {}
+        latest_outcome: dict[str, Any] = {}
+        refreshed_at = ""
+        try:
+            refresh_status = self.runtime.load_sheet_vitrina_refresh_status()
+            refreshed_at = str(refresh_status.refreshed_at or "")
+            latest_outcome = next(
+                (
+                    dict(item)
+                    for item in refresh_status.source_outcomes
+                    if str(item.get("source_key") or "") == "spp_proxy"
+                ),
+                {},
+            )
+        except (ValueError, sqlite3.Error):
+            pass
+        transit = self.wb_supplies_block.get_transit_cost_enrichment_status({})
+        return {
+            "contract_name": "sheet_vitrina_v1_sources_sessions_v1",
+            "generated_at": self.activated_at_factory(),
+            "refresh_ttl_seconds": 180,
+            "seller_portal": {
+                "authorization": seller,
+                "collectors": [
+                    "Витрина: Seller Portal",
+                    "Поставки WB: транзитная стоимость",
+                    "Отзывы: Seller Portal",
+                ],
+                "transit_cost": transit,
+            },
+            "wb_buyer": {
+                "authorization": buyer,
+                "capability": buyer_capability,
+                "collectors": ["Проверка СПП: аутентифицированная цена покупателя"],
+            },
+            "spp_proxy": {
+                "authorization_required": False,
+                "source_label": "WB Card/SPP Proxy",
+                "source_mode": "anonymous_public_card",
+                "latest_refresh_at": refreshed_at,
+                "latest_refresh_outcome": latest_outcome,
+                "latest_route_probe": public_probe,
+                "collectors": ["Витрина: SPP Proxy"],
+            },
+        }
+
+    def handle_spp_proxy_source_check_request(self) -> dict[str, Any]:
+        enabled_nm_ids = sorted(
+            int(item.nm_id)
+            for item in self.runtime.load_current_state().config_v2
+            if item.enabled and int(item.nm_id) > 0
+        )
+        checked_at = self.activated_at_factory()
+        if not enabled_nm_ids:
+            result = {
+                "status": "unavailable",
+                "status_tone": "warning",
+                "reason": "no_active_sku_for_public_route_probe",
+                "authorization_required": False,
+            }
+        else:
+            nm_id = enabled_nm_ids[0]
+            payload = self.sku_management_block.buyer_price_source.fetch(
+                SppProxyRequest(
+                    snapshot_type="current",
+                    snapshot_date=current_business_date_iso(self.now_factory()),
+                    nm_ids=[nm_id],
+                    price_seller_discounted_by_nm_id={nm_id: 1_000_000},
+                )
+            )
+            diagnostics = dict(payload.get("diagnostics") or {})
+            covered_count = int(diagnostics.get("covered_count") or 0)
+            result = {
+                "status": "available" if covered_count > 0 else "unavailable",
+                "status_tone": "success" if covered_count > 0 else "warning",
+                "reason": "public_card_price_received" if covered_count > 0 else "public_card_price_missing",
+                "authorization_required": False,
+                "nm_id": nm_id,
+                "requested_count": int(diagnostics.get("requested_count") or 1),
+                "covered_count": covered_count,
+                "missing_count": int(diagnostics.get("missing_count") or 0),
+            }
+        return self.runtime.save_source_health_status(
+            "spp_proxy",
+            payload=result,
+            checked_at=checked_at,
         )
 
     def start_seller_portal_session_check_job(
@@ -4896,7 +5068,11 @@ class RegistryUploadHttpEntrypoint:
         return self.wb_supplies_block.list_supplies(params)
 
     def handle_wb_supplies_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.wb_supplies_block.sync_supplies(payload)
+        result = self.wb_supplies_block.sync_supplies(payload)
+        return {
+            **result,
+            "transit_cost_collection": self.wb_supplies_block.collect_all_due_transit_costs(),
+        }
 
     def handle_wb_supplies_backfill_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.start_full_backfill(payload)
@@ -4906,6 +5082,13 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_supplies_transit_cost_enrich_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.start_transit_cost_enrichment(payload)
+
+    def handle_wb_supplies_transit_cost_check_request(self) -> dict[str, Any]:
+        """Force one exact Seller supply/cost route check, independent of auth probe."""
+
+        return self.wb_supplies_block.start_transit_cost_enrichment(
+            {"limit": 1, "force": True}
+        )
 
     def _reconcile_completed_transit_costs(
         self,
@@ -5045,6 +5228,9 @@ class RegistryUploadHttpEntrypoint:
                 supply_payload = self.wb_supplies_block.sync_functional_sources(
                     record_ff_movements=False
                 )
+                transit_cost_collection = (
+                    self.wb_supplies_block.collect_all_due_transit_costs()
+                )
                 downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
                     opening_date="2026-07-01"
                 )
@@ -5089,6 +5275,7 @@ class RegistryUploadHttpEntrypoint:
                 "accepted_qty_changed_rows": int(sync.get("accepted_qty_changed_rows") or 0),
             },
             "downstream_cost_layers_materialized": downstream_cost_layers,
+            "wb_transit_cost_collection": transit_cost_collection,
             "ff_state": ff_state,
             "plan_fingerprint": plan["plan_fingerprint"],
             "diff": plan["diff"],
