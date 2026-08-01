@@ -408,12 +408,13 @@ class ReleaseSafetyTest(unittest.TestCase):
         deployed_sha = "a" * 40
         fingerprint = "sha256:" + "b" * 64
         manifest = {
-            "contract": "wb_autoanswers_answered_inventory_manifest_v1",
+            "contract": "wb_autoanswers_processed_inventory_manifest_v2",
             "captured_at": "2026-08-01T12:00:00Z",
             "items": [
                 {
                     "feedback_id": "feedback-1",
                     "content_hash": "c" * 64,
+                    "resolution_kind": "answer_observed",
                     "answer_sha256": "d" * 64,
                 }
             ],
@@ -421,7 +422,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         manifest["manifest_sha256"] = _fingerprint(manifest)
         captured: list[tuple[list[str], dict[str, object]]] = []
         response = {
-            "contract": "wb_autoanswers_answered_inventory_recovery_v1",
+            "contract": "wb_autoanswers_answered_inventory_recovery_v2",
             "status": "applied",
             "manifest_sha256": manifest["manifest_sha256"],
             "deployed_runtime": {"runtime_sha": deployed_sha},

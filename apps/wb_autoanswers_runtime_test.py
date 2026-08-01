@@ -203,6 +203,37 @@ class RuntimeTest(unittest.TestCase):
         self.assertNotEqual(wb_observation_hash(original), wb_observation_hash(viewed_changed))
         self.assertEqual(content_version_hash(original), content_version_hash(viewed_changed))
 
+    def test_official_processed_without_answer_is_not_actionable_unanswered(self) -> None:
+        self.enable("auto_all")
+        ordinary = self.insert_new("processed-without-answer")
+        self.assertTrue(ordinary["auto_enqueue"])
+        self.repo.update_settings(mode="manual", actor_id="test-admin")
+        self.repo.enqueue_manual_processing(
+            "processed-without-answer",
+            content_version=1,
+            actor_id="reviewer",
+        )
+
+        processed = {
+            **feedback("processed-without-answer"),
+            "state": "wbRu",
+        }
+        outcome = self.repo.upsert_feedback(
+            processed,
+            source_stream="answered",
+            run_kind="steady",
+        )
+
+        self.assertTrue(outcome["officially_processed_without_answer"])
+        self.assertFalse(outcome["has_external_answer"])
+        self.assertFalse(outcome["auto_enqueue"])
+        self.assertEqual(self.repo.local_unanswered_count(), 0)
+        status = self.repo.operational_status()
+        self.assertEqual(status["feedbacks"]["unanswered"], 0)
+        self.assertEqual(status["feedbacks"]["processed_without_answer"], 1)
+        self.assertEqual(status["claimable_ai_jobs"], 0)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker"))
+
     def test_content_reversion_reuses_immutable_version_without_unique_failure(
         self,
     ) -> None:
