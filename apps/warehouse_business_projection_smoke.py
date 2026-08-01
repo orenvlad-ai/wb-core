@@ -150,6 +150,7 @@ def main() -> None:
         _assert_failure_keeps_last_good(runtime)
         _assert_concurrent_drain_is_exactly_once(runtime)
         _assert_partial_functional_source_keeps_quantities(runtime)
+        _assert_late_transit_cost_scope_is_bounded(runtime)
     print("warehouse_business_projection_smoke: OK")
 
 
@@ -364,6 +365,62 @@ def _assert_partial_functional_source_keeps_quantities(
     status = load_warehouse_business_projection_status(runtime)
     assert not status["updating"], status
     assert status["queue_counts"].get("queued") == 1, status
+
+
+def _assert_late_transit_cost_scope_is_bounded(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> None:
+    quantity_before = _all_quantity_digest(runtime)
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            f"""
+            INSERT INTO {OUTBOX_TABLE}(
+                request_id,stable_source_id,source_revision,
+                business_effective_date,affected_nm_ids_json,source_kind,
+                status,requested_at,started_at,finished_at,error
+            ) VALUES(?,?,?,?,?,'functional_source_revision','error',?,NULL,?,?)
+            """,
+            (
+                "smoke-late-transit-cost",
+                "functional_queue:wb_transit_cost:40422317",
+                "sha256:late-transit-cost",
+                "2025-02-21",
+                "[101]",
+                NOW,
+                NOW,
+                "bounded business projection exceeds 366 dates",
+            ),
+        )
+        conn.commit()
+    result = drain_warehouse_business_projection_outbox(
+        runtime,
+        published_at=NOW,
+    )
+    diagnostics = dict(result.get("diagnostics") or {})
+    assert result.get("status") == "success", result
+    assert diagnostics.get("cost_only") is True, result
+    assert diagnostics.get("scope_truncated") is True, result
+    assert (
+        diagnostics.get("scope_truncation_reason")
+        == "late_cost_outside_active_bounded_business_projection"
+    ), result
+    assert diagnostics.get("requested_business_effective_date") == "2025-02-21"
+    assert diagnostics.get("applied_business_effective_date") == "2026-07-21"
+    assert result.get("affected_dates") == [
+        "2026-07-21",
+        "2026-07-22",
+        "2026-07-23",
+        "2026-07-24",
+        "2026-07-25",
+    ], result
+    assert _all_quantity_digest(runtime) == quantity_before
+    with sqlite3.connect(runtime.db_path) as conn:
+        source_kind, status = conn.execute(
+            f"SELECT source_kind,status FROM {OUTBOX_TABLE} WHERE request_id=?",
+            ("smoke-late-transit-cost",),
+        ).fetchone()
+    assert source_kind == "functional_transit_cost_revision"
+    assert status == "complete"
 
 
 if __name__ == "__main__":

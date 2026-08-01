@@ -276,6 +276,10 @@ current_update_note: "`Настройки` встроены в общий WebCor
 - `accepted_counts` обязаны отражать фактические длины списков из request body после successful ingest.
 - Hosted/public publication boundary теперь repo-owned:
   - canonical allowlist живёт в `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`;
+  - central source/session status, anonymous SPP Proxy check and exact
+    supply-cost capability check are explicit protected allowlist entries;
+    application routes without these nginx entries are deployment drift and
+    cannot be accepted by the public-route smoke;
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py deploy` применяет его к configured nginx server config as one managed block `WB-CORE MANAGED PUBLIC ROUTES`;
   - active EU target is explicitly marked `target_role=primary_live`, `target_lifecycle=current_live`, `mutation_policy=routine_writes_allowed`, sets `public_base_url=https://api.selleros.pro`, and publishes `nginx_public_routes.server_names=["89.191.226.88","api.selleros.pro"]`; target identity for deploy safety is `wb-core-eu-root` / `89.191.226.88` plus target/runtime/service metadata;
   - current-live publication is a hard invariant: `deploy`, `deploy-and-verify` and `apply-nginx-routes` fail locally before SSH/rsync/nginx/systemd mutation if the EU target no longer publishes `https://api.selleros.pro`, both required server names, and managed `443 ssl` TLS with the LetsEncrypt `api.selleros.pro` paths;

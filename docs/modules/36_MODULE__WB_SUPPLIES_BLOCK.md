@@ -658,3 +658,12 @@ creates a second physical WB/FF movement. The canonical hourly/manual pipeline
 marks the fact `complete` only after its exact functional, economics and
 Finance consumers finish; a partial pipeline failure leaves durable work for
 the next bounded retry.
+
+`wb_transit_cost:*` is classified as a cost-only functional revision, never as
+a generic physical/source revision. Its queue retains the originating factual
+date. If that date predates the active business-time projection by more than
+the 366-day safety bound, the public projection is limited to the intersection
+of the active materialized surface, functional cutover and final bounded
+window; diagnostics retain the requested/applied boundaries and omitted-day
+count. Quantity keys must remain byte-semantically unchanged, and the runtime
+must not weaken the 366-day limit or fabricate pre-cutover warehouse history.

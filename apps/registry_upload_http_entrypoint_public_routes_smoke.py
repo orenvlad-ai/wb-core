@@ -77,6 +77,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
+        "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/check",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/",
         "/v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx",
         "/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads",
@@ -99,6 +100,8 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/settings/documents/",
         "/v1/sheet-vitrina-v1/settings/users",
         "/v1/sheet-vitrina-v1/settings/users/",
+        "/v1/sheet-vitrina-v1/settings/sources-sessions",
+        "/v1/sheet-vitrina-v1/settings/sources-sessions/spp-proxy/check",
         "/sheet-vitrina-v1/supplier",
         "/sheet-vitrina-v1/settings",
         "/sheet-vitrina-v1/instructions",
@@ -195,6 +198,8 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include WB supplies backfill exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies sync status exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/check {") != 1:
+        raise AssertionError("rendered nginx block must include route-specific transit-cost check exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/wb-supplies/ {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies detail prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx {") != 1:
@@ -237,6 +242,10 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include trade document item API exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/settings/users {") != 1:
         raise AssertionError("rendered nginx block must include settings users API exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/sources-sessions {") != 1:
+        raise AssertionError("rendered nginx block must include sources/sessions status exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/sources-sessions/spp-proxy/check {") != 1:
+        raise AssertionError("rendered nginx block must include SPP Proxy source check exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/users/ {") != 1:
         raise AssertionError("rendered nginx block must include settings user item API exactly once")
     if rendered.count("location = /sheet-vitrina-v1/settings {") != 1:
