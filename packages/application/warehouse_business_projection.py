@@ -131,6 +131,110 @@ def _date_range(start: str, end: str) -> list[str]:
     return [(left + timedelta(days=offset)).isoformat() for offset in range(count)]
 
 
+def _is_cost_only_outbox_request(request: Mapping[str, Any]) -> bool:
+    source_kind = str(request.get("source_kind") or "").lower()
+    stable_source_id = str(request.get("stable_source_id") or "").lower()
+    return (
+        "cost" in source_kind
+        or "fee" in source_kind
+        or "certification" in source_kind
+        or source_kind == "supplier_cost_payment"
+        or stable_source_id.startswith("functional_queue:wb_transit_cost:")
+    )
+
+
+def _bounded_outbox_target_dates(
+    conn: sqlite3.Connection,
+    *,
+    business_effective_date: str,
+    publication_business_date: str,
+    cost_only: bool,
+) -> tuple[list[str], dict[str, Any]]:
+    """Keep late cost publication inside the active bounded projection surface."""
+
+    requested_start = _iso_date(
+        business_effective_date,
+        field_name="business_effective_date",
+    )
+    target_end = max(
+        requested_start,
+        _iso_date(
+            publication_business_date,
+            field_name="publication_business_date",
+        ),
+    )
+    requested_count = (
+        date.fromisoformat(target_end) - date.fromisoformat(requested_start)
+    ).days + 1
+    if requested_count <= MAX_TARGET_DAYS or not cost_only:
+        target_dates = _date_range(requested_start, target_end)
+        return target_dates, {
+            "requested_business_effective_date": requested_start,
+            "applied_business_effective_date": requested_start,
+            "requested_date_count": requested_count,
+            "omitted_historical_date_count": 0,
+            "scope_truncated": False,
+            "scope_truncation_reason": None,
+            "lower_bound_sources": {},
+        }
+
+    lower_bounds = {
+        "maximum_bounded_window": (
+            date.fromisoformat(target_end) - timedelta(days=MAX_TARGET_DAYS - 1)
+        ).isoformat(),
+    }
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "sheet_vitrina_v1_warehouse_functional_cutovers" in tables:
+        cutover = conn.execute(
+            """
+            SELECT cutover_at
+            FROM sheet_vitrina_v1_warehouse_functional_cutovers
+            WHERE cutover_id='warehouse_functional_cutover_v1'
+            """
+        ).fetchone()
+        if cutover is not None and str(cutover[0] or "")[:10]:
+            cutover_date = _iso_date(
+                str(cutover[0])[:10],
+                field_name="functional_cutover",
+            )
+            if cutover_date <= target_end:
+                lower_bounds["functional_cutover"] = cutover_date
+    current_lower_bound = conn.execute(
+        f"SELECT MIN(as_of_date) FROM {CURRENT_ROW_TABLE}"
+    ).fetchone()
+    if (
+        current_lower_bound is not None
+        and str(current_lower_bound[0] or "")[:10]
+    ):
+        active_surface_date = _iso_date(
+            str(current_lower_bound[0])[:10],
+            field_name="active_projection_surface",
+        )
+        if active_surface_date <= target_end:
+            lower_bounds["active_projection_surface"] = active_surface_date
+    applied_start = max(requested_start, *lower_bounds.values())
+    target_dates = _date_range(applied_start, target_end)
+    omitted_count = (
+        date.fromisoformat(applied_start) - date.fromisoformat(requested_start)
+    ).days
+    return target_dates, {
+        "requested_business_effective_date": requested_start,
+        "applied_business_effective_date": applied_start,
+        "requested_date_count": requested_count,
+        "omitted_historical_date_count": omitted_count,
+        "scope_truncated": True,
+        "scope_truncation_reason": (
+            "late_cost_outside_active_bounded_business_projection"
+        ),
+        "lower_bound_sources": lower_bounds,
+    }
+
+
 def ensure_warehouse_business_projection_schema(conn: sqlite3.Connection) -> None:
     existing_tables = {
         str(row[0])
@@ -446,6 +550,8 @@ def ensure_warehouse_projection_source_outbox(
                         OR NEW.stable_source_id LIKE 'cny_document:%'
                         OR NEW.stable_source_id LIKE 'fulfillment_upload:%'
                       THEN 'functional_cost_revision'
+                      WHEN NEW.stable_source_id LIKE 'wb_transit_cost:%'
+                      THEN 'functional_transit_cost_revision'
                       WHEN NEW.stable_source_id LIKE 'wb_supply:%'
                       THEN 'functional_physical_revision'
                       ELSE 'functional_source_revision'
@@ -1739,6 +1845,15 @@ def drain_warehouse_business_projection_outbox(
             conn.row_factory = sqlite3.Row
             ensure_warehouse_projection_source_outbox(conn)
             conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"""
+                UPDATE {OUTBOX_TABLE}
+                SET source_kind='functional_transit_cost_revision'
+                WHERE stable_source_id LIKE 'functional_queue:wb_transit_cost:%'
+                  AND source_kind<>'functional_transit_cost_revision'
+                  AND status IN ('queued','error')
+                """
+            )
             request_rows = [
                 dict(row)
                 for row in conn.execute(
@@ -1776,21 +1891,14 @@ def drain_warehouse_business_projection_outbox(
                 raise WarehouseBusinessProjectionError(
                     "coalesced source outbox has no affected SKU closure"
                 )
-            target_dates = _date_range(
-                business_effective_date,
-                max(
-                    business_effective_date,
-                    business_date_from_timestamp(timestamp),
-                ),
-            )
             cost_only = all(
-                (
-                    "cost" in str(item["source_kind"]).lower()
-                    or "fee" in str(item["source_kind"]).lower()
-                    or "certification" in str(item["source_kind"]).lower()
-                    or str(item["source_kind"]) == "supplier_cost_payment"
-                )
-                for item in request_rows
+                _is_cost_only_outbox_request(item) for item in request_rows
+            )
+            target_dates, date_scope = _bounded_outbox_target_dates(
+                conn,
+                business_effective_date=business_effective_date,
+                publication_business_date=business_date_from_timestamp(timestamp),
+                cost_only=cost_only,
             )
             has_canonical_event_proof = any(
                 not str(item["source_kind"]).startswith(
@@ -1883,6 +1991,7 @@ def drain_warehouse_business_projection_outbox(
                         "source": "canonical_own_capital_events",
                         "source_request_ids": request_ids,
                         "business_effective_date": business_effective_date,
+                        "projection_effective_date": target_dates[0],
                         "as_of_date": as_of_date,
                         "published_at": timestamp,
                         "missing_exact_projection_date": (
@@ -1969,6 +2078,7 @@ def drain_warehouse_business_projection_outbox(
                 "full_vitrina_refresh_count": 0,
                 "all_history_rebuild": False,
                 "cost_only": cost_only,
+                **date_scope,
                 "complexity": "O(affected dates × canonical daily capital rows)",
             }
             if inject_failure is not None:

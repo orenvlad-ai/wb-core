@@ -81,6 +81,13 @@ revision polling без page reload и без обязательной ручн�
 ## Safety и performance
 
 - максимум одной bounded revision — 366 consecutive business dates;
+- late cost-only request сохраняет исходную factual business date в source и
+  audit, но если она лежит раньше активного materialized/cutover-контура,
+  publication начинает не раньше максимума из active projection surface,
+  functional cutover и последнего окна в 366 дней. Diagnostics явно фиксируют
+  requested/applied start, число исключённых исторических дат и причину
+  `late_cost_outside_active_bounded_business_projection`; такая нормализация
+  запрещена для physical/non-cost revision;
 - no Finance raw/full database scan, external producer fetch или full Vitrina
   refresh;
 - diagnostics содержат affected dates/SKU/rows, elapsed time,
