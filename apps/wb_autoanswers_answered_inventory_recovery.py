@@ -447,7 +447,7 @@ def build_plan(
     snapshot = _core_snapshot(conn)
     safety = _mutation_safety(conn)
     lifecycle_pause = _lifecycle_pause_snapshot(runtime_dir)
-    backup = _verified_backup(runtime_dir, 10)
+    backup = _verified_backup(runtime_dir)
     identity = {
         "contract": CONTRACT,
         "manifest_sha256": manifest["manifest_sha256"],
