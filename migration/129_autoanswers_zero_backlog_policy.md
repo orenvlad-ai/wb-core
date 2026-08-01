@@ -168,6 +168,17 @@ existing unique constraint make replay idempotent. A row first seen while the
 persisted owner master is OFF or mode is manual remains ineligible, preserving
 the explicit capped-history boundary.
 
+The deployed canary exposed one upgrade-only gap in that correction: the two
+pre-fix rows already carried NULL eligibility before the new first-observation
+rule existed. The bounded bridge adopts such an unchanged row on ordinary
+steady re-observation only when its durable `first_seen_at` is strictly later
+than the current settings revision, owner intent remains automatic, no active
+sweep or exact processing job exists and WB still reports it unresolved. A
+content-changing observation under active automatic intent is also eligible as
+a new semantic version. This does not sweep historical NULL rows: owner-OFF or
+manual observations precede the later settings revision and remain gated by a
+capped transition.
+
 Strict publication GET readback now also persists a non-empty observed answer
 into the canonical feedback observation in the same transaction as the
 publication result. Immutable content-version truth is not rewritten; only the
