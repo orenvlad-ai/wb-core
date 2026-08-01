@@ -99,35 +99,45 @@ Any row with a possible previous WB write remains GET-reconciliation-only. No
 apply path manufactures an answer, deletes immutable evidence, guesses provider
 cost or repeats a POST.
 
-## Full answered-inventory reconciliation
+## Full processed-inventory reconciliation
 
 Production readback after the exact backlog apply proved a separate acquisition
 gap: the local historical answered cursor had completed on 2026-07-20, while
-41,000+ older local observations still had an empty `answer_text`. The official
-full unanswered inventory contained only the current bounded queue, so waiting
-for the ordinary 48-hour steady window could never make DB/API/UI truth converge.
+41,000+ older local observations still had an empty `answer_text`. A fresh
+official `isAnswered=true` capture then proved that this endpoint is a processed
+inventory, not an answer-text invariant: WB can return `state=wbRu` with no
+supplier answer. Those rows are officially resolved without publication and
+must not be counted or claimed as actionable unanswered work. The official full
+unanswered inventory contained only the current bounded queue, so waiting for
+the ordinary 48-hour steady window could never make DB/API/UI truth converge.
 
 `autoanswers-answered-inventory-recovery capture|dry-run|apply|readback` is the
 only correction path. It is deployment-inert and separately human-gated:
 
 - capture reads the complete official `isAnswered=true,dateFrom=0` inventory
   twice, at the recovery GET rate, and binds every sorted feedback ID to its
-  stable content hash and normalized WB-answer hash;
+  stable content hash plus exactly one disposition: `answer_observed` with the
+  normalized WB-answer hash, or `processed_without_answer` with exact
+  `state=wbRu` and no fabricated hash/text. A row with neither proof fails
+  capture closed;
 - dry-run accepts only an unchanged manifest subset, opens SQLite with
   `mode=ro` plus `PRAGMA query_only=ON`, selects only missing or divergent local
-  answered observations, verifies the schema-v10 backup, zero active
+  processed observations, verifies the schema-v10 backup, zero active
   reservations/provider-cost ambiguity and exact settings/core-count invariants,
   then emits the deployed-SHA-bound fingerprint and expected inserts/updates;
 - apply requires that exact manifest, reviewed fingerprint, deployed SHA, actor
   and human-gate reference. It reuses the schema-v10 recovery ledger for
   interruption-safe replay and calls only the canonical feedback-observation
-  upsert for reviewed WB-answered rows. It cannot enqueue AI, call a provider or
-  POST to WB, and proves settings plus job/publication/write/cost/reservation
-  counts unchanged;
-- readback is query-only and proves every reviewed answer hash locally plus exact
-  equality between local empty-answer IDs and the fresh full official unanswered
-  inventory. The original backlog readback remains authoritative for terminal
-  official zero, detail GETs and zero pipeline tails.
+  upsert for reviewed WB-processed rows. It cannot invent an answer, enqueue AI,
+  call a provider or POST to WB, and proves settings plus job/publication/write/
+  cost/reservation counts unchanged;
+- readback is query-only and proves every reviewed answer hash or exact local
+  `wbRu` no-answer disposition plus exact equality between locally actionable
+  unanswered IDs (empty answer and not `wbRu`) and the fresh full official
+  unanswered inventory. Runtime enqueue, processing, publication, backlog and
+  UI unanswered filters all exclude the explicit no-answer disposition. The
+  original backlog readback remains authoritative for terminal official zero,
+  detail GETs and zero pipeline tails.
 
 New answers that appear after capture are outside that fingerprint and require a
 fresh manifest/plan gate; they are never silently widened into an approved apply.

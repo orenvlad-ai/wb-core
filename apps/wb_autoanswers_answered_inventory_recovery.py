@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Reconcile stale local feedback observations from the full WB answered inventory.
+"""Reconcile stale local observations from the full WB processed inventory.
 
 Capture, dry-run and readback use only official WB GETs and query-only SQLite.
 Apply requires an exact deployed SHA, manifest, reviewed plan fingerprint and
-human approval reference.  It updates only feedback observations already
-proven answered by WB, performs no provider call or WB POST, and is resumable
-through the schema-v10 recovery ledger.
+human approval reference.  It updates only feedback observations proven either
+answered or officially processed without an answer by WB, performs no provider
+call or WB POST, and is resumable through the schema-v10 recovery ledger.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from packages.adapters.wb_autoanswers import (  # noqa: E402
     WbFeedbackReadPort,
 )
 from packages.application.wb_autoanswers_runtime import (  # noqa: E402
+    OFFICIAL_PROCESSED_STATE,
     AutoanswersRepository,
     canonical_json,
     final_reply_hash,
@@ -53,11 +54,13 @@ from packages.application.wb_autoanswers_lifecycle import (  # noqa: E402
 )
 
 
-CONTRACT = "wb_autoanswers_answered_inventory_recovery_v1"
-MANIFEST_CONTRACT = "wb_autoanswers_answered_inventory_manifest_v1"
+CONTRACT = "wb_autoanswers_answered_inventory_recovery_v2"
+MANIFEST_CONTRACT = "wb_autoanswers_processed_inventory_manifest_v2"
 SOURCE_STREAM = "answered_inventory_recovery"
 PAGE_SIZE = 5000
 QUERY_CHUNK = 400
+RESOLUTION_ANSWER_OBSERVED = "answer_observed"
+RESOLUTION_PROCESSED_WITHOUT_ANSWER = "processed_without_answer"
 
 
 def _chunks(values: list[str], size: int = QUERY_CHUNK) -> Iterable[list[str]]:
@@ -70,12 +73,23 @@ def _manifest_item(row: Mapping[str, Any]) -> dict[str, str]:
     answer = _answer_text(row)
     if not feedback_id:
         raise RuntimeError("WB answered inventory contains an empty feedback ID")
-    if not answer:
-        raise RuntimeError(f"WB answered inventory row has no answer: {feedback_id}")
+    state = str(row.get("state") or "").strip()
+    if answer:
+        resolution_kind = RESOLUTION_ANSWER_OBSERVED
+        answer_sha256 = final_reply_hash(answer)
+    elif state == OFFICIAL_PROCESSED_STATE:
+        resolution_kind = RESOLUTION_PROCESSED_WITHOUT_ANSWER
+        answer_sha256 = ""
+    else:
+        raise RuntimeError(
+            "WB processed inventory row has neither an answer nor the canonical "
+            f"processed state: {feedback_id}"
+        )
     return {
         "feedback_id": feedback_id,
         "content_hash": _content_hash(row),
-        "answer_sha256": final_reply_hash(answer),
+        "resolution_kind": resolution_kind,
+        "answer_sha256": answer_sha256,
     }
 
 
@@ -145,34 +159,41 @@ def capture_manifest(source: WbFeedbackReadPort) -> dict[str, Any]:
 
 def validate_manifest(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("contract") != MANIFEST_CONTRACT:
-        raise ValueError("an exact answered-inventory manifest is required")
+        raise ValueError("an exact processed-inventory manifest is required")
     items = payload.get("items")
     if not isinstance(items, list) or not items:
-        raise ValueError("answered-inventory manifest contains no items")
+        raise ValueError("processed-inventory manifest contains no items")
     ids: list[str] = []
     for item in items:
         if not isinstance(item, Mapping):
-            raise ValueError("answered-inventory manifest item is not an object")
+            raise ValueError("processed-inventory manifest item is not an object")
         feedback_id = str(item.get("feedback_id") or "").strip()
         content_hash = str(item.get("content_hash") or "").strip()
+        resolution_kind = str(item.get("resolution_kind") or "").strip()
         answer_sha256 = str(item.get("answer_sha256") or "").strip()
-        if (
-            not feedback_id
-            or len(content_hash) != 64
-            or len(answer_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in content_hash)
-            or any(character not in "0123456789abcdef" for character in answer_sha256)
-        ):
-            raise ValueError("answered-inventory manifest item is incomplete")
+        content_hash_valid = len(content_hash) == 64 and not any(
+            character not in "0123456789abcdef" for character in content_hash
+        )
+        answer_hash_valid = len(answer_sha256) == 64 and not any(
+            character not in "0123456789abcdef" for character in answer_sha256
+        )
+        resolution_valid = (
+            resolution_kind == RESOLUTION_ANSWER_OBSERVED and answer_hash_valid
+        ) or (
+            resolution_kind == RESOLUTION_PROCESSED_WITHOUT_ANSWER
+            and not answer_sha256
+        )
+        if not feedback_id or not content_hash_valid or not resolution_valid:
+            raise ValueError("processed-inventory manifest item is incomplete")
         ids.append(feedback_id)
     if ids != sorted(ids) or len(ids) != len(set(ids)):
-        raise ValueError("answered-inventory manifest IDs must be sorted and unique")
+        raise ValueError("processed-inventory manifest IDs must be sorted and unique")
     supplied = str(payload.get("manifest_sha256") or "")
     calculated = _fingerprint(
         {key: value for key, value in payload.items() if key != "manifest_sha256"}
     )
     if supplied != calculated:
-        raise ValueError("answered-inventory manifest fingerprint mismatch")
+        raise ValueError("processed-inventory manifest fingerprint mismatch")
     return payload
 
 
@@ -198,6 +219,7 @@ def fetch_remote_evidence(
     expected = {
         str(item["feedback_id"]): {
             "content_hash": str(item["content_hash"]),
+            "resolution_kind": str(item["resolution_kind"]),
             "answer_sha256": str(item["answer_sha256"]),
         }
         for item in manifest["items"]
@@ -205,6 +227,7 @@ def fetch_remote_evidence(
     current = {
         item["feedback_id"]: {
             "content_hash": item["content_hash"],
+            "resolution_kind": item["resolution_kind"],
             "answer_sha256": item["answer_sha256"],
         }
         for item in first
@@ -219,10 +242,18 @@ def fetch_remote_evidence(
     return (
         {
             "captured_at": iso_utc(captured_at),
-            "manifest_answered_count": len(expected),
-            "current_answered_count": len(current),
-            "current_answered_ids_sha256": _fingerprint(sorted(current)),
-            "full_answered_stable": True,
+            "manifest_processed_count": len(expected),
+            "manifest_answer_observed_count": sum(
+                item["resolution_kind"] == RESOLUTION_ANSWER_OBSERVED
+                for item in expected.values()
+            ),
+            "manifest_processed_without_answer_count": sum(
+                item["resolution_kind"] == RESOLUTION_PROCESSED_WITHOUT_ANSWER
+                for item in expected.values()
+            ),
+            "current_processed_count": len(current),
+            "current_processed_ids_sha256": _fingerprint(sorted(current)),
+            "full_processed_stable": True,
             "manifest_subset_confirmed": coverage_confirmed,
             "missing_manifest_count": len(missing),
             "changed_manifest_count": len(changed),
@@ -243,7 +274,7 @@ def _local_rows(
         for row in conn.execute(
             f"""
             SELECT feedback_id,content_version,content_version_hash,answer_text,
-                   wb_observation_hash,source_stream,last_seen_at
+                   wb_observation_hash,source_stream,last_seen_at,raw_json
             FROM sheet_vitrina_v1_wb_feedbacks
             WHERE feedback_id IN ({placeholders})
             """,
@@ -368,19 +399,49 @@ def build_plan(
         row = local.get(feedback_id)
         local_answer = str((row or {}).get("answer_text") or "")
         local_answer_sha256 = final_reply_hash(local_answer) if local_answer else None
-        expected_answer_sha256 = str(remote_items[feedback_id]["answer_sha256"])
-        if local_answer_sha256 == expected_answer_sha256:
+        remote_item = remote_items[feedback_id]
+        resolution_kind = str(remote_item["resolution_kind"])
+        expected_answer_sha256 = str(remote_item["answer_sha256"])
+        content_matches = (
+            row is not None
+            and str(row["content_version_hash"])
+            == str(remote_item["content_hash"])
+        )
+        try:
+            local_raw = json.loads(str((row or {}).get("raw_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            local_raw = {}
+        local_processed_without_answer = (
+            not local_answer
+            and isinstance(local_raw, Mapping)
+            and str(local_raw.get("state") or "").strip() == OFFICIAL_PROCESSED_STATE
+        )
+        resolution_matches = (
+            content_matches
+            and resolution_kind == RESOLUTION_ANSWER_OBSERVED
+            and local_answer_sha256 == expected_answer_sha256
+        ) or (
+            content_matches
+            and resolution_kind == RESOLUTION_PROCESSED_WITHOUT_ANSWER
+            and local_processed_without_answer
+        )
+        if resolution_matches:
             continue
         actions.append(
             {
                 "feedback_id": feedback_id,
-                "action": "insert_answered_observation" if row is None else "refresh_answered_observation",
+                "action": (
+                    "insert_processed_observation"
+                    if row is None
+                    else "refresh_processed_observation"
+                ),
+                "resolution_kind": resolution_kind,
                 "local_exists": row is not None,
                 "local_content_version": int(row["content_version"]) if row is not None else None,
                 "local_content_version_hash": str(row["content_version_hash"]) if row is not None else None,
                 "local_answer_sha256": local_answer_sha256,
                 "remote_content_hash": str(remote_items[feedback_id]["content_hash"]),
-                "remote_answer_sha256": expected_answer_sha256,
+                "remote_answer_sha256": expected_answer_sha256 or None,
             }
         )
     snapshot = _core_snapshot(conn)
@@ -405,7 +466,15 @@ def build_plan(
     plan = {
         **identity,
         "coverage_confirmed": coverage_confirmed,
-        "manifest_answered_count": len(feedback_ids),
+        "manifest_processed_count": len(feedback_ids),
+        "manifest_answer_observed_count": sum(
+            item["resolution_kind"] == RESOLUTION_ANSWER_OBSERVED
+            for item in manifest["items"]
+        ),
+        "manifest_processed_without_answer_count": sum(
+            item["resolution_kind"] == RESOLUTION_PROCESSED_WITHOUT_ANSWER
+            for item in manifest["items"]
+        ),
         "expected_local_updates": len(actions),
         "expected_local_inserts": sum(not action["local_exists"] for action in actions),
         "remote": dict(remote),
@@ -435,22 +504,44 @@ def _stored_run(repo: AutoanswersRepository, fingerprint: str) -> sqlite3.Row | 
         ).fetchone()
 
 
-def _verify_target_answers(
+def _verify_target_resolutions(
     conn: sqlite3.Connection,
     actions: list[Mapping[str, Any]],
 ) -> list[str]:
     expected = {
-        str(action["feedback_id"]): str(action["remote_answer_sha256"])
+        str(action["feedback_id"]): action
         for action in actions
     }
     local = _local_rows(conn, sorted(expected))
-    return sorted(
-        feedback_id
-        for feedback_id, answer_sha256 in expected.items()
-        if feedback_id not in local
-        or not str(local[feedback_id].get("answer_text") or "")
-        or final_reply_hash(str(local[feedback_id]["answer_text"])) != answer_sha256
-    )
+    unconfirmed: list[str] = []
+    for feedback_id, action in expected.items():
+        row = local.get(feedback_id)
+        if row is None:
+            unconfirmed.append(feedback_id)
+            continue
+        if str(row["content_version_hash"]) != str(action["remote_content_hash"]):
+            unconfirmed.append(feedback_id)
+            continue
+        resolution_kind = str(action["resolution_kind"])
+        answer = str(row.get("answer_text") or "")
+        if resolution_kind == RESOLUTION_ANSWER_OBSERVED:
+            if (
+                not answer
+                or final_reply_hash(answer) != str(action["remote_answer_sha256"])
+            ):
+                unconfirmed.append(feedback_id)
+            continue
+        try:
+            raw = json.loads(str(row.get("raw_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+        if (
+            answer
+            or not isinstance(raw, Mapping)
+            or str(raw.get("state") or "").strip() != OFFICIAL_PROCESSED_STATE
+        ):
+            unconfirmed.append(feedback_id)
+    return sorted(unconfirmed)
 
 
 def apply_plan(
@@ -540,10 +631,10 @@ def apply_plan(
         )
 
     with repo.transaction() as conn:
-        unconfirmed = _verify_target_answers(conn, actions)
+        unconfirmed = _verify_target_resolutions(conn, actions)
         if unconfirmed:
             raise RuntimeError(
-                "answered-inventory local readback is incomplete: "
+                "processed-inventory local readback is incomplete: "
                 + ",".join(unconfirmed[:20])
             )
         after = _core_snapshot(conn)
@@ -637,13 +728,15 @@ def reconcile_readback(
         if recovery is not None:
             evidence = json.loads(str(recovery["evidence_json"] or "{}"))
             actions = list((evidence.get("plan") or {}).get("target_actions") or [])
-        target_unconfirmed = _verify_target_answers(conn, actions)
+        target_unconfirmed = _verify_target_resolutions(conn, actions)
         local_ids = [
             str(row[0])
             for row in conn.execute(
                 """
                 SELECT feedback_id FROM sheet_vitrina_v1_wb_feedbacks
-                WHERE COALESCE(answer_text,'')='' ORDER BY feedback_id
+                WHERE COALESCE(answer_text,'')=''
+                  AND COALESCE(json_extract(raw_json,'$.state'),'')<>'wbRu'
+                ORDER BY feedback_id
                 """
             ).fetchall()
         ]
@@ -663,7 +756,7 @@ def reconcile_readback(
         "contract": CONTRACT,
         "status": "reconciled" if reconciled else "pending",
         "manifest_sha256": manifest["manifest_sha256"],
-        "manifest_answered_count": len(manifest["items"]),
+        "manifest_processed_count": len(manifest["items"]),
         "target_count": len(actions),
         "target_unconfirmed_count": len(target_unconfirmed),
         "target_unconfirmed_examples": target_unconfirmed[:20],

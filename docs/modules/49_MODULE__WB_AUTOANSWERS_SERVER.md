@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Schema v10 adds a fingerprint-bound backlog recovery ledger; policy v4 removes automatic seller-chat/operator tails, safely rebinds unstarted publications, recovers durable terminal evidence and adds a full unanswered inventory without changing the frozen v1.4.2 bundle."
+update_note: "Schema v10 adds a fingerprint-bound backlog recovery ledger; policy v4 removes automatic seller-chat/operator tails, safely rebinds unstarted publications, recovers durable terminal evidence and distinguishes WB processed-without-answer observations from actionable unanswered work without changing the frozen v1.4.2 bundle."
 ---
 
 # WB Autoanswers Server v1
@@ -153,16 +153,20 @@ readback. This stays below the official shared Feedbacks and Questions account
 limit and retries only `429` with a bounded `Retry-After` delay; exhaustion
 fails closed without a partial manifest or mutation.
 
-The deployment-inert answered-inventory reconciliation runner uses the same
+The deployment-inert processed-inventory reconciliation runner uses the same
 recovery-only pacing for the complete official `isAnswered=true,dateFrom=0`
-inventory. Its manifest binds stable content and normalized answer hashes;
-query-only dry-run selects only missing or divergent local answered
-observations. Exact-fingerprint apply uses the existing recovery ledger and
-canonical feedback upsert, performs no provider call or WB POST and preserves
-all job/publication/write/cost/reservation counts and settings. Query-only
-readback requires the local empty-answer ID set to equal the fresh complete
-official unanswered ID set, closing the history-cursor gap without guessing an
-answer.
+inventory. WB defines that endpoint as processed inventory: an item can carry
+an observed supplier answer or an answerless `state=wbRu` disposition. The v2
+manifest binds stable content plus exactly one of `answer_observed` with a
+normalized answer hash or `processed_without_answer` without fabricated text;
+anything else fails closed. Query-only dry-run selects only missing or divergent
+local processed observations. Exact-fingerprint apply uses the existing recovery
+ledger and canonical feedback upsert, performs no provider call or WB POST and
+preserves all job/publication/write/cost/reservation counts and settings.
+Query-only readback requires locally actionable empty-answer IDs (excluding
+exact `wbRu`) to equal the fresh complete official unanswered ID set. Enqueue,
+claim, publication, backlog and UI unanswered paths use the same exclusion,
+closing the history-cursor gap without guessing an answer.
 
 The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has highest priority:
 

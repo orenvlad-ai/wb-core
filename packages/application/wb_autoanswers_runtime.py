@@ -111,6 +111,7 @@ RECONCILIATION_PRESERVED_OUTCOMES = frozenset(
     {
         "classification_review_required",
         "external_answer_skipped",
+        "official_processed_without_answer_skipped",
         "publication_bound_regeneration_preserved",
         "published_preserved",
         "readback_preserved",
@@ -122,6 +123,7 @@ RECONCILIATION_PRESERVED_OUTCOMES = frozenset(
 )
 BACKLOG_PREVIEW_TTL_SECONDS = 900
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+OFFICIAL_PROCESSED_STATE = "wbRu"
 COMPRESSED_SCHEMA_BACKUP_CONTRACT = "wb_autoanswers_compressed_schema_backup_v10"
 RATING_ONLY_POLICY_PATH = (
     Path(__file__).resolve().parents[1]
@@ -466,6 +468,35 @@ def wb_observation_hash(raw: Mapping[str, Any]) -> str:
 
 def _answer_text(raw: Mapping[str, Any]) -> str:
     return str(observation_projection(raw)["answer"]["text"])
+
+
+def officially_processed_without_answer(raw: Mapping[str, Any]) -> bool:
+    """Return the explicit WB processed disposition without inventing an answer.
+
+    WB's ``isAnswered=true`` stream is a processed inventory: it also contains
+    feedback automatically processed without a supplier answer (for example an
+    empty rating-only review).  ``state=wbRu`` is the durable observation that
+    distinguishes those rows from the actionable unanswered stream.
+    """
+
+    return (
+        not _answer_text(raw)
+        and _clean_text(raw.get("state")) == OFFICIAL_PROCESSED_STATE
+    )
+
+
+def _stored_officially_processed(raw_json: Any) -> bool:
+    try:
+        raw = json.loads(str(raw_json or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(raw, Mapping) and officially_processed_without_answer(raw)
+
+
+def _feedback_row_officially_resolved(row: Any) -> bool:
+    if row is None:
+        return False
+    return bool(row["answer_text"]) or _stored_officially_processed(row["raw_json"])
 
 
 def _feedback_id(raw: Mapping[str, Any]) -> str:
@@ -1714,7 +1745,10 @@ class AutoanswersRepository:
               )
               AND NOT EXISTS (
                     SELECT 1 FROM sheet_vitrina_v1_wb_feedbacks f
-                    WHERE f.feedback_id=j.feedback_id AND COALESCE(f.answer_text,'')<>''
+                    WHERE f.feedback_id=j.feedback_id AND (
+                        COALESCE(f.answer_text,'')<>''
+                        OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
+                    )
               )
             """,
             (iso_utc(),),
@@ -2566,6 +2600,7 @@ class AutoanswersRepository:
                                   ON p.processing_key=j.processing_key
                                 WHERE rs.sweep_id=?
                                   AND COALESCE(f.answer_text,'')=''
+                                  AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                                   AND COALESCE(j.policy_epoch,-1)<>?
                                   AND (COALESCE(j.regeneration_required,0)=1
                                        OR COALESCE(j.media_uncertain,0)=1)
@@ -2710,6 +2745,8 @@ class AutoanswersRepository:
         created_at_wb = _clean_text(raw.get("createdDate") or raw.get("created_at")) or None
         updated_at_wb = _clean_text(raw.get("updatedDate") or raw.get("updated_at")) or None
         answer_text = str(observation["answer"]["text"])
+        processed_without_answer = officially_processed_without_answer(raw)
+        officially_resolved = bool(answer_text) or processed_without_answer
         with self.transaction() as conn:
             current = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
@@ -2759,7 +2796,7 @@ class AutoanswersRepository:
                 and run_kind == "steady"
                 and effective_on
                 and automatic_mode
-                and not answer_text
+                and not officially_resolved
                 and active_sweep is None
             ):
                 eligible_epoch = int(settings["enable_epoch"])
@@ -2911,6 +2948,7 @@ class AutoanswersRepository:
             "content_version_reused": reused_content_version is not None,
             "wb_observation_hash": observation_hash,
             "has_external_answer": bool(answer_text),
+            "officially_processed_without_answer": processed_without_answer,
             "content_classification": content_classification,
             "auto_eligible_epoch": eligible_epoch,
             "auto_enqueue": bool(
@@ -2921,7 +2959,7 @@ class AutoanswersRepository:
                 and automatic_mode
                 and active_sweep is None
                 and eligible_epoch == int(settings["enable_epoch"])
-                and not answer_text
+                and not officially_resolved
             ),
         }
 
@@ -3017,6 +3055,7 @@ class AutoanswersRepository:
                     f.content_classification,
                     f.rating,
                     f.answer_text,
+                    f.raw_json,
                     f.source_stream,
                     f.last_sync_run_id,
                     f.created_at_wb,
@@ -3078,6 +3117,7 @@ class AutoanswersRepository:
                     current_exact
                     and in_date_scope
                     and not str(row["answer_text"] or "")
+                    and not _stored_officially_processed(row["raw_json"])
                     and initial_exact is None
                 ):
                     classification = str(
@@ -3217,7 +3257,9 @@ class AutoanswersRepository:
         with closing(self._connect()) as conn:
             return int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks WHERE COALESCE(answer_text,'')=''"
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks "
+                    "WHERE COALESCE(answer_text,'')='' "
+                    "AND COALESCE(json_extract(raw_json,'$.state'),'')<>'wbRu'"
                 ).fetchone()[0]
             )
 
@@ -3249,7 +3291,12 @@ class AutoanswersRepository:
                 SELECT COUNT(*) AS total,
                        MIN(substr(created_at_wb,1,10)) AS min_created_date,
                        MAX(substr(created_at_wb,1,10)) AS max_created_date,
-                       SUM(CASE WHEN COALESCE(answer_text,'')='' THEN 1 ELSE 0 END) AS unanswered,
+                       SUM(CASE WHEN COALESCE(answer_text,'')=''
+                                      AND COALESCE(json_extract(raw_json,'$.state'),'')<>'wbRu'
+                                THEN 1 ELSE 0 END) AS unanswered,
+                       SUM(CASE WHEN COALESCE(answer_text,'')=''
+                                      AND COALESCE(json_extract(raw_json,'$.state'),'')='wbRu'
+                                THEN 1 ELSE 0 END) AS processed_without_answer,
                        SUM(CASE WHEN has_photo=1 THEN 1 ELSE 0 END) AS with_photo,
                        SUM(CASE WHEN has_video=1 THEN 1 ELSE 0 END) AS with_video
                 FROM sheet_vitrina_v1_wb_feedbacks
@@ -3281,9 +3328,16 @@ class AutoanswersRepository:
             claimable_ai_jobs = int(
                 conn.execute(
                     """
-                    SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswer_jobs
-                    WHERE policy_epoch=? AND state IN (?,?,?)
-                      AND (?<>? OR trigger_source='manual_generate')
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                    JOIN sheet_vitrina_v1_wb_feedbacks f
+                      ON f.feedback_id=j.feedback_id
+                     AND f.content_version=j.content_version
+                     AND f.content_version_hash=j.content_version_hash
+                    WHERE j.policy_epoch=? AND j.state IN (?,?,?)
+                      AND COALESCE(f.answer_text,'')=''
+                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
+                      AND (?<>? OR j.trigger_source='manual_generate')
                     """,
                     (
                         int(settings_row["policy_epoch"]),
@@ -3298,8 +3352,15 @@ class AutoanswersRepository:
             claimable_publication_writes = int(
                 conn.execute(
                     """
-                    SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs
-                    WHERE policy_epoch=? AND write_started_at IS NULL AND state IN (?,?)
+                    SELECT COUNT(*)
+                    FROM sheet_vitrina_v1_wb_publication_jobs p
+                    JOIN sheet_vitrina_v1_wb_feedbacks f
+                      ON f.feedback_id=p.feedback_id
+                     AND f.content_version=p.content_version
+                     AND f.content_version_hash=p.content_version_hash
+                    WHERE p.policy_epoch=? AND p.write_started_at IS NULL AND p.state IN (?,?)
+                      AND COALESCE(f.answer_text,'')=''
+                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                     """,
                     (int(settings_row["policy_epoch"]), STATE_APPROVED, STATE_PUBLISHING),
                 ).fetchone()[0]
@@ -3331,6 +3392,7 @@ class AutoanswersRepository:
                 LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
                   ON p.processing_key=j.processing_key
                 WHERE COALESCE(f.answer_text,'')=''
+                  AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                 """,
                 (PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE, PROMPT_BUNDLE_VERSION),
             ).fetchone()
@@ -3362,6 +3424,9 @@ class AutoanswersRepository:
                 "min_created_date": feedback["min_created_date"],
                 "max_created_date": feedback["max_created_date"],
                 "unanswered": int(feedback["unanswered"] or 0),
+                "processed_without_answer": int(
+                    feedback["processed_without_answer"] or 0
+                ),
                 "with_photo": int(feedback["with_photo"] or 0),
                 "with_video": int(feedback["with_video"] or 0),
             },
@@ -3483,12 +3548,22 @@ class AutoanswersRepository:
             row = conn.execute(
                 f"""
                 SELECT COUNT(*) AS scope_total,
-                       SUM(CASE WHEN COALESCE(f.answer_text,'')='' THEN 1 ELSE 0 END) AS unanswered,
+                       SUM(CASE WHEN COALESCE(f.answer_text,'')=''
+                                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
+                                THEN 1 ELSE 0 END) AS unanswered,
+                       SUM(CASE WHEN COALESCE(f.answer_text,'')=''
+                                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
+                                THEN 1 ELSE 0 END) AS official_processed_without_answer,
                        SUM(CASE WHEN COALESCE(f.answer_text,'')<>'' THEN 1 ELSE 0 END) AS wb_answered,
                        SUM(CASE WHEN j.final_reply IS NOT NULL THEN 1 ELSE 0 END) AS system_reply_created,
-                       SUM(CASE WHEN COALESCE(f.answer_text,'')='' AND j.final_reply IS NOT NULL THEN 1 ELSE 0 END) AS system_reply_created_unanswered,
+                       SUM(CASE WHEN COALESCE(f.answer_text,'')=''
+                                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
+                                      AND j.final_reply IS NOT NULL THEN 1 ELSE 0 END) AS system_reply_created_unanswered,
                        SUM(CASE WHEN j.final_reply IS NULL THEN 1 ELSE 0 END) AS system_reply_missing,
-                       SUM(CASE WHEN COALESCE(f.answer_text,'')='' AND (j.processing_key IS NULL OR COALESCE(j.policy_epoch,-1)<>?) THEN 1 ELSE 0 END) AS awaiting_materialization,
+                       SUM(CASE WHEN COALESCE(f.answer_text,'')=''
+                                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
+                                      AND (j.processing_key IS NULL OR COALESCE(j.policy_epoch,-1)<>?)
+                                THEN 1 ELSE 0 END) AS awaiting_materialization,
                        SUM(CASE WHEN j.state='queued' THEN 1 ELSE 0 END) AS processing_queue,
                        SUM(CASE WHEN j.state='processing' THEN 1 ELSE 0 END) AS processing_now,
                        SUM(CASE WHEN j.state='processing' AND j.lease_until<=? THEN 1 ELSE 0 END) AS stale_leases,
@@ -3565,7 +3640,9 @@ class AutoanswersRepository:
                 ),
             ).fetchone()
             prepared_sql = f"""
-                p.state='{STATE_PUBLISHED}' OR (
+                COALESCE(f.answer_text,'')<>''
+                OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
+                OR p.state='{STATE_PUBLISHED}' OR (
                     j.final_reply IS NOT NULL
                     AND j.content_version=f.content_version
                     AND j.content_version_hash=f.content_version_hash
@@ -3711,6 +3788,7 @@ class AutoanswersRepository:
                     """
                     SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks f
                     WHERE COALESCE(f.answer_text,'')=''
+                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                       AND NOT (
                         EXISTS(
                             SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_scope rs
@@ -3762,8 +3840,14 @@ class AutoanswersRepository:
                     (
                         SELECT COUNT(*)
                         FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                        JOIN sheet_vitrina_v1_wb_feedbacks f
+                          ON f.feedback_id=j.feedback_id
+                         AND f.content_version=j.content_version
+                         AND f.content_version_hash=j.content_version_hash
                         WHERE j.policy_epoch=?
                           AND j.state IN ('queued','processing','retryable_error')
+                          AND COALESCE(f.answer_text,'')=''
+                          AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                           AND (
                             j.state<>'retryable_error'
                             OR j.available_at<=?
@@ -3772,7 +3856,13 @@ class AutoanswersRepository:
                     (
                         SELECT COUNT(*)
                         FROM sheet_vitrina_v1_wb_publication_jobs p
+                        JOIN sheet_vitrina_v1_wb_feedbacks f
+                          ON f.feedback_id=p.feedback_id
+                         AND f.content_version=p.content_version
+                         AND f.content_version_hash=p.content_version_hash
                         WHERE p.policy_epoch=?
+                          AND COALESCE(f.answer_text,'')=''
+                          AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                           AND (
                             (p.write_started_at IS NULL
                              AND p.state IN ('approved','publishing')
@@ -4415,8 +4505,11 @@ class AutoanswersRepository:
             version = int(content_version or feedback["content_version"])
             if version != int(feedback["content_version"]):
                 raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
-            if feedback["answer_text"]:
-                raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+            if _feedback_row_officially_resolved(feedback):
+                raise AutoanswersRuntimeError(
+                    "WB already has an answer or processed disposition",
+                    code="external_answer_present",
+                )
             active_sweep = conn.execute(
                 """
                 SELECT sweep_id,transition_run_id
@@ -4626,8 +4719,11 @@ class AutoanswersRepository:
             ).fetchone()
             if feedback is None or int(feedback["content_version"]) != int(job["content_version"]):
                 raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
-            if feedback["answer_text"]:
-                raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+            if _feedback_row_officially_resolved(feedback):
+                raise AutoanswersRuntimeError(
+                    "WB already has an answer or processed disposition",
+                    code="external_answer_present",
+                )
             if str(job["state"]) in {STATE_QUEUED, STATE_PROCESSING, STATE_RETRYABLE_ERROR} and bool(
                 job["regeneration_required"]
             ):
@@ -4789,8 +4885,11 @@ class AutoanswersRepository:
             raise AutoanswersRuntimeError("automatic processing is paused in manual mode", code="manual_pause")
         if feedback is None or int(feedback["content_version"]) != int(job["content_version"]):
             raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
-        if feedback["answer_text"]:
-            raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+        if _feedback_row_officially_resolved(feedback):
+            raise AutoanswersRuntimeError(
+                "WB already has an answer or processed disposition",
+                code="external_answer_present",
+            )
         return settings
 
     @staticmethod
@@ -5661,6 +5760,7 @@ class AutoanswersRepository:
                   ON p.processing_key=j.processing_key
                 WHERE f.content_classification=?
                   AND COALESCE(f.answer_text,'')=''
+                  AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                   AND (
                     j.processing_key IS NULL
                     OR (
@@ -5745,6 +5845,7 @@ class AutoanswersRepository:
             LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
               ON p.processing_key=j.processing_key
             WHERE COALESCE(f.answer_text,'')=''
+              AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
               AND (
                 j.processing_key IS NULL
                 OR (
@@ -5913,6 +6014,8 @@ class AutoanswersRepository:
                     (j.state=? AND j.retry_stage='processing' AND j.available_at<=?)
                 )
                   AND j.policy_epoch=?
+                  AND COALESCE(f.answer_text,'')=''
+                  AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                   AND (? <> ? OR j.trigger_source='manual_generate')
                   AND (j.trigger_source='manual_generate' OR ?='' OR j.transition_run_id=?)
                   AND (
@@ -6016,7 +6119,7 @@ class AutoanswersRepository:
                     (STATE_NEEDS_REVIEW, iso_utc(now), row["processing_key"]),
                 )
                 return None
-            if feedback["answer_text"]:
+            if _feedback_row_officially_resolved(feedback):
                 conn.execute(
                     "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state=?, last_error_code='external_answer_present', updated_at=? WHERE processing_key=?",
                     (STATE_NEEDS_REVIEW, iso_utc(now), row["processing_key"]),
@@ -6674,7 +6777,7 @@ class AutoanswersRepository:
             feedback is None
             or int(feedback["content_version"]) != int(job["content_version"])
             or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
-            or feedback["answer_text"]
+            or _feedback_row_officially_resolved(feedback)
         ):
             raise AutoanswersRuntimeError(
                 "safe-public input is stale",
@@ -6849,7 +6952,7 @@ class AutoanswersRepository:
                 evidence["outcome"] != "ready"
                 or int(feedback["content_version"]) != int(job["content_version"])
                 or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
-                or feedback["answer_text"]
+                or _feedback_row_officially_resolved(feedback)
                 or publication is not None
             ):
                 return None
@@ -7018,7 +7121,7 @@ class AutoanswersRepository:
             if (
                 int(feedback["content_version"]) != int(job["content_version"])
                 or str(feedback["content_version_hash"]) != str(job["content_version_hash"])
-                or feedback["answer_text"]
+                or _feedback_row_officially_resolved(feedback)
             ):
                 raise AutoanswersRuntimeError("feedback is not current", code="stale_content_version")
             publication = conn.execute(
@@ -7191,7 +7294,7 @@ class AutoanswersRepository:
                 (job["feedback_id"],),
             ).fetchone()
             stale = feedback is None or int(feedback["content_version"]) != int(job["content_version"])
-            external_answer = bool(feedback and feedback["answer_text"])
+            external_answer = _feedback_row_officially_resolved(feedback)
             stored_result = dict(result)
             if (
                 settings.policy_version == DEFAULT_POLICY_VERSION
@@ -7551,8 +7654,11 @@ class AutoanswersRepository:
             raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
         if str(feedback["content_version_hash"]) != str(job["content_version_hash"]):
             raise AutoanswersRuntimeError("stale feedback hash", code="stale_content_hash")
-        if feedback["answer_text"]:
-            raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+        if _feedback_row_officially_resolved(feedback):
+            raise AutoanswersRuntimeError(
+                "WB already has an answer or processed disposition",
+                code="external_answer_present",
+            )
         if not bool(job["node_contract_valid"]) or not bool(job["hard_gates_passed"]):
             raise AutoanswersRuntimeError("hard gates did not pass", code="hard_gate_failed")
         if bool(job["fallback_used"]) or bool(job["media_uncertain"]):
@@ -7675,8 +7781,11 @@ class AutoanswersRepository:
             ).fetchone()
             if feedback is None or int(feedback["content_version"]) != int(job["content_version"]):
                 raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
-            if feedback["answer_text"]:
-                raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+            if _feedback_row_officially_resolved(feedback):
+                raise AutoanswersRuntimeError(
+                    "WB already has an answer or processed disposition",
+                    code="external_answer_present",
+                )
             if not bool(job["node_contract_valid"]) or not bool(job["hard_gates_passed"]):
                 raise AutoanswersRuntimeError("hard gates did not pass", code="hard_gate_failed")
             if bool(job["fallback_used"]) or bool(job["media_uncertain"]):
@@ -7835,6 +7944,8 @@ class AutoanswersRepository:
                         WHERE j.state=?
                           AND j.policy_epoch=?
                           AND j.transition_run_id=?
+                          AND COALESCE(f.answer_text,'')=''
+                          AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                           AND j.final_reply IS NOT NULL
                           AND j.final_reply_sha256 IS NOT NULL
                           AND NOT EXISTS(
@@ -7890,6 +8001,8 @@ class AutoanswersRepository:
                         (p.state=? AND p.write_started_at IS NULL AND p.lease_until<=?)
                     )
                       AND p.policy_epoch=?
+                      AND COALESCE(f.answer_text,'')=''
+                      AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                       AND (p.request_source='manual' OR ?='' OR p.transition_run_id=?)
                       AND (
                         p.request_source='manual'
@@ -8056,8 +8169,11 @@ class AutoanswersRepository:
             raise AutoanswersRuntimeError("stale feedback version", code="stale_content_version")
         if str(feedback["content_version_hash"]) != str(publication["content_version_hash"]):
             raise AutoanswersRuntimeError("stale feedback hash", code="stale_content_hash")
-        if feedback["answer_text"]:
-            raise AutoanswersRuntimeError("WB already has an answer", code="external_answer_present")
+        if _feedback_row_officially_resolved(feedback):
+            raise AutoanswersRuntimeError(
+                "WB already has an answer or processed disposition",
+                code="external_answer_present",
+            )
         if final_reply_hash(publication["exact_reply"]) != str(publication["normalized_reply_sha256"]):
             raise AutoanswersRuntimeError("publication reply hash mismatch", code="publication_reply_hash_mismatch")
         if not bool(processing["node_contract_valid"]) or not bool(processing["hard_gates_passed"]):
@@ -8354,6 +8470,7 @@ class AutoanswersRepository:
               ON j.feedback_id=f.feedback_id AND j.content_version=f.content_version
              AND j.bundle_version=?
             WHERE COALESCE(f.answer_text,'')=''
+              AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
               AND COALESCE(f.created_at_wb, f.first_seen_at)>=?
               AND j.processing_key IS NULL
             ORDER BY COALESCE(f.created_at_wb, f.first_seen_at), f.feedback_id
@@ -8381,7 +8498,11 @@ class AutoanswersRepository:
         scope_from: str,
         scope_to: str | None,
     ) -> tuple[list[dict[str, Any]], str]:
-        clauses = ["COALESCE(f.answer_text,'')=''", "substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?"]
+        clauses = [
+            "COALESCE(f.answer_text,'')=''",
+            "COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'",
+            "substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)>=?",
+        ]
         params: list[Any] = [_clean_text(scope_from)]
         if scope_to:
             clauses.append("substr(COALESCE(f.created_at_wb,f.first_seen_at),1,10)<=?")
@@ -8965,17 +9086,37 @@ class AutoanswersRepository:
                 if active_policy_row is not None
                 else ""
             )
-            if feedback["answer_text"]:
+            if _feedback_row_officially_resolved(feedback):
+                processed_without_answer = _stored_officially_processed(
+                    feedback["raw_json"]
+                )
+                resolution_code = (
+                    "official_processed_without_answer"
+                    if processed_without_answer
+                    else "external_answer_present"
+                )
                 if job is not None and str(job["state"]) != STATE_PUBLISHED:
                     conn.execute(
                         """
                         UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
-                        SET state=?, policy_epoch=?, policy_version=?, last_error_code='external_answer_present', updated_at=?
+                        SET state=?, policy_epoch=?, policy_version=?, last_error_code=?, updated_at=?
                         WHERE processing_key=?
                         """,
-                        (STATE_SKIPPED, policy_epoch, DEFAULT_POLICY_VERSION, iso_utc(now), job["processing_key"]),
+                        (
+                            STATE_SKIPPED,
+                            policy_epoch,
+                            DEFAULT_POLICY_VERSION,
+                            resolution_code,
+                            iso_utc(now),
+                            job["processing_key"],
+                        ),
                     )
-                return acknowledge("external_answer_skipped", feedback)
+                return acknowledge(
+                    "official_processed_without_answer_skipped"
+                    if processed_without_answer
+                    else "external_answer_skipped",
+                    feedback,
+                )
             classification = str(
                 feedback["content_classification"] or CONTENT_CLASS_INDETERMINATE
             )
@@ -9601,6 +9742,7 @@ class AutoanswersRepository:
                   )
                   AND (
                     COALESCE(f.answer_text,'')<>''
+                    OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
                     OR j.state IN (?,?,?,?)
                     OR COALESCE(j.policy_epoch,-1)=?
                     OR (
@@ -9613,8 +9755,10 @@ class AutoanswersRepository:
                     )=?
                   )
                   AND (?=0 OR COALESCE(f.answer_text,'')<>''
+                       OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
                        OR j.final_reply IS NOT NULL)
                   AND (?=0 OR COALESCE(f.answer_text,'')<>''
+                       OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
                        OR j.final_reply IS NOT NULL
                        OR f.content_classification IN (?,?)
                        OR j.state IN (?,?))
@@ -9622,7 +9766,9 @@ class AutoanswersRepository:
                   {scope_clause}
                 ORDER BY
                   CASE
-                    WHEN COALESCE(f.answer_text,'')<>'' THEN 1
+                    WHEN COALESCE(f.answer_text,'')<>''
+                      OR COALESCE(json_extract(f.raw_json,'$.state'),'')='wbRu'
+                    THEN 1
                     WHEN COALESCE(j.policy_epoch,-1)=? THEN 2
                     WHEN j.state='needs_review'
                          AND (
@@ -9906,7 +10052,12 @@ class AutoanswersRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if source.get("unanswered") in {True, "true", "1", 1}:
-            clauses.append("COALESCE(f.answer_text,'')='' ")
+            clauses.extend(
+                [
+                    "COALESCE(f.answer_text,'')=''",
+                    "COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'",
+                ]
+            )
         if source.get("rating") not in (None, ""):
             clauses.append("f.rating=?")
             params.append(int(source["rating"]))

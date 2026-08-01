@@ -383,6 +383,18 @@ class PublicationTest(unittest.TestCase):
                 expected_reply_sha256=reviewed["manual_reply_sha256"],
             )
 
+    def test_official_processed_without_answer_blocks_publication_write(self) -> None:
+        self.approved("processed-without-answer")
+        self.repo.upsert_feedback(
+            {**feedback("processed-without-answer"), "state": "wbRu"},
+            source_stream="answered",
+            run_kind="reconciliation",
+        )
+
+        self.assertIsNone(self.worker.run_once())
+        self.assertEqual(self.transport.write_calls, [])
+        self.assertEqual(self.repo.operational_status()["claimable_publication_writes"], 0)
+
     def test_manual_publication_is_quarantined_if_mode_changes_before_write(self) -> None:
         reviewed = self.manual_reviewed("mode-changed")
         self.repo.approve_for_publication(

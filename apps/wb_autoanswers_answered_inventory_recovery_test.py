@@ -64,6 +64,8 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
         self.already = feedback("already-local", answer="Уже подтверждено")
         self.remote_stale = feedback("stale-local", answer="Ответ из WB")
         self.remote_missing = feedback("missing-local", answer="Найдено в полном inventory")
+        self.local_processed = feedback("processed-local")
+        self.remote_processed = {**self.local_processed, "state": "wbRu"}
         self.repo.upsert_feedback(
             self.stale,
             source_stream="fixture",
@@ -79,8 +81,18 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
             source_stream="fixture",
             run_kind="reconciliation",
         )
+        self.repo.upsert_feedback(
+            self.local_processed,
+            source_stream="fixture",
+            run_kind="reconciliation",
+        )
         self.source = FullInventorySource(
-            answered=[self.already, self.remote_missing, self.remote_stale],
+            answered=[
+                self.already,
+                self.remote_missing,
+                self.remote_processed,
+                self.remote_stale,
+            ],
             unanswered=[self.current],
         )
         self.deployed = {"runtime_sha": "a" * 40}
@@ -90,11 +102,17 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
 
     def test_capture_uses_full_answered_inventory_without_history_floor(self) -> None:
         manifest = capture_manifest(self.source)
-        self.assertEqual(len(manifest["items"]), 3)
+        self.assertEqual(len(manifest["items"]), 4)
         self.assertEqual(
             [item["feedback_id"] for item in manifest["items"]],
-            ["already-local", "missing-local", "stale-local"],
+            ["already-local", "missing-local", "processed-local", "stale-local"],
         )
+        processed = next(
+            item for item in manifest["items"]
+            if item["feedback_id"] == "processed-local"
+        )
+        self.assertEqual(processed["resolution_kind"], "processed_without_answer")
+        self.assertEqual(processed["answer_sha256"], "")
         self.assertTrue(all(call["date_from_ts"] == 0 for call in self.source.calls))
         self.assertTrue(all(call["is_answered"] for call in self.source.calls))
 
@@ -150,8 +168,9 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
                     deployed_runtime=self.deployed,
                 )
             self.assertTrue(plan["coverage_confirmed"])
-            self.assertEqual(plan["expected_local_updates"], 2)
+            self.assertEqual(plan["expected_local_updates"], 3)
             self.assertEqual(plan["expected_local_inserts"], 1)
+            self.assertEqual(plan["manifest_processed_without_answer_count"], 1)
             applied = apply_plan(
                 self.runtime_dir,
                 manifest=manifest,
@@ -172,6 +191,14 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
             self.repo.get_feedback("missing-local")["answer"]["text"],
             "Найдено в полном inventory",
         )
+        processed = self.repo.get_feedback("processed-local")
+        self.assertEqual(processed["answer"]["text"], "")
+        with _open(self.runtime_dir, read_only=True) as conn:
+            processed_raw = conn.execute(
+                "SELECT json_extract(raw_json,'$.state') FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                ("processed-local",),
+            ).fetchone()[0]
+        self.assertEqual(processed_raw, "wbRu")
         replay = apply_plan(
             self.runtime_dir,
             manifest=manifest,
@@ -193,6 +220,11 @@ class AnsweredInventoryRecoveryTest(unittest.TestCase):
         self.assertTrue(readback["local_official_match"])
         self.assertEqual(readback["official_unanswered_count"], 1)
         self.assertEqual(readback["local_unanswered_count"], 1)
+
+    def test_processed_inventory_rejects_unanswered_row_without_processed_state(self) -> None:
+        self.source.answered = [feedback("not-processed")]
+        with self.assertRaisesRegex(RuntimeError, "canonical processed state"):
+            capture_manifest(self.source)
 
     def test_manifest_row_change_fails_closed(self) -> None:
         manifest = capture_manifest(self.source)

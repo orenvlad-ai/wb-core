@@ -1323,6 +1323,7 @@ def _local_zero_tail(conn: sqlite3.Connection) -> dict[str, int]:
         LEFT JOIN sheet_vitrina_v1_wb_publication_jobs p
           ON p.processing_key=j.processing_key
         WHERE COALESCE(f.answer_text,'')=''
+          AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
         """,
         (PROMPT_BUNDLE_VERSION,),
     ).fetchone()
