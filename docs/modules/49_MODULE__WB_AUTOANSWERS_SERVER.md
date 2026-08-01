@@ -153,6 +153,17 @@ readback. This stays below the official shared Feedbacks and Questions account
 limit and retries only `429` with a bounded `Retry-After` delay; exhaustion
 fails closed without a partial manifest or mutation.
 
+The deployment-inert answered-inventory reconciliation runner uses the same
+recovery-only pacing for the complete official `isAnswered=true,dateFrom=0`
+inventory. Its manifest binds stable content and normalized answer hashes;
+query-only dry-run selects only missing or divergent local answered
+observations. Exact-fingerprint apply uses the existing recovery ledger and
+canonical feedback upsert, performs no provider call or WB POST and preserves
+all job/publication/write/cost/reservation counts and settings. Query-only
+readback requires the local empty-answer ID set to equal the fresh complete
+official unanswered ID set, closing the history-cursor gap without guessing an
+answer.
+
 The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has highest priority:
 
 - `off`: readonly sync/UI/readback continue; worker timer, new AI claims and new WB writes stop;
