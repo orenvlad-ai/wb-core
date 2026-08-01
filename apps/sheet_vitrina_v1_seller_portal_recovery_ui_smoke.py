@@ -1,4 +1,4 @@
-"""Browser smoke for Seller Portal recovery state machine in web-vitrina UI."""
+"""Browser smoke proving Seller recovery is absent from the Vitrina monitor UI."""
 
 from __future__ import annotations
 
@@ -33,6 +33,32 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 
 
 def main() -> None:
+    with RecoveryUiFixtureServer() as fixture:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                page.goto(fixture.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+                page.locator("[data-activity-block] > summary").click()
+                payload = page.evaluate(
+                    """() => ({
+                      top: document.querySelectorAll('[data-seller-top-session]').length,
+                      check: document.querySelectorAll('[data-session-check]').length,
+                      install: document.querySelectorAll('[data-session-install]').length,
+                      recovery: document.querySelectorAll('[data-session-recovery-start]').length,
+                      launcher: document.querySelectorAll('[data-session-launcher]').length
+                    })"""
+                )
+                if payload != {"top": 0, "check": 0, "install": 0, "recovery": 0, "launcher": 0}:
+                    raise AssertionError(f"Vitrina must not duplicate Seller auth/recovery UI, got {payload}")
+                if fixture.start_payloads or fixture.launcher_requests:
+                    raise AssertionError("opening monitoring surfaces must not start recovery or download a launcher")
+                print("seller_recovery_ui_centralized: ok -> Vitrina has no Seller badge or recovery controls")
+            finally:
+                browser.close()
+
+
+def _legacy_recovery_ui_smoke() -> None:
     with RecoveryUiFixtureServer() as fixture:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)

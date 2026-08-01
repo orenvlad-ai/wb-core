@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-42-WB-SPP-TESTER-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать production MVP инструмента `Цены -> Проверка СПП` для безопасного live измерения персонализированной цены авторизованного покупателя и анонимного контроля по пользовательскому диапазону discounted price."
-scope: "Server-owned one-nmID SPP tester inside unified operator shell: separate persistent Wildberries buyer session with automatic check/recovery, safe one-click login through exactly one saved account, human-only noVNC escalation, authenticated buyer price as the primary test fact, anonymous public buyer price as an explicit control, baseline capture, safe-slow plan/start/status/restore endpoints, guarded WB Prices live writes, threshold detection over high-confidence points, cross-process runtime locks/state/audit, stale/orphan reconciliation, bounded history, one persistent daily schedule with a repo-owned due runner/systemd timer, exact seller-tuple restore and fake-upstream smokes. The block does not change promo semantics, global anonymous spp_proxy semantics or current prices table behavior."
+scope: "Server-owned one-nmID SPP tester inside unified operator shell: separate persistent Wildberries buyer session, exact authenticated-buyer-price capability check, authenticated buyer price as primary fact and anonymous public price as explicit control. Login/recovery and human-only noVNC escalation are exposed only in `Настройки → Источники и сессии`; the tester page is monitoring/testing only. Baseline, safe-slow plan/start/status/restore, guarded WB Prices writes, runtime locks/audit, stale reconciliation, bounded history and one persistent daily schedule remain unchanged."
 source_basis:
   - "packages/contracts/wb_spp_tester.py"
   - "packages/contracts/wb_buyer_session.py"
@@ -19,7 +19,8 @@ source_basis:
 related_modules:
   - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "35_MODULE__SPP_PROXY_BLOCK.md"
-related_tables: []
+related_tables:
+  - "sheet_vitrina_v1_source_health_status"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/baseline?nmID=..."
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/plan"
@@ -35,6 +36,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start"
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
+  - "GET /v1/sheet-vitrina-v1/settings/sources-sessions"
 related_runners:
   - "apps/wb_spp_tester_smoke.py"
   - "apps/wb_spp_tester_browser_smoke.py"
@@ -47,7 +49,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Buyer session now uses one protected persistent Chromium user_data_dir for checks, recovery, automatic saved-account login and authenticated price reads; snapshot export/import and candidate storage state are non-canonical and forbidden."
+update_note: "Buyer health now requires both persistent-profile authentication and the exact authenticated-buyer-price capability. Cached capability status is shown centrally; login/recovery/noVNC live only in `Настройки → Источники и сессии`, while `Цены → Проверка СПП` exposes a route-specific `Проверить` and no install/recovery UI."
 ---
 
 # 1. Идентификатор и статус
@@ -80,6 +82,8 @@ Control formula:
 `anonymous_spp_proxy = (seller discounted price - anonymous public buyer price) / seller discounted price`
 
 The global module 35 metric `spp_proxy` stays anonymous and unchanged. Only this tester and its schedule use the dedicated authenticated source as primary truth.
+
+The tester's local green state requires `session.valid=true` and `capability_valid=true` from the exact authenticated buyer-price route for the configured validation nmID. A generic valid session is not sufficient. If either layer fails, the page links the operator conceptually to `Настройки → Источники и сессии`; it never launches recovery automatically or duplicates the recovery controls.
 
 # 3. Runtime State
 
@@ -217,7 +221,7 @@ Late-run policy is bounded: a due run may start at most 15 minutes late. A later
 
 # 10. UI
 
-The upper block continues to show the current/last job while `active_job` is reserved for a truly active/unrestored pointer. Opening `Цены -> Проверка СПП` first reads the current recovery status, joins its `run_id` after reload, or checks the persistent buyer profile and starts recovery automatically when invalid. The UI distinguishes `checking_session`, `automatic_login`, `awaiting_human`, `validating_session`, valid, wrong-account, timeout and error states. noVNC/websockify and launcher download are created only for a real human challenge in `awaiting_human`; automatic saved-account login creates no VNC/websockify/SSH contour. After terminal completion the UI rechecks the same persistent profile and unblocks baseline/plan. `Проверить сессию` / `Установить сессию` remain emergency fallbacks. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job.
+The upper block continues to show the current/last job while `active_job` is reserved for a truly active/unrestored pointer. Opening `Цены -> Проверка СПП` performs only the exact authenticated buyer-price capability check and never starts or resumes recovery. Generic auth without `capability_valid=true` keeps plan/schedule actions disabled and points to `Настройки → Источники и сессии`; the tester exposes one route-specific `Проверить` button and no install, noVNC or launcher control. The centralized settings card owns `checking_session`, `automatic_login`, `awaiting_human`, `validating_session`, valid, wrong-account, timeout and error recovery states. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job.
 
 Manual UI remains intentionally small:
 - SKU selector from current prices/active registry rows;

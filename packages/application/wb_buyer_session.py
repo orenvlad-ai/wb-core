@@ -102,6 +102,31 @@ class WbBuyerSessionBlock:
     def check_session(self) -> dict[str, Any]:
         return _public_session_payload(self.adapter.check_session())
 
+    def check_spp_capability(self) -> dict[str, Any]:
+        """Check both authenticated identity and the exact buyer-price route."""
+
+        session = self.check_session()
+        if not bool(session.get("valid")):
+            return {
+                **session,
+                "capability": "authenticated_buyer_price",
+                "capability_status": "blocked_by_auth",
+                "capability_valid": False,
+                "price": {},
+            }
+        nm_id = int(self.adapter.config.validation_nm_id)
+        price = _public_price_payload(
+            self.adapter.fetch_authenticated_buyer_price(nm_id)
+        )
+        return {
+            **session,
+            "capability": "authenticated_buyer_price",
+            "capability_status": "available" if price.get("status") == "ok" else str(price.get("status") or "unavailable"),
+            "capability_valid": price.get("status") == "ok",
+            "validation_nm_id": nm_id,
+            "price": price,
+        }
+
     def ensure_session(
         self,
         *,

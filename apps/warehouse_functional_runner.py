@@ -46,6 +46,9 @@ from packages.application.warehouse_supplier_cost_state_replay import (  # noqa:
 )
 from packages.application.wb_finance_weekly import block_from_env  # noqa: E402
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
+from packages.application.wb_transit_cost_replay import (  # noqa: E402
+    reconcile_completed_transit_costs,
+)
 from packages.application.stocks_block import StocksBlock  # noqa: E402
 
 WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_MS = 120_000
@@ -53,6 +56,8 @@ WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV = (
     "WB_CORE_WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_MS"
 )
 WAREHOUSE_SYNC_COMMANDS = frozenset({"hourly-sync", "manual-sync", "sync-apply"})
+AUTONOMOUS_TRANSIT_COST_BATCH_LIMIT = 250
+AUTONOMOUS_TRANSIT_COST_MAX_BATCHES = 4
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -297,6 +302,11 @@ def _run(
                         record_ff_movements=False,
                     ),
                 )
+                transit_cost_collection = _run_sync_phase(
+                    "collect_autonomous_transit_costs",
+                    phase_timings_ms,
+                    lambda: _collect_autonomous_transit_costs(runtime),
+                )
                 downstream_cost_layers = _run_sync_phase(
                     "materialize_downstream_cost_layers",
                     phase_timings_ms,
@@ -374,6 +384,7 @@ def _run(
                     "recovery_retention_before": retention_before,
                     "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
+                    "wb_transit_cost_collection": transit_cost_collection,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
                     "wb_finance_cost_recalculation": finance_cost_recalculation,
                     "wb_transit_cost_replays": transit_cost_replays,
@@ -655,6 +666,32 @@ def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) 
 
     return OurWbCostBlock(runtime=runtime).materialize_wb_supply_cost_layers(
         opening_date="2026-07-01"
+    )
+
+
+def _collect_autonomous_transit_costs(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> dict[str, Any]:
+    """Collect every currently-due global Seller supply/cost candidate.
+
+    The loop is bounded for one hosted run, while fresh-success and failure
+    backoff state make repeated batches deterministic and prevent hot retries.
+    Collector failure remains visible in the returned status but cannot erase
+    the last canonical successful amount.
+    """
+
+    block = WbSuppliesBlock(runtime=runtime)
+    block.transit_cost_reconciliation_callback = lambda supply_ids: (
+        reconcile_completed_transit_costs(
+            runtime=runtime,
+            cost_block=OurWbCostBlock(runtime=runtime),
+            supply_ids=supply_ids,
+            timestamp_factory=block.timestamp_factory,
+        )
+    )
+    return block.collect_all_due_transit_costs(
+        batch_limit=AUTONOMOUS_TRANSIT_COST_BATCH_LIMIT,
+        max_batches=AUTONOMOUS_TRANSIT_COST_MAX_BATCHES,
     )
 
 

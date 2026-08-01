@@ -134,6 +134,7 @@
     .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, .12); color: var(--accent); }
     .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
     .pill.success { background: rgba(52, 211, 153, .12); color: var(--success); }
+    .pill.danger { background: rgba(251, 113, 133, .12); color: var(--danger); }
     .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     .users-form { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(150px, 1fr) minmax(160px, 1fr) minmax(180px, .9fr) minmax(116px, .55fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
     .users-table { min-width: 1320px; }
@@ -180,6 +181,19 @@
     .vitrina-schedule-table input[type="checkbox"] { width: 18px; min-height: 18px; }
     .vitrina-schedule-table input[type="time"] { width: 108px; }
     .vitrina-schedule-message { margin: 0; }
+    .sources-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+    .source-card { display: grid; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: rgba(16, 19, 27, .48); }
+    .source-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .source-card h3 { margin: 0; font-size: 17px; }
+    .source-card-copy { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .source-health { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(0, 1.25fr); gap: 6px 10px; margin: 0; font-size: 12px; }
+    .source-health dt { color: var(--muted); }
+    .source-health dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+    .recovery-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; }
+    .recovery-step { min-width: 0; padding: 7px 5px; border: 1px solid rgba(177, 139, 255, .18); border-radius: 7px; color: var(--muted); font-size: 10px; text-align: center; }
+    .recovery-step.is-active { border-color: var(--warning); color: var(--warning); background: rgba(250, 204, 21, .08); }
+    .recovery-step.is-done { border-color: var(--success); color: var(--success); background: rgba(52, 211, 153, .08); }
+    .source-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
@@ -191,6 +205,9 @@
       .auto-update-card-header { display: grid; }
       .auto-update-meta { grid-template-columns: 1fr; }
       .vitrina-schedule-toolbar, .vitrina-schedule-actions { display: grid; grid-template-columns: 1fr; }
+      .sources-grid { grid-template-columns: 1fr; }
+      .source-card-header, .source-health { display: grid; grid-template-columns: 1fr; }
+      .recovery-steps { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -212,6 +229,7 @@
         <button class="settings-tab-button is-active" type="button" data-settings-group-button="directories" aria-controls="directoriesGroupPanel" aria-selected="true">Справочники</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="user-directory" aria-controls="userDirectoryGroupPanel" aria-selected="false">Расчётные параметры</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="auto-updates" aria-controls="autoUpdatesGroupPanel" aria-selected="false">Автообновления</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="sources-sessions" aria-controls="sourcesSessionsGroupPanel" aria-selected="false">Источники и сессии</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="users" aria-controls="usersGroupPanel" aria-selected="false">Пользователи</button>
       </nav>
 
@@ -475,6 +493,39 @@
         </details>
       </section>
 
+      <section id="sourcesSessionsGroupPanel" class="block settings-group-panel" data-settings-group-panel="sources-sessions" aria-labelledby="sourcesSessionsTitle" hidden>
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="sourcesSessionsTitle">Источники и сессии</h2>
+            <p>Единственная зона входа и восстановления. Статусы авторизации, маршрутов, сборщиков и данных показаны отдельно.</p>
+          </div>
+          <button id="reloadSourcesSessionsButton" type="button">Обновить статус</button>
+        </div>
+        <p id="sourcesSessionsMessage" class="message">Читаем кешированный server-side status...</p>
+        <div class="sources-grid">
+          <article id="sellerSourceCard" class="source-card" data-source-card="seller">
+            <div class="source-card-header"><div><h3>Seller Portal</h3><p class="source-card-copy">Отдельный storage-state и кабинет продавца.</p></div><span id="sellerSourceBadge" class="pill warning">Неизвестно</span></div>
+            <dl id="sellerSourceHealth" class="source-health"></dl>
+            <div id="sellerRecoverySteps" class="recovery-steps"></div>
+            <div class="compact-actions"><button type="button" data-source-check="seller">Проверить</button><button class="primary" type="button" data-source-recover="seller">Восстановить</button><a id="sellerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <p id="sellerSourceError" class="source-error"></p>
+          </article>
+          <article id="buyerSourceCard" class="source-card" data-source-card="buyer">
+            <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Отдельный persistent profile для аутентифицированной проверки СПП.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
+            <dl id="buyerSourceHealth" class="source-health"></dl>
+            <div id="buyerRecoverySteps" class="recovery-steps"></div>
+            <div class="compact-actions"><button type="button" data-source-check="buyer">Проверить</button><button class="primary" type="button" data-source-recover="buyer">Восстановить</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <p id="buyerSourceError" class="source-error"></p>
+          </article>
+          <article id="publicSourceCard" class="source-card" data-source-card="public">
+            <div class="source-card-header"><div><h3>WB Card / SPP Proxy</h3><p class="source-card-copy">Публичная карточка WB. Авторизация и login UI не используются.</p></div><span id="publicSourceBadge" class="pill warning">Неизвестно</span></div>
+            <dl id="publicSourceHealth" class="source-health"></dl>
+            <div class="compact-actions"><button type="button" data-source-check="public">Проверить</button></div>
+            <p id="publicSourceError" class="source-error"></p>
+          </article>
+        </div>
+      </section>
+
       <section id="usersGroupPanel" class="block settings-group-panel" data-settings-group-panel="users" aria-labelledby="usersTitle" hidden>
         <div class="toolbar" style="justify-content: space-between;">
           <div>
@@ -558,6 +609,28 @@
       const calculationParametersPath = config.calculation_parameters_path;
       const calculationParametersPreviewPath = config.calculation_parameters_preview_path;
       const autoUpdatesPath = config.auto_updates_path;
+      const sourcesSessionsPath = config.sources_sessions_path;
+      const sourceRoutes = {
+        seller: {
+          check: config.seller_session_check_path,
+          status: config.seller_recovery_status_path,
+          start: config.seller_recovery_start_path,
+          stop: config.seller_recovery_stop_path,
+          launcher: config.seller_recovery_launcher_path
+        },
+        buyer: {
+          check: config.wb_buyer_session_check_path,
+          status: config.wb_buyer_recovery_status_path,
+          start: config.wb_buyer_recovery_start_path,
+          stop: config.wb_buyer_recovery_stop_path,
+          launcher: config.wb_buyer_recovery_launcher_path
+        },
+        public: {check: config.spp_proxy_source_check_path},
+        transit: {
+          check: config.wb_supplies_transit_cost_check_path,
+          status: config.wb_supplies_transit_cost_status_path
+        }
+      };
       const vitrinaAutoSchedulesPath = config.auto_schedules_path;
       const vitrinaAutoSchedulesRunNowPath = config.auto_schedules_run_now_path;
       const sheetJobPath = config.job_path;
@@ -632,6 +705,8 @@
       const autoUpdatesMasterButton = document.getElementById("autoUpdatesMasterButton");
       const autoUpdatesTechnicalDetails = document.getElementById("autoUpdatesTechnicalDetails");
       const reloadAutoUpdatesButton = document.getElementById("reloadAutoUpdatesButton");
+      const reloadSourcesSessionsButton = document.getElementById("reloadSourcesSessionsButton");
+      const sourcesSessionsMessage = document.getElementById("sourcesSessionsMessage");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
       const NOMENCLATURE_COLUMNS_STORAGE_KEY = "wb-core:sheet-vitrina-v1:nomenclature-columns:v1";
@@ -664,6 +739,9 @@
       let users = [];
       let calculationPreviewFingerprint = "";
       let autoUpdatesState = null;
+      let sourcesSessionsState = null;
+      const sourceCheckPromises = new Map();
+      const recoveryPollTimers = new Map();
       let vitrinaScheduleState = {
         loading: false,
         saving: false,
@@ -760,7 +838,7 @@
       }
 
       function activateSettingsGroup(groupName, options) {
-        const allowed = ["user-directory", "auto-updates"].includes(groupName) || (groupName === "users" && canManageUsers);
+        const allowed = ["user-directory", "auto-updates", "sources-sessions"].includes(groupName) || (groupName === "users" && canManageUsers);
         const requested = allowed ? groupName : "directories";
         settingsGroupButtons.forEach((button) => {
           const isActive = button.dataset.settingsGroupButton === requested;
@@ -787,16 +865,24 @@
           loadAutoUpdates();
           loadVitrinaSchedules();
         }
+        if (requested === "sources-sessions") {
+          loadSourcesSessions({refreshStale: true});
+        }
       }
 
       function restoreSettingsGroup() {
+        const requestedByHash = String(window.location.hash || "").replace(/^#/, "");
+        if (["users", "user-directory", "auto-updates", "sources-sessions"].includes(requestedByHash)) {
+          activateSettingsGroup(requestedByHash, { persist: false });
+          return;
+        }
         let saved = "";
         try {
           saved = window.localStorage.getItem(SETTINGS_GROUP_STORAGE_KEY) || "";
         } catch (error) {
           saved = "";
         }
-        activateSettingsGroup(["users", "user-directory", "auto-updates"].includes(saved) ? saved : "directories", { persist: false });
+        activateSettingsGroup(["users", "user-directory", "auto-updates", "sources-sessions"].includes(saved) ? saved : "directories", { persist: false });
       }
 
       function activateSettingsTab(tabName, options) {
@@ -842,6 +928,239 @@
           throw new Error(payload.error || rowErrors || ("HTTP " + response.status));
         }
         return payload;
+      }
+
+      function sourceTimestamp(...values) {
+        for (const value of values) {
+          const text = String(value || "");
+          const parsed = Date.parse(text);
+          if (text && Number.isFinite(parsed)) return {text, parsed};
+        }
+        return {text: "", parsed: 0};
+      }
+
+      function formatSourceTime(value) {
+        const parsed = Date.parse(String(value || ""));
+        return Number.isFinite(parsed) ? new Date(parsed).toLocaleString("ru-RU") : (String(value || "") || "—");
+      }
+
+      function sourceIsStale(value, ttlSeconds) {
+        const parsed = Date.parse(String(value || ""));
+        return !Number.isFinite(parsed) || (Date.now() - parsed) > Math.max(Number(ttlSeconds || 180), 60) * 1000;
+      }
+
+      function renderHealthRows(targetId, rows) {
+        const target = document.getElementById(targetId);
+        target.innerHTML = rows.map((row) => (
+          "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1] == null || row[1] === "" ? "—" : row[1]) + "</dd>"
+        )).join("");
+      }
+
+      function setSourceBadge(source, label, tone) {
+        const badge = document.getElementById(source + "SourceBadge");
+        badge.textContent = label;
+        badge.className = "pill " + (tone || "warning");
+      }
+
+      function recoveryStepIndex(source, status) {
+        const value = String(status || "idle");
+        if (["completed", "not_needed"].includes(value)) return 4;
+        if (["saving_session", "validating_session", "checking_canonical_supplier", "validating_account", "restarting_profile"].includes(value)) return 3;
+        if (["awaiting_login", "awaiting_human"].includes(value)) return 2;
+        if (["automatic_login", "automatic_recovery", "starting", "launching"].includes(value)) return 1;
+        if (["error", "timeout", "stopped"].includes(value)) return -2;
+        return 0;
+      }
+
+      function renderRecoverySteps(source, recovery) {
+        const labels = ["Проверка", "Автовход", "Человек", "Валидация", "Готово"];
+        const index = recoveryStepIndex(source, recovery && (recovery.run_status || recovery.status));
+        document.getElementById(source + "RecoverySteps").innerHTML = labels.map((label, step) => {
+          const className = index === -2 ? (step === 0 ? " is-active" : "") : step < index ? " is-done" : step === index ? " is-active" : "";
+          return '<div class="recovery-step' + className + '">' + escapeHtml(label) + "</div>";
+        }).join("");
+        const launcher = document.getElementById(source + "LauncherLink");
+        const route = sourceRoutes[source] || {};
+        const ready = Boolean(recovery && (recovery.can_download_launcher || recovery.launcher_ready));
+        launcher.hidden = !ready;
+        launcher.href = ready ? (recovery.launcher_download_path || recovery.launcher_url || route.launcher || "") : "";
+      }
+
+      function renderSourcesSessions(payload) {
+        sourcesSessionsState = payload || {};
+        const seller = (payload.seller_portal || {});
+        const sellerAuth = seller.authorization || {};
+        const coverage = ((seller.transit_cost || {}).coverage || {});
+        const sellerAuthOk = ["session_valid", "session_valid_canonical"].includes(String(sellerAuth.session_status || "")) && sellerAuth.organization_confirmed === true;
+        const sellerHealthy = sellerAuthOk && coverage.overall_status === "healthy";
+        setSourceBadge("seller", sellerHealthy ? "Готово" : sellerAuthOk ? "Есть ограничения" : "Нужен вход", sellerHealthy ? "success" : sellerAuthOk ? "warning" : "danger");
+        renderHealthRows("sellerSourceHealth", [
+          ["Авторизация", sellerAuth.session_status_label || sellerAuth.session_status || "Не проверена"],
+          ["Кабинет", sellerAuth.organization_confirmed === true ? (sellerAuth.expected_supplier_label || sellerAuth.current_supplier_id || "Подтверждён") : "Не подтверждён"],
+          ["Маршрут supply/cost", coverage.route_status || "unknown"],
+          ["Фоновый сборщик", coverage.collector_status || "unknown"],
+          ["Последний успех", formatSourceTime(coverage.last_success_at)],
+          ["Покрытие", String(coverage.confirmed || 0) + "/" + String(coverage.eligible || 0) + " · ожидает " + String(coverage.pending || 0)],
+          ["Сборщики", (seller.collectors || []).join(", ")]
+        ]);
+        document.getElementById("sellerSourceError").textContent = coverage.last_error || sellerAuth.reason || "";
+        renderRecoverySteps("seller", sellerAuth);
+
+        const buyer = payload.wb_buyer || {};
+        const buyerAuth = buyer.authorization || {};
+        const buyerSession = buyerAuth.session || {};
+        const buyerCapability = buyer.capability || {};
+        const buyerAuthOk = (buyerSession.status === "valid" && buyerSession.account_confirmed === true)
+          || (buyerCapability.session_valid === true && buyerCapability.account_confirmed === true);
+        const buyerHealthy = buyerAuthOk && buyerCapability.valid === true;
+        const buyerFingerprint = String(buyerSession.session_fingerprint || buyerCapability.session_fingerprint || "");
+        setSourceBadge("buyer", buyerHealthy ? "Готово" : buyerAuthOk ? "Маршрут не проверен" : "Нужен вход", buyerHealthy ? "success" : buyerAuthOk ? "warning" : "danger");
+        renderHealthRows("buyerSourceHealth", [
+          ["Авторизация", buyerSession.status_label || buyerSession.status || buyerCapability.session_status_label || buyerCapability.session_status || "Не проверена"],
+          ["Аккаунт", buyerAuthOk ? "Подтверждён" + (buyerFingerprint ? " · " + buyerFingerprint.slice(0, 12) : "") : "Не подтверждён"],
+          ["Capability", buyerCapability.status || "not_checked"],
+          ["Последняя проверка", formatSourceTime(buyerCapability.checked_at || buyerSession.checked_at)],
+          ["Сборщики", (buyer.collectors || []).join(", ")]
+        ]);
+        document.getElementById("buyerSourceError").textContent = buyerCapability.reason || buyerAuth.reason || "";
+        renderRecoverySteps("buyer", buyerAuth);
+
+        const publicSource = payload.spp_proxy || {};
+        const publicProbe = publicSource.latest_route_probe || {};
+        const publicOutcome = publicSource.latest_refresh_outcome || {};
+        const publicAvailable = publicProbe.status === "available" || publicOutcome.status === "success";
+        setSourceBadge("public", publicAvailable ? "Доступен" : "Нужно проверить", publicAvailable ? "success" : "warning");
+        renderHealthRows("publicSourceHealth", [
+          ["Авторизация", "Не требуется"],
+          ["Availability", publicProbe.status || publicOutcome.status || "not_checked"],
+          ["Последняя route-проверка", formatSourceTime(publicProbe.checked_at)],
+          ["Свежесть данных", formatSourceTime(publicSource.latest_refresh_at)],
+          ["Сборщики", (publicSource.collectors || []).join(", ")]
+        ]);
+        document.getElementById("publicSourceError").textContent = publicProbe.reason || publicOutcome.reason || "";
+        sourcesSessionsMessage.textContent = "Показан кешированный server-side status. Live-проверки запускаются только по TTL или кнопке.";
+        sourcesSessionsMessage.className = "message success";
+
+        if (sellerAuth.running) scheduleRecoveryPoll("seller");
+        if (buyerAuth.running) scheduleRecoveryPoll("buyer");
+      }
+
+      async function loadSourcesSessions(options) {
+        if (!sourcesSessionsPath) return null;
+        sourcesSessionsMessage.textContent = "Читаем кешированный server-side status...";
+        sourcesSessionsMessage.className = "message";
+        try {
+          const payload = await fetchJson(sourcesSessionsPath, {headers: {Accept: "application/json"}});
+          renderSourcesSessions(payload);
+          if (options && options.refreshStale) refreshStaleSources(payload);
+          return payload;
+        } catch (error) {
+          sourcesSessionsMessage.textContent = error.message;
+          sourcesSessionsMessage.className = "message error";
+          return null;
+        }
+      }
+
+      async function pollTransitRun(runId) {
+        if (!runId || !sourceRoutes.transit.status) return;
+        for (let attempt = 0; attempt < 180; attempt += 1) {
+          const payload = await fetchJson(sourceRoutes.transit.status + "?run_id=" + encodeURIComponent(runId), {headers: {Accept: "application/json"}});
+          const run = payload.run || payload.active_run || {};
+          if (!["queued", "running"].includes(String(run.status || ""))) return payload;
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
+        throw new Error("Проверка supply/cost не завершилась за bounded wait.");
+      }
+
+      async function performSourceCheck(source) {
+        const route = sourceRoutes[source] || {};
+        if (!route.check) return;
+        if (source === "seller") {
+          await fetchJson(route.check, {headers: {Accept: "application/json"}});
+          await performSourceCheck("transit");
+        } else if (source === "buyer") {
+          await fetchJson(route.check, {headers: {Accept: "application/json"}});
+        } else if (source === "transit") {
+          const accepted = await fetchJson(route.check, {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: "{}"});
+          await pollTransitRun(accepted.run_id);
+        } else {
+          await fetchJson(route.check, {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: "{}"});
+        }
+      }
+
+      function checkSource(source) {
+        if (sourceCheckPromises.has(source)) return sourceCheckPromises.get(source);
+        const promise = (async () => {
+          const errorTarget = document.getElementById(source + "SourceError");
+          if (errorTarget) errorTarget.textContent = "Проверяем точный маршрут...";
+          try {
+            await performSourceCheck(source);
+            await loadSourcesSessions({refreshStale: false});
+          } catch (error) {
+            if (errorTarget) errorTarget.textContent = error.message || String(error);
+          } finally {
+            sourceCheckPromises.delete(source);
+          }
+        })();
+        sourceCheckPromises.set(source, promise);
+        return promise;
+      }
+
+      async function refreshStaleSources(payload) {
+        const ttl = Number(payload.refresh_ttl_seconds || 180);
+        const sellerAuth = ((payload.seller_portal || {}).authorization || {});
+        const buyer = payload.wb_buyer || {};
+        const publicSource = payload.spp_proxy || {};
+        const coverage = (((payload.seller_portal || {}).transit_cost || {}).coverage || {});
+        const sellerChecked = sourceTimestamp(sellerAuth.checked_at, (sellerAuth.current_storage_probe || {}).checked_at, sellerAuth.updated_at).text;
+        const buyerChecked = sourceTimestamp((buyer.capability || {}).checked_at, ((buyer.authorization || {}).session || {}).checked_at).text;
+        const publicChecked = sourceTimestamp((publicSource.latest_route_probe || {}).checked_at, publicSource.latest_refresh_at).text;
+        const transitChecked = sourceTimestamp(coverage.last_attempt_at, coverage.last_success_at).text;
+        await Promise.all([
+          sourceIsStale(buyerChecked, ttl) ? checkSource("buyer") : Promise.resolve(),
+          sourceIsStale(publicChecked, ttl) ? checkSource("public") : Promise.resolve(),
+          (async () => {
+            if (sourceIsStale(sellerChecked, ttl)) {
+              await checkSource("seller");
+            } else if (sourceIsStale(transitChecked, ttl)) {
+              await checkSource("transit");
+            }
+          })()
+        ]);
+      }
+
+      async function startRecovery(source) {
+        const route = sourceRoutes[source] || {};
+        if (!route.start) return;
+        const errorTarget = document.getElementById(source + "SourceError");
+        try {
+          const payload = await fetchJson(route.start, {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify({replace: false})});
+          renderRecoverySteps(source, payload);
+          scheduleRecoveryPoll(source, true);
+          await loadSourcesSessions({refreshStale: false});
+        } catch (error) {
+          errorTarget.textContent = error.message || String(error);
+        }
+      }
+
+      function scheduleRecoveryPoll(source, immediate) {
+        if (recoveryPollTimers.has(source)) return;
+        const poll = async () => {
+          try {
+            const payload = await fetchJson(sourceRoutes[source].status + "?probe=false", {headers: {Accept: "application/json"}});
+            renderRecoverySteps(source, payload);
+            await loadSourcesSessions({refreshStale: false});
+            if (payload.running) {
+              recoveryPollTimers.set(source, window.setTimeout(poll, 2000));
+            } else {
+              recoveryPollTimers.delete(source);
+            }
+          } catch (error) {
+            recoveryPollTimers.delete(source);
+            document.getElementById(source + "SourceError").textContent = error.message || String(error);
+          }
+        };
+        recoveryPollTimers.set(source, window.setTimeout(poll, immediate ? 0 : 2000));
       }
 
       async function loadItems() {
@@ -2801,6 +3120,13 @@
       reloadAutoUpdatesButton.addEventListener("click", () => {
         loadAutoUpdates();
         loadVitrinaSchedules();
+      });
+      reloadSourcesSessionsButton.addEventListener("click", () => loadSourcesSessions({refreshStale: false}));
+      Array.from(document.querySelectorAll("[data-source-check]")).forEach((button) => {
+        button.addEventListener("click", () => checkSource(button.dataset.sourceCheck || ""));
+      });
+      Array.from(document.querySelectorAll("[data-source-recover]")).forEach((button) => {
+        button.addEventListener("click", () => startRecovery(button.dataset.sourceRecover || ""));
       });
       autoUpdatesMasterButton.addEventListener("click", updateAutoUpdatesMaster);
       document.addEventListener("click", () => closeAccessPickers());

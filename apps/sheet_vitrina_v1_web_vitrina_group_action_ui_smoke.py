@@ -84,7 +84,6 @@ def _assert_top_session_indicator_style(page: object, expected_tone: str) -> dic
 
 def main() -> None:
     _assert_group_controls_survive_empty_loading_rows()
-    _assert_seller_session_indicator_readonly_and_manual_actions()
     _assert_group_action_launch_error()
 
 
@@ -150,29 +149,9 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             page = context.new_page()
             page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
-            page.wait_for_function(
-                """() => {
-                  const node = document.querySelector('[data-seller-top-session]');
-                  const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
-                  const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
-                  return !!node
-                    && !!word
-                    && !!separator
-                    && word.textContent.trim() === 'сессия'
-                    && separator.textContent.trim() === '|'
-                    && node.classList.contains('tone-success')
-                    && !node.querySelector('[data-session-recovery-start]');
-                }""",
-                timeout=10000,
-            )
-            initial_indicator = _assert_top_session_indicator_style(page, "success")
             initial_payload = page.evaluate(
                 """() => ({
-	                  seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim().replace(/\\s+/g, ' '),
-	                  seller_top_class: document.querySelector('[data-seller-top-session]').className,
-	                  seller_top_tag: document.querySelector('[data-seller-top-session]').tagName,
-	                  seller_top_role: document.querySelector('[data-seller-top-session]').getAttribute('role') || '',
-	                  seller_top_recovery_buttons: document.querySelectorAll('[data-seller-top-session] [data-session-recovery-start]').length,
+                  seller_top_count: document.querySelectorAll('[data-seller-top-session]').length,
                   shell_hidden: document.querySelector('[data-loading-table-shell]').classList.contains('is-hidden'),
                   empty_hidden: document.querySelector('[data-loading-table-empty]').classList.contains('is-hidden'),
                   empty_text: document.querySelector('[data-loading-table-empty]').textContent.trim(),
@@ -192,19 +171,14 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 or initial_payload["source_row_count"] != 0
                 or initial_payload["empty_source_rows"] != 0
                 or "не OK" in initial_payload["empty_text"]
-                or initial_payload["seller_top_text"] != "сессия |"
-                or initial_payload["seller_top_tag"] != "SPAN"
-                or initial_payload["seller_top_role"]
-                or "is-actionable" in initial_payload["seller_top_class"]
-                or "tone-success" not in initial_payload["seller_top_class"]
-                or initial_payload["seller_top_recovery_buttons"] != 0
+                or initial_payload["seller_top_count"] != 0
             ):
                 raise AssertionError(f"initial source status surface must be lazy/neutral, got {initial_payload}")
             if refresh_hits["count"] != 0:
                 raise AssertionError(f"page open/session indicator must not trigger hidden heavy refresh, got {refresh_hits}")
             if session_check_hits["count"] != 0:
                 raise AssertionError(f"page open must not trigger session-check for indicator, got {session_check_hits}")
-            print(f"web_vitrina_seller_session_indicator_active_style: ok -> {initial_indicator}")
+            print("web_vitrina_seller_session_badge_removed: ok")
             page.locator("[data-activity-block] > summary").click()
             page.wait_for_function(
                 """() => {
@@ -219,7 +193,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 timeout=5000,
             )
             print("web_vitrina_source_status_lazy_empty: ok -> open auto-load, empty details collapse")
-            print("web_vitrina_seller_session_top_indicator: ok -> visible without hidden refresh")
+            print("web_vitrina_session_recovery_centralized: ok -> no badge or recovery controls")
             browser.close()
 
 
@@ -295,13 +269,16 @@ def _assert_group_action_launch_error() -> None:
 	                  session_launcher_controls: document.querySelectorAll('[data-session-launcher]').length
 	                })"""
             )
-            if (
-                payload["session_check_controls"] != 1
-                or payload["session_install_controls"] != 1
-                or payload["session_recovery_controls"] != 0
-                or payload["session_launcher_controls"] != 0
+            if any(
+                payload[key] != 0
+                for key in (
+                    "session_check_controls",
+                    "session_install_controls",
+                    "session_recovery_controls",
+                    "session_launcher_controls",
+                )
             ):
-                raise AssertionError(f"seller session controls must render only check/install actions, got {payload}")
+                raise AssertionError(f"data monitoring surface must not render session recovery actions, got {payload}")
             if payload["top_status_badge_count"] != 0:
                 raise AssertionError(f"top status badge must not be rendered, got {payload}")
 

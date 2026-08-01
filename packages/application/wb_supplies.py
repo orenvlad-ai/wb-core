@@ -43,9 +43,22 @@ CONTRACT_VERSION = "v1"
 DEFAULT_SYNC_LIMIT = 1000
 DEFAULT_PAGE_LIMIT = 20
 DEFAULT_TRANSIT_COST_ENRICHMENT_LIMIT = 50
-MAX_TRANSIT_COST_ENRICHMENT_LIMIT = 100
+MAX_TRANSIT_COST_ENRICHMENT_LIMIT = 250
 MAX_FORCED_STATUS_REFRESH_ROWS = 12
 TRANSIT_COST_ENRICHMENT_FRESH_SECONDS = 24 * 60 * 60
+TRANSIT_COST_ACTIVE_RUN_STALE_SECONDS = 2 * 60 * 60
+TRANSIT_COST_RETRY_BACKOFF_SECONDS = {
+    "lock_busy": 5 * 60,
+    "session_expired": 30 * 60,
+    "auth_required": 30 * 60,
+    "route_unavailable": 2 * 60 * 60,
+    "collector_unavailable": 2 * 60 * 60,
+    "response_missing": 2 * 60 * 60,
+    "search_failed": 30 * 60,
+    "invalid_payload": 2 * 60 * 60,
+    "failed": 2 * 60 * 60,
+    "not_found": 24 * 60 * 60,
+}
 SYNC_MODE_INCREMENTAL_REFRESH = "incremental_refresh"
 SYNC_MODE_FULL_BACKFILL = "full_backfill"
 SYNC_MODE_ENRICH_MISSING = "enrich_missing"
@@ -300,6 +313,7 @@ class WbSuppliesBlock:
                 "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
                 "read_only": True,
                 "official_api": False,
+                "coverage": self.transit_cost_coverage(),
             },
         }
 
@@ -712,7 +726,7 @@ class WbSuppliesBlock:
     def start_transit_cost_enrichment(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_transit_cost_enrichment_request(payload or {})
         with self._transit_cost_run_lock:
-            active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+            active_run = self._reconcile_stale_transit_cost_run()
             if active_run:
                 return {
                     "contract_name": CONTRACT_NAME,
@@ -769,12 +783,152 @@ class WbSuppliesBlock:
             "active_run": run,
         }
 
+    def collect_transit_costs(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Run one durable autonomous batch in the current process.
+
+        The hosted warehouse pipeline uses this synchronous entrypoint so a
+        service restart cannot orphan a daemon thread after official supply
+        sync.  Candidate selection is global server-side and independent from
+        the currently visible table page.
+        """
+
+        request = _normalize_transit_cost_enrichment_request(payload or {})
+        with self._transit_cost_run_lock:
+            active_run = self._reconcile_stale_transit_cost_run()
+            if active_run:
+                return {
+                    "contract_name": CONTRACT_NAME,
+                    "contract_version": CONTRACT_VERSION,
+                    "status": "single_flight_joined",
+                    "accepted": True,
+                    "run_id": str(active_run.get("run_id") or ""),
+                    "candidate_count": int(active_run.get("candidate_count") or 0),
+                    "active_run": active_run,
+                    "coverage": self.transit_cost_coverage(),
+                }
+            candidates = self._select_transit_cost_enrichment_candidates(request)
+            run_id = _new_transit_cost_run_id()
+            queued_at = self.timestamp_factory()
+            self.runtime.create_wb_supply_transit_cost_enrichment_run(
+                run_id=run_id,
+                status="queued",
+                phase="queued",
+                started_at=queued_at,
+                candidate_count=len(candidates),
+                logs=[_run_log(queued_at, f"autonomous transit cost batch queued; candidates={len(candidates)}")],
+            )
+        if candidates:
+            try:
+                run = self._run_transit_cost_enrichment(run_id, candidates)
+            except Exception as exc:  # noqa: BLE001 - durable autonomous failure evidence.
+                failed_at = self.timestamp_factory()
+                error = _safe_error_message(exc)
+                run = self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                    run_id,
+                    status="failed",
+                    phase="collector_failed",
+                    updated_at=failed_at,
+                    completed_at=failed_at,
+                    last_error=error,
+                    logs=[_run_log(failed_at, f"autonomous transit collector failed: {error}")],
+                )
+        else:
+            completed_at = self.timestamp_factory()
+            run = self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                run_id,
+                status="success",
+                phase="no_candidates",
+                updated_at=completed_at,
+                completed_at=completed_at,
+                logs=[_run_log(completed_at, "no due transit cost candidates")],
+            )
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": str(run.get("status") or "success"),
+            "accepted": True,
+            "run_id": run_id,
+            "candidate_count": len(candidates),
+            "run": run,
+            "coverage": self.transit_cost_coverage(),
+        }
+
+    def collect_all_due_transit_costs(
+        self,
+        *,
+        batch_limit: int = MAX_TRANSIT_COST_ENRICHMENT_LIMIT,
+        max_batches: int = 4,
+    ) -> dict[str, Any]:
+        """Run bounded global batches until no immediately-due candidate remains."""
+
+        normalized_limit = max(1, min(int(batch_limit), MAX_TRANSIT_COST_ENRICHMENT_LIMIT))
+        normalized_max_batches = max(1, min(int(max_batches), 20))
+        batches: list[dict[str, Any]] = []
+        for _ in range(normalized_max_batches):
+            result = self.collect_transit_costs(
+                {"limit": normalized_limit, "force": False}
+            )
+            batches.append(result)
+            if int(result.get("candidate_count") or 0) < normalized_limit:
+                break
+            if str(result.get("status") or "") == "single_flight_joined":
+                break
+        coverage = self.transit_cost_coverage()
+        retry_due = int(coverage.get("retry_due") or 0)
+        return {
+            "status": (
+                "complete"
+                if bool(coverage.get("complete"))
+                else "bounded_pending"
+                if retry_due
+                else "awaiting_recalculation"
+                if int(coverage.get("awaiting_recalculation") or 0)
+                else "recalculation_error"
+                if int(coverage.get("recalculation_error") or 0)
+                else "waiting_backoff"
+                if int(coverage.get("waiting_backoff") or 0)
+                else "degraded"
+            ),
+            "batch_count": len(batches),
+            "processed_candidate_count": sum(
+                int(item.get("candidate_count") or 0) for item in batches
+            ),
+            "batches": batches,
+            "coverage": coverage,
+        }
+
+    def _reconcile_stale_transit_cost_run(self) -> dict[str, Any] | None:
+        active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        if not active_run:
+            return None
+        updated_at = str(active_run.get("updated_at") or active_run.get("started_at") or "")
+        if not _is_timestamp_older_than(
+            updated_at,
+            now_text=self.timestamp_factory(),
+            age_seconds=TRANSIT_COST_ACTIVE_RUN_STALE_SECONDS,
+        ):
+            return active_run
+        failed_at = self.timestamp_factory()
+        self.runtime.update_wb_supply_transit_cost_enrichment_run(
+            str(active_run.get("run_id") or ""),
+            status="failed",
+            phase="orphan_reconciled",
+            updated_at=failed_at,
+            completed_at=failed_at,
+            last_error="collector process ended before durable completion",
+            logs=[_run_log(failed_at, "stale active transit collector reconciled as failed")],
+        )
+        return None
+
     def get_transit_cost_enrichment_status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         run_id = str((params or {}).get("run_id") or "").strip()
         run = (
             self.runtime.load_wb_supply_transit_cost_enrichment_run(run_id)
             if run_id
-            else self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+            else (
+                self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+                or self.runtime.load_latest_wb_supply_transit_cost_enrichment_run()
+            )
         )
         lock_status: dict[str, Any] = {}
         try:
@@ -792,6 +946,148 @@ class WbSuppliesBlock:
             "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
             "read_only": True,
             "official_api": False,
+            "coverage": self.transit_cost_coverage(),
+        }
+
+    def transit_cost_coverage(self) -> dict[str, Any]:
+        now_text = self.timestamp_factory()
+        rows = self.runtime.list_wb_supplies()
+        eligible = {
+            _transit_cost_supply_id(row): row
+            for row in rows
+            if _is_transit_cost_enrichment_candidate(row)
+            and _transit_cost_supply_id(row)
+        }
+        enrichments = _transit_cost_enrichment_map(
+            self.runtime.list_wb_supply_transit_cost_enrichments()
+        )
+        counters = {
+            "eligible": len(eligible),
+            "confirmed": 0,
+            "fresh_confirmed": 0,
+            "stale_confirmed": 0,
+            "confirmed_positive": 0,
+            "confirmed_zero": 0,
+            "pending": 0,
+            "retry_due": 0,
+            "waiting_backoff": 0,
+            "errors": 0,
+            "awaiting_recalculation": 0,
+            "recalculation_error": 0,
+        }
+        error_taxonomy: dict[str, int] = {}
+        last_success_at = ""
+        last_attempt_at = ""
+        last_error = ""
+        last_error_status = ""
+        last_error_at = ""
+        for supply_id, row in eligible.items():
+            enrichment = _lookup_transit_cost_enrichment(row, enrichments)
+            attempt_status = str(enrichment.get("last_attempt_status") or enrichment.get("status") or "")
+            attempt_at = str(enrichment.get("last_attempt_at") or enrichment.get("updated_at") or "")
+            if attempt_at > last_attempt_at:
+                last_attempt_at = attempt_at
+            canonical_success = _is_canonical_seller_portal_transit_enrichment(enrichment)
+            if canonical_success:
+                successful_at = _transit_cost_last_success_at(enrichment)
+                counters["confirmed"] += 1
+                if _is_recent_iso_timestamp(
+                    successful_at,
+                    now_text=now_text,
+                    max_age_seconds=TRANSIT_COST_ENRICHMENT_FRESH_SECONDS,
+                ):
+                    counters["fresh_confirmed"] += 1
+                else:
+                    counters["stale_confirmed"] += 1
+                amount = _optional_number(enrichment.get("amount")) or 0.0
+                counters["confirmed_zero" if amount == 0 else "confirmed_positive"] += 1
+                last_success_at = max(last_success_at, successful_at)
+                recalculation_status = str(enrichment.get("recalculation_status") or "")
+                if recalculation_status in {"awaiting_recalculation", "queued"}:
+                    counters["awaiting_recalculation"] += 1
+                elif recalculation_status == "recalculation_error":
+                    counters["recalculation_error"] += 1
+            else:
+                counters["pending"] += 1
+            if attempt_status and attempt_status != "success":
+                counters["errors"] += 1
+                error_taxonomy[attempt_status] = error_taxonomy.get(attempt_status, 0) + 1
+                if attempt_at >= last_error_at:
+                    last_error_at = attempt_at
+                    last_error = str(enrichment.get("last_attempt_error") or enrichment.get("error") or "")
+                    last_error_status = attempt_status
+            if canonical_success:
+                continue
+            if _transit_cost_attempt_is_backed_off(enrichment, now_text=now_text):
+                counters["waiting_backoff"] += 1
+            else:
+                counters["retry_due"] += 1
+        active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        auth_status = "unknown"
+        if last_error_status in {"session_expired", "auth_required"} and last_error_at >= last_success_at:
+            auth_status = "invalid"
+        elif last_success_at:
+            auth_status = "valid"
+        route_status = (
+            "checking"
+            if active_run
+            else "unavailable"
+            if last_error_status == "route_unavailable" and last_error_at >= last_success_at
+            else "degraded"
+            if last_error_status in {"response_missing", "search_failed", "invalid_payload"}
+            and last_error_at >= last_success_at
+            else "available"
+            if last_success_at
+            else "unknown"
+        )
+        latest_run = self.runtime.load_latest_wb_supply_transit_cost_enrichment_run()
+        latest_run_status = str((latest_run or {}).get("status") or "")
+        collector_status = (
+            "running"
+            if active_run
+            else "unavailable"
+            if last_error_status == "collector_unavailable" and last_error_at >= last_success_at
+            else "error"
+            if latest_run_status in {"failed", "session_expired"}
+            else "healthy"
+            if latest_run_status in {"success", "partial"} or last_success_at
+            else "idle"
+        )
+        freshness_status = (
+            "fresh"
+            if counters["eligible"] == counters["fresh_confirmed"]
+            else "stale" if counters["confirmed"] else "missing"
+        )
+        complete = bool(
+            counters["eligible"] == counters["confirmed"]
+            and counters["awaiting_recalculation"] == 0
+            and counters["recalculation_error"] == 0
+        )
+        overall_status = "healthy" if (
+            auth_status == "valid"
+            and route_status == "available"
+            and collector_status == "healthy"
+            and freshness_status == "fresh"
+            and complete
+        ) else "checking" if active_run else "degraded"
+        return {
+            **counters,
+            "complete": complete,
+            "coverage_pct": round((counters["confirmed"] / counters["eligible"] * 100), 1)
+            if counters["eligible"] else 100.0,
+            "auth_status": auth_status,
+            "route_status": route_status,
+            "collector_status": collector_status,
+            "freshness_status": freshness_status,
+            "overall_status": overall_status,
+            "last_success_at": last_success_at,
+            "last_attempt_at": last_attempt_at,
+            "last_error_status": last_error_status,
+            "last_error": last_error,
+            "last_error_at": last_error_at,
+            "error_taxonomy": error_taxonomy,
+            "active_run": active_run,
+            "latest_run": latest_run,
         }
 
     def get_supply(self, supply_id: str) -> dict[str, Any]:
@@ -964,6 +1260,12 @@ class WbSuppliesBlock:
                 continue
             if not force and _has_fresh_success_transit_cost(row, enrichments, now_text=self.timestamp_factory()):
                 continue
+            enrichment = _lookup_transit_cost_enrichment(row, enrichments)
+            if not force and _transit_cost_attempt_is_backed_off(
+                enrichment,
+                now_text=self.timestamp_factory(),
+            ):
+                continue
             candidates.append(
                 {
                     "supply_id": supply_id,
@@ -1012,7 +1314,7 @@ class WbSuppliesBlock:
                 fetched_at=started_at,
             )
         except SellerPortalTransitCostSourceError as exc:
-            status = "session_expired" if exc.code == "session_expired" else "failed"
+            status = _transit_cost_source_error_status(exc.code)
             fetched_at = self.timestamp_factory()
             results = [
                 {
@@ -1038,15 +1340,20 @@ class WbSuppliesBlock:
             "not_found_count": 0,
             "failed_count": 0,
             "session_expired_count": 0,
+            "auth_required_count": 0,
+            "route_unavailable_count": 0,
+            "collector_unavailable_count": 0,
+            "lock_busy_count": 0,
         }
         updated_at = self.timestamp_factory()
         for result in results:
             supply_id = str(result.get("supply_id") or "").strip()
             if not supply_id:
                 continue
-            status = str(result.get("status") or "failed")
+            status = _transit_cost_result_status(result)
             record = {
                 **result,
+                "status": status,
                 "created_at": updated_at,
                 "updated_at": updated_at,
                 "source": SELLER_PORTAL_TRANSIT_COST_SOURCE,
@@ -1061,6 +1368,14 @@ class WbSuppliesBlock:
                 counters["not_found_count"] += 1
             elif status == "session_expired":
                 counters["session_expired_count"] += 1
+            elif status == "auth_required":
+                counters["auth_required_count"] += 1
+            elif status == "route_unavailable":
+                counters["route_unavailable_count"] += 1
+            elif status == "collector_unavailable":
+                counters["collector_unavailable_count"] += 1
+            elif status == "lock_busy":
+                counters["lock_busy_count"] += 1
             else:
                 counters["failed_count"] += 1
             self.runtime.update_wb_supply_transit_cost_enrichment_run(
@@ -1103,9 +1418,19 @@ class WbSuppliesBlock:
                     )
                 )
         completed_at = self.timestamp_factory()
-        if counters["session_expired_count"]:
+        classified_failure_count = sum(
+            counters[key]
+            for key in (
+                "failed_count",
+                "not_found_count",
+                "route_unavailable_count",
+                "collector_unavailable_count",
+                "lock_busy_count",
+            )
+        )
+        if counters["session_expired_count"] or counters["auth_required_count"]:
             status = "session_expired"
-        elif counters["failed_count"] or counters["not_found_count"]:
+        elif classified_failure_count:
             status = "partial" if counters["success_count"] else "failed"
         else:
             status = "success"
@@ -1114,7 +1439,7 @@ class WbSuppliesBlock:
                 completed_at,
                 "Seller Portal transit cost enrichment completed: "
                 f"success={counters['success_count']} not_found={counters['not_found_count']} "
-                f"failed={counters['failed_count']} session_expired={counters['session_expired_count']}",
+                f"failed={classified_failure_count} session_expired={counters['session_expired_count']}",
             )
         )
         return self.runtime.update_wb_supply_transit_cost_enrichment_run(
@@ -3305,11 +3630,22 @@ def _has_fresh_success_transit_cost(
         and str(enrichment.get("recalculation_status") or "")
         not in {"awaiting_recalculation", "recalculation_error"}
         and _is_recent_iso_timestamp(
-            str(enrichment.get("fetched_at") or enrichment.get("updated_at") or ""),
+            _transit_cost_last_success_at(enrichment),
             now_text=now_text,
             max_age_seconds=TRANSIT_COST_ENRICHMENT_FRESH_SECONDS,
         )
     )
+
+
+def _transit_cost_last_success_at(enrichment: Mapping[str, Any]) -> str:
+    if str(enrichment.get("last_attempt_status") or "") == "success":
+        return str(
+            enrichment.get("last_attempt_at")
+            or enrichment.get("fetched_at")
+            or enrichment.get("updated_at")
+            or ""
+        )
+    return str(enrichment.get("fetched_at") or enrichment.get("updated_at") or "")
 
 
 def _is_canonical_seller_portal_transit_enrichment(
@@ -3346,6 +3682,73 @@ def _is_recent_iso_timestamp(value: str, *, now_text: str, max_age_seconds: int)
         now = now.replace(tzinfo=timezone.utc)
     age_seconds = (now - timestamp).total_seconds()
     return 0 <= age_seconds <= max(0, int(max_age_seconds))
+
+
+def _is_timestamp_older_than(
+    value: str,
+    *,
+    now_text: str,
+    age_seconds: int,
+) -> bool:
+    timestamp = _parse_iso_datetime(value)
+    now = _parse_iso_datetime(now_text)
+    if timestamp is None or now is None:
+        return True
+    return (now - timestamp).total_seconds() > max(0, int(age_seconds))
+
+
+def _transit_cost_attempt_is_backed_off(
+    enrichment: Mapping[str, Any],
+    *,
+    now_text: str,
+) -> bool:
+    status = str(
+        enrichment.get("last_attempt_status")
+        or enrichment.get("status")
+        or ""
+    )
+    backoff_seconds = TRANSIT_COST_RETRY_BACKOFF_SECONDS.get(status)
+    if backoff_seconds is None:
+        return False
+    attempted_at = str(
+        enrichment.get("last_attempt_at")
+        or enrichment.get("updated_at")
+        or ""
+    )
+    return not _is_timestamp_older_than(
+        attempted_at,
+        now_text=now_text,
+        age_seconds=backoff_seconds,
+    )
+
+
+def _transit_cost_source_error_status(code: str) -> str:
+    normalized = str(code or "failed")
+    if normalized == "session_expired":
+        return "session_expired"
+    if normalized in {"storage_state_absent", "storage_state_policy"}:
+        return "auth_required"
+    if normalized == "lock_busy":
+        return "lock_busy"
+    if normalized == "selector_not_found":
+        return "route_unavailable"
+    if normalized in {"playwright_unavailable", "guard_unavailable"}:
+        return "collector_unavailable"
+    return "failed"
+
+
+def _transit_cost_result_status(result: Mapping[str, Any]) -> str:
+    status = str(result.get("status") or "failed")
+    if status != "failed":
+        return status
+    error = str(result.get("error") or "").casefold()
+    if "response missing target key" in error:
+        return "response_missing"
+    if "search failed" in error:
+        return "search_failed"
+    if "no usable amount" in error:
+        return "invalid_payload"
+    return status
 
 
 def _format_effective_cost(value: float | None) -> str:

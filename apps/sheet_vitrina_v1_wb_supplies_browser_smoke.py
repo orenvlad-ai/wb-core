@@ -95,6 +95,9 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesPageSizeSelect")).to_have_value("20")
                 expect(operator_frame.locator("#wbSuppliesBackfillButton")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesTransitCostButton")).to_have_count(0)
+                expect(operator_frame.locator("#wbSuppliesTransitCheckButton")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesTransitRetryButton")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesTransitHealth")).to_contain_text("Seller auth")
                 expect(operator_frame.locator("#wbSuppliesSupplyDateSortButton")).to_be_visible()
                 page_size_options = operator_frame.locator("#wbSuppliesPageSizeSelect option").evaluate_all(
                     "(nodes) => nodes.map((node) => node.value)"
@@ -135,7 +138,8 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("3 333 ₽", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("₽/шт", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("Seller Portal")
-                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки WB обновлены. Стоимость транзита: success 1.", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Транзитная стоимость: awaiting_recalculation", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTransitHealth")).to_contain_text("Coverage: 1/1", timeout=10000)
                 status_classes = operator_frame.locator(".wb-supplies-status-pill").evaluate_all(
                     "(nodes) => Array.from(new Set(nodes.map((node) => Array.from(node.classList).filter((item) => item.startsWith('is-status-')).join(' ')).filter(Boolean))).sort()"
                 )
@@ -170,7 +174,7 @@ def main() -> None:
                 operator_frame.locator("#wbSuppliesRefreshButton").click()
                 expect(operator_frame.locator("#wbSuppliesSearchInput")).to_have_value("1003", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003", timeout=10000)
-                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки WB обновлены. Стоимость транзита: не требовала обновления.", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Транзитная стоимость: awaiting_recalculation, обработано 0, coverage 1/1.", timeout=10000)
 
                 transit_mode = {"kind": ""}
 
@@ -248,16 +252,16 @@ def main() -> None:
                 page.route(re.compile(".*/transit-cost/status\\?.*"), fulfill_transit_status)
 
                 transit_mode["kind"] = "session_expired"
-                operator_frame.locator("#wbSuppliesRefreshButton").click()
+                operator_frame.locator("#wbSuppliesTransitRetryButton").click()
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
-                    "Поставки WB обновлены. Стоимость транзита: session_expired. Восстановите Seller-сессию в блоке «Действия и состояния».",
+                    "Стоимость транзита: нужна переавторизация Seller Portal. Восстановите сессию в Настройки → Источники и сессии.",
                     timeout=10000,
                 )
 
                 transit_mode["kind"] = "lock_busy"
-                operator_frame.locator("#wbSuppliesRefreshButton").click()
+                operator_frame.locator("#wbSuppliesTransitRetryButton").click()
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
-                    "Поставки WB обновлены. Стоимость транзита: lock_busy, другой Seller Portal процесс уже выполняется.",
+                    "Стоимость транзита: lock_busy, другой Seller Portal процесс уже выполняется.",
                     timeout=10000,
                 )
 

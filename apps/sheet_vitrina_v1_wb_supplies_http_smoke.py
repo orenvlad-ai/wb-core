@@ -27,7 +27,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
-    DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
     DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
     build_registry_upload_http_server,
 )
@@ -510,8 +510,17 @@ def main() -> None:
             if all_status != 200 or all_ids != {"39265492", "39265540", "1001", "1002", "1003", "1004", "1005"}:
                 raise AssertionError(f"all size filter must include unknown quantity rows, got {all_status} {all_payload}")
             all_rows = {row["wb_supply_id"]: row for row in all_payload.get("rows", [])}
-            if all_rows["1003"].get("effective_cost_source") != "unknown":
-                raise AssertionError(f"unknown transit row must remain unknown before Seller Portal enrichment: {all_rows['1003']}")
+            if (
+                all_rows["1003"].get("effective_cost_source") != "seller_portal_browser"
+                or all_rows["1003"].get("effective_cost_total") != 3333.0
+            ):
+                raise AssertionError(
+                    "official sync must autonomously collect all due transit costs: "
+                    + json.dumps(all_rows["1003"], ensure_ascii=False, sort_keys=True)
+                )
+            transit_coverage = (all_payload.get("transit_cost_enrichment") or {}).get("coverage") or {}
+            if transit_coverage.get("eligible") != 1 or transit_coverage.get("confirmed") != 1:
+                raise AssertionError(f"list payload must expose global transit coverage, got {transit_coverage}")
             status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
                 raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
@@ -626,8 +635,8 @@ def main() -> None:
                 raise AssertionError(f"search must match preorderID/visible number, got {search_status} {search_payload}")
 
             transit_enrich_status, transit_enrich_payload = _post_json(
-                f"{base_url}{DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH}",
-                {"supply_ids": ["1003", "39265492", "39265540"], "limit": 10, "force": False},
+                f"{base_url}{DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH}",
+                {"force": True, "limit": 1},
             )
             if (
                 transit_enrich_status != 202
@@ -635,14 +644,17 @@ def main() -> None:
                 or transit_enrich_payload.get("candidate_count") != 1
             ):
                 raise AssertionError(
-                    f"transit cost enrich route must accept exactly missing transit cost candidate, got "
+                    f"route-specific transit check must accept one exact supply-cost candidate, got "
                     f"{transit_enrich_status} {transit_enrich_payload}"
                 )
             transit_run = _wait_transit_cost_run(base_url, str(transit_enrich_payload.get("run_id") or ""))
             if transit_run.get("status") != "success" or transit_run.get("success_count") != 1:
                 raise AssertionError(f"transit cost fake run must finish successfully, got {transit_run}")
-            if fake_transit_cost_source.calls != [["1003"]]:
-                raise AssertionError(f"transit cost source must receive only missing unknown transit row, got {fake_transit_cost_source.calls}")
+            if fake_transit_cost_source.calls != [["1003"], ["1003"]]:
+                raise AssertionError(
+                    "autonomous sync and explicit route check must each use the global eligible supply: "
+                    f"{fake_transit_cost_source.calls}"
+                )
             enriched_status, enriched_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search=1003&size_filter=all"
             )

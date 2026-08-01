@@ -281,7 +281,8 @@ class SheetVitrinaV1WebVitrinaBlock:
                 row_count=len(rows),
                 incident_policy_badge=policy_badge(current_incident_policy),
                 incident_projection_quality=_incident_projection_quality_badge(
-                    snapshot
+                    snapshot,
+                    refreshed_at=refreshed_at,
                 ),
                 warehouse_business_projection=deepcopy(
                     dict(snapshot.metadata or {}).get(
@@ -666,6 +667,8 @@ def _merge_period_incident_projection_quality(
 
 def _incident_projection_quality_badge(
     snapshot: SheetVitrinaV1Envelope,
+    *,
+    refreshed_at: str,
 ) -> dict[str, Any]:
     quality_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
         "incident_projection_quality_by_date"
@@ -692,7 +695,8 @@ def _incident_projection_quality_badge(
     return {
         "active": True,
         "state": "provisional_received_rows",
-        "label": "Полученный снимок",
+        "label": "Снимок:",
+        "snapshot_at": refreshed_at,
         "detail": (
             "Рассчитано по полученному снимку, полнота WB не подтверждена. "
             f"Даты: {', '.join(dates)}; обработано items: {accepted_items}; "

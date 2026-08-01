@@ -3809,56 +3809,14 @@
             <p id="manualLoadResult" class="field-note">Legacy Google Sheets contour архивирован и не используется.</p>
           </section>
 
-          <section class="block" aria-labelledby="sellerRecoveryTitle">
+          <section class="block" aria-labelledby="sellerSourcesTitle">
             <div class="block-header">
-              <h2 id="sellerRecoveryTitle" class="block-title">Проверка и восстановление Seller-сессии</h2>
-              <span id="sellerRecoveryBadge" class="badge is-idle">проверяем</span>
+              <h2 id="sellerSourcesTitle" class="block-title">Источники и сессии</h2>
             </div>
-            <p class="field-note">
-              Сначала проверьте сохранённую seller-сессию. Если вход слетел или открыт не тот кабинет, запустите
-              временное окно входа: после логина система сама проверит нужный кабинет, при необходимости переключит
-              supplier, сохранит <code>storage_state.json</code>, запустит refresh и закроет временный login contour.
-            </p>
+            <p class="field-note">Вход, восстановление Seller Portal и WB Buyer, а также точные проверки capabilities централизованы в настройках.</p>
             <div class="block-actions">
-              <button id="sellerSessionCheckButton" class="action-button secondary-button" type="button">Проверить сессию</button>
-              <button id="sellerRecoveryStartButton" class="action-button secondary-button" type="button">Восстановить сессию</button>
-              <button id="sellerRecoveryLauncherButton" class="action-button secondary-button" type="button" disabled>Скачать launcher для Mac</button>
-              <button id="sellerRecoveryStopButton" class="action-button secondary-button" type="button" disabled>Остановить восстановление</button>
+              <a class="action-button secondary-button" href="/sheet-vitrina-v1/settings#sources-sessions">Открыть настройки источников</a>
             </div>
-            <p class="field-note">
-              «Остановить восстановление» закрывает только временное окно входа. Сохранённый
-              <code>storage_state.json</code> не удаляется, seller-сессия бота не сбрасывается.
-            </p>
-            <dl class="meta-grid">
-              <div>
-                <dt>Текущий запуск</dt>
-                <dd id="sellerRecoveryRunId">не запущен</dd>
-              </div>
-              <div>
-                <dt>Статус запуска</dt>
-                <dd id="sellerRecoveryRunStatus">-</dd>
-              </div>
-              <div>
-                <dt>Финал запуска</dt>
-                <dd id="sellerRecoveryRunFinal">-</dd>
-              </div>
-              <div>
-                <dt>Статус сессии</dt>
-                <dd id="sellerRecoverySessionState">-</dd>
-              </div>
-              <div>
-                <dt>Старт</dt>
-                <dd id="sellerRecoveryStartedAt">-</dd>
-              </div>
-              <div>
-                <dt>Завершение</dt>
-                <dd id="sellerRecoveryFinishedAt">-</dd>
-              </div>
-            </dl>
-            <p id="sellerRecoverySummary" class="field-note">Проверяем сохранённую seller-сессию...</p>
-            <p id="sellerRecoveryInstruction" class="field-note" hidden></p>
-            <p id="sellerRecoveryTechnical" class="field-note" hidden></p>
-            <p id="sellerRecoveryActionMessage" class="section-message"></p>
           </section>
 
           <section class="block" aria-labelledby="server-title">
@@ -5173,6 +5131,24 @@
               </div>
             </div>
 
+            <section class="block" aria-labelledby="wbSuppliesTransitHealthTitle">
+              <div class="block-header">
+                <h3 id="wbSuppliesTransitHealthTitle" class="block-title">Транзитная стоимость</h3>
+                <div class="block-actions">
+                  <button id="wbSuppliesTransitCheckButton" class="action-button secondary-button" type="button">Проверить</button>
+                  <button id="wbSuppliesTransitRetryButton" class="action-button secondary-button" type="button">Повторить сбор</button>
+                </div>
+              </div>
+              <p class="field-note">Проверка обращается к точному маршруту supply-cost. Повторный сбор обрабатывает все eligible поставки на сервере и не зависит от фильтра или страницы списка.</p>
+              <div id="wbSuppliesTransitHealth" class="wb-supplies-summary" aria-live="polite">
+                <span class="wb-supplies-chip">Seller auth: неизвестно</span>
+                <span class="wb-supplies-chip">Route: не проверен</span>
+                <span class="wb-supplies-chip">Collector: неизвестно</span>
+                <span class="wb-supplies-chip">Coverage: —</span>
+              </div>
+              <p id="wbSuppliesTransitError" class="wb-supplies-message"></p>
+            </section>
+
             <div class="wb-supplies-filters" aria-label="Фильтры поставок Wildberries">
               <div class="field">
                 <label for="wbSuppliesSearchInput">Поиск</label>
@@ -5585,6 +5561,10 @@
       const shipmentRegistryDetailFrame = document.getElementById("shipmentRegistryDetailFrame");
       const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
       const wbSuppliesBackfillButton = document.getElementById("wbSuppliesBackfillButton");
+      const wbSuppliesTransitCheckButton = document.getElementById("wbSuppliesTransitCheckButton");
+      const wbSuppliesTransitRetryButton = document.getElementById("wbSuppliesTransitRetryButton");
+      const wbSuppliesTransitHealth = document.getElementById("wbSuppliesTransitHealth");
+      const wbSuppliesTransitError = document.getElementById("wbSuppliesTransitError");
       const wbSuppliesSupplyDateSortButton = document.getElementById("wbSuppliesSupplyDateSortButton");
       const wbSuppliesSupplyDateSortArrow = document.getElementById("wbSuppliesSupplyDateSortArrow");
       const wbSuppliesSearchInput = document.getElementById("wbSuppliesSearchInput");
@@ -12297,6 +12277,14 @@
           wbSuppliesBackfillButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling || wbSuppliesTransitCostRefreshing;
           wbSuppliesBackfillButton.textContent = wbSuppliesBackfilling ? "Загружаем историю..." : "Загрузить всю историю";
         }
+        if (wbSuppliesTransitCheckButton) {
+          wbSuppliesTransitCheckButton.disabled = wbSuppliesTransitCostRefreshing;
+          wbSuppliesTransitCheckButton.textContent = wbSuppliesTransitCostRefreshing ? "Проверяем..." : "Проверить";
+        }
+        if (wbSuppliesTransitRetryButton) {
+          wbSuppliesTransitRetryButton.disabled = wbSuppliesTransitCostRefreshing || wbSuppliesSyncing;
+          wbSuppliesTransitRetryButton.textContent = wbSuppliesTransitCostRefreshing ? "Собираем..." : "Повторить сбор";
+        }
       }
 
       function ensureWbSuppliesLoaded() {
@@ -12427,10 +12415,19 @@
             return;
           }
           const sync = payload.sync || {};
+          const transitCollection = payload.transit_cost_collection && typeof payload.transit_cost_collection === "object"
+            ? payload.transit_cost_collection
+            : null;
+          const transitCoverage = transitCollection && transitCollection.coverage ? transitCollection.coverage : {};
           const syncMessage = "Поставки WB обновлены: new " + valueOrDash(sync.new_rows) +
             ", changed " + valueOrDash(sync.changed_rows) +
             ", unchanged " + valueOrDash(sync.unchanged_rows) +
-            ", enriched " + valueOrDash(sync.enriched) + ".";
+            ", enriched " + valueOrDash(sync.enriched) + "." +
+            (transitCollection
+              ? " Транзитная стоимость: " + valueOrDash(transitCollection.status) +
+                ", обработано " + valueOrDash(transitCollection.processed_candidate_count) +
+                ", coverage " + valueOrDash(transitCoverage.confirmed) + "/" + valueOrDash(transitCoverage.eligible) + "."
+              : "");
           const syncTone = sync.failed_enrich ? "warning" : "";
           await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
           if (!runTransitCost) {
@@ -12545,18 +12542,37 @@
         }
       }
 
-      function currentWbSuppliesListParams() {
-        return {
-          search: wbSuppliesState.search,
-          warehouse_id: wbSuppliesState.warehouse_id,
-          district_keys: wbSuppliesState.district_keys.slice(),
-          status_ids: sortedWbSuppliesStatusIds(wbSuppliesState.status_ids),
-          size_filter: wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER,
-          limit: wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT,
-          offset: wbSuppliesState.offset || 0,
-          sort_key: wbSuppliesState.sort_key || "supply_date",
-          sort_dir: wbSuppliesState.sort_dir || "desc"
-        };
+      async function checkWbSuppliesTransitRoute() {
+        if (!config.wb_supplies_transit_cost_check_path || wbSuppliesTransitCostRefreshing) {
+          return;
+        }
+        wbSuppliesTransitCostRefreshing = true;
+        updateWbSuppliesBusyState();
+        setWbSuppliesMessage("Проверяем точный маршрут supply-cost...", "");
+        try {
+          const response = await fetch(config.wb_supplies_transit_cost_check_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ force: true, limit: 1 })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const runId = payload.run_id || (payload.active_run && payload.active_run.run_id) || "";
+          if (runId && Number(payload.candidate_count || (payload.active_run && payload.active_run.candidate_count) || 0) > 0) {
+            await pollWbSuppliesTransitCost(runId, { routeCheck: true });
+            return;
+          }
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
+          setWbSuppliesMessage("Route-specific проверка завершена: eligible кандидатов сейчас нет.", "");
+        } catch (error) {
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          setWbSuppliesMessage("Route-specific проверка не пройдена: " + (error instanceof Error ? error.message : String(error)), "error");
+        }
       }
 
       async function startWbSuppliesTransitCostEnrichment() {
@@ -12572,7 +12588,7 @@
           const response = await fetch(config.wb_supplies_transit_cost_enrich_path, {
             method: "POST",
             headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify({ list_params: currentWbSuppliesListParams(), limit: 50, force: false })
+            body: JSON.stringify({ limit: 250, force: false })
           });
           const payload = await readJson(response);
           if (!response.ok) {
@@ -12638,7 +12654,7 @@
             sessionExpired
               ? (afterOfficialSync
                   ? "Поставки: готово. Стоимость транзита: Seller-сессия протухла."
-                  : "Стоимость транзита: нужна переавторизация Seller Portal")
+                  : "Стоимость транзита: нужна переавторизация Seller Portal. Восстановите сессию в Настройки → Источники и сессии.")
               : (afterOfficialSync ? "Поставки: готово. Стоимость транзита: обработано " : "Стоимость транзита: обработано ") + processed + "/" + total +
                 ", success " + valueOrDash(run.success_count) +
                 ", failed " + valueOrDash(run.failed_count) +
@@ -12657,9 +12673,12 @@
           updateWbSuppliesBusyState();
           await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
           if (!afterOfficialSync && !sessionExpired) {
+            const terminalKind = wbSuppliesTransitCostKind(run);
             setWbSuppliesMessage(
-              "Стоимость транзита: готово, success " + valueOrDash(run.success_count) +
-                ", failed " + valueOrDash(run.failed_count),
+              terminalKind === "lock_busy"
+                ? "Стоимость транзита: lock_busy, другой Seller Portal процесс уже выполняется."
+                : "Стоимость транзита: готово, success " + valueOrDash(run.success_count) +
+                  ", failed " + valueOrDash(run.failed_count),
               run.status === "success" ? "" : "warning"
             );
           }
@@ -12715,7 +12734,7 @@
         }
         if (kind === "session_expired") {
           return {
-            message: "Поставки WB обновлены. Стоимость транзита: session_expired. Восстановите Seller-сессию в блоке «Действия и состояния».",
+            message: "Поставки WB обновлены. Стоимость транзита: session_expired. Восстановите Seller-сессию в Настройки → Источники и сессии.",
             tone: "warning"
           };
         }
@@ -12743,6 +12762,7 @@
         const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
         renderWbSuppliesOptions(payload);
         renderWbSuppliesSummary(payload);
+        renderWbSuppliesTransitHealth(payload);
         renderWbSuppliesRows(rows);
         renderWbSuppliesPagination(payload);
         renderWbSuppliesSort(payload);
@@ -12948,6 +12968,38 @@
           );
         }
         wbSuppliesSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+      }
+
+      function renderWbSuppliesTransitHealth(payload) {
+        if (!wbSuppliesTransitHealth) {
+          return;
+        }
+        const transit = payload && payload.transit_cost_enrichment ? payload.transit_cost_enrichment : {};
+        const coverage = transit.coverage && typeof transit.coverage === "object" ? transit.coverage : {};
+        const eligible = Number(coverage.eligible || 0);
+        const confirmed = Number(coverage.confirmed || 0);
+        const errorTaxonomy = coverage.error_taxonomy && typeof coverage.error_taxonomy === "object"
+          ? Object.entries(coverage.error_taxonomy).map(([key, count]) => key + " " + count).join(", ")
+          : "";
+        const items = [
+          "Seller auth: " + valueOrDash(coverage.auth_status),
+          "Supply-cost route: " + valueOrDash(coverage.route_status),
+          "Collector: " + valueOrDash(coverage.collector_status),
+          "Данные: " + valueOrDash(coverage.freshness_status),
+          "Coverage: " + confirmed + "/" + eligible + " (" + valueOrDash(coverage.coverage_pct) + "%)",
+          "Ожидает: " + valueOrDash(coverage.pending) + " · retry due " + valueOrDash(coverage.retry_due) + " · backoff " + valueOrDash(coverage.waiting_backoff),
+          "Последний успех: " + valueOrDash(coverage.last_success_at),
+          "Последняя попытка: " + valueOrDash(coverage.last_attempt_at)
+        ];
+        wbSuppliesTransitHealth.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+        if (wbSuppliesTransitError) {
+          const lastError = String(coverage.last_error || "").trim();
+          const status = String(coverage.last_error_status || "").trim();
+          wbSuppliesTransitError.textContent = lastError
+            ? "Последняя ошибка: " + (status ? status + " · " : "") + lastError + (errorTaxonomy ? " · " + errorTaxonomy : "")
+            : "Последняя ошибка: —";
+          wbSuppliesTransitError.className = "wb-supplies-message" + (lastError ? " is-warning" : "");
+        }
       }
 
       function renderWbSuppliesSort(payload) {
@@ -14666,10 +14718,6 @@
       refreshButton.addEventListener("click", () => runAction("refresh"));
       loadButton.addEventListener("click", () => runAction("load"));
       downloadButton.addEventListener("click", downloadCurrentLog);
-      sellerSessionCheckButton.addEventListener("click", checkSellerSession);
-      sellerRecoveryStartButton.addEventListener("click", startSellerRecovery);
-      sellerRecoveryLauncherButton.addEventListener("click", downloadSellerRecoveryLauncher);
-      sellerRecoveryStopButton.addEventListener("click", stopSellerRecovery);
       if (downloadRegionalRecommendationsZipButton) {
         downloadRegionalRecommendationsZipButton.addEventListener("click", downloadRegionalRecommendationsZip);
       }
@@ -14844,8 +14892,14 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
-      wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0, withTransitCost: true }));
+      wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0 }));
       wbSuppliesBackfillButton.addEventListener("click", startWbSuppliesBackfill);
+      if (wbSuppliesTransitCheckButton) {
+        wbSuppliesTransitCheckButton.addEventListener("click", checkWbSuppliesTransitRoute);
+      }
+      if (wbSuppliesTransitRetryButton) {
+        wbSuppliesTransitRetryButton.addEventListener("click", () => startWbSuppliesTransitCostEnrichment({ afterOfficialSync: false }));
+      }
       wbSuppliesSupplyDateSortButton.addEventListener("click", () => {
         wbSuppliesState.sort_key = "supply_date";
         wbSuppliesState.sort_dir = wbSuppliesState.sort_dir === "asc" ? "desc" : "asc";
@@ -15119,31 +15173,10 @@
           setupEmbeddedWheelRelay();
           setActionState(null);
       setCompletedJob(null);
-      renderSellerRecovery({
-        status: "idle",
-        status_label: "Проверяем",
-        status_tone: "idle",
-        run_status: "idle",
-        run_status_label: "Проверяем",
-        run_status_tone: "idle",
-        summary: "Проверяем сохранённую seller-сессию...",
-        instruction: "",
-        technical_line: "",
-        can_start: false,
-        can_stop: false,
-        launcher_enabled: false,
-        run_id: "",
-        run_is_final: false,
-        run_final_status: "",
-        run_final_label: "",
-        session_status: "",
-        session_status_label: ""
-      });
       renderStockReportSkuSelector();
       renderStockReportColumnSelector();
       renderStockReportIdle();
       loadStatus();
-      loadSellerRecoveryStatus();
       loadDailyReport();
       loadPlanReportBaselineStatus();
       loadFactoryStatus();

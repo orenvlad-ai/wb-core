@@ -373,6 +373,7 @@ def run_browser_checks(
                 raise AssertionError(f"source strip controls must live in the table header only, got {top_panel_state}")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
             table_header_layout = _check_table_header_layout(page)
+            narrow_table_header_layout = _check_narrow_table_header_layout(page)
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
@@ -693,7 +694,6 @@ def run_browser_checks(
                 or table_toolbar["forbiddenSortVisible"]
                 or table_toolbar["forbiddenScopeVisible"]
                 or "Тип строк" in table_toolbar["headerText"]
-                or "Метрики" in table_toolbar["headerText"]
                 or forbidden_toolbar_labels.intersection(set(table_toolbar["labels"]))
                 or table_toolbar["forbiddenSummaryVisible"]
                 or table_toolbar["logoutText"] != "Выйти"
@@ -850,6 +850,7 @@ def run_browser_checks(
         "table_rendered": total_rows > 0,
         "top_panel": top_panel_state,
         "table_header": table_header_layout,
+        "narrow_table_header": narrow_table_header_layout,
         "default_total_first": initial_order[0]["scope_label"].lower() == "итого",
         "default_sku_metric_cluster": sku_cluster_ok,
         "dynamic_object_label": dynamic_object_label,
@@ -2109,7 +2110,6 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
-          const sellerSession = header ? header.querySelector('[data-seller-top-session]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
           const headerControls = header ? header.querySelector('[data-table-header-controls]') : null;
@@ -2164,7 +2164,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const historyRect = historyButton ? historyButton.getBoundingClientRect() : {width: 0, right: 0};
           const historyLabelRect = historyLabel ? historyLabel.getBoundingClientRect() : {width: 0, right: 0};
           const historyIconRect = historyIcon ? historyIcon.getBoundingClientRect() : {left: 0, right: 0};
-          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть данных', 'today_current', 'yesterday_closed', 'load window'];
+          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть данных', 'today_current', 'yesterday_closed', 'load window'];
           const visibleFilterLabels = Array.from(header ? header.querySelectorAll('.filter-label') : [])
             .filter((node) => {
               const rect = node.getBoundingClientRect();
@@ -2198,9 +2198,9 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             object_label_text: objectLabel ? ((objectLabel.textContent || '').trim()) : '',
             object_label_hidden: objectLabel ? !!objectLabel.hidden : null,
             title_table_count: Array.from(document.querySelectorAll('h1,h2,h3')).filter((node) => (node.textContent || '').trim() === 'Таблица').length,
-            heading_line_order_ok: !!(objectLabel && sellerSession && summary &&
-              ((objectLabel.compareDocumentPosition(sellerSession) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) &&
-              ((sellerSession.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
+            heading_line_order_ok: !!(objectLabel && summary &&
+              ((objectLabel.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
+            seller_badge_count: header ? header.querySelectorAll('[data-seller-top-session]').length : 0,
             visible_filter_labels: visibleFilterLabels,
             load_status_text: loadStatus ? (loadStatus.getAttribute('data-load-status-text') || '') : '',
             load_status_title: loadStatus ? (loadStatus.getAttribute('title') || '') : '',
@@ -2253,6 +2253,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or int(payload["freshness_badge_count"]) != 0
         or payload["object_label_hidden"]
         or payload["object_label_text"] != "Итого"
+        or int(payload["seller_badge_count"]) != 0
         or payload["title_table_count"] != 0
         or not payload["heading_line_order_ok"]
     ):
@@ -2300,6 +2301,54 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         ):
             raise AssertionError(f"{control_name} must show its full selected label with chevron padding, got {payload}")
     return payload
+
+
+def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
+    original = page.viewport_size or {"width": 1100, "height": 900}
+    results: dict[str, object] = {}
+    try:
+        for width in (760, 560):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(120)
+            layout = page.evaluate(
+                """() => {
+                  const header = document.querySelector('[data-table-header]');
+                  const left = header && header.querySelector('.table-heading-left');
+                  const right = header && header.querySelector('[data-table-heading-right]');
+                  const load = header && header.querySelector('[data-load-refresh-button]');
+                  const metrics = header && header.querySelector('[data-metrics-settings-open]');
+                  const rect = node => node ? node.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
+                  const headerRect = rect(header);
+                  const leftRect = rect(left);
+                  const rightRect = rect(right);
+                  return {
+                    documentWidth: document.documentElement.scrollWidth,
+                    viewportWidth: window.innerWidth,
+                    leftInside: leftRect.left >= headerRect.left - 1 && leftRect.right <= headerRect.right + 1,
+                    rightInside: rightRect.left >= headerRect.left - 1 && rightRect.right <= headerRect.right + 1,
+                    wrapped: rightRect.top >= leftRect.bottom - 2,
+                    sellerBadgeCount: header ? header.querySelectorAll('[data-seller-top-session]').length : -1,
+                    incidentText: ((header && header.querySelector('[data-vitrina-incident-policy-badge]')) || {}).textContent || '',
+                    qualityText: ((header && header.querySelector('[data-vitrina-incident-quality-badge]')) || {}).textContent || '',
+                    metricsText: metrics ? metrics.textContent.trim() : '',
+                    loadVisible: !!load && load.offsetParent !== null
+                  };
+                }"""
+            )
+            if (
+                int(layout["documentWidth"]) > int(layout["viewportWidth"]) + 1
+                or not layout["leftInside"]
+                or not layout["rightInside"]
+                or not layout["wrapped"]
+                or int(layout["sellerBadgeCount"]) != 0
+                or layout["metricsText"] != "Метрики"
+                or not layout["loadVisible"]
+            ):
+                raise AssertionError(f"compact Vitrina header must wrap without narrow overflow at {width}px, got {layout}")
+            results[str(width)] = layout
+    finally:
+        page.set_viewport_size(original)
+    return results
 
 
 def _check_operator_screen_layout(page: object) -> dict[str, object]:
@@ -3334,6 +3383,7 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
             const groups = Array.from(document.querySelectorAll('[data-loading-group]')).map(node => ({
               group_id: node.getAttribute('data-loading-group') || '',
               text: (node.textContent || '').trim(),
+              has_check_button: node.querySelectorAll('[data-check-source-group]').length === 1,
               has_refresh_button: node.querySelectorAll('[data-refresh-source-group]').length === 1,
 	              date_value: (node.querySelector('[data-refresh-source-group-date]') || {}).value || '',
 	              date_min: (node.querySelector('[data-refresh-source-group-date]') || {}).min || '',
@@ -3382,20 +3432,20 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     group_ids = [item["group_id"] for item in payload["loading"]["groups"]]
     if group_ids != ["wb_api", "webcore_product_capital", "seller_portal_bot", "wb_public_card_bot", "other_sources"]:
         raise AssertionError(f"loading table must render grouped source headers, got {payload}")
-    if not all(item["has_refresh_button"] for item in payload["loading"]["groups"]):
-        raise AssertionError(f"each loading group must expose one group refresh button, got {payload}")
+    if not all(item["has_check_button"] and item["has_refresh_button"] for item in payload["loading"]["groups"]):
+        raise AssertionError(f"each loading group must expose local check and retry buttons, got {payload}")
     if not all(item["date_value"] for item in payload["loading"]["groups"]):
         raise AssertionError(f"each loading group must expose a default refresh date, got {payload}")
     seller_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "seller_portal_bot")
-    if not (
+    if (
         seller_group["has_session_check"]
-        and seller_group["has_session_install"]
-        and not seller_group["has_session_recovery_start"]
-        and not seller_group["has_session_launcher"]
+        or seller_group["has_session_install"]
+        or seller_group["has_session_recovery_start"]
+        or seller_group["has_session_launcher"]
+        or seller_group["session_state_in_main"]
+        or seller_group["session_state_in_controls"]
     ):
-        raise AssertionError(f"Seller Portal group must expose only check/install session actions, got {payload}")
-    if not seller_group["session_state_in_main"] or seller_group["session_state_in_controls"]:
-        raise AssertionError(f"Seller Portal session state must be placed in the left group header, got {payload}")
+        raise AssertionError(f"data monitoring groups must not duplicate session recovery controls, got {payload}")
     public_card_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "wb_public_card_bot")
     if (
         public_card_group["has_session_check"]

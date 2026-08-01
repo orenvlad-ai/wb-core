@@ -321,8 +321,12 @@ def main() -> None:
             operator_status, operator_html = _get_text(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH + "?embedded_tab=vitrina")
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
-            if "Проверка и восстановление Seller-сессии" not in operator_html or "Проверить сессию" not in operator_html:
-                raise AssertionError("operator UI must render the seller recovery block")
+            if (
+                "Источники и сессии" not in operator_html
+                or "/sheet-vitrina-v1/settings#sources-sessions" not in operator_html
+                or "Проверка и восстановление Seller-сессии" in operator_html
+            ):
+                raise AssertionError("operator UI must delegate Seller recovery to centralized settings")
             config_payload = _extract_operator_ui_config(operator_html)
             for key, expected in {
                 "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
@@ -421,7 +425,7 @@ def main() -> None:
 
             print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")
             print("seller_portal_session_check_probe_error: ok -> probe exceptions stay 200-shape")
-            print("seller_portal_recovery_http_operator: ok -> operator UI exposes recovery block and config")
+            print("seller_portal_recovery_http_operator: ok -> operator links centralized settings; backend routes remain wired")
             print("seller_portal_recovery_http_lifecycle: ok -> run-aware start/status/stop/not_needed lifecycle is wired")
             print("seller_portal_recovery_launcher_unavailable: ok -> unavailable launcher is 409 JSON, not 500")
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")

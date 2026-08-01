@@ -333,6 +333,7 @@ DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_WB_SUPPLIES_BACKFILL_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
 DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
+DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/check"
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH = (
@@ -385,6 +386,8 @@ DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
 DEFAULT_AUTO_UPDATES_PATH = "/v1/sheet-vitrina-v1/settings/auto-updates"
+DEFAULT_SOURCES_SESSIONS_PATH = "/v1/sheet-vitrina-v1/settings/sources-sessions"
+DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH = f"{DEFAULT_SOURCES_SESSIONS_PATH}/spp-proxy/check"
 DEFAULT_AUTO_UPDATES_MONITORING_PATH = "/v1/sheet-vitrina-v1/auto-updates/status"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
@@ -604,6 +607,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"auto-updates update failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_spp_proxy_source_check_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"SPP Proxy source check failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2416,10 +2434,17 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.ACCEPTED, result)
                 return
 
-            if parsed.path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH:
+            if parsed.path in {
+                DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+                DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
+            }:
                 try:
                     payload = _load_optional_request_payload(self)
-                    result = entrypoint.handle_wb_supplies_transit_cost_enrich_request(payload)
+                    result = (
+                        entrypoint.handle_wb_supplies_transit_cost_check_request()
+                        if parsed.path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH
+                        else entrypoint.handle_wb_supplies_transit_cost_enrich_request(payload)
+                    )
                 except WbSuppliesBlockError as exc:
                     _write_json_response(
                         self,
@@ -2785,6 +2810,24 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"auto-updates status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SOURCES_SESSIONS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_sources_sessions_status_request(
+                        seller_launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        buyer_launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sources/sessions status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -7926,6 +7969,8 @@ def _required_section_for_path(path: str) -> str:
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PATH
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH
         or normalized == DEFAULT_AUTO_UPDATES_PATH
+        or normalized == DEFAULT_SOURCES_SESSIONS_PATH
+        or normalized == DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH
         or normalized == DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH
         or normalized == DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH
     ):
@@ -7980,6 +8025,33 @@ def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = ""
         return role == WEB_AUTH_ROLE_SUPPLIER or _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
     if normalized == DEFAULT_SUPPLIER_SHIPMENTS_PATH or normalized.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return role == WEB_AUTH_ROLE_SUPPLIER or _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
+    if normalized in {
+        DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+    }:
+        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(
+            user, WEB_AUTH_SECTION_VITRINA
+        )
+    if normalized in {
+        DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
+        DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
+        DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+        DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+    }:
+        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(
+            user, WEB_AUTH_SECTION_PRICES
+        )
+    if normalized in {
+        DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
+        DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
+    }:
+        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(
+            user, WEB_AUTH_SECTION_SUPPLY
+        )
     required_section = _required_section_for_path(normalized)
     if required_section:
         return _user_has_section_access(user, required_section)
@@ -8336,6 +8408,7 @@ def _render_sheet_vitrina_operator_ui(
         "legacy_google_sheets_contour": legacy_google_sheets_archive_context(),
         "status_path": status_path,
         "job_path": job_path,
+        "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
@@ -8371,6 +8444,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_backfill_path": DEFAULT_WB_SUPPLIES_BACKFILL_PATH,
         "wb_supplies_sync_status_path": DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH,
         "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+        "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "wb_warehouse_exclusion_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
@@ -8494,6 +8568,20 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
+        "sources_sessions_path": DEFAULT_SOURCES_SESSIONS_PATH,
+        "spp_proxy_source_check_path": DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH,
+        "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+        "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+        "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+        "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+        "wb_buyer_session_check_path": DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
+        "wb_buyer_recovery_status_path": DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
+        "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+        "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+        "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
+        "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
         "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         "job_path": DEFAULT_SHEET_JOB_PATH,

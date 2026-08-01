@@ -83,6 +83,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
     DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
     DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
     build_registry_upload_http_server,
@@ -245,16 +246,11 @@ def main() -> None:
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if (
-                "Проверка и восстановление Seller-сессии" not in operator_ui_html
-                or "Проверить сессию" not in operator_ui_html
-                or "Восстановить сессию" not in operator_ui_html
-                or "Скачать launcher для Mac" not in operator_ui_html
-                or "Остановить восстановление" not in operator_ui_html
-                or "Текущий запуск" not in operator_ui_html
-                or "Финал запуска" not in operator_ui_html
-                or "Статус сессии" not in operator_ui_html
+                "Источники и сессии" not in operator_ui_html
+                or "/sheet-vitrina-v1/settings#sources-sessions" not in operator_ui_html
+                or "Проверка и восстановление Seller-сессии" in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose the bounded seller recovery block and launcher actions")
+                raise AssertionError("operator UI must link to centralized source/session settings without a local recovery block")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
             if (
@@ -327,6 +323,7 @@ def main() -> None:
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
                 "job_path": DEFAULT_SHEET_JOB_PATH,
+                "settings_path": registry_http_adapter.DEFAULT_SETTINGS_UI_PATH,
                 "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
                 "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
                 "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
@@ -375,6 +372,7 @@ def main() -> None:
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
                 "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
                 "wb_regional_recommendations_zip_path": DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
+                "supply_calculations_path": registry_http_adapter.DEFAULT_SUPPLY_CALCULATIONS_PATH,
                 "wb_regional_district_options": [
                     {
                         "district_key": key,
@@ -389,6 +387,7 @@ def main() -> None:
                 "wb_supplies_backfill_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
                 "wb_supplies_sync_status_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
                 "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+                "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
                 "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
                 "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
                 "wb_warehouse_exclusion_options_path": (
