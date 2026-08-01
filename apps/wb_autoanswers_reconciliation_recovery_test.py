@@ -18,6 +18,9 @@ from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     SCHEMA_VERSION,
+    canonical_json,
+    observation_projection,
+    sha256_text,
 )
 
 
@@ -110,6 +113,30 @@ class ReconciliationRecoveryTest(unittest.TestCase):
                     answer_text=readback_job["exact_reply"],
                     worker_id="publisher",
                 )
+
+                # This recovery fixture represents the deployed pre-fix
+                # incident where publication GET truth lived only on the
+                # publication aggregate.  Current record_publication_readback
+                # deliberately closes that gap, so recreate only the legacy
+                # feedback projection directly without weakening production
+                # semantics or immutable publication evidence.
+                legacy_raw = content_feedback(feedback_id, rating=1)
+                legacy_observation = observation_projection(legacy_raw)
+                with repo.transaction() as conn:
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_wb_feedbacks
+                        SET answer_text='', raw_json=?, observation_json=?,
+                            wb_observation_hash=?, source_stream='legacy_pre_fix_fixture'
+                        WHERE feedback_id=?
+                        """,
+                        (
+                            canonical_json(legacy_raw),
+                            canonical_json(legacy_observation),
+                            sha256_text(canonical_json(legacy_observation)),
+                            feedback_id,
+                        ),
+                    )
 
             repo.upsert_feedback(
                 content_feedback("terminal-human-1star", rating=1),

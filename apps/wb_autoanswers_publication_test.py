@@ -102,6 +102,14 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(second["state"], "published")
         self.assertEqual(len(self.transport.write_calls), 1)
         self.assertEqual(self.repo.get_feedback("publish")["publications"][0]["state"], "published")
+        self.assertEqual(self.repo.get_feedback("publish")["answer"]["text"], reply)
+        self.assertEqual(self.repo.local_unanswered_count(), 0)
+
+        audit_types = {
+            item["event_type"]
+            for item in self.repo.get_feedback("publish")["audit"]
+        }
+        self.assertIn("feedback_publication_readback_observed", audit_types)
 
     def test_204_missing_readback_goes_to_review_without_second_write(self) -> None:
         self.approved()

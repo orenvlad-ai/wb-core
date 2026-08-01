@@ -757,6 +757,31 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertIsNotNone(applied["sweep"])
 
+    def test_force_off_reader_preserves_active_epoch_for_one_later_enqueue(self) -> None:
+        self.enable("auto_all")
+        current_epoch = self.repo.settings().enable_epoch
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+
+        readonly = self.insert_new("readonly-first")
+        self.assertFalse(readonly["auto_enqueue"])
+        self.assertEqual(readonly["auto_eligible_epoch"], current_epoch)
+        self.assertEqual(self.repo.get_feedback("readonly-first")["ai_jobs"], [])
+
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "false"
+        active = self.insert_new("readonly-first")
+        self.assertFalse(active["content_changed"])
+        self.assertTrue(active["auto_enqueue"])
+        job = self.repo.enqueue_processing(
+            "readonly-first", trigger_source="steady_sync", actor_id="sync"
+        )
+
+        replay = self.insert_new("readonly-first")
+        self.assertFalse(replay["auto_enqueue"])
+        self.assertEqual(
+            self.repo.get_feedback("readonly-first")["ai_jobs"][0]["processing_key"],
+            job["processing_key"],
+        )
+
     def test_reenable_does_not_resume_old_epoch_queue_automatically(self) -> None:
         self.enable()
         self.insert_new("queued-before-off")
@@ -786,9 +811,11 @@ class RuntimeTest(unittest.TestCase):
         self.assertTrue(first["is_new"])
         self.assertFalse(second["is_new"])
         self.assertFalse(second["content_changed"])
+        self.assertTrue(second["auto_enqueue"])
         job1 = self.repo.enqueue_processing("f-1", trigger_source="automatic", actor_id="sync")
         job2 = self.repo.enqueue_processing("f-1", trigger_source="automatic", actor_id="sync")
         self.assertEqual(job1["processing_key"], job2["processing_key"])
+        self.assertFalse(self.insert_new()["auto_enqueue"])
 
     def test_transition_run_claims_all_content_newest_first_before_legacy_rating_jobs(self) -> None:
         self.repo.update_settings(

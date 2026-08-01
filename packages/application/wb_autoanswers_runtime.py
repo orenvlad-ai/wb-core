@@ -2723,7 +2723,10 @@ class AutoanswersRepository:
 
         ``run_kind`` is either ``backfill`` or ``steady``.  Backfill rows are
         deliberately never auto-enqueued.  A review first observed while the
-        master switch is off also stays outside future automatic backlogs.
+        persisted master switch is off also stays outside future automatic
+        backlogs.  A force-off GET-only process may, however, preserve the
+        current automatic enable epoch so the active worker can materialize
+        the same unchanged observation after the read-only race.
         """
 
         if run_kind not in {"backfill", "steady", "reconciliation", "detail_readback"}:
@@ -2757,15 +2760,10 @@ class AutoanswersRepository:
             ).fetchone()
             if settings is None:
                 raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
-            active_sweep = conn.execute(
-                """
-                SELECT sweep_id,transition_run_id
-                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
-                WHERE policy_epoch=?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (int(settings["policy_epoch"]),),
-            ).fetchone()
+            active_sweep = self._active_automatic_sweep(
+                conn,
+                policy_epoch=int(settings["policy_epoch"]),
+            )
             is_new = current is None
             content_changed = is_new or str(current["content_version_hash"]) != content_hash
             observation_changed = is_new or str(current["wb_observation_hash"]) != observation_hash
@@ -2788,14 +2786,14 @@ class AutoanswersRepository:
                 if reused_content_version is not None
                 else int(current["content_version"]) + int(content_changed)
             )
-            effective_on = bool(settings["master_enabled"]) and not _force_off_from_env(self.env)
-            eligible_epoch: int | None = None
             automatic_mode = str(settings["mode"]) != MODE_MANUAL
+            persistent_automatic_intent = bool(settings["master_enabled"]) and automatic_mode
+            effective_on = persistent_automatic_intent and not _force_off_from_env(self.env)
+            eligible_epoch: int | None = None
             if (
                 is_new
                 and run_kind == "steady"
-                and effective_on
-                and automatic_mode
+                and persistent_automatic_intent
                 and not officially_resolved
                 and active_sweep is None
             ):
@@ -2938,6 +2936,10 @@ class AutoanswersRepository:
                     },
                     at=now,
                 )
+            current_processing_exists = conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (processing_key(feedback_id, content_version),),
+            ).fetchone() is not None
         return {
             "feedback_id": feedback_id,
             "is_new": is_new,
@@ -2953,13 +2955,13 @@ class AutoanswersRepository:
             "auto_eligible_epoch": eligible_epoch,
             "auto_enqueue": bool(
                 run_kind == "steady"
-                and content_changed
                 and eligible_epoch is not None
                 and effective_on
                 and automatic_mode
                 and active_sweep is None
                 and eligible_epoch == int(settings["enable_epoch"])
                 and not officially_resolved
+                and not current_processing_exists
             ),
         }
 
@@ -4510,15 +4512,10 @@ class AutoanswersRepository:
                     "WB already has an answer or processed disposition",
                     code="external_answer_present",
                 )
-            active_sweep = conn.execute(
-                """
-                SELECT sweep_id,transition_run_id
-                FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
-                WHERE policy_epoch=?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (settings.policy_epoch,),
-            ).fetchone()
+            active_sweep = self._active_automatic_sweep(
+                conn,
+                policy_epoch=settings.policy_epoch,
+            )
             transition_run_id: str | None = None
             if active_sweep is not None and _clean_text(trigger_source) != "manual_generate":
                 membership = conn.execute(
@@ -8407,6 +8404,66 @@ class AutoanswersRepository:
                     """,
                     (iso_utc(now), iso_utc(now)),
                 )
+            if observed:
+                feedback = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                    (row["feedback_id"],),
+                ).fetchone()
+                if feedback is None:
+                    raise AutoanswersRuntimeError(
+                        "publication feedback not found",
+                        code="feedback_not_found",
+                    )
+                try:
+                    raw = json.loads(str(feedback["raw_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    raw = {}
+                if not isinstance(raw, dict):
+                    raw = {}
+                answer = raw.get("answer")
+                answer_record = dict(answer) if isinstance(answer, Mapping) else {}
+                answer_record["text"] = observed
+                raw["answer"] = answer_record
+                observation = observation_projection(raw)
+                observation_json = canonical_json(observation)
+                observation_hash = sha256_text(observation_json)
+                observation_changed = (
+                    str(feedback["wb_observation_hash"]) != observation_hash
+                    or str(feedback["answer_text"] or "") != observed
+                )
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_feedbacks
+                    SET wb_observation_hash=?, observation_json=?, raw_json=?,
+                        answer_text=?, source_stream='publication_readback',
+                        last_seen_at=?, sync_status=?
+                    WHERE feedback_id=?
+                    """,
+                    (
+                        observation_hash,
+                        observation_json,
+                        canonical_json(raw),
+                        observed,
+                        iso_utc(now),
+                        STATE_SYNCED,
+                        row["feedback_id"],
+                    ),
+                )
+                if observation_changed:
+                    self._audit(
+                        conn,
+                        aggregate_type="feedback",
+                        aggregate_id=str(row["feedback_id"]),
+                        event_type="feedback_publication_readback_observed",
+                        actor_type="worker",
+                        actor_id=_clean_text(worker_id),
+                        details={
+                            "publication_key": publication_key_value,
+                            "observed_hash": observed_hash,
+                            "matches_publication": state == STATE_PUBLISHED,
+                        },
+                        at=now,
+                    )
             return dict(
                 conn.execute(
                     "SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE publication_key=?",

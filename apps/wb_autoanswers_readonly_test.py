@@ -6,6 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -180,6 +181,12 @@ class ReadonlyRunnerTest(unittest.TestCase):
         self.assertGreater(self.source.page_calls, 0)
         self.assertEqual(result["runtime"]["ai_jobs"], {})
         self.assertEqual(result["runtime"]["publication_jobs"], {})
+        with sqlite3.connect(self.repo.db_path) as conn:
+            eligible_epoch = conn.execute(
+                "SELECT auto_eligible_epoch FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
+                ("read-1",),
+            ).fetchone()[0]
+        self.assertEqual(eligible_epoch, self.repo.settings().enable_epoch)
 
     def test_status_has_no_external_dependency_and_reports_get_only_capabilities(self) -> None:
         result = run_operation(
