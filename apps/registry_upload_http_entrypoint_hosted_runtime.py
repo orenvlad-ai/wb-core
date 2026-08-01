@@ -2060,6 +2060,60 @@ def run_warehouse_opening_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_warehouse_july_recovery_command(args: argparse.Namespace) -> int:
+    """Run one exact July warehouse recovery submanifest on the active target."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.warehouse_july_action)
+    batch = str(args.batch)
+    plan_path = (
+        Path(str(args.plan_file)).resolve()
+        if action == "apply"
+        else None
+    )
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError(
+            "July warehouse reviewed plan must stay outside the Git checkout"
+        )
+    payload = _run_remote_warehouse_july_recovery_action(
+        target,
+        action=action,
+        batch=batch,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(
+            getattr(args, "approval_reference", "") or ""
+        ),
+        reason=str(getattr(args, "reason", "") or ""),
+        batch_a_fingerprint=str(
+            getattr(args, "batch_a_fingerprint", "") or ""
+        ),
+        backup_path=str(getattr(args, "backup_path", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if action == "dry-run" and output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError(
+                "July warehouse evidence must stay outside the Git checkout"
+            )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": action,
+            "batch": batch,
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def _run_remote_autoanswers_readonly(
     target: HostedRuntimeTarget,
     *,
@@ -7553,6 +7607,163 @@ def _warehouse_opening_timeout_seconds(action: str) -> float:
     return WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS
 
 
+def _run_remote_warehouse_july_recovery_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    batch: str,
+    plan_path: Path | None = None,
+    fingerprint: str = "",
+    approval_reference: str = "",
+    reason: str = "",
+    batch_a_fingerprint: str = "",
+    backup_path: str = "",
+) -> dict[str, Any]:
+    action_name = f"warehouse-july-recovery-{action}"
+    _ensure_active_hosted_runtime_target(target, action=action_name)
+    if action not in {"dry-run", "apply", "rollback"}:
+        raise ValueError(f"unsupported July warehouse action: {action}")
+    if batch not in {"a", "b", "transit"}:
+        raise ValueError(f"unsupported July warehouse batch: {batch}")
+    if action in {"apply", "rollback"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=action_name,
+            dry_run=False,
+        )
+    if batch == "transit" and action != "dry-run":
+        raise ValueError(
+            "transit backup evidence is query-only; recovery requires fresh "
+            "Seller Portal ingestion or a separately reviewed contract"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "July warehouse recovery requires the canonical active runtime dir"
+        )
+    runner_args = [
+        "python3",
+        "apps/warehouse_historical_recovery.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--batch",
+        batch,
+    ]
+    if batch == "transit":
+        normalized_backup = Path(str(backup_path or ""))
+        allowed_roots = (
+            Path("/opt/wb-core-runtime/backups"),
+            Path("/opt/wb-core-runtime/state/backups"),
+        )
+        if (
+            not normalized_backup.is_absolute()
+            or not any(
+                normalized_backup == root or root in normalized_backup.parents
+                for root in allowed_roots
+            )
+            or normalized_backup.suffix not in {".sqlite3", ".zst"}
+        ):
+            raise ValueError(
+                "transit backup path must be one exact canonical backup file"
+            )
+        runner_args.extend(
+            [
+                "--backup-path",
+                str(normalized_backup),
+            ]
+        )
+    if action == "apply":
+        if (
+            plan_path is None
+            or not fingerprint
+            or not approval_reference.strip()
+        ):
+            raise ValueError(
+                "July warehouse apply requires reviewed plan, exact fingerprint "
+                "and approval reference"
+            )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        expected_contract = {
+            "a": "warehouse_historical_recovery_2026_07_v2",
+            "b": "warehouse_early_wb_recovery_2026_07_v1",
+        }[batch]
+        if (
+            not isinstance(plan, dict)
+            or str(plan.get("contract_name") or "") != expected_contract
+            or str(plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError(
+                "July warehouse reviewed plan identity/fingerprint mismatch"
+            )
+        runner_args.extend(
+            [
+                "--apply",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+            ]
+        )
+        if batch == "b":
+            if not batch_a_fingerprint:
+                raise ValueError(
+                    "Batch B apply requires reconciled Batch A fingerprint"
+                )
+            runner_args.extend(
+                ["--batch-a-fingerprint", batch_a_fingerprint]
+            )
+    elif action == "rollback":
+        if not fingerprint or not reason.strip():
+            raise ValueError(
+                "July warehouse rollback requires exact fingerprint and reason"
+            )
+        runner_args.extend(
+            [
+                "--rollback",
+                "--fingerprint",
+                fingerprint,
+                "--reason",
+                reason,
+            ]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=_warehouse_opening_timeout_seconds(action),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"July warehouse {batch} {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "July warehouse runner returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "July warehouse runner returned a non-object JSON payload"
+        )
+    return payload
+
+
 def run_warehouse_functional_failed_backup_cleanup_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -9013,6 +9224,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
     warehouse_rollback.set_defaults(
         handler=run_warehouse_opening_command,
         warehouse_action="rollback",
+    )
+
+    july_recovery_dry_run = subparsers.add_parser(
+        "warehouse-july-recovery-dry-run",
+        help="Build one exact July warehouse recovery submanifest.",
+    )
+    july_recovery_dry_run.add_argument(
+        "--batch", choices=("a", "b", "transit"), required=True
+    )
+    july_recovery_dry_run.add_argument("--backup-path", default="")
+    july_recovery_dry_run.add_argument("--output", default="")
+    july_recovery_dry_run.set_defaults(
+        handler=run_warehouse_july_recovery_command,
+        warehouse_july_action="dry-run",
+    )
+
+    july_recovery_apply = subparsers.add_parser(
+        "warehouse-july-recovery-apply",
+        help="Apply one exact human-gated July warehouse recovery batch.",
+    )
+    july_recovery_apply.add_argument(
+        "--batch", choices=("a", "b"), required=True
+    )
+    july_recovery_apply.add_argument("--plan-file", required=True)
+    july_recovery_apply.add_argument("--fingerprint", required=True)
+    july_recovery_apply.add_argument("--approval-reference", required=True)
+    july_recovery_apply.add_argument("--batch-a-fingerprint", default="")
+    july_recovery_apply.set_defaults(
+        handler=run_warehouse_july_recovery_command,
+        warehouse_july_action="apply",
+    )
+
+    july_recovery_rollback = subparsers.add_parser(
+        "warehouse-july-recovery-rollback",
+        help="Restore exact before-images for one July warehouse batch.",
+    )
+    july_recovery_rollback.add_argument(
+        "--batch", choices=("a", "b"), required=True
+    )
+    july_recovery_rollback.add_argument("--fingerprint", required=True)
+    july_recovery_rollback.add_argument("--reason", required=True)
+    july_recovery_rollback.set_defaults(
+        handler=run_warehouse_july_recovery_command,
+        warehouse_july_action="rollback",
     )
 
     functional_dry_run = subparsers.add_parser(

@@ -12985,6 +12985,16 @@
           const costSub = costValue !== null && costValue !== undefined
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.transit_per_unit_display || "₽/шт —") + "</span>"
             : "";
+          const transitAttemptStatus = String(row.seller_portal_transit_cost_last_attempt_status || "").trim();
+          const transitAttemptError = String(row.seller_portal_transit_cost_last_attempt_error || "").trim();
+          const transitAttemptSub = transitAttemptStatus && transitAttemptStatus !== "success"
+            ? "<span class=\"wb-supplies-sub is-warning\" title=\"" + escapeHtml(transitAttemptError || transitAttemptStatus) + "\">Последняя попытка: " + escapeHtml(transitAttemptStatus) + "</span>"
+            : "";
+          const transitRecalculationStatus = String(row.seller_portal_transit_cost_recalculation_status || "").trim();
+          const transitRecalculationError = String(row.seller_portal_transit_cost_recalculation_error || "").trim();
+          const transitRecalculationSub = transitRecalculationStatus && !["complete", "completed"].includes(transitRecalculationStatus)
+            ? "<span class=\"wb-supplies-sub\" title=\"" + escapeHtml(transitRecalculationError || transitRecalculationStatus) + "\">Пересчёт: " + escapeHtml(transitRecalculationStatus) + "</span>"
+            : "";
           const fulfillmentValue = row.fulfillment_amount_with_vat_total;
           const fulfillmentStorageValue = row.fulfillment_storage_allocated_amount_with_vat_total;
           const fulfillmentStorageSub = fulfillmentStorageValue !== null && fulfillmentStorageValue !== undefined && Number(fulfillmentStorageValue) > 0
@@ -13004,7 +13014,7 @@
             "<td><span class=\"wb-supplies-status-pill" + statusTone + "\">" + escapeHtml(row.status_label || "—") + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbNumber(row.quantity_added)) + "</span>" + quantitySub + "</td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbCoefficient(row.acceptance_coefficient)) + "</span></td>",
-            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(costValue)) + "</span>" + costSub + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(costValue)) + "</span>" + costSub + transitAttemptSub + transitRecalculationSub + "</td>",
             "<td>" + fulfillmentCell + "</td>",
             "</tr>"
           ].join("");

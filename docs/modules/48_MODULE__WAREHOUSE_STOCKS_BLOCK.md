@@ -326,3 +326,14 @@ marked unavailable/provisional. Other ready-snapshot sources are neither
 fabricated nor copied from yesterday. Candidate publication is atomic;
 conservation, cost-only quantity invariance, non-target digests and source
 revision are checked before current-state switch.
+
+## July 2026 bounded historical recovery
+
+Migration 127 owns the one-off repo runner. Batch A publishes only exact
+`2026-07-19..29` functional six-stage and owned product-capital rows, with
+`2026-07-30+` and the active functional pointer hard non-targets. Batch B
+publishes only persisted exact WB quantity/WAC/capital for `2026-07-01..18`;
+other stages and all-stage totals remain unavailable with server provenance,
+never copied from an adjacent/current snapshot or replaced by zero. Both
+batches are external-manifest, exact-fingerprint, T1 rollback and T0-repeat
+operations, and Batch B cannot run before retained Batch A reconciliation.

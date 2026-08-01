@@ -565,6 +565,7 @@ Targeted smokes:
 - `python3 apps/wb_supplies_filter_sort_date_smoke.py`;
 - `python3 apps/wb_supplies_acceptance_expenses_report_smoke.py`;
 - `python3 apps/wb_supplies_transit_cost_enrichment_smoke.py`;
+- `python3 apps/wb_transit_cost_replay_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_fulfillment_services_smoke.py`;
@@ -629,3 +630,23 @@ layers, FF reconciliation and the six warehouse stages uses one central T2
 warehouse/cost domain checkpoint. Neither path may open Finance raw or regain a
 full-store checkpoint. Historical targeted supply runners either route through
 T1 or remain disabled as documented in module 51.
+
+## Transit last-success and late replay
+
+Seller Portal transit enrichment stores every attempt append-only and keeps a
+separate canonical last-success. `failed`, `timeout`, `not_found`,
+`session_expired` and logged-out attempts update only attempt freshness/error;
+they cannot erase an earlier confirmed amount, currency or evidence. The UI
+therefore shows the preserved amount together with the latest attempt warning.
+Unknown stays NULL/`—`; zero is numeric only after a successful zero fact.
+
+Mixed runs commit each success independently. Retry selection includes only
+missing/stale facts and successful facts whose durable targeted recalculation
+is awaiting/error. An unchanged successful fact keeps its source and success
+revision; a changed fact advances exactly one revision. After fact commit the
+bounded `wb_transit_cost:<supply_id>` replay owns cost-layer/WAC consumers. A
+failure leaves `recalculation_error` and never loses the successful fact or
+creates a second physical WB/FF movement. The canonical hourly/manual pipeline
+marks the fact `complete` only after its exact functional, economics and
+Finance consumers finish; a partial pipeline failure leaves durable work for
+the next bounded retry.

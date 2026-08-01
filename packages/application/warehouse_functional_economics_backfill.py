@@ -92,6 +92,7 @@ def build_functional_economics_backfill_plan(
     business_date: str | None = None,
     affected_nm_ids: Iterable[int] | None = None,
     earliest_business_date: str | None = None,
+    latest_business_date: str | None = None,
     _enforce_business_date_boundary: bool = True,
 ) -> dict[str, Any]:
     operation_business_date = str(business_date or current_business_date_iso())[:10]
@@ -108,6 +109,7 @@ def build_functional_economics_backfill_plan(
         }
     )
     target_earliest_date = str(earliest_business_date or "")[:10]
+    target_latest_date = str(latest_business_date or "")[:10]
     if targeted and not target_nm_ids:
         raise FunctionalEconomicsBackfillError(
             "targeted economics requires affected SKU identities"
@@ -123,6 +125,17 @@ def build_functional_economics_backfill_plan(
             raise FunctionalEconomicsBackfillError(
                 "targeted economics earliest business date is invalid"
             ) from exc
+    if target_latest_date:
+        try:
+            date.fromisoformat(target_latest_date)
+        except ValueError as exc:
+            raise FunctionalEconomicsBackfillError(
+                "targeted economics latest business date is invalid"
+            ) from exc
+        if not target_earliest_date or target_latest_date < target_earliest_date:
+            raise FunctionalEconomicsBackfillError(
+                "targeted economics latest business date precedes earliest date"
+            )
     with _connect(runtime.db_path) as conn:
         cutover = conn.execute(
             """SELECT cutover_at,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_cutovers
@@ -142,6 +155,7 @@ def build_functional_economics_backfill_plan(
             for row in snapshots
             for day in _snapshot_dates(row["plan_json"])
             if not target_earliest_date or day >= target_earliest_date
+            if not target_latest_date or day <= target_latest_date
         }
     )
     warehouse_dates = [
@@ -200,6 +214,7 @@ def build_functional_economics_backfill_plan(
                 {
                     "affected_nm_ids": target_nm_ids,
                     "earliest_business_date": target_earliest_date,
+                    "latest_business_date": target_latest_date or None,
                 }
                 if targeted
                 else {}
@@ -231,6 +246,9 @@ def build_functional_economics_backfill_plan(
                 affected_nm_ids=target_nm_ids if targeted else None,
                 earliest_business_date=(
                     target_earliest_date if targeted else None
+                ),
+                latest_business_date=(
+                    target_latest_date if targeted else None
                 ),
             )
         except Exception as exc:
@@ -323,6 +341,7 @@ def build_functional_economics_backfill_plan(
         plan["target_scope"] = {
             "affected_nm_ids": target_nm_ids,
             "earliest_business_date": target_earliest_date,
+            "latest_business_date": target_latest_date or None,
             "copy_bytes": 0,
             "full_database_copy": False,
             "finance_raw_rows_read": 0,
@@ -367,6 +386,11 @@ def apply_functional_economics_backfill_plan(
         if target_scope
         else None
     )
+    target_latest_date = (
+        str(target_scope.get("latest_business_date") or "")
+        if target_scope
+        else None
+    )
     recovery_registry = WarehouseRecoveryRegistry(
         runtime_dir=runtime.runtime_dir,
         db_path=runtime.db_path,
@@ -381,6 +405,7 @@ def apply_functional_economics_backfill_plan(
         business_date=operation_business_date,
         affected_nm_ids=target_nm_ids,
         earliest_business_date=target_earliest_date,
+        latest_business_date=target_latest_date,
     )
     if str(fresh["plan_fingerprint"]) != fingerprint:
         if (
@@ -649,6 +674,7 @@ def apply_functional_economics_backfill_plan(
             business_date=operation_business_date,
             affected_nm_ids=target_nm_ids,
             earliest_business_date=target_earliest_date,
+            latest_business_date=target_latest_date,
             _enforce_business_date_boundary=False,
         )
     except Exception as exc:
@@ -1055,15 +1081,21 @@ def _transform_snapshot(
     operation_business_date: str | None = None,
     affected_nm_ids: Iterable[int] | None = None,
     earliest_business_date: str | None = None,
+    latest_business_date: str | None = None,
 ) -> dict[str, Any]:
     targeted = affected_nm_ids is not None
     target_nm_ids = {
         int(value) for value in (affected_nm_ids or []) if int(value) > 0
     }
     target_earliest_date = str(earliest_business_date or "")[:10]
+    target_latest_date = str(latest_business_date or "")[:10]
     if targeted and (not target_nm_ids or not target_earliest_date):
         raise FunctionalEconomicsBackfillError(
             "targeted snapshot transformation requires SKU/date scope"
+        )
+    if target_latest_date and target_latest_date < target_earliest_date:
+        raise FunctionalEconomicsBackfillError(
+            "targeted snapshot latest date precedes earliest date"
         )
     original = json.loads(str(snapshot["plan_json"]))
     plan = deepcopy(original)
@@ -1075,7 +1107,10 @@ def _transform_snapshot(
     relevant_indices = [
         index
         for index, day in enumerate(dates)
-        if not target_earliest_date or day >= target_earliest_date
+        if (
+            (not target_earliest_date or day >= target_earliest_date)
+            and (not target_latest_date or day <= target_latest_date)
+        )
     ]
     include_warehouse_rows = any(
         day >= CANONICAL_COST_POLICY_DATE.isoformat() for day in dates
@@ -1090,6 +1125,7 @@ def _transform_snapshot(
             original,
             affected_nm_ids=target_nm_ids,
             earliest_business_date=target_earliest_date,
+            latest_business_date=target_latest_date,
             target_metric_keys=active_target_keys,
         )
         if targeted
@@ -1389,6 +1425,8 @@ def _transform_snapshot(
     if targeted:
         marker["affected_nm_ids"] = sorted(target_nm_ids)
         marker["earliest_business_date"] = target_earliest_date
+        if target_latest_date:
+            marker["latest_business_date"] = target_latest_date
     if metadata.get(marker_key) != marker:
         metadata[marker_key] = marker
     coverage_changes = int(metadata.get("warehouse_history_coverage") != warehouse_coverage)
@@ -1419,6 +1457,7 @@ def _transform_snapshot(
             plan,
             affected_nm_ids=target_nm_ids,
             earliest_business_date=target_earliest_date,
+            latest_business_date=target_latest_date,
             target_metric_keys=active_target_keys,
         )
         if targeted
@@ -1946,6 +1985,7 @@ def _targeted_non_target_digest(
     affected_nm_ids: set[int],
     earliest_business_date: str,
     target_metric_keys: set[str],
+    latest_business_date: str = "",
 ) -> str:
     """Redact only the exact SKU/date cells and dependent TOTAL cells."""
 
@@ -1955,6 +1995,7 @@ def _targeted_non_target_digest(
         index
         for index, day in enumerate(dates)
         if day >= earliest_business_date
+        and (not latest_business_date or day <= latest_business_date)
     ]
     sheet = _data_sheet(value)
     rows = sheet.get("rows") or []
@@ -1987,7 +2028,10 @@ def _targeted_non_target_digest(
     coverage = metadata.get("warehouse_history_coverage")
     if isinstance(coverage, dict):
         for day in list(coverage):
-            if str(day) >= earliest_business_date:
+            if (
+                str(day) >= earliest_business_date
+                and (not latest_business_date or str(day) <= latest_business_date)
+            ):
                 coverage.pop(day, None)
         if not coverage:
             metadata.pop("warehouse_history_coverage", None)
@@ -2000,7 +2044,13 @@ def _targeted_non_target_digest(
             if not isinstance(day_map, dict):
                 continue
             for day in list(day_map):
-                if str(day) >= earliest_business_date:
+                if (
+                    str(day) >= earliest_business_date
+                    and (
+                        not latest_business_date
+                        or str(day) <= latest_business_date
+                    )
+                ):
                     day_map.pop(day, None)
             if not day_map:
                 presentation.pop(row_id, None)
