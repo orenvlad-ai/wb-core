@@ -147,6 +147,12 @@ Processing idempotency is `feedback_id | content_version | 1.4.2`. Publication i
 
 Initial historical backfill begins at `2026-01-01`. Answered, unanswered and archive streams use durable cursors; backfill never creates AI jobs. Steady sync has a 48-hour overlap and upserts before eligibility decisions. In addition, policy v4 runs a periodic full official unanswered inventory from `dateFrom=0`, with a 5000-row resumable page and no history floor. That inventory closes old/missing-ingestion gaps and admits newly materialized current unanswered versions through the ordinary idempotent queue. `429`, `5xx` and transport failures do not advance an incomplete cursor.
 
+The separately human-gated exact backlog recovery runner uses a conservative
+two-requests-per-second GET pace for capture, dry-run, apply preflight and
+readback. This stays below the official shared Feedbacks and Questions account
+limit and retries only `429` with a bounded `Retry-After` delay; exhaustion
+fails closed without a partial manifest or mutation.
+
 The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has highest priority:
 
 - `off`: readonly sync/UI/readback continue; worker timer, new AI claims and new WB writes stop;

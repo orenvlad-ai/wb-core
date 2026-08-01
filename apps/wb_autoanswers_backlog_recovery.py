@@ -22,7 +22,8 @@ from pathlib import Path
 import shlex
 import sqlite3
 import sys
-from typing import Any, Mapping
+import time
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 
@@ -32,7 +33,9 @@ if str(ROOT) not in sys.path:
 
 from apps.wb_autoanswers_rolling_recovery import _verified_backup  # noqa: E402
 from packages.adapters.wb_autoanswers import (  # noqa: E402
+    FeedbackPage,
     HttpBackedWbAutoanswersReadAdapter,
+    WbAutoanswersHttpError,
     WbFeedbackReadPort,
 )
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV  # noqa: E402
@@ -69,6 +72,88 @@ SAFE_ENV_KEYS = frozenset(
         "OFFICIAL_API_TIMEOUT_SECONDS",
     }
 )
+RECOVERY_WB_REQUEST_INTERVAL_SECONDS = 0.5
+RECOVERY_WB_RATE_LIMIT_RETRIES = 5
+RECOVERY_WB_RATE_LIMIT_RETRY_SECONDS = 1.0
+RECOVERY_WB_MAX_RETRY_AFTER_SECONDS = 30.0
+
+
+class RecoveryPacedReadPort:
+    """Conservative account-wide WB GET pacing for exact recovery evidence."""
+
+    def __init__(
+        self,
+        source: WbFeedbackReadPort,
+        *,
+        request_interval_seconds: float = RECOVERY_WB_REQUEST_INTERVAL_SECONDS,
+        max_rate_limit_retries: int = RECOVERY_WB_RATE_LIMIT_RETRIES,
+        retry_seconds: float = RECOVERY_WB_RATE_LIMIT_RETRY_SECONDS,
+        max_retry_after_seconds: float = RECOVERY_WB_MAX_RETRY_AFTER_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._source = source
+        self._request_interval_seconds = max(0.0, float(request_interval_seconds))
+        self._max_rate_limit_retries = max(0, int(max_rate_limit_retries))
+        self._retry_seconds = max(0.0, float(retry_seconds))
+        self._max_retry_after_seconds = max(0.0, float(max_retry_after_seconds))
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._last_request_at: float | None = None
+
+    def _wait_for_slot(self) -> None:
+        now = self._monotonic()
+        if self._last_request_at is not None:
+            wait_seconds = self._request_interval_seconds - (now - self._last_request_at)
+            if wait_seconds > 0:
+                self._sleep(wait_seconds)
+        self._last_request_at = self._monotonic()
+
+    def _call(self, operation: Callable[[], Any]) -> Any:
+        for attempt in range(self._max_rate_limit_retries + 1):
+            self._wait_for_slot()
+            try:
+                return operation()
+            except WbAutoanswersHttpError as exc:
+                if exc.status_code != 429 or attempt >= self._max_rate_limit_retries:
+                    raise
+                server_retry_after = float(exc.retry_after_seconds or 0)
+                if server_retry_after > self._max_retry_after_seconds:
+                    raise
+                retry_after = max(
+                    self._retry_seconds,
+                    server_retry_after,
+                )
+                self._sleep(retry_after)
+        raise AssertionError("unreachable WB rate-limit retry state")
+
+    def fetch_feedbacks_page(
+        self,
+        *,
+        date_from_ts: int,
+        date_to_ts: int,
+        is_answered: bool,
+        take: int,
+        skip: int,
+    ) -> FeedbackPage:
+        return self._call(
+            lambda: self._source.fetch_feedbacks_page(
+                date_from_ts=date_from_ts,
+                date_to_ts=date_to_ts,
+                is_answered=is_answered,
+                take=take,
+                skip=skip,
+            )
+        )
+
+    def fetch_archive_page(self, *, take: int, skip: int) -> FeedbackPage:
+        return self._call(lambda: self._source.fetch_archive_page(take=take, skip=skip))
+
+    def fetch_detail(self, feedback_id: str) -> Mapping[str, Any] | None:
+        return self._call(lambda: self._source.fetch_detail(feedback_id))
+
+    def count_unanswered(self) -> int:
+        return int(self._call(self._source.count_unanswered))
 
 
 def _canonical(value: Any) -> str:
@@ -1360,7 +1445,7 @@ def main() -> int:
     )
     if args.operation == "apply" and deployed_evidence is None:
         parser.error("apply requires --expected-deployed-sha")
-    source = HttpBackedWbAutoanswersReadAdapter()
+    source = RecoveryPacedReadPort(HttpBackedWbAutoanswersReadAdapter())
     if args.operation == "capture":
         if args.manifest is not None or args.manifest_stdin:
             parser.error("capture does not accept a manifest")

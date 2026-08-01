@@ -13,6 +13,7 @@ from unittest.mock import patch
 from apps.wb_autoanswers_backlog_recovery import (
     _fingerprint,
     _open,
+    RecoveryPacedReadPort,
     apply_plan,
     build_plan,
     capture_t0_manifest,
@@ -20,7 +21,7 @@ from apps.wb_autoanswers_backlog_recovery import (
     reconcile_readback,
 )
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_result
-from packages.adapters.wb_autoanswers import FeedbackPage
+from packages.adapters.wb_autoanswers import FeedbackPage, WbAutoanswersHttpError
 from packages.application.wb_autoanswers_runtime import (
     DEFAULT_POLICY_VERSION,
     PREVIOUS_POLICY_VERSION,
@@ -61,6 +62,87 @@ class FakeSource:
 
 
 class BacklogRecoveryTest(unittest.TestCase):
+    def test_recovery_gets_are_paced_and_retry_429_with_server_delay(self) -> None:
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+                self.sleeps: list[float] = []
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+                self.now += seconds
+
+        class RateLimitedSource(FakeSource):
+            def __init__(self) -> None:
+                super().__init__({"paced": feedback("paced", text="Отзыв")})
+                self.detail_calls = 0
+
+            def fetch_detail(self, feedback_id: str) -> dict | None:
+                self.detail_calls += 1
+                if self.detail_calls == 1:
+                    raise WbAutoanswersHttpError(
+                        429,
+                        "limited",
+                        retry_after_seconds=2,
+                    )
+                return super().fetch_detail(feedback_id)
+
+        clock = Clock()
+        source = RateLimitedSource()
+        paced = RecoveryPacedReadPort(
+            source,
+            request_interval_seconds=0.5,
+            max_rate_limit_retries=2,
+            retry_seconds=1.0,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+        self.assertEqual(paced.fetch_detail("paced")["id"], "paced")
+        self.assertEqual(source.detail_calls, 2)
+        self.assertEqual(paced.count_unanswered(), 1)
+        self.assertEqual(clock.sleeps, [2.0, 0.5])
+
+    def test_recovery_get_429_retry_budget_is_bounded(self) -> None:
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+                self.sleeps: list[float] = []
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+                self.now += seconds
+
+        class ExhaustedSource(FakeSource):
+            def __init__(self) -> None:
+                super().__init__({"limited": feedback("limited", text="Отзыв")})
+                self.detail_calls = 0
+
+            def fetch_detail(self, feedback_id: str) -> dict | None:
+                self.detail_calls += 1
+                raise WbAutoanswersHttpError(429, "limited", retry_after_seconds=1)
+
+        clock = Clock()
+        source = ExhaustedSource()
+        paced = RecoveryPacedReadPort(
+            source,
+            max_rate_limit_retries=1,
+            max_retry_after_seconds=30,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+        with self.assertRaises(WbAutoanswersHttpError):
+            paced.fetch_detail("limited")
+        self.assertEqual(source.detail_calls, 2)
+        self.assertEqual(clock.sleeps, [1.0])
+
     def test_planned_apply_resumes_after_its_own_detail_upsert_prefix(self) -> None:
         with TemporaryDirectory() as directory:
             runtime_dir = Path(directory)

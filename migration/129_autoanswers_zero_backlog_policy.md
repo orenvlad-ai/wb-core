@@ -59,6 +59,9 @@ for the incident cohort; it invokes
 
 1. `capture` builds `wb_autoanswers_t0_manifest_v1` from a count-matched full
    paginated official unanswered list and one unanswered detail GET per ID;
+   its recovery-only read boundary paces requests at two per second, below the
+   official shared account limit, and retries only HTTP `429` with a bounded
+   server-directed delay before failing closed;
 2. `dry-run` validates that external manifest, performs a fresh full list and
    exact detail GETs, reads SQLite with `mode=ro`
    plus `PRAGMA query_only=ON`, verifies the schema-v10 backup and emits the
