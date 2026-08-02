@@ -8461,6 +8461,7 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     if str(args.acceptance_profile or "") in {
         "warehouse_recovery_policy_20260726",
         "vitrina_incident_provisional_20260727",
+        "ff_inventory_capital_20260803",
     }:
         if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
             raise ValueError(
@@ -10578,6 +10579,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "warehouse_cost_transparency_20260720",
             "warehouse_recovery_policy_20260726",
             "vitrina_incident_provisional_20260727",
+            "ff_inventory_capital_20260803",
         ),
         default=None,
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",
