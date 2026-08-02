@@ -108,6 +108,11 @@ A cost-only replay preserves every last-good SKU and aggregate physical
 quantity, including legacy `nm_id=0` totals, and recomputes WAC from the new
 capital over that preserved quantity. A historical aggregate mismatch therefore
 cannot create a physical movement or abort an otherwise safe cost publication.
+Proportional FF debits that consume the final units transfer the whole remaining
+pool capital atomically; a repeating Decimal WAC cannot leave an infinitesimal
+capital-only residue or block an otherwise exact zero-quantity close. Frozen
+line-cost debits retain their stricter exact-cost invariant and are not rounded
+or normalized by this rule.
 
 Published warehouse versions also own:
 

@@ -79,6 +79,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     build_historical_wb_cost_projection,
     compose_supply_costs,
     moving_weighted_average,
+    proportional_ff_outbound,
     reconcile_discrepancies,
     roll_periodic_wac,
     validate_cutover_ff_debit_coverage,
@@ -169,6 +170,23 @@ def _test_decimal_and_allocations() -> None:
         method="quantity",
     )
     _assert(sum(quantity.values(), Decimal("0")) == Decimal("1"), "allocation conserves exact capital")
+    remaining_qty, remaining_capital, first_outbound_wac = proportional_ff_outbound(
+        quantity="500",
+        capital="59011.79010127528074135875863",
+        outbound_quantity="250",
+    )
+    remaining_qty, remaining_capital, final_outbound_wac = proportional_ff_outbound(
+        quantity=remaining_qty,
+        capital=remaining_capital,
+        outbound_quantity="250",
+    )
+    _assert(
+        remaining_qty == Decimal("0")
+        and remaining_capital == Decimal("0")
+        and first_outbound_wac == Decimal("118.0235802025505614827175173")
+        and final_outbound_wac == Decimal("118.0235802025505614827175172"),
+        "full FF depletion transfers all capital without a Decimal residue",
+    )
 
 
 def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
