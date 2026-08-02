@@ -303,6 +303,7 @@ def main() -> None:
 
     _test_read_time_warehouse_certification_revalidation(bundle)
     _test_period_warehouse_presentation_is_preserved()
+    _test_warehouse_incident_ui_contract()
 
 
 def _test_read_time_warehouse_certification_revalidation(bundle: dict[str, object]) -> None:
@@ -563,6 +564,36 @@ def _test_period_warehouse_presentation_is_preserved() -> None:
     }:
         raise AssertionError(f"period envelope must preserve the numeric version binding, got {coverage}")
     print("web_vitrina_period_warehouse_presentation: ok")
+
+
+def _test_warehouse_incident_ui_contract() -> None:
+    template = (
+        ROOT / "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+    ).read_text(encoding="utf-8")
+    required = (
+        "data-wb-incident-drawer",
+        "grid-template-columns: repeat(4, minmax(0, 1fr))",
+        "grid-template-columns: repeat(3, minmax(0, 1fr))",
+        "grid-template-columns: repeat(2, minmax(0, 1fr))",
+        "grid-template-columns: minmax(0, 1fr)",
+        "data-wb-incident-date-id",
+        "draft.retainedDates",
+        'warehouse_entries: entries',
+        'Number(right.stock_quantity || 0) - Number(left.stock_quantity || 0)',
+        'id === "0"',
+        "overflow-x: hidden",
+        "data-warehouse-documents-drawer",
+        "warehouseDocumentsDrawer && warehouseDocumentsDrawer.open",
+        "загружается при раскрытии",
+    )
+    missing = [item for item in required if item not in template]
+    if missing:
+        raise AssertionError(f"warehouse incident responsive/draft contract is incomplete: {missing}")
+    if template.count("data-wb-incident-apply>Применить</button>") != 1:
+        raise AssertionError("warehouse incident policy must expose exactly one business Apply button")
+    if "data-wb-incident-effective-from" in template:
+        raise AssertionError("the removed global incident effective-from field leaked back into the UI")
+    print("web_vitrina_warehouse_incident_responsive_contract: ok")
 
 
 def _build_plan(

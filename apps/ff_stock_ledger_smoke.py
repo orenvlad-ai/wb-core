@@ -28,6 +28,7 @@ from packages.application.ff_stock_ledger import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.warehouse_functional import ensure_warehouse_functional_schema
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.contracts.factory_order_supply import STOCK_FF_SOURCE_LEDGER
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
@@ -168,6 +169,7 @@ def main() -> None:
         supplier_op_repeat = block.record_supplier_acceptance(supplier_detail)
         _assert(not supplier_op.get("idempotent") and supplier_op_repeat.get("idempotent"), "supplier auto receipt must be idempotent")
         _assert(_balance(block, second_nm_id) == 10.0, "supplier auto receipt must add accepted quantity")
+        _seed_ff_functional_cost(runtime, second_nm_id)
 
         checkpoint = block.ensure_wb_supply_auto_writeoff_checkpoint(
             [_wb_record("wb-baseline-known", 5, second_nm_id, 1)],
@@ -366,6 +368,7 @@ def main() -> None:
             supplier_fulfillment and not supplier_fulfillment.get("idempotent"),
             "supplier receipt for a reserved SKU must append physical stock",
         )
+        _seed_ff_functional_cost(runtime, second_nm_id)
         fulfilled = block.record_wb_supply_debit(
             _wb_record(fulfillment_supply_id, 5, second_nm_id, 100)
         )
@@ -631,6 +634,62 @@ def _seed_validated_downstream_cost(
                 0, 1, "2026-04-18", None, 100, "direct_zero_confirmed", 0,
                 0, 0, 0, 0, 0, 100, 0, 0, 100, "estimated", "{}", None,
                 ACTIVATED_AT, f"sha256:{supply_id}:{nm_id}", 1,
+            ),
+        )
+        conn.commit()
+
+
+def _seed_ff_functional_cost(
+    runtime: RegistryUploadDbBackedRuntime,
+    nm_id: int,
+) -> None:
+    version_id = "ff-ledger-smoke-functional"
+    quantity = next(
+        float(item["balance"])
+        for item in runtime.list_ff_stock_balances()
+        if int(item["nm_id"]) == int(nm_id)
+    )
+    published_at = "2026-04-18T09:00:30Z"
+    with sqlite3.connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sheet_vitrina_v1_warehouse_functional_versions(
+                version_id,cutover_id,version_kind,effective_at,status,
+                plan_fingerprint,local_source_digest,source_watermarks_json,
+                created_at,business_effective_date,published_at
+            ) VALUES(?,?,'fixture',?,'good',?,?,?,?,'2026-04-18',?)
+            """,
+            (
+                version_id,
+                "warehouse_functional_cutover_v1",
+                published_at,
+                "sha256:ff-ledger-smoke-functional",
+                "sha256:ff-ledger-smoke-functional-source",
+                "{}",
+                published_at,
+                published_at,
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,?,?)",
+            (version_id, published_at),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sheet_vitrina_v1_warehouse_functional_balances(
+                version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                cost_covered_quantity,quality,certified,wb_quantity,
+                wb_in_way_to_client,wb_in_way_from_client,provenance_json
+            ) VALUES(?,'ff',?,?,?,?,?,'fixture',1,'0','0','0','{}')
+            """,
+            (
+                version_id,
+                int(nm_id),
+                str(quantity),
+                "100",
+                str(quantity * 100),
+                str(quantity),
             ),
         )
         conn.commit()

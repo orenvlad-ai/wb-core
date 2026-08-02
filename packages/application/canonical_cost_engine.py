@@ -3663,6 +3663,27 @@ def resolve_ff_operation_effective_date(
                 "source_key": str(operation.get("source_key") or ""),
             },
         )
+    business_effective_date = str(
+        operation.get("business_effective_date") or ""
+    ).strip()
+    if business_effective_date:
+        effective_date = _effective_date_value(
+            business_effective_date,
+            blocker_code="ff_operation_business_effective_date_invalid",
+            details={
+                "operation_id": operation_id,
+                "source_field": "ff_operation.business_effective_date",
+            },
+        )
+        return FfOperationDateResolution(
+            effective_date=effective_date,
+            provenance={
+                "resolution_method": "persisted_operation_business_effective_date",
+                "source_field": "ff_operation.business_effective_date",
+                "source_identity": str(operation.get("source_key") or operation_id),
+                "operation_id": operation_id,
+            },
+        )
     created_at = str(operation.get("created_at") or "")
     return FfOperationDateResolution(
         effective_date=created_at[:10],

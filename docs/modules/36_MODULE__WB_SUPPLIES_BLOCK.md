@@ -159,6 +159,7 @@ Tables:
 - `sheet_vitrina_v1_fulfillment_service_uploads` and `sheet_vitrina_v1_fulfillment_service_lines`: server-owned Fulfillment upload/line persistence. The WB supplies block reads only fully valid uploads through the approved overlay provider and never treats them as WB official raw evidence.
 - `sheet_vitrina_v1_ff_stock_operations` and `sheet_vitrina_v1_ff_stock_operation_lines`: internal ФФ stock ledger writeoffs are created idempotently with source key `wb_supply_debit:<cache_key or supply_id>` for eligible statuses `3/4/5/6`; statuses `1/2` and `Допринято` are skipped.
 - `sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint`: current ФФ stock ledger WB auto-writeoff boundary. Sync/backfill/detail enrichment ensures it before debiting, captures baseline-known `cache_key`, `source_key` and `supply_id` values from the current cache, and prevents historical/backfilled/cache-known WB supplies from being debited retroactively.
+- `sheet_vitrina_v1_ff_stock_wb_supply_lifecycle`: durable complete-snapshot/cancellation journal. One missing active slice is debounced; two distinct complete observations or a strictly parsed confirmed-cancelled signal make only the unaccepted remainder eligible for one exact-cost FF return. Ordinary final accepted/cancelled cache history (`statusID=5/6`) is not reclassified merely because it is absent from an active slice. Economic return identity is bound to the original debit and canonical supply-source revision, so changed observation ids or lost lifecycle pointers cannot create a second return. Reappearance is retained as conservation evidence and cannot create a second debit/return.
 - The ordinary checkpoint and pre-activation rules above are unchanged. The separate repo-owned v2 CLI `apps/ff_stock_targeted_reconciliation.py` is hard-bounded to `supply_id=40561872`, reads its identity and composition only from this cache, and may bypass only the exact pair `wb_supply_before_auto_writeoff_checkpoint` + `wb_supply_before_ledger_activation` after fingerprinted dry-run, integrity-checked backup and atomic revalidation of cache/goods/status/checkpoint/exact activation evidence/active nomenclature/affected balances plus the exact whole-ledger `38 250 - 31 500 = 6 750` totals. It is not a WB sync/backfill/detail route, is not an operator UI action and does not update the checkpoint or activation operation.
 - A later official refresh may refine accepted-line evidence without rewriting that debit. For the exact current `40561872` operation, canonical replay pins the complete sent/accepted evidence fingerprints and conserves `31 477` accepted units inside the same supply when two one-unit SKU surpluses coexist with larger shortages. This is not a general tolerance: missing/drifted evidence, missing canonical baseline cost, future supplies and cross-supply allocation fail closed.
 
@@ -240,6 +241,15 @@ Display priority:
 1. official `cost_total`, when official evidence provides it;
 2. Seller Portal enrichment amount only when the row is transit, official `cost_total` is unknown and enrichment status is `success`;
 3. `—`.
+
+A status-`1` preorder without a real numeric `wb_supply_id` is never a
+Seller-Portal supply-cost candidate, even when its visible/preorder number is
+numeric. It is rendered as `awaiting_supply_creation` / `Ожидает создания
+поставки`, counted separately in coverage and is not classified as
+`response_missing` or an endpoint error. Confirmed numeric zero remains a
+successful fact distinct from missing; a failed latest attempt preserves the
+last successful amount and a later success triggers only the bounded cost
+replay.
 
 Seller Portal values must not overwrite `cost_total` or become official raw evidence. A successful positive enrichment is nevertheless a canonical downstream-cost input: after saving the normalized evidence the application idempotently rematerializes canonical WB supply/SKU cost layers and immediately invokes the existing FF reservation reconciliation; the run reports the exact successful target supply IDs. Physical FF debit and reservation fulfillment remain one atomic ledger transaction; a reconciliation failure is visible on the enrichment run and never discards or promotes the saved evidence silently. Missing/failed evidence leaves that supply waiting and does not block independent supplies. Repeating the same enrichment/reconciliation is a no-op.
 

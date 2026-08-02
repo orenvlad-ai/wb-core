@@ -5202,24 +5202,31 @@
     .warehouse-section-title { margin: 0 0 10px; font-size: 17px; }
     .warehouse-incident-card { border-color: color-mix(in srgb, var(--accent-border) 66%, var(--border)); }
     .warehouse-incident-head, .warehouse-incident-footer { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
-    .warehouse-incident-grid { display: grid; grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, .7fr)); gap: 12px; margin-top: 16px; }
+    .warehouse-incident-grid { display: grid; grid-template-columns: minmax(220px, 1.3fr) repeat(2, minmax(150px, .7fr)); gap: 12px; margin-top: 16px; }
     .warehouse-incident-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
     .warehouse-incident-grid input, .warehouse-incident-grid select, .warehouse-incident-grid textarea {
       width: 100%; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-subtle); color: var(--text); padding: 8px; font: inherit;
     }
     .warehouse-incident-toggle { display: flex !important; align-items: center; align-self: end; grid-column: 1 / -1; }
     .warehouse-incident-toggle input { width: auto; }
-    .warehouse-incident-options { margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-    .warehouse-incident-options legend { color: var(--muted); font-size: 12px; font-weight: 750; padding: 0 6px; }
-    .warehouse-incident-options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
-    .warehouse-incident-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-subtle); font-size: 12px; }
+    .warehouse-incident-options { margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; overflow: clip; }
+    .warehouse-incident-options > summary { display: flex; justify-content: space-between; gap: 10px; align-items: center; cursor: pointer; padding: 12px; color: var(--text); font-size: 13px; font-weight: 750; list-style-position: inside; }
+    .warehouse-incident-options > summary small { color: var(--muted); font-weight: 600; text-align: right; }
+    .warehouse-incident-options[open] > summary { border-bottom: 1px solid var(--border); }
+    .warehouse-incident-options-body { padding: 12px; }
+    .warehouse-incident-options-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .warehouse-incident-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: flex-start; gap: 8px; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-subtle); font-size: 12px; }
+    .warehouse-incident-option > span { min-width: 0; overflow-wrap: anywhere; }
     .warehouse-incident-option small { display: block; margin-top: 3px; color: var(--muted); }
+    .warehouse-incident-option-date { grid-column: 2; display: grid; gap: 4px; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
+    .warehouse-incident-option-date input { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-bg); color: var(--text); padding: 6px; font: inherit; }
+    .warehouse-incident-option[data-selected="false"] .warehouse-incident-option-date { display: none; }
     .warehouse-incident-footer { align-items: center; }
     .warehouse-incident-footer p, .warehouse-incident-result { margin: 0; color: var(--muted); font-size: 12px; }
     .warehouse-incident-result { margin-top: 10px; color: var(--success-text); }
     .warehouse-incident-result[data-tone="error"] { color: var(--error-text); }
-    .warehouse-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
-    .warehouse-table { width: 100%; border-collapse: collapse; min-width: 900px; font-size: 13px; }
+    .warehouse-table-wrap { overflow-x: hidden; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+    .warehouse-table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
     .warehouse-table th, .warehouse-table td { border-bottom: 1px solid var(--border); padding: 9px 10px; text-align: left; vertical-align: top; }
     .warehouse-table th { background: var(--panel-subtle); color: var(--muted); font-size: 12px; white-space: nowrap; }
     .warehouse-table tbody tr:last-child td { border-bottom: 0; }
@@ -5236,7 +5243,7 @@
     .warehouse-evidence-item dd { margin: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
     .warehouse-technical-evidence { margin-top: 9px; }
     .warehouse-empty { margin: 0; padding: 18px; color: var(--muted); text-align: center; }
-    .warehouse-document-lines { margin: 8px 0 0; min-width: 620px; }
+    .warehouse-document-lines { margin: 8px 0 0; min-width: 0; }
     .warehouse-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .warehouse-action { border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; background: var(--panel-subtle); color: var(--text); cursor: pointer; font-weight: 650; transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 80ms ease, opacity 120ms ease; }
     .warehouse-action:hover:not(:disabled) { border-color: var(--accent-border); background: var(--accent-soft); color: var(--text); }
@@ -5247,9 +5254,27 @@
     .warehouse-action.warehouse-action[data-state="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
     .warehouse-action.warehouse-action[data-state="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
     .warehouse-action.is-danger { color: var(--warning-text); border-color: var(--warning-text); }
+    @media (max-width: 1320px) {
+      .warehouse-incident-options-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 1000px) {
+      .warehouse-incident-options-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .warehouse-table th, .warehouse-table td { padding: 7px 6px; overflow-wrap: anywhere; }
+    }
     @media (max-width: 780px) {
       .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
       .warehouse-incident-grid { grid-template-columns: 1fr; }
+      .warehouse-card { padding: 12px; min-width: 0; }
+      .warehouse-switcher { max-width: 100%; }
+      .warehouse-switch { flex: 1 1 130px; min-width: 0; }
+      .warehouse-table { font-size: 11px; }
+      .warehouse-table th, .warehouse-table td { padding: 6px 4px; white-space: normal; }
+    }
+    @media (max-width: 620px) {
+      .warehouse-incident-options-grid { grid-template-columns: minmax(0, 1fr); }
+      .warehouse-incident-options > summary { align-items: flex-start; flex-direction: column; }
+      .warehouse-incident-options > summary small { text-align: left; }
+      .warehouse-summary { grid-template-columns: minmax(0, 1fr); }
     }
   </style>
 </head>
@@ -5514,9 +5539,6 @@
           <label>Причина
             <textarea rows="2" data-wb-incident-reason placeholder="Кратко опишите подтверждённый инцидент"></textarea>
           </label>
-          <label>Действует с
-            <input type="date" data-wb-incident-effective-from>
-          </label>
           <label>Действует до (опционально)
             <input type="date" data-wb-incident-effective-to>
           </label>
@@ -5529,10 +5551,10 @@
             </select>
           </label>
         </div>
-        <fieldset class="warehouse-incident-options">
-          <legend>Склады WB</legend>
-          <div data-wb-incident-options><p class="warehouse-empty">Список складов загружается из полного current snapshot…</p></div>
-        </fieldset>
+        <details class="warehouse-incident-options" data-wb-incident-drawer>
+          <summary><span>Склады WB</span><small data-wb-incident-summary>Политика выключена · выбрано 0</small></summary>
+          <div class="warehouse-incident-options-body" data-wb-incident-options><p class="warehouse-empty">Список складов загружается из полного current snapshot…</p></div>
+        </details>
         <div class="warehouse-incident-footer">
           <p data-wb-incident-audit>Revision ещё не создана.</p>
           <button class="button primary" type="button" data-wb-incident-apply>Применить</button>
@@ -5561,13 +5583,15 @@
       </section>
 
       <section class="warehouse-card">
-        <h2 class="warehouse-section-title">Реестр документов</h2>
-        <div class="warehouse-table-wrap">
-          <table class="warehouse-table">
-            <thead><tr><th>Номер</th><th>Дата и время</th><th>Тип</th><th>Склад</th><th>Отправитель → получатель</th><th>Документ / источник-основание</th><th>SKU</th><th>Количество</th><th>Себестоимость</th><th>Товарный капитал</th><th>Статус</th><th>Состав</th></tr></thead>
-            <tbody data-warehouse-documents><tr><td colspan="12"><p class="warehouse-empty">Загрузка…</p></td></tr></tbody>
-          </table>
-        </div>
+        <details data-warehouse-documents-drawer>
+          <summary class="warehouse-section-title">Реестр документов <small>загружается при раскрытии</small></summary>
+          <div class="warehouse-table-wrap">
+            <table class="warehouse-table">
+              <thead><tr><th>Номер</th><th>Дата и время</th><th>Тип</th><th>Склад</th><th>Отправитель → получатель</th><th>Документ / источник-основание</th><th>SKU</th><th>Количество</th><th>Себестоимость</th><th>Товарный капитал</th><th>Статус</th><th>Состав</th></tr></thead>
+              <tbody data-warehouse-documents><tr><td colspan="12"><p class="warehouse-empty">Раскройте реестр, чтобы загрузить первую страницу.</p></td></tr></tbody>
+            </table>
+          </div>
+        </details>
       </section>
       </div>
 
@@ -5580,6 +5604,14 @@
           <button class="warehouse-action" type="button" data-warehouse-update-start>Пересчитать все склады и себестоимости</button>
         </div>
         <p class="warehouse-status-detail" data-warehouse-update-status>Обновление ещё не запускалось.</p>
+        <h2 class="warehouse-section-title">Автоматические обновления</h2>
+        <div class="warehouse-summary">
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Последняя попытка / успех</span><span class="warehouse-summary-value" data-warehouse-auto-attempt>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Следующий запуск</span><span class="warehouse-summary-value" data-warehouse-auto-next>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Статус / свежесть</span><span class="warehouse-summary-value" data-warehouse-auto-freshness>—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Last-good version / дата</span><span class="warehouse-summary-value" data-warehouse-auto-version>—</span></div>
+        </div>
+        <h2 class="warehouse-section-title">Ручные обновления</h2>
         <div class="warehouse-summary">
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Последняя попытка</span><span class="warehouse-summary-value" data-warehouse-update-attempt>—</span></div>
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Последний успешный запуск</span><span class="warehouse-summary-value" data-warehouse-update-success>—</span></div>
@@ -5587,6 +5619,13 @@
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Изменено складов / SKU</span><span class="warehouse-summary-value" data-warehouse-update-changes>0 / 0</span></div>
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Functional version</span><span class="warehouse-summary-value" data-warehouse-update-version>—</span></div>
           <div class="warehouse-summary-item"><span class="warehouse-summary-label">Business date</span><span class="warehouse-summary-value" data-warehouse-update-business-date>—</span></div>
+        </div>
+        <h2 class="warehouse-section-title">Фазы текущего / последнего запуска</h2>
+        <div class="warehouse-table-wrap">
+          <table class="warehouse-table">
+            <thead><tr><th>Фаза</th><th>Статус</th><th>Начало / конец</th><th>Длительность</th><th>Количество</th><th>Last-good</th><th>Ошибка</th></tr></thead>
+            <tbody data-warehouse-update-phases><tr><td colspan="7"><p class="warehouse-empty">Запусков пока нет.</p></td></tr></tbody>
+          </table>
         </div>
         <section aria-labelledby="warehouse-recovery-title">
           <div class="warehouse-head">
@@ -6531,6 +6570,7 @@
     const warehouseSummaryNode = document.querySelector("[data-warehouse-summary]");
     const warehouseBalancesNode = document.querySelector("[data-warehouse-balances]");
     const warehouseDocumentsNode = document.querySelector("[data-warehouse-documents]");
+    const warehouseDocumentsDrawer = document.querySelector("[data-warehouse-documents-drawer]");
     const warehouseDetailView = document.querySelector("[data-warehouse-detail-view]");
     const warehouseUpdateView = document.querySelector("[data-warehouse-update-view]");
     const warehouseUpdateStartButton = document.querySelector("[data-warehouse-update-start]");
@@ -6541,6 +6581,11 @@
     const warehouseUpdateChangesNode = document.querySelector("[data-warehouse-update-changes]");
     const warehouseUpdateVersionNode = document.querySelector("[data-warehouse-update-version]");
     const warehouseUpdateBusinessDateNode = document.querySelector("[data-warehouse-update-business-date]");
+    const warehouseAutoAttemptNode = document.querySelector("[data-warehouse-auto-attempt]");
+    const warehouseAutoNextNode = document.querySelector("[data-warehouse-auto-next]");
+    const warehouseAutoFreshnessNode = document.querySelector("[data-warehouse-auto-freshness]");
+    const warehouseAutoVersionNode = document.querySelector("[data-warehouse-auto-version]");
+    const warehouseUpdatePhasesNode = document.querySelector("[data-warehouse-update-phases]");
     const warehouseUpdateLogNode = document.querySelector("[data-warehouse-update-log]");
     const warehouseUpdateTechnicalNode = document.querySelector("[data-warehouse-update-technical]");
     const warehouseRecoveryStatusNode = document.querySelector("[data-warehouse-recovery-status]");
@@ -6561,10 +6606,10 @@
     const wbIncidentPolicyBadge = document.querySelector("[data-wb-incident-policy-badge]");
     const wbIncidentActive = document.querySelector("[data-wb-incident-active]");
     const wbIncidentReason = document.querySelector("[data-wb-incident-reason]");
-    const wbIncidentEffectiveFrom = document.querySelector("[data-wb-incident-effective-from]");
     const wbIncidentEffectiveTo = document.querySelector("[data-wb-incident-effective-to]");
     const wbIncidentStatus = document.querySelector("[data-wb-incident-status]");
     const wbIncidentOptions = document.querySelector("[data-wb-incident-options]");
+    const wbIncidentSummary = document.querySelector("[data-wb-incident-summary]");
     const wbIncidentAudit = document.querySelector("[data-wb-incident-audit]");
     const wbIncidentApply = document.querySelector("[data-wb-incident-apply]");
     const wbIncidentResult = document.querySelector("[data-wb-incident-result]");
@@ -7086,14 +7131,17 @@
       },
       warehouses: {
         activeKey: warehouseInitialKey(),
-        loadedKey: "",
         loading: false,
         requestSequence: 0,
-        payload: null,
+        cacheByKey: {},
+        documentPagesByKey: {},
+        documentDetails: {},
+        balanceDetails: {},
         error: "",
         updateRunId: "",
         updatePollTimer: null,
         incidentPolicy: null,
+        incidentDraft: null,
         incidentOptions: [],
         incidentOptionsError: "",
         incidentLoading: false
@@ -7672,7 +7720,48 @@
       });
     }
     if (warehouseUpdateStartButton) warehouseUpdateStartButton.addEventListener("click", startWarehouseCurrentSync);
+    if (warehouseDocumentsNode) {
+      warehouseDocumentsNode.addEventListener("click", function(event) {
+        const more = event.target.closest("[data-warehouse-documents-more]");
+        if (!more) return;
+        loadWarehouseDocuments(
+          state.warehouses.activeKey,
+          Number(more.getAttribute("data-warehouse-documents-more") || 1)
+        );
+      });
+      warehouseDocumentsNode.addEventListener("toggle", function(event) {
+        const details = event.target.closest("[data-warehouse-document-detail]");
+        if (!details || !details.open || details.getAttribute("data-detail-loaded") === "1") return;
+        details.setAttribute("data-detail-loaded", "1");
+        loadWarehouseDocumentDetail(
+          state.warehouses.activeKey,
+          details.getAttribute("data-warehouse-document-detail") || "",
+          details
+        );
+      }, true);
+    }
+    if (warehouseDocumentsDrawer) {
+      warehouseDocumentsDrawer.addEventListener("toggle", function() {
+        if (!warehouseDocumentsDrawer.open) return;
+        loadWarehouseDocuments(state.warehouses.activeKey, 1);
+      });
+    }
+    if (warehouseBalancesNode) {
+      warehouseBalancesNode.addEventListener("toggle", function(event) {
+        const details = event.target.closest("[data-warehouse-balance-evidence]");
+        if (!details || !details.open || details.getAttribute("data-detail-loaded") === "1") return;
+        details.setAttribute("data-detail-loaded", "1");
+        const parts = String(details.getAttribute("data-warehouse-balance-evidence") || "").split(":");
+        loadWarehouseBalanceEvidence(details, parts[0] || "", parts[1] || "");
+      }, true);
+    }
     if (wbIncidentApply) wbIncidentApply.addEventListener("click", applyWbIncidentPolicy);
+    if (wbIncidentOptions) wbIncidentOptions.addEventListener("change", handleWbIncidentDraftChange);
+    [wbIncidentActive, wbIncidentReason, wbIncidentEffectiveTo, wbIncidentStatus].forEach(function(node) {
+      if (!node) return;
+      node.addEventListener("change", handleWbIncidentDraftChange);
+      if (node === wbIncidentReason) node.addEventListener("input", handleWbIncidentDraftChange);
+    });
     window.addEventListener("message", handleOperatorEmbedMessage);
 
     if (researchPanelNode) {
@@ -8646,22 +8735,34 @@
       if (key === "update") {
         return loadWarehouseCurrentSyncStatus();
       }
-      if ((!options || options.force !== true) && state.warehouses.loadedKey === key && state.warehouses.payload) {
-        renderWarehousePayload(state.warehouses.payload);
-        return Promise.resolve();
+      const cached = state.warehouses.cacheByKey[key];
+      if ((!options || options.force !== true) && cached && cached.payload) {
+        renderWarehousePayload(cached.payload);
+        return loadWarehouse(key, {background: true});
       }
       return loadWarehouse(key);
     }
 
-    async function loadWarehouse(warehouseKey) {
+    async function loadWarehouse(warehouseKey, options) {
       const key = normalizeWarehouseKey(warehouseKey);
       const sequence = ++state.warehouses.requestSequence;
+      const background = Boolean(options && options.background);
       state.warehouses.loading = true;
       state.warehouses.error = "";
-      renderWarehouseLoading(key);
+      if (!background) renderWarehouseLoading(key);
       try {
         const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
-        const response = await fetch(basePath + "/" + encodeURIComponent(key), {headers: {Accept: "application/json"}});
+        const cached = state.warehouses.cacheByKey[key] || {};
+        const headers = {Accept: "application/json"};
+        if (cached.etag) headers["If-None-Match"] = cached.etag;
+        const response = await fetch(basePath + "/" + encodeURIComponent(key), {headers: headers});
+        if (response.status === 304 && cached.payload) {
+          if (sequence === state.warehouses.requestSequence && key === state.warehouses.activeKey) {
+            renderWarehousePayload(cached.payload);
+            if (warehouseDocumentsDrawer && warehouseDocumentsDrawer.open) loadWarehouseDocuments(key, 1);
+          }
+          return;
+        }
         const payload = await response.json().catch(function() { return {}; });
         if (!response.ok) {
           throw new Error(String(payload.error || ("HTTP " + response.status)));
@@ -8669,19 +8770,123 @@
         if (sequence !== state.warehouses.requestSequence || key !== state.warehouses.activeKey) {
           return;
         }
-        state.warehouses.loadedKey = key;
-        state.warehouses.payload = payload;
+        const previousVersion = String(((cached.payload || {}).active_version || {}).version_id || "");
+        const nextVersion = String((payload.active_version || {}).version_id || "");
+        if (previousVersion && nextVersion && previousVersion !== nextVersion) {
+          ["documentPagesByKey", "documentDetails", "balanceDetails"].forEach(function(bucketName) {
+            const bucket = state.warehouses[bucketName] || {};
+            Object.keys(bucket).forEach(function(cacheKey) {
+              if (cacheKey.indexOf(key + ":") === 0) delete bucket[cacheKey];
+            });
+          });
+        }
+        state.warehouses.cacheByKey[key] = {
+          payload: payload,
+          etag: response.headers.get("ETag") || String(payload.etag || "")
+        };
         renderWarehousePayload(payload);
+        if (warehouseDocumentsDrawer && warehouseDocumentsDrawer.open) loadWarehouseDocuments(key, 1);
       } catch (error) {
         if (sequence !== state.warehouses.requestSequence) {
           return;
         }
         state.warehouses.error = String(error && error.message ? error.message : error);
-        renderWarehouseError(state.warehouses.error);
+        if (!background || !(state.warehouses.cacheByKey[key] || {}).payload) {
+          renderWarehouseError(state.warehouses.error);
+        }
       } finally {
         if (sequence === state.warehouses.requestSequence) {
           state.warehouses.loading = false;
         }
+      }
+    }
+
+    async function loadWarehouseDocuments(warehouseKey, page) {
+      const key = normalizeWarehouseKey(warehouseKey);
+      if (key === "update") return;
+      const requestedPage = Math.max(1, Number(page || 1));
+      const cacheKey = key + ":" + String(requestedPage);
+      const cached = state.warehouses.documentPagesByKey[cacheKey] || {};
+      try {
+        const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+        const headers = {Accept: "application/json"};
+        if (cached.etag) headers["If-None-Match"] = cached.etag;
+        const response = await fetch(basePath + "/" + encodeURIComponent(key) + "/documents?page=" + encodeURIComponent(requestedPage) + "&limit=25", {headers: headers});
+        let payload = cached.payload;
+        if (response.status !== 304) {
+          payload = await response.json().catch(function() { return {}; });
+          if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+          state.warehouses.documentPagesByKey[cacheKey] = {
+            payload: payload,
+            etag: response.headers.get("ETag") || String(payload.etag || "")
+          };
+        }
+        if (key !== state.warehouses.activeKey || !payload) return;
+        const documents = [];
+        for (let currentPage = 1; currentPage <= requestedPage; currentPage += 1) {
+          const pagePayload = (state.warehouses.documentPagesByKey[key + ":" + String(currentPage)] || {}).payload;
+          if (pagePayload && Array.isArray(pagePayload.documents)) documents.push.apply(documents, pagePayload.documents);
+        }
+        const pageState = payload.page || {};
+        if (warehouseDocumentsNode) {
+          warehouseDocumentsNode.innerHTML = documents.length
+            ? documents.map(renderWarehouseDocumentRow).join("") + (pageState.has_next ? '<tr><td colspan="12"><button class="button secondary" type="button" data-warehouse-documents-more="' + escapeHtml(String(requestedPage + 1)) + '">Показать ещё</button></td></tr>' : '')
+            : '<tr><td colspan="12"><p class="warehouse-empty">Проведённых документов нет.</p></td></tr>';
+        }
+      } catch (error) {
+        if (warehouseDocumentsNode && key === state.warehouses.activeKey) {
+          warehouseDocumentsNode.innerHTML = '<tr><td colspan="12"><p class="warehouse-empty">Документы временно недоступны: ' + escapeHtml(String(error && error.message ? error.message : error)) + '</p></td></tr>';
+        }
+      }
+    }
+
+    async function loadWarehouseDocumentDetail(warehouseKey, documentId, detailsNode) {
+      const cacheKey = String(warehouseKey) + ":" + String(documentId);
+      const cached = state.warehouses.documentDetails[cacheKey];
+      if (cached) {
+        renderWarehouseDocumentDetail(detailsNode, cached.document || {});
+        return;
+      }
+      try {
+        const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+        const response = await fetch(basePath + "/" + encodeURIComponent(warehouseKey) + "/documents/" + encodeURIComponent(documentId), {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        state.warehouses.documentDetails[cacheKey] = payload;
+        renderWarehouseDocumentDetail(detailsNode, payload.document || {});
+      } catch (error) {
+        const target = detailsNode && detailsNode.querySelector("[data-warehouse-document-detail-body]");
+        if (target) target.textContent = "Не удалось загрузить детали: " + String(error && error.message ? error.message : error);
+      }
+    }
+
+    function renderWarehouseDocumentDetail(detailsNode, documentRow) {
+      if (!detailsNode) return;
+      const target = detailsNode.querySelector("[data-warehouse-document-detail-body]");
+      if (!target) return;
+      const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
+      target.innerHTML = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.human_evidence, "Основание документа", documentRow.provenance) + '</div>' +
+        '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Основание</th></tr></thead><tbody>' +
+        (lines.length ? lines.map(function(line) {
+          return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.human_evidence, "Основание", line.provenance) + '</td></tr>';
+        }).join("") : '<tr><td colspan="7">Документ проведён с нулевым остатком.</td></tr>') + '</tbody></table>';
+    }
+
+    async function loadWarehouseBalanceEvidence(detailsNode, warehouseKey, nmId) {
+      const cacheKey = String(warehouseKey) + ":" + String(nmId);
+      let payload = state.warehouses.balanceDetails[cacheKey];
+      try {
+        if (!payload) {
+          const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+          const response = await fetch(basePath + "/" + encodeURIComponent(warehouseKey) + "/balances/" + encodeURIComponent(nmId), {headers: {Accept: "application/json"}});
+          payload = await response.json().catch(function() { return {}; });
+          if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+          state.warehouses.balanceDetails[cacheKey] = payload;
+        }
+        detailsNode.outerHTML = warehouseEvidenceDetails(payload.human_evidence, "Раскрыть основание", payload.provenance);
+      } catch (error) {
+        const paragraph = detailsNode.querySelector(".warehouse-empty");
+        if (paragraph) paragraph.textContent = "Не удалось загрузить основание: " + String(error && error.message ? error.message : error);
       }
     }
 
@@ -8701,6 +8906,7 @@
         const optionsPayload = await responses[1].json().catch(function() { return {}; });
         if (!responses[0].ok) throw new Error(String(settings.error || "Не удалось загрузить политику складов WB"));
         state.warehouses.incidentPolicy = settings;
+        state.warehouses.incidentDraft = wbIncidentDraftFromPolicy(settings);
         state.warehouses.incidentOptions = responses[1].ok && Array.isArray(optionsPayload.options) ? optionsPayload.options : [];
         state.warehouses.incidentOptionsError = responses[1].ok
           ? ""
@@ -8720,17 +8926,14 @@
 
     function renderWbIncidentPolicy() {
       const policy = state.warehouses.incidentPolicy || {};
-      const selected = new Set((policy.excluded_wb_warehouse_ids || []).map(function(item) { return String(item); }));
+      const draft = state.warehouses.incidentDraft || wbIncidentDraftFromPolicy(policy);
+      state.warehouses.incidentDraft = draft;
+      const selected = new Set(Object.keys(draft.entries || {}));
       const active = Boolean(policy.active);
-      if (wbIncidentActive) wbIncidentActive.checked = Boolean(
-        Object.prototype.hasOwnProperty.call(policy, "configured_active")
-          ? policy.configured_active
-          : active
-      );
-      if (wbIncidentReason) wbIncidentReason.value = String(policy.reason || "");
-      if (wbIncidentEffectiveFrom) wbIncidentEffectiveFrom.value = String(policy.effective_from || new Date().toISOString().slice(0, 10));
-      if (wbIncidentEffectiveTo) wbIncidentEffectiveTo.value = String(policy.effective_to || "");
-      if (wbIncidentStatus) wbIncidentStatus.value = String(policy.policy_status || policy.status || (active ? "active" : "disabled"));
+      if (wbIncidentActive) wbIncidentActive.checked = Boolean(draft.active);
+      if (wbIncidentReason) wbIncidentReason.value = String(draft.reason || "");
+      if (wbIncidentEffectiveTo) wbIncidentEffectiveTo.value = String(draft.effectiveTo || "");
+      if (wbIncidentStatus) wbIncidentStatus.value = String(draft.status || (active ? "active" : "disabled"));
       if (wbIncidentPolicyBadge) {
         const badge = policy.badge || {};
         wbIncidentPolicyBadge.textContent = String(active ? "С инцидентами" : "Политика инцидентов не активна");
@@ -8749,18 +8952,100 @@
           " · обновлено: " + warehouseDate(policy.updated_at || policy.created_at) + migration;
       }
       if (wbIncidentOptions) {
+        const sortedOptions = (state.warehouses.incidentOptions || []).slice().sort(function(left, right) {
+          const quantityDifference = Number(right.stock_quantity || 0) - Number(left.stock_quantity || 0);
+          if (quantityDifference) return quantityDifference;
+          const nameDifference = String(left.warehouse_name || "").localeCompare(String(right.warehouse_name || ""), "ru");
+          return nameDifference || Number(left.warehouse_id || 0) - Number(right.warehouse_id || 0);
+        });
         wbIncidentOptions.innerHTML = state.warehouses.incidentOptionsError
           ? '<p class="warehouse-empty">' + escapeHtml(state.warehouses.incidentOptionsError) + '</p>'
-          : state.warehouses.incidentOptions.length
-          ? '<div class="warehouse-incident-options-grid">' + state.warehouses.incidentOptions.map(function(option) {
+          : sortedOptions.length
+          ? '<div class="warehouse-incident-options-grid">' + sortedOptions.map(function(option) {
               const id = String(option.warehouse_id);
-              return '<label class="warehouse-incident-option"><input type="checkbox" data-wb-incident-warehouse-id="' + escapeHtml(id) + '"' +
-                (selected.has(id) ? " checked" : "") + '><span><strong>' + escapeHtml(option.warehouse_name || ("warehouseId " + id)) +
+              const isSelected = selected.has(id);
+              const destinationEligible = Number(option.warehouse_id || 0) > 0 && option.destination_eligible !== false;
+              const locked = Object.prototype.hasOwnProperty.call(draft.persistedEntries || {}, id);
+              return '<label class="warehouse-incident-option" data-selected="' + String(isSelected) + '"><input type="checkbox" data-wb-incident-warehouse-id="' + escapeHtml(id) + '"' +
+                (isSelected ? " checked" : "") + (destinationEligible ? "" : " disabled") + '><span><strong>' + escapeHtml(option.warehouse_name || ("warehouseId " + id)) +
                 '</strong><small>ID ' + escapeHtml(id) + ' · физически ' + escapeHtml(warehouseNumber(option.stock_quantity)) +
-                ' шт' + (option.temporarily_missing ? " · временно отсутствует" : "") + '</small></span></label>';
+                ' шт' + (option.temporarily_missing ? " · временно отсутствует" : "") +
+                (destinationEligible ? "" : " · служебная группа, выбор недоступен") + '</small></span>' +
+                '<span class="warehouse-incident-option-date"><span>Действует с</span><input type="date" data-wb-incident-date-id="' + escapeHtml(id) + '" value="' +
+                escapeHtml(String((draft.entries || {})[id] || (draft.retainedDates || {})[id] || draft.canonicalBusinessDate || "")) + '"' +
+                (locked ? " readonly" : "") + '></span></label>';
             }).join("") + "</div>"
           : '<p class="warehouse-empty">В полном current snapshot нет доступных складов.</p>';
       }
+      renderWbIncidentSummary();
+    }
+
+    function wbIncidentDraftFromPolicy(policy) {
+      const entries = {};
+      const persistedEntries = {};
+      const sourceEntries = Array.isArray(policy.warehouse_entries) && policy.warehouse_entries.length
+        ? policy.warehouse_entries
+        : (policy.excluded_wb_warehouse_ids || []).map(function(warehouseId) {
+            return {warehouse_id: warehouseId, effective_from: policy.effective_from || policy.canonical_business_date || ""};
+          });
+      sourceEntries.forEach(function(entry) {
+        const id = String(Number(entry.warehouse_id || 0));
+        if (id === "0" || entry.effective_to_exclusive) return;
+        const effectiveFrom = String(entry.effective_from || "");
+        entries[id] = effectiveFrom;
+        persistedEntries[id] = effectiveFrom;
+      });
+      return {
+        active: Boolean(Object.prototype.hasOwnProperty.call(policy, "configured_active") ? policy.configured_active : policy.active),
+        reason: String(policy.reason || ""),
+        effectiveTo: String(policy.effective_to || ""),
+        status: String(policy.policy_status || policy.status || (policy.active ? "active" : "disabled")),
+        canonicalBusinessDate: String(policy.canonical_business_date || new Date().toISOString().slice(0, 10)),
+        entries: entries,
+        persistedEntries: persistedEntries,
+        retainedDates: Object.assign({}, entries)
+      };
+    }
+
+    function renderWbIncidentSummary() {
+      if (!wbIncidentSummary) return;
+      const draft = state.warehouses.incidentDraft || {entries: {}};
+      const dates = Object.keys(draft.entries || {}).map(function(id) { return String(draft.entries[id] || ""); }).filter(Boolean).sort();
+      wbIncidentSummary.textContent = (draft.active ? "Политика включена" : "Политика выключена") +
+        " · выбрано " + String(dates.length) +
+        (dates.length ? " · с " + dates[0].split("-").reverse().join(".") : "");
+    }
+
+    function handleWbIncidentDraftChange(event) {
+      const draft = state.warehouses.incidentDraft;
+      if (!draft) return;
+      const checkbox = event.target.closest("[data-wb-incident-warehouse-id]");
+      if (checkbox) {
+        const id = String(Number(checkbox.getAttribute("data-wb-incident-warehouse-id") || 0));
+        if (id === "0") {
+          checkbox.checked = false;
+          return;
+        }
+        if (checkbox.checked) {
+          draft.entries[id] = String((draft.retainedDates || {})[id] || draft.canonicalBusinessDate || "");
+        } else {
+          draft.retainedDates[id] = String((draft.entries || {})[id] || draft.canonicalBusinessDate || "");
+          delete draft.entries[id];
+        }
+        renderWbIncidentPolicy();
+        return;
+      }
+      const dateInput = event.target.closest("[data-wb-incident-date-id]");
+      if (dateInput) {
+        const id = String(Number(dateInput.getAttribute("data-wb-incident-date-id") || 0));
+        draft.entries[id] = String(dateInput.value || "");
+        draft.retainedDates[id] = draft.entries[id];
+      }
+      draft.active = Boolean(wbIncidentActive && wbIncidentActive.checked);
+      draft.reason = String((wbIncidentReason && wbIncidentReason.value) || "");
+      draft.effectiveTo = String((wbIncidentEffectiveTo && wbIncidentEffectiveTo.value) || "");
+      draft.status = String((wbIncidentStatus && wbIncidentStatus.value) || "disabled");
+      renderWbIncidentSummary();
     }
 
     function renderVitrinaIncidentPolicyBadge(badge) {
@@ -8799,17 +9084,27 @@
 
     async function applyWbIncidentPolicy() {
       if (!wbIncidentApply || state.warehouses.incidentLoading) return;
-      const selected = Array.from(document.querySelectorAll("[data-wb-incident-warehouse-id]:checked")).map(function(node) {
-        return Number(node.getAttribute("data-wb-incident-warehouse-id"));
+      handleWbIncidentDraftChange({target: wbIncidentActive});
+      const draft = state.warehouses.incidentDraft || wbIncidentDraftFromPolicy(state.warehouses.incidentPolicy || {});
+      const entries = Object.keys(draft.entries || {}).sort(function(left, right) { return Number(left) - Number(right); }).map(function(id) {
+        return {warehouse_id: Number(id), effective_from: String(draft.entries[id] || "")};
       });
+      const missingDate = entries.find(function(entry) { return !entry.effective_from; });
+      if (missingDate) {
+        if (wbIncidentResult) {
+          wbIncidentResult.textContent = "Укажите дату «Действует с» для warehouseId " + String(missingDate.warehouse_id) + ".";
+          wbIncidentResult.setAttribute("data-tone", "error");
+          wbIncidentResult.hidden = false;
+        }
+        return;
+      }
       const payload = {
         base_revision: Number((state.warehouses.incidentPolicy || {}).revision || 0),
-        active: Boolean(wbIncidentActive && wbIncidentActive.checked),
-        excluded_wb_warehouse_ids: selected,
-        reason: String((wbIncidentReason && wbIncidentReason.value) || "").trim(),
-        effective_from: String((wbIncidentEffectiveFrom && wbIncidentEffectiveFrom.value) || ""),
-        effective_to: String((wbIncidentEffectiveTo && wbIncidentEffectiveTo.value) || ""),
-        status: String((wbIncidentStatus && wbIncidentStatus.value) || "disabled")
+        active: Boolean(draft.active),
+        warehouse_entries: entries,
+        reason: String(draft.reason || "").trim(),
+        effective_to: String(draft.effectiveTo || ""),
+        status: String(draft.status || "disabled")
       };
       wbIncidentApply.disabled = true;
       wbIncidentApply.textContent = "Применяем…";
@@ -8823,13 +9118,23 @@
         const result = await response.json().catch(function() { return {}; });
         if (!response.ok) throw new Error(String(result.error || ("HTTP " + response.status)));
         state.warehouses.incidentPolicy = result;
+        state.warehouses.incidentDraft = wbIncidentDraftFromPolicy(result);
         renderWbIncidentPolicy();
         if (wbIncidentResult) {
           const rematerialization = result && typeof result.rematerialization === "object"
             ? result.rematerialization
             : {};
           const rematerializationStatus = String(rematerialization.status || "");
-          if (rematerializationStatus === "failed") {
+          const applyStatus = String(result.policy_apply_status || "");
+          if (applyStatus === "failed_reverted_to_last_good") {
+            const recovery = result && typeof result.last_good_recovery === "object"
+              ? result.last_good_recovery
+              : {};
+            wbIncidentResult.textContent = "Новая политика не активирована: зависимый пересчёт завершился ошибкой. " +
+              "Сохранена последняя успешная revision " + String(recovery.recovery_revision || result.revision || 0) +
+              "; причина: " + String(rematerialization.error || "неизвестная ошибка") + ".";
+            wbIncidentResult.setAttribute("data-tone", "error");
+          } else if (rematerializationStatus === "failed") {
             wbIncidentResult.textContent = "Политика revision " + String(result.revision || 0) +
               " сохранена, но bounded rematerialization витрины не завершена: " +
               String(rematerialization.error || "неизвестная ошибка") + ".";
@@ -8926,12 +9231,20 @@
       return '<details class="warehouse-source-details"><summary>' + escapeHtml(label || "Показать") + '</summary>' + readable + technical + '</details>';
     }
 
+    function warehouseLazyBalanceEvidence(line) {
+      if (!line || line.provenance_available === false) return "—";
+      const key = String(line.warehouse_key || "") + ":" + String(line.nm_id || "");
+      const cached = state.warehouses.balanceDetails[key];
+      if (cached) return warehouseEvidenceDetails(cached.human_evidence, "Раскрыть основание", cached.provenance);
+      return '<details class="warehouse-source-details" data-warehouse-balance-evidence="' + escapeHtml(key) + '"><summary>Раскрыть основание</summary><p class="warehouse-empty">Детали загрузятся при раскрытии.</p></details>';
+    }
+
     function renderWarehousePayload(payload) {
       const warehouse = (payload && payload.warehouse) || {};
       const balances = Array.isArray(payload && payload.balances) ? payload.balances : [];
       const documents = Array.isArray(payload && payload.documents) ? payload.documents : [];
       const unmatched = Array.isArray(payload && payload.unmatched_doprinato) ? payload.unmatched_doprinato : [];
-      const initialized = String((payload && payload.status) || "") === "ready" && documents.length > 0;
+      const initialized = String((payload && payload.status) || "") === "ready";
       if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Склады и себестоимость");
       if (warehouseMetaNode) {
         warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—") +
@@ -8994,13 +9307,15 @@
               (line.warning ? '<span class="warehouse-balance-warning" data-tone="' + escapeHtml(line.quality_tone || "warning") + '">' + escapeHtml(line.warning) + '</span>' : '') + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td>' +
-            '<td>' + warehouseEvidenceDetails(line.human_evidence, "Раскрыть основание", line.provenance) + '</td></tr>';
+            '<td>' + warehouseLazyBalanceEvidence(line) + '</td></tr>';
         }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">' +
           (initialized ? 'На зафиксированном срезе остаток равен нулю.' : 'Начальные остатки ещё не зафиксированы.') +
           '</p></td></tr>';
       }
       if (warehouseDocumentsNode) {
-        warehouseDocumentsNode.innerHTML = documents.length ? documents.map(renderWarehouseDocumentRow).join("") : '<tr><td colspan="12"><p class="warehouse-empty">Документы начальных остатков ещё не зафиксированы.</p></td></tr>';
+        warehouseDocumentsNode.innerHTML = documents.length
+          ? documents.map(renderWarehouseDocumentRow).join("")
+          : '<tr><td colspan="12"><p class="warehouse-empty">Раскройте реестр, чтобы загрузить первую страницу.</p></td></tr>';
       }
       if (warehouseUnmatchedCard) warehouseUnmatchedCard.hidden = String(warehouse.warehouse_key || "") !== "wb_acceptance_discrepancy";
       if (warehouseUnmatchedNode) {
@@ -9027,15 +9342,40 @@
 
     function renderWarehouseCurrentSyncStatus(payload) {
       const status = String((payload && payload.status) || "never");
+      const durable = (payload && payload.durable_journal) || {};
+      const automatic = durable.automatic_updates || {};
+      const manual = durable.manual_updates || {};
+      const activeVersion = durable.active_version || {};
       state.warehouses.updateRunId = String((payload && payload.run_id) || "");
       if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent = String((payload && payload.user_status) || "Состояние не подтверждено");
-      if (warehouseUpdateAttemptNode) warehouseUpdateAttemptNode.textContent = warehouseDate(payload && payload.last_attempt_at);
-      if (warehouseUpdateSuccessNode) warehouseUpdateSuccessNode.textContent = warehouseDate(payload && payload.last_success_at);
+      if (warehouseUpdateAttemptNode) warehouseUpdateAttemptNode.textContent = warehouseDate((payload && payload.last_attempt_at) || manual.last_attempt_at);
+      if (warehouseUpdateSuccessNode) warehouseUpdateSuccessNode.textContent = warehouseDate((payload && payload.last_success_at) || manual.last_success_at);
       if (warehouseUpdateRunIdNode) warehouseUpdateRunIdNode.textContent = state.warehouses.updateRunId || "—";
       if (warehouseUpdateChangesNode) warehouseUpdateChangesNode.textContent =
         warehouseNumber(payload && payload.changed_warehouses) + " / " + warehouseNumber(payload && payload.changed_skus);
-      if (warehouseUpdateVersionNode) warehouseUpdateVersionNode.textContent = String((payload && payload.functional_version_id) || "—");
-      if (warehouseUpdateBusinessDateNode) warehouseUpdateBusinessDateNode.textContent = String((payload && payload.business_date) || "—");
+      if (warehouseUpdateVersionNode) warehouseUpdateVersionNode.textContent = String((payload && payload.functional_version_id) || manual.functional_version_id || "—");
+      if (warehouseUpdateBusinessDateNode) warehouseUpdateBusinessDateNode.textContent = String((payload && payload.business_date) || manual.business_date || "—");
+      if (warehouseAutoAttemptNode) {
+        warehouseAutoAttemptNode.textContent = warehouseDate(automatic.last_attempt_at) + " / " + warehouseDate(automatic.last_success_at);
+      }
+      if (warehouseAutoNextNode) warehouseAutoNextNode.textContent = warehouseDate(durable.next_scheduled_run);
+      if (warehouseAutoFreshnessNode) {
+        warehouseAutoFreshnessNode.textContent = String(automatic.status || "never") + " / " + String(durable.freshness || "unavailable") +
+          (durable.last_good_retained ? " · last-good сохранён" : "");
+      }
+      if (warehouseAutoVersionNode) {
+        warehouseAutoVersionNode.textContent = String(activeVersion.version_id || "—") + " / " + String(activeVersion.business_effective_date || "—");
+      }
+      if (warehouseUpdatePhasesNode) {
+        const phases = Array.isArray(durable.phases) ? durable.phases : [];
+        warehouseUpdatePhasesNode.innerHTML = phases.length ? phases.map(function(phase) {
+          const duration = phase.duration_ms == null ? "—" : (Number(phase.duration_ms) / 1000).toFixed(2) + " с";
+          return '<tr><td>' + escapeHtml(phase.label_ru || phase.phase_key || "—") + '</td><td>' + escapeHtml(phase.status || "—") +
+            '</td><td>' + escapeHtml(warehouseDate(phase.started_at)) + ' / ' + escapeHtml(warehouseDate(phase.finished_at)) +
+            '</td><td>' + escapeHtml(duration) + '</td><td>' + escapeHtml(warehouseNumber(phase.item_count)) +
+            '</td><td>' + escapeHtml(warehouseDate(phase.last_good_at)) + '</td><td>' + escapeHtml(phase.last_error || "—") + '</td></tr>';
+        }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">Durable-журнал пока пуст.</p></td></tr>';
+      }
       if (warehouseUpdateLogNode) {
         const lines = Array.isArray(payload && payload.short_log) ? payload.short_log : [];
         warehouseUpdateLogNode.innerHTML = lines.length
@@ -9049,7 +9389,7 @@
         const running = status === "running" || status === "busy";
         setWarehouseActionState(
           warehouseUpdateStartButton,
-          running ? "loading" : (status === "error" ? "error" : "normal"),
+          running ? "loading" : (["error", "failed"].includes(status) ? "error" : "normal"),
           running ? "Пересчёт выполняется…" : "Пересчитать все склады и себестоимости"
         );
       }
@@ -9208,20 +9548,14 @@
     }
 
     function renderWarehouseDocumentRow(documentRow) {
-      const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
       const movement = String(documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
-      const documentProvenance = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.human_evidence, "Основание документа", documentRow.provenance) + '</div>';
-      const lineTable = '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Основание</th></tr></thead><tbody>' +
-        (lines.length ? lines.map(function(line) {
-          return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.human_evidence, "Основание", line.provenance) + '</td></tr>';
-        }).join("") : '<tr><td colspan="7">Документ проведён с нулевым остатком.</td></tr>') + '</tbody></table>';
       return '<tr data-warehouse-document-id="' + escapeHtml(documentRow.document_id || "") + '">' +
         '<td>' + escapeHtml(documentRow.document_number || "—") + '</td><td>' + escapeHtml(warehouseDate(documentRow.occurred_at)) + '</td>' +
         '<td>' + escapeHtml(documentRow.document_type_label || "—") + '</td><td>' + escapeHtml(documentRow.warehouse_name || "—") + '</td>' +
         '<td>' + escapeHtml(movement) + '</td><td>' + escapeHtml(documentRow.source_basis || "—") + '</td>' +
         '<td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.sku_count)) + '</td><td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.total_quantity)) + '</td>' +
         '<td>' + escapeHtml(warehouseMoney(documentRow.total_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(documentRow.total_capital_rub)) + '</td><td>' + escapeHtml(documentRow.status_label || "—") + '</td>' +
-        '<td><details class="warehouse-source-details"><summary>Открыть (' + escapeHtml(String(lines.length)) + ')</summary>' + documentProvenance + lineTable + '</details></td></tr>';
+        '<td><details class="warehouse-source-details" data-warehouse-document-detail="' + escapeHtml(documentRow.document_id || "") + '"><summary>Открыть</summary><div data-warehouse-document-detail-body><p class="warehouse-empty">Строки и основания загрузятся при раскрытии.</p></div></details></td></tr>';
     }
 
     function ensureOperatorEmbed(tabName) {

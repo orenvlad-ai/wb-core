@@ -638,10 +638,55 @@ def _settings_and_table(block) -> None:
         "incomplete" in warning for warning in incomplete["warnings"]
     ):
         raise AssertionError("incomplete warehouse evidence must fail closed")
-    block.save_warehouse_exclusion_settings(
+    prior_policy_record = block.runtime.load_latest_wb_incident_policy(
+        seller_id="canonical"
+    )
+    original_rematerialize = block._rematerialize_incident_policy_ready_dates
+    block._rematerialize_incident_policy_ready_dates = lambda **_: {
+        "status": "failed",
+        "date_from": "2026-07-13",
+        "date_to": "2026-07-13",
+        "error": "fixture dependent replay failure",
+    }
+    failed_apply = block.save_warehouse_exclusion_settings(
         user_key="operator",
         payload={
             "base_revision": warehouse_settings["revision"],
+            "active": True,
+            "warehouse_entries": [
+                {"warehouse_id": 101, "effective_from": "2026-07-13"},
+                {"warehouse_id": 102, "effective_from": "2026-07-13"},
+                {"warehouse_id": 103, "effective_from": "2026-07-13"},
+            ],
+            "reason": "fixture incident changed",
+            "effective_to": "",
+            "status": "active",
+            "change_effective_from": "2026-07-13",
+        },
+    )
+    block._rematerialize_incident_policy_ready_dates = original_rematerialize
+    if (
+        failed_apply.get("policy_apply_status")
+        != "failed_reverted_to_last_good"
+        or failed_apply.get("excluded_wb_warehouse_ids") != [101, 102]
+    ):
+        raise AssertionError(
+            "failed dependent replay must append an exact last-good recovery revision"
+        )
+    restored_policy_record = block.runtime.load_latest_wb_incident_policy(
+        seller_id="canonical"
+    )
+    if (
+        restored_policy_record.get("warehouse_entries")
+        != prior_policy_record.get("warehouse_entries")
+        or restored_policy_record.get("source")
+        != "incident_policy_v2_last_good_recovery"
+    ):
+        raise AssertionError("last-good recovery must preserve the exact prior interval history")
+    block.save_warehouse_exclusion_settings(
+        user_key="operator",
+        payload={
+            "base_revision": failed_apply["revision"],
             "active": False,
             "excluded_wb_warehouse_ids": [101, 102],
             "reason": "fixture incident resolved",

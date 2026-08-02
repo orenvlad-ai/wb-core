@@ -62,6 +62,18 @@ Capital следует тому же physical layer. В каждой стади�
 
 Обычное proportional movement переносит exact quantity и proportional capital без изменения unit WAC. Все intermediate calculations используют `Decimal`; округляется только UI.
 
+Каждый новый `FF → WB` debit переносит immutable line-level FF cost snapshot
+из active same-SKU FF WAC. Отмена/доказанное исчезновение возвращает только
+непринятый остаток и ровно тот же original debit capital; текущий/будущий WB
+WAC, transit add-ons, cross-SKU/warehouse average and zero fallback запрещены.
+Настоящая inventory adjustment замораживает единый pre-adjustment FF basis на
+business date: exact source cost, same-date FF WAC, last earlier FF WAC,
+certified inbound landed FF cost, затем только отдельная versioned approved
+estimate. Отсутствующая basis блокирует строку. Receipt/writeoff and their T1
+compensation carry signed Decimal quantity/capital in audit provenance, а
+последующий targeted replay обновляет derived stage/WB/Vitrina/Finance values
+without a second physical movement.
+
 # 3. Active vitrina and TOTAL semantics
 
 Для каждой из шести стадий active catalog содержит ровно три пользовательские строки: quantity, `Средневзвешенная себестоимость, ₽/шт`, `Товарный капитал, ₽`. Для пяти стадий quantity сохраняет подпись `Количество, шт`; WB SKU и TOTAL используют точную подпись `Склад WB: весь контур, шт`, потому что эта строка показывает полный контур `quantity + inWayToClient + inWayFromClient`, а не только физический компонент `На складах WB` или отдельную метрику `Остаток всего`. Общий блок содержит `Всего единиц`, `Общий товарный капитал`, `Общая средневзвешенная себестоимость, ₽/шт`. Пустой склад показывает quantity/capital `0`, а WAC — единообразно `—`.

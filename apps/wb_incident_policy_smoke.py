@@ -465,53 +465,194 @@ def main() -> None:
             contradictory_row["blank_reasons_by_field"]["stock_total_mp"]
         )
         assert contradictory["invariants"]["status"] == "ok"
-        save_policy_revision(
+        try:
+            save_policy_revision(
+                runtime,
+                payload={
+                    "base_revision": 0,
+                    "active": True,
+                    "excluded_wb_warehouse_ids": [0],
+                    "reason": "official special bucket fixture",
+                    "effective_from": "2026-07-20",
+                    "effective_to": "",
+                    "status": "active",
+                },
+                actor="operator",
+                warehouse_options=[
+                    {
+                        "warehouse_id": 0,
+                        "warehouse_name": "Остальные — служебная группа WB",
+                    }
+                ],
+                timestamp="2026-07-20T12:30:00Z",
+                seller_id="service-bucket-fixture",
+            )
+        except WbIncidentPolicyError as exc:
+            assert "service bucket" in str(exc)
+        else:
+            raise AssertionError("warehouseId 0 must not become an operational incident destination")
+
+        warehouse_options = [
+            {"warehouse_id": 101, "warehouse_name": "Альфа"},
+            {"warehouse_id": 102, "warehouse_name": "Бета"},
+        ]
+        migrated = save_policy_revision(
             runtime,
             payload={
                 "base_revision": 0,
                 "active": True,
-                "excluded_wb_warehouse_ids": [0],
-                "reason": "official special bucket fixture",
-                "effective_from": "2026-07-20",
+                "excluded_wb_warehouse_ids": [101],
+                "reason": "existing 25 July selection",
+                "effective_from": "2026-07-25",
                 "effective_to": "",
                 "status": "active",
             },
             actor="operator",
-            warehouse_options=[
-                {
-                    "warehouse_id": 0,
-                    "warehouse_name": "Остальные — служебная группа WB",
-                }
-            ],
-            timestamp="2026-07-20T12:30:00Z",
-            seller_id="service-bucket-fixture",
+            warehouse_options=warehouse_options,
+            timestamp="2026-07-25T08:00:00Z",
+            seller_id="mixed-date-fixture",
         )
-        service_bucket = build_vitrina_incident_stock_projection(
+        assert migrated["warehouse_entries"][0]["effective_from"] == "2026-07-25"
+        mixed = save_policy_revision(
             runtime,
-            items=items,
-            warehouse_rows=[
-                StocksWarehouseRow(
-                    nm_id=1,
-                    warehouse_id=None,
-                    warehouse_name="Остальные",
-                    region_name="",
-                    quantity=3,
-                    planning_zone_key=None,
-                    classification_status="unmapped",
-                    classification_source="fixture",
-                )
-            ],
-            snapshot_date="2026-07-20",
-            fetched_at="2026-07-20T08:00:00+00:00",
-            pagination_complete=False,
-            raw_rows_digest="",
-            seller_id="service-bucket-fixture",
+            payload={
+                "base_revision": 1,
+                "active": True,
+                "warehouse_entries": [
+                    {"warehouse_id": 101, "effective_from": "2026-07-25"},
+                    {"warehouse_id": 102, "effective_from": "2026-08-02"},
+                ],
+                "reason": "mixed dates",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="operator",
+            warehouse_options=warehouse_options,
+            timestamp="2026-08-02T08:00:00Z",
+            seller_id="mixed-date-fixture",
         )
-        assert (
-            service_bucket["by_nm_id"]["1"]["excluded_stock_total_mp"]
-            == 3
+        assert mixed["revision"] == 2
+        assert mixed["changed_from"] == "2026-08-02"
+        assert [
+            (entry["warehouse_id"], entry["effective_from"])
+            for entry in mixed["warehouse_entries"]
+        ] == [(101, "2026-07-25"), (102, "2026-08-02")]
+        assert get_policy_state(
+            runtime,
+            snapshot_date="2026-08-01",
+            seller_id="mixed-date-fixture",
+        )["warehouse_ids"] == [101]
+        assert get_policy_state(
+            runtime,
+            snapshot_date="2026-08-02",
+            seller_id="mixed-date-fixture",
+        )["warehouse_ids"] == [101, 102]
+        repeated = save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 2,
+                "active": True,
+                "warehouse_entries": [
+                    {"warehouse_id": 101, "effective_from": "2026-07-25"},
+                    {"warehouse_id": 102, "effective_from": "2026-08-02"},
+                ],
+                "reason": "mixed dates",
+                "effective_to": "",
+                "status": "active",
+            },
+            actor="operator",
+            warehouse_options=warehouse_options,
+            timestamp="2026-08-02T08:01:00Z",
+            seller_id="mixed-date-fixture",
         )
-        assert service_bucket["accepted_selected_warehouse_ids"] == [0]
+        assert repeated["idempotency_status"] == "T0" and repeated["revision"] == 2
+        try:
+            save_policy_revision(
+                runtime,
+                payload={
+                    "base_revision": 2,
+                    "active": True,
+                    "warehouse_entries": [
+                        {"warehouse_id": 101, "effective_from": ""},
+                    ],
+                    "reason": "missing date",
+                    "status": "active",
+                },
+                actor="operator",
+                warehouse_options=warehouse_options,
+                seller_id="mixed-date-fixture",
+            )
+        except WbIncidentPolicyError as exc:
+            assert "effective_from is required" in str(exc)
+        else:
+            raise AssertionError("selected warehouses without a date must fail closed")
+
+        removed = save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 2,
+                "active": True,
+                "warehouse_entries": [
+                    {"warehouse_id": 101, "effective_from": "2026-07-25"},
+                ],
+                "change_effective_from": "2026-08-03",
+                "reason": "temporarily remove beta",
+                "status": "active",
+            },
+            actor="operator",
+            warehouse_options=warehouse_options,
+            timestamp="2026-08-03T08:00:00Z",
+            seller_id="mixed-date-fixture",
+        )
+        assert removed["revision"] == 3 and removed["changed_from"] == "2026-08-03"
+        try:
+            save_policy_revision(
+                runtime,
+                payload={
+                    "base_revision": 3,
+                    "active": True,
+                    "warehouse_entries": [
+                        {"warehouse_id": 101, "effective_from": "2026-07-25"},
+                        {"warehouse_id": 102, "effective_from": "2026-08-02"},
+                    ],
+                    "reason": "overlapping reselect",
+                    "status": "active",
+                },
+                actor="operator",
+                warehouse_options=warehouse_options,
+                timestamp="2026-08-03T08:01:00Z",
+                seller_id="mixed-date-fixture",
+            )
+        except WbIncidentPolicyError as exc:
+            assert "before its prior interval closed" in str(exc)
+        else:
+            raise AssertionError("overlapping per-warehouse re-selection must fail closed")
+        reselected = save_policy_revision(
+            runtime,
+            payload={
+                "base_revision": 3,
+                "active": True,
+                "warehouse_entries": [
+                    {"warehouse_id": 101, "effective_from": "2026-07-25"},
+                    {"warehouse_id": 102, "effective_from": "2026-08-03"},
+                ],
+                "reason": "deterministic reselect",
+                "status": "active",
+            },
+            actor="operator",
+            warehouse_options=warehouse_options,
+            timestamp="2026-08-03T08:02:00Z",
+            seller_id="mixed-date-fixture",
+        )
+        assert reselected["revision"] == 4
+        reselected_audit = runtime.load_latest_wb_incident_policy(
+            seller_id="mixed-date-fixture"
+        )
+        assert [
+            (entry["effective_from"], entry["effective_to_exclusive"])
+            for entry in reselected_audit["warehouse_entries"]
+            if int(entry["warehouse_id"]) == 102
+        ] == [("2026-08-02", "2026-08-03"), ("2026-08-03", "")]
 
         metrics = extend_metrics_with_incident_stock_metrics([])
         assert len(metrics) == 42

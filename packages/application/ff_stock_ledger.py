@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import sqlite3
@@ -36,6 +37,7 @@ FF_STOCK_OPERATION_MANUAL_WRITEOFF = "manual_writeoff"
 FF_STOCK_OPERATION_AUTO_RECEIPT = "auto_receipt"
 FF_STOCK_OPERATION_AUTO_WRITEOFF = "auto_writeoff"
 FF_STOCK_OPERATION_CORRECTION_RECEIPT = "correction_receipt"
+FF_STOCK_OPERATION_AUTO_RETURN = "auto_return"
 
 FF_STOCK_RESERVATION_RESERVE = "reserve"
 FF_STOCK_RESERVATION_ADJUST = "adjust"
@@ -47,6 +49,11 @@ FF_STOCK_SOURCE_SUPPLIER_SHIPMENT = "supplier_shipment"
 FF_STOCK_SOURCE_WB_SUPPLY = "wb_supply"
 FF_STOCK_SOURCE_RUNTIME_REPAIR = "runtime_repair"
 FF_STOCK_SOURCE_TARGETED_RECONCILIATION = "wb_supply_targeted_reconciliation"
+FF_STOCK_SOURCE_WB_SUPPLY_RETURN = "wb_supply_return"
+FF_STOCK_SOURCE_WB_SUPPLY_REAPPEARANCE = "wb_supply_reappearance"
+
+WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD = 2
+WB_SUPPLY_LIFECYCLE_ACTIVE_STATUS_IDS = {1, 2, 3, 4}
 
 FF_STOCK_LEDGER_SOURCE_KEY_PREFIX = "ff_stock_ledger"
 FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE = 50
@@ -601,6 +608,574 @@ class FfStockLedgerBlock:
             "reservation_summary": self.reservation_summary(),
         }
 
+    def reconcile_wb_supply_lifecycle(
+        self,
+        *,
+        records: list[Mapping[str, Any]],
+        active_authoritative_keys: set[str],
+        observation_id: str,
+        observed_at: str,
+        apply_returns: bool = True,
+    ) -> dict[str, Any]:
+        """Observe one complete official active slice and return proven remainders.
+
+        A supply must first have been seen by this lifecycle journal and then be
+        absent from two distinct complete observations. Existing orphan debits
+        enter the same debounce only when immutable history proves a positive
+        unaccepted remainder with an exact original FF cost.
+        """
+
+        if not observation_id.strip():
+            raise ValueError("complete WB supply observation_id is required")
+        record_by_supply: dict[str, Mapping[str, Any]] = {}
+        present_supply_ids: set[str] = set()
+        for record in records:
+            normalized = dict(record.get("normalized") or record)
+            status_id = _optional_int(normalized.get("status_id"))
+            confirmed_cancelled = _record_is_confirmed_cancelled(record)
+            if (
+                status_id not in WB_SUPPLY_LIFECYCLE_ACTIVE_STATUS_IDS
+                and not confirmed_cancelled
+            ):
+                # Final accepted/historical cache rows disappear from the
+                # complete active slice by design. Their absence is not
+                # cancellation evidence and must never create an FF return.
+                continue
+            supply_id = str(
+                _first_present(normalized, "supply_id", "wb_supply_id")
+                or _first_present(record, "supply_id", "wb_supply_id")
+                or ""
+            ).strip()
+            if not supply_id:
+                continue
+            record_by_supply[supply_id] = record
+            if _record_lifecycle_identity_keys(record) & active_authoritative_keys:
+                present_supply_ids.add(supply_id)
+        for supply_id, orphan in self._legacy_orphan_supply_records(
+            excluded_supply_ids=set(record_by_supply)
+        ).items():
+            record_by_supply[supply_id] = orphan
+        now = observed_at
+        eligible: list[dict[str, Any]] = []
+        protected_supply_ids: set[str] = set()
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=120000")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = {
+                    str(row["supply_id"]): dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM sheet_vitrina_v1_ff_stock_wb_supply_lifecycle"
+                    ).fetchall()
+                }
+                for supply_id in sorted(present_supply_ids):
+                    prior = existing.get(supply_id)
+                    return_operation_id = str((prior or {}).get("return_operation_id") or "")
+                    state = "returned_reappeared" if return_operation_id else "active_seen"
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_ff_stock_wb_supply_lifecycle(
+                            supply_id,first_seen_complete_snapshot_at,
+                            last_seen_complete_snapshot_at,last_observation_id,
+                            last_observation_at,consecutive_missing_complete_snapshots,
+                            lifecycle_state,original_debit_operation_id,
+                            return_operation_id,return_source_revision,last_record_json,
+                            diagnostics_json,updated_at
+                        ) VALUES(?,?,?,?,?,0,?,?,?,?,?,?,?)
+                        ON CONFLICT(supply_id) DO UPDATE SET
+                            last_seen_complete_snapshot_at=excluded.last_seen_complete_snapshot_at,
+                            last_observation_id=excluded.last_observation_id,
+                            last_observation_at=excluded.last_observation_at,
+                            consecutive_missing_complete_snapshots=0,
+                            lifecycle_state=CASE
+                              WHEN return_operation_id<>'' THEN 'returned_reappeared'
+                              ELSE 'active_seen' END,
+                            last_record_json=excluded.last_record_json,
+                            diagnostics_json=excluded.diagnostics_json,
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            supply_id,
+                            str((prior or {}).get("first_seen_complete_snapshot_at") or now),
+                            now,
+                            observation_id,
+                            now,
+                            state,
+                            str((prior or {}).get("original_debit_operation_id") or ""),
+                            return_operation_id,
+                            str((prior or {}).get("return_source_revision") or ""),
+                            json.dumps(dict(record_by_supply[supply_id]), ensure_ascii=False, default=str),
+                            json.dumps({"present_in_complete_official_snapshot": True}, ensure_ascii=False),
+                            now,
+                        ),
+                    )
+                candidate_supply_ids = sorted(set(record_by_supply) - present_supply_ids)
+                for supply_id in candidate_supply_ids:
+                    prior = existing.get(supply_id)
+                    if prior is None:
+                        record = dict(record_by_supply[supply_id])
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_ff_stock_wb_supply_lifecycle(
+                                supply_id,first_seen_complete_snapshot_at,
+                                last_seen_complete_snapshot_at,last_observation_id,
+                                last_observation_at,consecutive_missing_complete_snapshots,
+                                lifecycle_state,original_debit_operation_id,
+                                return_operation_id,return_source_revision,last_record_json,
+                                diagnostics_json,updated_at
+                            ) VALUES(?,?,?, ?,?,1,'missing_debounced',?,'','',?,?,?)
+                            """,
+                            (
+                                supply_id,
+                                "",
+                                "",
+                                observation_id,
+                                now,
+                                str(record.get("original_debit_operation_id") or ""),
+                                json.dumps(record, ensure_ascii=False, default=str),
+                                json.dumps(
+                                    {
+                                        "present_in_complete_official_snapshot": False,
+                                        "threshold": WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD,
+                                        "legacy_orphan_candidate": bool(record.get("legacy_orphan_candidate")),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                now,
+                            ),
+                        )
+                        protected_supply_ids.add(supply_id)
+                        continue
+                    confirmed_cancelled = _record_is_confirmed_cancelled(
+                        record_by_supply[supply_id]
+                    )
+                    if confirmed_cancelled:
+                        missing_count = WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD
+                    elif str(prior["last_observation_id"] or "") == observation_id:
+                        missing_count = int(prior["consecutive_missing_complete_snapshots"] or 0)
+                    else:
+                        missing_count = int(prior["consecutive_missing_complete_snapshots"] or 0) + 1
+                    return_operation_id = str(prior["return_operation_id"] or "")
+                    state = (
+                        "returned"
+                        if return_operation_id
+                        else "cancelled_confirmed" if confirmed_cancelled
+                        else "missing_confirmed"
+                        if missing_count >= WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD
+                        else "missing_debounced"
+                    )
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                        SET last_observation_id=?,last_observation_at=?,
+                            consecutive_missing_complete_snapshots=?,lifecycle_state=?,
+                            last_record_json=?,diagnostics_json=?,updated_at=?
+                        WHERE supply_id=?
+                        """,
+                        (
+                            observation_id,
+                            now,
+                            missing_count,
+                            state,
+                            json.dumps(dict(record_by_supply[supply_id]), ensure_ascii=False, default=str),
+                            json.dumps(
+                                {
+                                    "present_in_complete_official_snapshot": False,
+                                    "threshold": WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD,
+                                    "confirmed_cancelled": confirmed_cancelled,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            now,
+                            supply_id,
+                        ),
+                    )
+                    if return_operation_id:
+                        continue
+                    if missing_count < WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD:
+                        protected_supply_ids.add(supply_id)
+                        continue
+                    eligible.append(
+                        {
+                            "supply_id": supply_id,
+                            "record": dict(record_by_supply[supply_id]),
+                            "missing_count": missing_count,
+                            "observation_id": observation_id,
+                            "proof_kind": (
+                                "confirmed_cancelled_status"
+                                if confirmed_cancelled
+                                else "repeated_complete_official_supply_snapshots"
+                            ),
+                        }
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        created: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        for item in eligible:
+            supply_id = str(item["supply_id"])
+            if not apply_returns:
+                protected_supply_ids.add(supply_id)
+                continue
+            try:
+                operation = self._record_proven_missing_supply_return(
+                    record=dict(item["record"]),
+                    observation_id=observation_id,
+                    observed_at=observed_at,
+                    missing_count=int(item["missing_count"]),
+                    proof_kind=str(item.get("proof_kind") or "repeated_complete_official_supply_snapshots"),
+                )
+            except (ValueError, TargetedWbSupplyReconciliationError) as exc:
+                reason = str(exc)
+                if reason == "missing supply has no original physical FF debit":
+                    blocked.append(
+                        {
+                            "supply_id": supply_id,
+                            "reason": "no_physical_debit_return_not_required",
+                        }
+                    )
+                else:
+                    protected_supply_ids.add(supply_id)
+                    blocked.append({"supply_id": supply_id, "reason": reason})
+                continue
+            created.append(operation)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                    SET lifecycle_state='returned',original_debit_operation_id=?,
+                        return_operation_id=?,return_source_revision=?,updated_at=?
+                    WHERE supply_id=?
+                    """,
+                    (
+                        str((operation.get("diagnostics") or {}).get("original_operation_id") or ""),
+                        str(operation.get("operation_id") or ""),
+                        str(
+                            (operation.get("diagnostics") or {}).get(
+                                "return_source_revision"
+                            )
+                            or (operation.get("diagnostics") or {}).get("proof_revision")
+                            or ""
+                        ),
+                        observed_at,
+                        supply_id,
+                    ),
+                )
+                conn.commit()
+        return {
+            "observation_id": observation_id,
+            "complete_snapshot": True,
+            "threshold": WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD,
+            "return_created_count": len(created),
+            "return_operation_ids": [str(item.get("operation_id") or "") for item in created],
+            "blocked": blocked,
+            "protected_supply_ids": sorted(protected_supply_ids),
+            "apply_returns": apply_returns,
+        }
+
+    def _legacy_orphan_supply_records(
+        self,
+        *,
+        excluded_supply_ids: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Find bounded pre-journal debits with a proven unaccepted remainder."""
+
+        from packages.application.ff_inventory_reconciliation import (
+            _historical_supply_cost_facts,
+        )
+
+        result: dict[str, dict[str, Any]] = {}
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            operations = conn.execute(
+                """
+                SELECT operation_id,source_key,source_object_id,created_at
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE source_key LIKE 'wb_supply_debit:supply:%'
+                ORDER BY created_at DESC,operation_id DESC
+                LIMIT 500
+                """
+            ).fetchall()
+            for operation in operations:
+                supply_id = str(operation["source_object_id"] or "").strip()
+                if not supply_id:
+                    supply_id = str(operation["source_key"]).split(":")[-1]
+                if not supply_id or supply_id in excluded_supply_ids:
+                    continue
+                returned = conn.execute(
+                    """
+                    SELECT 1 FROM sheet_vitrina_v1_ff_stock_operations
+                    WHERE source_type=? AND source_object_id=? LIMIT 1
+                    """,
+                    (FF_STOCK_SOURCE_WB_SUPPLY_RETURN, supply_id),
+                ).fetchone()
+                if returned is not None:
+                    continue
+                debit_lines = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_ff_stock_operation_lines
+                    WHERE operation_id=? ORDER BY nm_id,line_no
+                    """,
+                    (str(operation["operation_id"]),),
+                ).fetchall()
+                if not debit_lines:
+                    continue
+                try:
+                    facts = _historical_supply_cost_facts(
+                        conn,
+                        supply_id=supply_id,
+                        debit_lines=debit_lines,
+                        debit_created_at=str(operation["created_at"] or ""),
+                    )
+                except ValueError:
+                    continue
+                if not facts or not any(
+                    bool(item.get("accepted_evidence_available"))
+                    and _decimal_value(item.get("packed_quantity") or item.get("flow_quantity"))
+                    > _decimal_value(item.get("accepted_quantity"))
+                    for item in facts.values()
+                ):
+                    continue
+                result[supply_id] = {
+                    "supply_id": supply_id,
+                    "normalized": {"supply_id": supply_id},
+                    "legacy_orphan_candidate": True,
+                    "original_debit_operation_id": str(operation["operation_id"]),
+                    "historical_cost_facts": facts,
+                }
+        return result
+
+    def apply_confirmed_wb_supply_returns(self) -> dict[str, Any]:
+        """Apply lifecycle rows already proven by complete official snapshots."""
+
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                WHERE lifecycle_state IN ('missing_confirmed','cancelled_confirmed')
+                  AND return_operation_id=''
+                ORDER BY updated_at,supply_id
+                """
+            ).fetchall()
+        created: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        for row in rows:
+            supply_id = str(row["supply_id"])
+            record = json.loads(str(row["last_record_json"] or "{}"))
+            try:
+                operation = self._record_proven_missing_supply_return(
+                    record=record,
+                    observation_id=str(row["last_observation_id"]),
+                    observed_at=str(row["last_observation_at"]),
+                    missing_count=int(row["consecutive_missing_complete_snapshots"] or 0),
+                    proof_kind=(
+                        "confirmed_cancelled_status"
+                        if str(row["lifecycle_state"]) == "cancelled_confirmed"
+                        else "repeated_complete_official_supply_snapshots"
+                    ),
+                )
+            except (ValueError, TargetedWbSupplyReconciliationError) as exc:
+                reason = str(exc)
+                blocked.append(
+                    {
+                        "supply_id": supply_id,
+                        "reason": (
+                            "no_physical_debit_return_not_required"
+                            if reason == "missing supply has no original physical FF debit"
+                            else reason
+                        ),
+                    }
+                )
+                continue
+            created.append(operation)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                    SET lifecycle_state='returned',original_debit_operation_id=?,
+                        return_operation_id=?,return_source_revision=?,updated_at=?
+                    WHERE supply_id=?
+                    """,
+                    (
+                        str((operation.get("diagnostics") or {}).get("original_operation_id") or ""),
+                        str(operation.get("operation_id") or ""),
+                        str(
+                            (operation.get("diagnostics") or {}).get(
+                                "return_source_revision"
+                            )
+                            or (operation.get("diagnostics") or {}).get("proof_revision")
+                            or ""
+                        ),
+                        self.timestamp_factory(),
+                        supply_id,
+                    ),
+                )
+                conn.commit()
+        return {
+            "return_created_count": len(created),
+            "return_operation_ids": [str(item.get("operation_id") or "") for item in created],
+            "returned_supply_ids": [
+                str((item.get("diagnostics") or {}).get("supply_id") or item.get("source_object_id") or "")
+                for item in created
+            ],
+            "blocked": blocked,
+        }
+
+    def _record_proven_missing_supply_return(
+        self,
+        *,
+        record: Mapping[str, Any],
+        observation_id: str,
+        observed_at: str,
+        missing_count: int,
+        proof_kind: str = "repeated_complete_official_supply_snapshots",
+    ) -> dict[str, Any]:
+        from packages.application.ff_inventory_reconciliation import (
+            _costed_line,
+            _historical_supply_cost_facts,
+        )
+
+        normalized = dict(record.get("normalized") or record)
+        supply_id = str(
+            _first_present(normalized, "supply_id", "wb_supply_id")
+            or _first_present(record, "supply_id", "wb_supply_id")
+            or ""
+        ).strip()
+        _cache_key, _identity, current_source_key = _wb_supply_debit_identity(
+            record=record,
+            normalized=normalized,
+        )
+        source_keys = [
+            current_source_key,
+            f"wb_supply_debit:supply:{supply_id}",
+            f"wb_supply_debit:{supply_id}",
+        ]
+        original = next(
+            (
+                candidate
+                for source_key in dict.fromkeys(source_keys)
+                if source_key
+                for candidate in [self.runtime.load_ff_stock_operation_by_source_key(source_key)]
+                if candidate is not None
+            ),
+            None,
+        )
+        if original is None:
+            raise ValueError("missing supply has no original physical FF debit")
+        source_key = str(original.get("source_key") or current_source_key)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            debit_lines = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_stock_operation_lines WHERE operation_id=? ORDER BY nm_id,line_no",
+                (str(original["operation_id"]),),
+            ).fetchall()
+            facts = _historical_supply_cost_facts(
+                conn,
+                supply_id=supply_id,
+                debit_lines=debit_lines,
+                debit_created_at=str(original.get("created_at") or ""),
+            )
+        accepted_by_nm = _accepted_quantities_by_nm(record)
+        identity = self._nomenclature_by_nm()
+        lines: list[dict[str, Any]] = []
+        source_revisions: set[str] = set()
+        for debit in debit_lines:
+            nm_id = int(debit["nm_id"])
+            packed = abs(_decimal_value(debit["quantity_delta"]))
+            accepted = accepted_by_nm.get(
+                nm_id,
+                _decimal_value((facts.get(nm_id) or {}).get("accepted_quantity")),
+            )
+            if accepted < 0 or accepted > packed:
+                raise ValueError(f"accepted quantity is invalid for {supply_id}:{nm_id}")
+            quantity = packed - accepted
+            if quantity == 0:
+                continue
+            fact = facts.get(nm_id)
+            if fact is None:
+                raise ValueError(f"exact original debit cost is missing for {supply_id}:{nm_id}")
+            source_revisions.add(str(fact["source_revision"]))
+            lines.append(
+                _costed_line(
+                    nm_id=nm_id,
+                    quantity_delta=quantity,
+                    unit_cost=_decimal_value(fact["unit_cost_rub"]),
+                    identity=identity.get(nm_id, {}),
+                    quality="exact_original_ff_debit",
+                    provenance={
+                        "original_operation_id": str(original["operation_id"]),
+                        "original_source_key": source_key,
+                        "original_supply_id": supply_id,
+                        "original_source_revision": str(fact["source_revision"]),
+                        "original_functional_version_id": str(fact["version_id"]),
+                        "packed_quantity": str(packed),
+                        "accepted_quantity": str(accepted),
+                        "return_quantity": str(quantity),
+                    },
+                )
+            )
+        if not lines:
+            raise ValueError("missing supply has no unaccepted quantity to return")
+        proof = {
+            "proof_kind": proof_kind,
+            "supply_id": supply_id,
+            "observation_id": observation_id,
+            "observed_at": observed_at,
+            "consecutive_missing_complete_snapshots": missing_count,
+            "threshold": WB_SUPPLY_MISSING_COMPLETE_SNAPSHOT_THRESHOLD,
+            "original_operation_id": str(original["operation_id"]),
+            "historical_source_revisions": sorted(source_revisions),
+        }
+        return_source_revision = _fingerprint(
+            {
+                "supply_id": supply_id,
+                "original_operation_id": str(original["operation_id"]),
+                "lines": [
+                    {
+                        "nm_id": int(line["nm_id"]),
+                        "quantity_delta": str(line["quantity_delta"]),
+                        "unit_cost_rub": str(line["unit_cost_rub"]),
+                        "capital_delta_rub": str(line["capital_delta_rub"]),
+                        "original_source_revision": str(
+                            (line.get("cost_provenance") or {}).get(
+                                "original_source_revision"
+                            )
+                            or ""
+                        ),
+                    }
+                    for line in lines
+                ],
+            }
+        )
+        proof["return_source_revision"] = return_source_revision
+        proof_revision = _fingerprint(proof)
+        return_source_key = (
+            f"wb_supply_return:supply:{supply_id}:{original['operation_id']}:"
+            f"{return_source_revision.removeprefix('sha256:')[:16]}"
+        )
+        existing = self.runtime.load_ff_stock_operation_by_source_key(return_source_key)
+        if existing is not None:
+            existing["idempotent"] = True
+            return existing
+        return self.runtime.create_ff_stock_operation(
+            operation_id="ffso_" + _fingerprint(return_source_key).removeprefix("sha256:")[:20],
+            operation_type=FF_STOCK_OPERATION_AUTO_RETURN,
+            source_type=FF_STOCK_SOURCE_WB_SUPPLY_RETURN,
+            source_key=return_source_key,
+            source_object_id=supply_id,
+            source_object_label=f"Автовозврат WB-поставки {supply_id}",
+            created_at=observed_at,
+            business_effective_date=str(observed_at)[:10],
+            created_by="system",
+            diagnostics={**proof, "proof_revision": proof_revision},
+            lines=lines,
+        )
+
     def reservation_summary(self) -> dict[str, Any]:
         reservations = self.runtime.list_ff_stock_reservations()
         balances = {
@@ -700,6 +1275,29 @@ class FfStockLedgerBlock:
         supply_revision = _wb_supply_revision(record, normalized)
         existing = self.runtime.load_ff_stock_operation_by_source_key(source_key)
         if existing is not None:
+            with sqlite3.connect(self.runtime.db_path) as lifecycle_conn:
+                lifecycle_conn.row_factory = sqlite3.Row
+                lifecycle = lifecycle_conn.execute(
+                    """
+                    SELECT lifecycle_state,return_operation_id,return_source_revision
+                    FROM sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                    WHERE supply_id=?
+                    """,
+                    (supply_id,),
+                ).fetchone()
+            if (
+                lifecycle is not None
+                and str(lifecycle["lifecycle_state"] or "") == "returned_reappeared"
+                and str(lifecycle["return_operation_id"] or "")
+            ):
+                return self._record_wb_supply_reappearance_debit(
+                    record=record,
+                    supply_id=supply_id,
+                    supply_revision=supply_revision,
+                    original_debit=existing,
+                    return_operation_id=str(lifecycle["return_operation_id"]),
+                    return_source_revision=str(lifecycle["return_source_revision"] or ""),
+                )
             self._set_wb_supply_reservation(
                 supply_id=supply_id,
                 supply_revision=supply_revision,
@@ -815,6 +1413,31 @@ class FfStockLedgerBlock:
             }
         balance_rows = self.runtime.list_ff_stock_balances()
         negative_preview = _negative_balance_preview(lines, balance_rows)
+        lines, ff_cost_snapshot_blockers = self._freeze_ff_debit_cost_snapshot(
+            lines=lines,
+            balance_rows=balance_rows,
+        )
+        if ff_cost_snapshot_blockers:
+            desired = {
+                int(item.get("nm_id") or 0): abs(float(item.get("quantity_delta") or 0.0))
+                for item in lines
+            }
+            reservation = self._set_wb_supply_reservation(
+                supply_id=supply_id,
+                supply_revision=supply_revision,
+                desired=desired,
+                reason="waiting_for_exact_ff_cost_snapshot",
+                diagnostics={"cost_snapshot_blockers": ff_cost_snapshot_blockers},
+            )
+            return {
+                "skip_reason": "wb_supply_ff_cost_snapshot_missing",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "cost_snapshot_blockers": ff_cost_snapshot_blockers,
+                "reservation": reservation,
+                "reservation_status": "Ожидает точной себестоимости FF",
+                "total_quantity": total_quantity,
+            }
         downstream_state = self._validated_downstream_cost_state(
             record=record,
             normalized=normalized,
@@ -939,6 +1562,283 @@ class FfStockLedgerBlock:
         )
         operation["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
         return operation
+
+    def _record_wb_supply_reappearance_debit(
+        self,
+        *,
+        record: Mapping[str, Any],
+        supply_id: str,
+        supply_revision: str,
+        original_debit: Mapping[str, Any],
+        return_operation_id: str,
+        return_source_revision: str,
+    ) -> dict[str, Any]:
+        """Restore conservation once when an already-returned supply reappears."""
+
+        from packages.application.ff_inventory_reconciliation import _costed_line
+
+        returned = self.runtime.load_ff_stock_operation(return_operation_id)
+        if returned is None or not list(returned.get("lines") or []):
+            raise ValueError(
+                f"returned WB supply {supply_id} has no immutable return document"
+            )
+        source_key = (
+            f"wb_supply_reappearance:{supply_id}:{return_operation_id}"
+        )
+        operation = self.runtime.load_ff_stock_operation_by_source_key(source_key)
+        if operation is None:
+            balances = {
+                int(item.get("nm_id") or 0): _decimal_value(item.get("balance"))
+                for item in self.runtime.list_ff_stock_balances()
+            }
+            required_by_nm: dict[int, Decimal] = {}
+            for returned_line in returned.get("lines") or []:
+                nm_id = int(returned_line.get("nm_id") or 0)
+                required_by_nm[nm_id] = required_by_nm.get(
+                    nm_id, Decimal("0")
+                ) + abs(_decimal_value(returned_line.get("quantity_delta")))
+            insufficient = [
+                {
+                    "nm_id": nm_id,
+                    "required_quantity": str(required),
+                    "current_balance": str(balances.get(nm_id, Decimal("0"))),
+                }
+                for nm_id, required in sorted(required_by_nm.items())
+                if balances.get(nm_id, Decimal("0")) < required
+            ]
+            if insufficient:
+                raise ValueError(
+                    "WB supply reappearance redebit would make FF negative: "
+                    + json.dumps(insufficient, ensure_ascii=False, sort_keys=True)
+                )
+            lines: list[dict[str, Any]] = []
+            for returned_line in returned.get("lines") or []:
+                raw = dict(returned_line.get("raw") or {})
+                snapshot = raw.get("cost_snapshot")
+                if not isinstance(snapshot, Mapping):
+                    raise ValueError(
+                        f"returned WB supply {supply_id} has no exact line cost"
+                    )
+                quantity = abs(_decimal_value(returned_line.get("quantity_delta")))
+                unit_cost = _decimal_value(snapshot.get("unit_cost_rub"))
+                if quantity <= 0 or unit_cost <= 0:
+                    raise ValueError(
+                        f"returned WB supply {supply_id} has an invalid line"
+                    )
+                lines.append(
+                    _costed_line(
+                        nm_id=int(returned_line.get("nm_id") or 0),
+                        quantity_delta=-quantity,
+                        unit_cost=unit_cost,
+                        identity={
+                            "barcode": returned_line.get("barcode"),
+                            "our_sku": returned_line.get("sku"),
+                            "nomenclature_name": returned_line.get("nomenclature_name"),
+                            "group_name": returned_line.get("group_name"),
+                        },
+                        quality="exact_return_reappearance_redebit",
+                        provenance={
+                            "original_debit_operation_id": str(
+                                original_debit.get("operation_id") or ""
+                            ),
+                            "return_operation_id": return_operation_id,
+                            "return_source_revision": return_source_revision,
+                            "supply_revision": supply_revision,
+                            "policy": "single_reappearance_redebit_at_exact_return_cost",
+                        },
+                    )
+                )
+            operation = self.runtime.create_ff_stock_operation(
+                operation_id="ffso_"
+                + _fingerprint(source_key).removeprefix("sha256:")[:20],
+                operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
+                source_type=FF_STOCK_SOURCE_WB_SUPPLY_REAPPEARANCE,
+                source_key=source_key,
+                source_object_id=supply_id,
+                source_object_label=f"Повторное появление WB-поставки {supply_id}",
+                created_at=self.timestamp_factory(),
+                created_by="system",
+                diagnostics={
+                    "supply_id": supply_id,
+                    "original_debit_operation_id": str(
+                        original_debit.get("operation_id") or ""
+                    ),
+                    "return_operation_id": return_operation_id,
+                    "return_source_revision": return_source_revision,
+                    "supply_revision": supply_revision,
+                    "conservation_action": "single_exact_reappearance_redebit",
+                },
+                lines=lines,
+            )
+        else:
+            operation["idempotent"] = True
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            updated = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_ff_stock_wb_supply_lifecycle
+                SET lifecycle_state='active_seen',
+                    consecutive_missing_complete_snapshots=0,
+                    return_operation_id='',return_source_revision='',
+                    diagnostics_json=?,updated_at=?
+                WHERE supply_id=? AND return_operation_id=?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "present_in_complete_official_snapshot": True,
+                            "reappearance_debit_operation_id": str(
+                                operation.get("operation_id") or ""
+                            ),
+                            "reappearance_source_revision": supply_revision,
+                            "prior_return_operation_id": return_operation_id,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    self.timestamp_factory(),
+                    supply_id,
+                    return_operation_id,
+                ),
+            ).rowcount
+            conn.commit()
+        if updated != 1:
+            raise ValueError(
+                f"WB supply {supply_id} reappearance lifecycle changed during redebit"
+            )
+        self._set_wb_supply_reservation(
+            supply_id=supply_id,
+            supply_revision=supply_revision,
+            desired={},
+            reason="reappeared_supply_exactly_redebited",
+        )
+        operation["reappearance_redebit"] = True
+        operation["own_product_capital"] = self._record_own_capital_wb_supply(
+            record,
+            dict(record.get("normalized") or record),
+        )
+        return operation
+
+    def _freeze_ff_debit_cost_snapshot(
+        self,
+        *,
+        lines: list[Mapping[str, Any]],
+        balance_rows: list[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Bind every physical FF debit to the exact pre-movement FF WAC."""
+
+        ledger_balance = {
+            int(item.get("nm_id") or 0): _decimal_value(item.get("balance"))
+            for item in balance_rows
+        }
+        nm_ids = sorted({int(item.get("nm_id") or 0) for item in lines})
+        placeholders = ",".join("?" for _ in nm_ids)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            required_tables = {
+                "sheet_vitrina_v1_warehouse_functional_active",
+                "sheet_vitrina_v1_warehouse_functional_versions",
+                "sheet_vitrina_v1_warehouse_functional_balances",
+            }
+            available_tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?)",
+                    tuple(sorted(required_tables)),
+                ).fetchall()
+            }
+            rows = []
+            if available_tables == required_tables:
+                rows = conn.execute(
+                    f"""
+                    SELECT balance.nm_id,balance.quantity,
+                           balance.wac_rub AS average_unit_cost_rub,
+                           balance.capital_rub,version.version_id,
+                           version.business_effective_date,version.plan_fingerprint,
+                           COALESCE(NULLIF(version.published_at,''),version.created_at,
+                                    version.effective_at) AS published_at
+                    FROM sheet_vitrina_v1_warehouse_functional_active AS active
+                    JOIN sheet_vitrina_v1_warehouse_functional_versions AS version
+                      ON version.version_id=active.version_id
+                    JOIN sheet_vitrina_v1_warehouse_functional_balances AS balance
+                      ON balance.version_id=version.version_id
+                    WHERE active.slot=1 AND balance.warehouse_key='ff'
+                      AND balance.nm_id IN ({placeholders})
+                    """,
+                    tuple(nm_ids),
+                ).fetchall()
+                positive_rows = conn.execute(
+                    f"""
+                    SELECT line.nm_id,MAX(operation.created_at) AS last_positive_at
+                    FROM sheet_vitrina_v1_ff_stock_operation_lines AS line
+                    JOIN sheet_vitrina_v1_ff_stock_operations AS operation
+                      ON operation.operation_id=line.operation_id
+                    WHERE line.nm_id IN ({placeholders}) AND line.quantity_delta>0
+                    GROUP BY line.nm_id
+                    """,
+                    tuple(nm_ids),
+                ).fetchall()
+            else:
+                positive_rows = []
+        by_nm = {int(row["nm_id"]): dict(row) for row in rows}
+        last_positive_by_nm = {
+            int(row["nm_id"]): str(row["last_positive_at"] or "")
+            for row in positive_rows
+        }
+        blockers: list[dict[str, Any]] = []
+        frozen: list[dict[str, Any]] = []
+        for source in lines:
+            line = dict(source)
+            nm_id = int(line.get("nm_id") or 0)
+            row = by_nm.get(nm_id)
+            functional_quantity = _decimal_value((row or {}).get("quantity"))
+            ledger_quantity = ledger_balance.get(nm_id, Decimal("0"))
+            unit_cost = _decimal_value((row or {}).get("average_unit_cost_rub"))
+            intervening_positive = bool(
+                row
+                and last_positive_by_nm.get(nm_id, "")
+                > str(row.get("published_at") or "")
+            )
+            # A debit never changes moving WAC, so several supplies may be
+            # written off atomically from the same published pre-run basis.
+            # A newer positive ledger movement makes the published quantity
+            # smaller than the ledger and must fail closed until replay.
+            if (
+                row is None
+                or unit_cost <= 0
+                or functional_quantity < ledger_quantity
+                or intervening_positive
+            ):
+                blockers.append(
+                    {
+                        "nm_id": nm_id,
+                        "reason": (
+                            "active_ff_cost_missing"
+                            if row is None or unit_cost <= 0
+                            else "active_ff_cost_precedes_positive_movement"
+                            if intervening_positive
+                            else "active_ff_quantity_is_stale"
+                        ),
+                        "ledger_quantity": str(ledger_quantity),
+                        "functional_quantity": str(functional_quantity),
+                        "published_at": str((row or {}).get("published_at") or ""),
+                        "last_positive_at": last_positive_by_nm.get(nm_id, ""),
+                    }
+                )
+                frozen.append(line)
+                continue
+            quantity_delta = _decimal_value(line.get("quantity_delta"))
+            raw = dict(line.get("raw") or {})
+            raw["cost_snapshot"] = {
+                "unit_cost_rub": str(unit_cost),
+                "capital_delta_rub": str(quantity_delta * unit_cost),
+                "quality": "exact_pre_movement_ff_wac",
+                "source_version_id": str(row.get("version_id") or ""),
+                "source_business_date": str(row.get("business_effective_date") or ""),
+                "source_plan_fingerprint": str(row.get("plan_fingerprint") or ""),
+                "ledger_quantity_guard": str(ledger_quantity),
+            }
+            line["raw"] = raw
+            frozen.append(line)
+        return frozen, blockers
 
     def _validated_downstream_cost_state(
         self,
@@ -2675,6 +3575,82 @@ def _optional_float(value: Any) -> float | None:
         return float(str(value).replace(",", ".").strip())
     except (TypeError, ValueError):
         return None
+
+
+def _decimal_value(value: Any) -> Decimal:
+    if value in (None, ""):
+        return Decimal("0")
+    return Decimal(str(value))
+
+
+def _record_lifecycle_identity_keys(record: Mapping[str, Any]) -> set[str]:
+    normalized = dict(record.get("normalized") or record)
+    values = {
+        str(record.get("cache_key") or "").strip(),
+        str(record.get("supply_id") or "").strip(),
+        str(record.get("wb_supply_id") or "").strip(),
+        str(record.get("preorder_id") or "").strip(),
+        str(normalized.get("cache_key") or "").strip(),
+        str(normalized.get("supply_id") or "").strip(),
+        str(normalized.get("wb_supply_id") or "").strip(),
+        str(normalized.get("preorder_id") or "").strip(),
+    }
+    result: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        result.add(value)
+        result.add(value.removeprefix("supply:").removeprefix("preorder:"))
+        if not value.startswith(("supply:", "preorder:")):
+            result.add(f"supply:{value}")
+            result.add(f"preorder:{value}")
+    return result
+
+
+def _accepted_quantities_by_nm(record: Mapping[str, Any]) -> dict[int, Decimal]:
+    normalized = dict(record.get("normalized") or record)
+    raw_goods = record.get("raw_goods")
+    if not isinstance(raw_goods, list):
+        raw_goods = normalized.get("raw_goods")
+    if not isinstance(raw_goods, list):
+        raise ValueError("WB supply goods are missing for return")
+    _sent, accepted, problems = _wb_capital_quantities(
+        [dict(item) for item in raw_goods if isinstance(item, Mapping)]
+    )
+    if problems:
+        raise ValueError("WB supply accepted quantities are invalid: " + "; ".join(problems[:10]))
+    return {nm_id: _decimal_value(quantity) for nm_id, quantity in accepted.items()}
+
+
+def _record_is_confirmed_cancelled(record: Mapping[str, Any]) -> bool:
+    normalized = dict(record.get("normalized") or record)
+    boolean_markers = (
+        "is_cancelled",
+        "isCancelled",
+        "cancelled",
+        "canceled",
+    )
+    for key in boolean_markers:
+        marker = record.get(key)
+        if marker in (None, ""):
+            marker = normalized.get(key)
+        if marker is True or marker == 1:
+            return True
+        if isinstance(marker, str) and marker.strip().casefold() in {
+            "1",
+            "true",
+            "yes",
+            "cancelled",
+            "canceled",
+            "отменена",
+            "отменено",
+        }:
+            return True
+    status_text = " ".join(
+        str(record.get(key) or normalized.get(key) or "")
+        for key in ("status", "status_name", "status_label", "statusName")
+    ).casefold()
+    return any(marker in status_text for marker in ("отмен", "cancelled", "canceled"))
 
 
 def _first_present(mapping: Mapping[str, Any], *keys: str) -> Any:

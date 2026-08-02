@@ -343,6 +343,27 @@ def _ff_operation_effective_date_resolution() -> None:
                 },
             )
             _eq(manual.effective_date, "2026-07-09", "manual/correction created-at semantics")
+            inventory = resolve_ff_operation_effective_date(
+                conn,
+                {
+                    "operation_id": "inventory-correction",
+                    "source_type": "inventory_reconciliation",
+                    "source_key": "ff_inventory:test:receipt",
+                    "created_at": "2026-08-02T18:28:28Z",
+                    "business_effective_date": "2026-07-31",
+                    "diagnostics_json": "{}",
+                },
+            )
+            _eq(
+                inventory.effective_date,
+                "2026-07-31",
+                "explicit inventory business date is independent from audit time",
+            )
+            _eq(
+                inventory.provenance["source_field"],
+                "ff_operation.business_effective_date",
+                "explicit inventory date provenance",
+            )
             try:
                 resolve_ff_operation_effective_date(
                     conn,

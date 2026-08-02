@@ -163,8 +163,30 @@ def _check_runtime_merge_and_background_job() -> None:
             synced_at=synced_at,
             warnings=[],
         )
+        preorder_awaiting_supply = _normalize_supply_row(
+            raw_list={"preorderID": 77000001, "statusID": 1, "supplyDate": "2026-07-05T00:00:00+03:00"},
+            raw_detail={
+                "preorderID": 77000001,
+                "statusID": 1,
+                "warehouseName": "Новосемейкино",
+                "transitWarehouseName": "Чехов 1",
+                "quantity": 250,
+                "acceptanceCost": 0,
+            },
+            raw_goods=None,
+            raw_package=None,
+            warehouse_by_id={},
+            synced_at=synced_at,
+            warnings=[],
+        )
         runtime.save_wb_supply_rows(
-            rows=[unknown_transit, missing_transit, official_transit, unknown_non_transit],
+            rows=[
+                unknown_transit,
+                missing_transit,
+                official_transit,
+                unknown_non_transit,
+                preorder_awaiting_supply,
+            ],
             warehouses=[],
             synced_at=synced_at,
         )
@@ -205,6 +227,19 @@ def _check_runtime_merge_and_background_job() -> None:
             raise AssertionError(f"unknown transit must remain unknown before enrichment: {before_rows['40422317']}")
         if before_rows["50000001"]["effective_cost_total"] != 777.0 or before_rows["50000001"]["effective_cost_source"] != "official_wb_api":
             raise AssertionError(f"official cost must win over Seller Portal cache: {before_rows['50000001']}")
+        preorder_row = next(
+            row for row in before["rows"] if str(row.get("preorder_id") or "") == "77000001"
+        )
+        if (
+            preorder_row.get("effective_cost_source") != "awaiting_supply_creation"
+            or preorder_row.get("effective_cost_display") != "Ожидает создания поставки"
+        ):
+            raise AssertionError(f"status-1 preorder must be shown as awaiting supply creation: {preorder_row}")
+        preorder_candidates = block._select_transit_cost_enrichment_candidates(
+            {"supply_ids": ["77000001"], "limit": 10, "force": True}
+        )
+        if preorder_candidates:
+            raise AssertionError("a preorder without real wb_supply_id reached the supply cost endpoint")
 
         response = block.start_transit_cost_enrichment(
             {

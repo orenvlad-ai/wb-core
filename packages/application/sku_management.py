@@ -26,6 +26,7 @@ from packages.application.vitrina_incident_rematerialization import (
 from packages.application.wb_incident_policy import (
     WbIncidentPolicyError,
     build_incident_stock_projection,
+    canonical_seller_id,
     get_latest_policy_state,
     policy_badge,
     save_policy_revision,
@@ -609,6 +610,8 @@ class SkuManagementBlock:
             "revision": int(policy.get("revision") or 0),
             "updated_at": str(policy.get("created_at") or ""),
             "excluded_wb_warehouse_ids": excluded,
+            "warehouse_entries": list(policy.get("configured_warehouse_entries") or policy.get("warehouse_entries") or []),
+            "canonical_business_date": snapshot_date,
             "effective_excluded_wb_warehouse_ids": list(
                 policy.get("effective_warehouse_ids")
                 if "effective_warehouse_ids" in policy
@@ -651,6 +654,15 @@ class SkuManagementBlock:
             require_complete=True,
         )
         normalized_payload = dict(payload)
+        seller_id = canonical_seller_id()
+        previous_record = self.runtime.load_latest_wb_incident_policy(
+            seller_id=seller_id,
+        )
+        previous_policy = get_latest_policy_state(
+            self.runtime,
+            snapshot_date=snapshot_date,
+            seller_id=seller_id,
+        )
         if "active" not in normalized_payload and "effective_from" not in normalized_payload:
             legacy_ids = list(normalized_payload.get("excluded_wb_warehouse_ids") or [])
             normalized_payload.update(
@@ -663,6 +675,7 @@ class SkuManagementBlock:
                 }
             )
         policy_saved_at = self.timestamp_factory()
+        normalized_payload.setdefault("change_effective_from", snapshot_date)
         try:
             saved_policy = save_policy_revision(
                 self.runtime,
@@ -674,16 +687,131 @@ class SkuManagementBlock:
         except WbIncidentPolicyError as exc:
             status = 409 if "conflict" in str(exc).casefold() else 422
             raise SkuManagementError(str(exc), http_status=status) from exc
-        rematerialization = self._rematerialize_incident_policy_ready_dates(
-            user_key=user_key,
-            revision=int(saved_policy.get("revision") or 0),
-            effective_from=str(normalized_payload.get("effective_from") or ""),
-            date_to=snapshot_date,
-            generated_at=policy_saved_at,
-        )
+        changed_from = str(saved_policy.get("changed_from") or "")
+        if str(saved_policy.get("idempotency_status") or "") == "T0":
+            rematerialization = {
+                "status": "T0",
+                "date_from": "",
+                "date_to": snapshot_date,
+                "snapshot_count": 0,
+                "changed_cells": 0,
+            }
+        else:
+            rematerialization = self._rematerialize_incident_policy_ready_dates(
+                user_key=user_key,
+                revision=int(saved_policy.get("revision") or 0),
+                effective_from=changed_from or snapshot_date,
+                date_to=snapshot_date,
+                generated_at=policy_saved_at,
+            )
+        recovery: dict[str, Any] = {}
+        policy_apply_status = "applied"
+        if str(rematerialization.get("status") or "") == "failed":
+            prior = (
+                dict(previous_record)
+                if isinstance(previous_record, Mapping)
+                and previous_record.get("status") == "ok"
+                else dict(previous_policy)
+            )
+            prior_entries = list(
+                prior.get("warehouse_entries")
+                or previous_policy.get("configured_warehouse_entries")
+                or []
+            )
+            prior_ids = sorted(
+                {
+                    int(item.get("warehouse_id") or 0)
+                    for item in prior_entries
+                    if int(item.get("warehouse_id") or 0) > 0
+                    and not str(item.get("effective_to_exclusive") or "")
+                }
+            )
+            prior_identities = list(prior.get("warehouse_identities") or [])
+            if not prior_identities and prior_ids:
+                option_by_id = {
+                    int(item.get("warehouse_id") or 0): dict(item)
+                    for item in options_contract.get("options") or []
+                }
+                prior_identities = [
+                    {
+                        "warehouse_id": warehouse_id,
+                        "warehouse_name": str(
+                            option_by_id.get(warehouse_id, {}).get("warehouse_name")
+                            or ""
+                        ),
+                        "effective_from": next(
+                            str(item.get("effective_from") or "")
+                            for item in prior_entries
+                            if int(item.get("warehouse_id") or 0) == warehouse_id
+                            and not str(item.get("effective_to_exclusive") or "")
+                        ),
+                    }
+                    for warehouse_id in prior_ids
+                ]
+            restored = self.runtime.append_wb_incident_policy_revision(
+                seller_id=seller_id,
+                active=bool(
+                    prior.get("active")
+                    if previous_record.get("status") == "ok"
+                    else previous_policy.get("configured_active")
+                    if "configured_active" in previous_policy
+                    else previous_policy.get("active")
+                ),
+                warehouse_ids=prior_ids,
+                warehouse_identities=prior_identities,
+                warehouse_entries=prior_entries,
+                reason=str(prior.get("reason") or ""),
+                effective_from=changed_from or snapshot_date,
+                effective_to=str(prior.get("effective_to") or ""),
+                policy_status=str(prior.get("policy_status") or "disabled"),
+                actor="system:incident-policy-last-good-recovery",
+                created_at=self.timestamp_factory(),
+                source="incident_policy_v2_last_good_recovery",
+                legacy_payloads=list(prior.get("legacy_payloads") or []),
+                expected_revision=int(saved_policy.get("revision") or 0),
+            )
+            if restored.get("status") == "conflict":
+                raise SkuManagementError(
+                    "Incident policy replay failed and last-good recovery revision conflicted",
+                    http_status=500,
+                )
+            policy_apply_status = "failed_reverted_to_last_good"
+            recovery = {
+                "status": "last_good_restored",
+                "attempted_revision": int(saved_policy.get("revision") or 0),
+                "recovery_revision": int(restored.get("revision") or 0),
+                "changed_from": changed_from,
+            }
         return {
             **self.get_warehouse_exclusion_settings(user_key=user_key),
+            "idempotency_status": (
+                policy_apply_status
+                if policy_apply_status != "applied"
+                else str(saved_policy.get("idempotency_status") or "applied")
+            ),
+            "policy_apply_status": policy_apply_status,
+            "changed_from": changed_from,
             "rematerialization": rematerialization,
+            "last_good_recovery": recovery,
+            "dependent_replay": {
+                "status": (
+                    "failed_reverted_to_last_good"
+                    if policy_apply_status != "applied"
+                    else "T0"
+                    if str(saved_policy.get("idempotency_status") or "") == "T0"
+                    else "applied"
+                ),
+                "date_from": changed_from,
+                "contours": [
+                    "supply_calculation_read_through",
+                    "sku_management_read_through",
+                    "vitrina_effective_availability",
+                    "vitrina_historical_projection",
+                ],
+                "physical_wb_mutated": False,
+                "warehouse_capital_mutated": False,
+                "warehouse_wac_mutated": False,
+            },
         }
 
     def _rematerialize_incident_policy_ready_dates(
@@ -1876,7 +2004,9 @@ class SkuManagementBlock:
                     warehouse_rows=list(
                         getattr(stock_result, "warehouse_rows", []) or []
                     ),
-                    snapshot_date=str(getattr(stock_result, "snapshot_date", "") or ""),
+                    snapshot_date=str(
+                        getattr(stock_result, "snapshot_date", "") or today
+                    ),
                     fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
                     pagination_complete=bool(
                         getattr(stock_result, "pagination_complete", False)
