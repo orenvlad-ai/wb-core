@@ -95,6 +95,9 @@ requires exact per-SKU plus total readback before commit. A repeated exact
 apply is T0. Recovery is T1: the retained recovery record and audit manifest
 support only append-only inverse-cost compensation after a separate exact
 approval; original documents/source bytes are never updated or deleted.
+The recovery-policy registry classifies `ff_inventory_reconciliation` as an
+enabled `sku_date` T1 mutation before capacity reservation; an unregistered or
+differently scoped operation fails before the inventory transaction starts.
 
 # 5. Derived publication and observability
 
