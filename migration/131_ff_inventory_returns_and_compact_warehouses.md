@@ -238,6 +238,66 @@ Terminalization uses the current production-mutation Release Train command and
 requires deployed merge SHA, gate comment/digest, reconciliation comment/digest
 and evidence hash. The migration is complete only at `release:production`.
 
+## 7.1 Exact projection-only recovery manifest (2026-08-02)
+
+The runtime correction shipped by PR `#906` as merge/deployed SHA
+`146865c8eb68c4ec05b0b3835cff8afb63b5ed71`. A fresh production query-only
+dry-run after that deploy produced the following locked projection manifest:
+
+- contract `warehouse_business_projection_exact_functional_recovery_v1`;
+- source workbook
+  `sha256:2c63ef251398c3f48b76ab72d859a70a987a04e0ea502744d18e731ef689e636`,
+  business date `2026-07-31`, manager target `33 SKU / 53 750 units`;
+- active exact functional version `whfv_caf7bbfb0bf72204899d8bf3`, business
+  date `2026-08-02`, plan fingerprint
+  `sha256:caf7bbfb0bf72204899d8bf301871669c3df948c0dfcaf40dee33b5e2b8b02d4`;
+- projection recovery fingerprint
+  `sha256:4fa535ba4fd550444c90dceb4f850da498b1e9ad2877e8f0dc5947a6a45e59ec`,
+  revision `whbpr_exact_recovery_4fa535ba4fd550444c90`;
+- source digest
+  `sha256:3f980f814b5ee23ff5f53b0d0418d8724e0b06f84b7c72018fd2ac9752a84cf8`,
+  active physical/functional non-target digest
+  `sha256:a4224fbfde56d161fc3c908c16bfe0d9ccd0fae9786fddac11132c1f05c3da0e`
+  and current projection target digest
+  `sha256:8044811685fe9ea4b7965c25d180529f009088010f8d407f678e297b6de39fbc`;
+- target dates `2026-07-30..2026-08-02`, `288` candidate rows, `372`
+  changed revision/current keys, `220` existing current rows, three already
+  committed inventory operations and `18` frozen-cost audit lines;
+- July 31 and August 1 use the three inventory operations only because their
+  exact version FF watermarks stop at row `359`; July 30 receives none and the
+  current August 2 watermark already includes all three at row `362`, so it is
+  not adjusted twice;
+- July 31 and August 1 FF readback is exactly `53 750` units and
+  `6 048 120.11650603214091306923 RUB`; current August 2 is the same, while
+  FF→WB is `20` units and `2 160.370426449805267145989195 RUB`;
+- current six-stage product capital is
+  `42 263 589.17804147728085544741 RUB`: production
+  `1 566 550.109999999999999999998`, China→FF
+  `6 361 497.429999999999999999999`, FF
+  `6 048 120.11650603214091306923`, FF→WB
+  `2 160.370426449805267145989195`, WB
+  `28 281 016.24149500788724613084` and discrepancy
+  `4 244.909613987447429101353303`.
+
+The earlier readback total `42 295 411.19003982564979548198 RUB` was correct for
+functional version `whfv_47382844b1b74662b8dc34ca` at `17:18 UTC`. The next
+complete official WB snapshot in active version `whfv_caf7bbfb0bf72204899d8bf3`
+reduced WB by `287` units and `31 822.01199834836894003457 RUB`; all other current-stage
+quantities/capital stayed identical. This is source-version advancement, not a
+projection loss, and the recovery must publish the newer canonical value.
+
+The deployed recovery-policy canary is query-only, covers T0/T1/T2,
+non-target digest and orphan scanning, and is bound to deployed SHA
+`146865c8eb68c4ec05b0b3835cff8afb63b5ed71` by fingerprint
+`sha256:2649c59f3b063509afe4ab0e740ab7bc48b8aad0068e91608f01bf0cbabbb81c`.
+Apply is allowed only with the exact manifest above and an exact human-gate
+reference. It registers `targeted_warehouse_publication` as T1/`sku_date`,
+captures projection-only before-images and rechecks source, target and
+non-target digests under the shared warehouse lock before `BEGIN IMMEDIATE`.
+Any hourly version/digest drift fails closed and requires a new dry-run; no
+inventory apply, physical ledger write or functional active-pointer mutation is
+part of this operation.
+
 # 8. Verification
 
 - `python3 -m apps.ff_inventory_reconciliation_smoke`
