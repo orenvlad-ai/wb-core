@@ -180,6 +180,9 @@ OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
     "ff_ledger_operation": _policy(
         "ff_ledger_operation", RecoveryTier.T1, "document", "shipment", "sku_date"
     ),
+    "ff_inventory_reconciliation": _policy(
+        "ff_inventory_reconciliation", RecoveryTier.T1, "sku_date"
+    ),
     "wb_supplies_refresh": _policy(
         "wb_supplies_refresh", RecoveryTier.T1, "shipment", "sku_date"
     ),

@@ -145,6 +145,13 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
                 closure_kind="shipment",
                 would_change=True,
             )
+        inventory = select_recovery_tier(
+            mutation_kind="ff_inventory_reconciliation",
+            closure_kind="sku_date",
+            would_change=True,
+        )
+        self.assertEqual(inventory.tier, RecoveryTier.T1)
+        self.assertEqual(inventory.reason, "policy:ff_inventory_reconciliation:T1")
 
     def test_t0_noop_creates_zero_recovery_state_or_bytes(self) -> None:
         isolated = Path(self.temporary.name) / "noop-only"
