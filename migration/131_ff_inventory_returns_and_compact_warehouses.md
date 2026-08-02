@@ -107,6 +107,33 @@ Vitrina/Finance projections. The missing supply is excluded from transit after
 return; active FF→WB is rebuilt only from debited, non-returned, unaccepted
 units. Conservation must hold per supply/SKU and in aggregate.
 
+The post-apply production diagnosis found that the physical/functional readback
+was correct while Web Vitrina had revision `whbpr_events_*`: capital from the
+legacy event daily state was combined with absent/preserved quantity cells and
+the header still reported freshness `2026-07-24`. The source was not another
+inventory movement. A physical-only FF outbox publication had no complete event
+proof, yet superseded the exact functional rows after the functional sync.
+
+The corrected contract has two guards:
+
+- each successful hourly/emergency/targeted functional apply atomically
+  publishes the complete six-stage exact-date projection with its new version;
+- a `functional_*` or `ff_stock_*` outbox request without canonical event proof
+  is consumed only as an awaiting-replay signal and leaves last-good projection
+  rows/state unchanged.
+
+The one-off `warehouse-july-recovery --batch projection` runner repairs only the
+derived `2026-07-30..active business date` rows. For 31 July and later it applies
+an already-committed inventory line only when the selected exact version's FF
+watermark proves that operation absent; a current version whose append-only
+prefix already contains the operation is not adjusted twice. Every line uses
+its frozen `cost_snapshot.capital_delta_rub`; no WAC is re-estimated. Dry-run
+pins the source/reconciliation, per-date versions/watermarks, current target
+digest, active physical/function non-target digest and candidate fingerprints.
+Apply is projection-only `sku_date` T1, exact repeat is T0 and rollback restores
+only projection revision/current/state before-images. It never reruns the
+inventory apply or changes a physical ledger/function version.
+
 A cost-only replay preserves every last-good SKU and aggregate physical
 quantity, including legacy `nm_id=0` totals, and recomputes WAC from the new
 capital over that preserved quantity. A historical aggregate mismatch therefore
@@ -220,6 +247,8 @@ and evidence hash. The migration is complete only at `release:production`.
 - `python3 -m apps.wb_incident_policy_smoke`
 - `python3 -m apps.warehouse_update_journal_smoke`
 - `python3 -m apps.warehouse_functional_smoke`
+- `python3 -m apps.warehouse_business_projection_smoke`
+- `python3 -m apps.warehouse_business_projection_recovery_smoke`
 - `python3 -m apps.sheet_vitrina_v1_web_vitrina_contract_smoke`
 - `python3 -m apps.registry_upload_http_entrypoint_hosted_runtime_smoke`
 - production warehouse UI Flow plus exact post-apply reconciliation evidence.

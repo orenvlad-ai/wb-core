@@ -323,15 +323,30 @@ their existing canonical source/event or targeted-queue transaction.
 
 The rematerializer reads no external producer and never invokes a full Vitrina
 refresh. It publishes only public warehouse/product-capital SKU/TOTAL metrics,
-exact coverage/presentation/provenance and affected dates. A planned full
-functional refresh remains a read consumer of the same current projection and
-naturally absorbs its revision without another Vitrina-side calculation.
+exact coverage/presentation/provenance and affected dates. Each successful
+hourly/emergency/targeted functional version is now the authoritative complete
+producer for its exact business date and publishes those rows atomically inside
+the functional transaction. A partial `functional_*`/`ff_stock_*` outbox request
+without complete event proof is consumed as a replay signal while preserving
+the last-good projection; it cannot replace exact rows with stale capital,
+preserved quantities or `missing_exact_projection_date` placeholders.
 
-If an exact daily base/event projection is missing, only owned metric keys are
-marked unavailable/provisional. Other ready-snapshot sources are neither
-fabricated nor copied from yesterday. Candidate publication is atomic;
-conservation, cost-only quantity invariance, non-target digests and source
-revision are checked before current-state switch.
+If an exact daily base/event projection is missing, only a complete canonical
+event revision may mark owned metric keys unavailable/provisional. A partial
+functional replay signal leaves the last-good rows active. Other ready-snapshot
+sources are neither fabricated nor copied from yesterday. Candidate publication
+is atomic; conservation, cost-only quantity invariance, non-target digests and
+source revision are checked before current-state switch.
+
+`warehouse-july-recovery --batch projection` is the bounded repair path for an
+already mixed post-inventory window. Dry-run is query-only and pins the applied
+inventory source SHA/business date, exact per-date functional version and FF
+watermark prefix, frozen document quantity/capital, current projection digest,
+active physical/function non-target digest and target row fingerprints. Apply
+requires its exact fingerprint and approval reference, changes projection
+tables only under `sku_date` T1 before-images, leaves the active functional
+pointer/ledger/balances unchanged, and exact repeat is T0. Rollback restores
+only those projection rows/state.
 
 ## July 2026 bounded historical recovery
 

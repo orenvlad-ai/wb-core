@@ -459,6 +459,9 @@ def _run_warehouse_ui_flow(
                 arg=warehouse_name,
                 timeout=60_000,
             )
+            documents_drawer = page.locator("[data-warehouse-documents-drawer]")
+            if not documents_drawer.evaluate("node => node.open"):
+                documents_drawer.locator("summary").click()
             document_row = page.locator(
                 f'[data-warehouse-document-id="{expected["document_id"]}"]'
             )
@@ -472,20 +475,37 @@ def _run_warehouse_ui_flow(
             warehouse_detail_by_key[warehouse_key] = detail_payload
             detail_summary = dict(detail_payload.get("warehouse") or {})
             detail_balances = list(detail_payload.get("balances") or [])
-            detail_documents = list(detail_payload.get("documents") or [])
+            documents_payload = _protected_json_get(
+                context,
+                normalized_base_url
+                + "/v1/sheet-vitrina-v1/warehouses/"
+                + warehouse_key
+                + "/documents?page=1&limit=25",
+                label=f"{warehouse_name}: paginated documents API",
+            )
+            detail_documents = list(documents_payload.get("documents") or [])
             matching_documents = [
                 item
                 for item in detail_documents
                 if str(item.get("document_id") or "") == str(expected.get("document_id") or "")
             ]
             _assert(len(matching_documents) == 1, f"{warehouse_name}: active version document is in detail registry")
-            detail_document = matching_documents[0]
+            document_payload = _protected_json_get(
+                context,
+                normalized_base_url
+                + "/v1/sheet-vitrina-v1/warehouses/"
+                + warehouse_key
+                + "/documents/"
+                + str(expected.get("document_id") or ""),
+                label=f"{warehouse_name}: lazy document detail API",
+            )
+            detail_document = dict(document_payload.get("document") or {})
             _assert(
                 str(detail_document.get("document_id") or "") == str(expected.get("document_id") or ""),
                 f"{warehouse_name}: detail/readback document identity",
             )
             _assert(
-                Decimal(str(detail_document.get("total_quantity") or 0))
+                Decimal(str(detail_document.get("quantity") or 0))
                 == Decimal(str(expected.get("quantity") or 0)),
                 f"{warehouse_name}: opening document/readback quantity",
             )
@@ -614,17 +634,95 @@ def _run_warehouse_ui_flow(
                     ),
                     "Склад WB: incident policy options use stable numeric warehouse IDs",
                 )
+                incident_drawer = page.locator("[data-wb-incident-drawer]")
+                _assert(
+                    not bool(incident_drawer.evaluate("node => node.open")),
+                    "Склад WB: incident warehouse drawer is collapsed by default",
+                )
+                incident_summary = page.locator(
+                    "[data-wb-incident-summary]"
+                ).inner_text().strip()
+                _assert(
+                    "Политика" in incident_summary and "выбрано" in incident_summary,
+                    "Склад WB: collapsed incident summary is compact and dated",
+                )
+                _assert(
+                    policy_card.locator("[data-wb-incident-apply]").count() == 1
+                    and page.locator("[data-wb-incident-effective-from]").count() == 0,
+                    "Склад WB: one Apply and no legacy global effective-from control",
+                )
+                selected_dates = {}
+                selected_nodes = page.locator(
+                    "[data-wb-incident-warehouse-id]:checked"
+                )
+                for index in range(selected_nodes.count()):
+                    warehouse_id = str(
+                        selected_nodes.nth(index).get_attribute(
+                            "data-wb-incident-warehouse-id"
+                        )
+                        or ""
+                    )
+                    effective_from = page.locator(
+                        f'[data-wb-incident-date-id="{warehouse_id}"]'
+                    ).input_value()
+                    _assert(
+                        bool(effective_from),
+                        f"Склад WB: selected warehouse {warehouse_id} has effective_from",
+                    )
+                    selected_dates[warehouse_id] = effective_from
+                policy_card.scroll_into_view_if_needed()
+                incident_collapsed_screenshot = (
+                    evidence_dir / "warehouse_wb_incident_collapsed.png"
+                )
+                page.screenshot(
+                    path=str(incident_collapsed_screenshot),
+                    full_page=False,
+                )
+                screenshots.append(str(incident_collapsed_screenshot))
+                incident_drawer.evaluate("node => { node.open = true; }")
+                incident_grid = page.locator(
+                    "[data-wb-incident-options-grid], .warehouse-incident-options-grid"
+                )
+                incident_grid_columns = 0
+                if option_nodes.count():
+                    incident_grid.wait_for(state="visible", timeout=60_000)
+                    incident_grid_columns = int(
+                        incident_grid.evaluate(
+                            "node => getComputedStyle(node).gridTemplateColumns.split(/\\s+/).filter(Boolean).length"
+                        )
+                    )
+                    _assert(
+                        incident_grid_columns == 4,
+                        "Склад WB: desktop incident grid has exactly four columns",
+                    )
+                _assert(
+                    bool(
+                        page.evaluate(
+                            "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+                        )
+                    ),
+                    "Склад WB: incident expansion has no horizontal viewport overflow",
+                )
+                incident_expanded_screenshot = (
+                    evidence_dir / "warehouse_wb_incident_expanded.png"
+                )
+                page.screenshot(
+                    path=str(incident_expanded_screenshot),
+                    full_page=False,
+                )
+                screenshots.append(str(incident_expanded_screenshot))
                 incident_policy_evidence = {
                     "visible": True,
                     "badge": page.locator("[data-wb-incident-policy-badge]").inner_text().strip(),
                     "revision_audit": page.locator("[data-wb-incident-audit]").inner_text().strip(),
                     "numeric_warehouse_option_count": option_nodes.count(),
-                    "selected_warehouse_count": page.locator(
-                        "[data-wb-incident-warehouse-id]:checked"
-                    ).count(),
-                    "effective_from": page.locator(
-                        "[data-wb-incident-effective-from]"
-                    ).input_value(),
+                    "selected_warehouse_count": selected_nodes.count(),
+                    "effective_from_by_warehouse_id": selected_dates,
+                    "collapsed_summary": incident_summary,
+                    "desktop_grid_columns": incident_grid_columns,
+                    "horizontal_overflow": False,
+                    "collapsed_screenshot": str(incident_collapsed_screenshot),
+                    "expanded_screenshot": str(incident_expanded_screenshot),
                     "active": page.locator("[data-wb-incident-active]").is_checked(),
                     "apply_not_clicked": True,
                 }
@@ -682,8 +780,18 @@ def _run_warehouse_ui_flow(
             screenshots.append(str(top_screenshot))
 
             document_row.scroll_into_view_if_needed()
-            document_row.locator("details").first.click()
+            document_row.locator("details").first.locator("summary").click()
             expected_lines = list(detail_document.get("lines") or [])
+            page.wait_for_function(
+                """expected => document.querySelectorAll(
+                    '[data-warehouse-document-id="' + expected.documentId + '"] .warehouse-document-lines tbody tr'
+                ).length === expected.lineCount""",
+                arg={
+                    "documentId": str(expected.get("document_id") or ""),
+                    "lineCount": max(1, len(expected_lines)),
+                },
+                timeout=60_000,
+            )
             rendered_document_lines = document_row.locator(".warehouse-document-lines tbody tr").count()
             _assert(
                 rendered_document_lines == max(1, len(expected_lines)),
@@ -699,7 +807,7 @@ def _run_warehouse_ui_flow(
                 ".warehouse-document-provenance > details.warehouse-source-details"
             )
             _assert(document_provenance.count() == 1, f"{warehouse_name}: document provenance control")
-            document_provenance.click()
+            document_provenance.evaluate("node => { node.open = true; }")
             _assert(
                 document_row.locator(".warehouse-document-provenance .warehouse-evidence-item").count() >= 1,
                 f"{warehouse_name}: human-readable document evidence",
@@ -707,20 +815,20 @@ def _run_warehouse_ui_flow(
             technical_document = document_row.locator(
                 ".warehouse-document-provenance details.warehouse-technical-evidence"
             )
-            technical_document.click()
+            technical_document.evaluate("node => { node.open = true; }")
             document_provenance_text = technical_document.locator("pre").inner_text()
             _assert(bool(document_provenance_text.strip()), f"{warehouse_name}: document provenance payload")
             if expected_lines:
                 line_evidence = document_row.locator(
                     ".warehouse-document-lines details.warehouse-source-details"
                 ).first
-                line_evidence.click()
+                line_evidence.evaluate("node => { node.open = true; }")
                 _assert(
                     line_evidence.locator(".warehouse-evidence-item").count() >= 1,
                     f"{warehouse_name}: human-readable line evidence",
                 )
                 line_technical = line_evidence.locator("details.warehouse-technical-evidence")
-                line_technical.click()
+                line_technical.evaluate("node => { node.open = true; }")
                 _assert(
                     bool(line_technical.locator("pre").inner_text().strip()),
                     f"{warehouse_name}: line provenance",
@@ -1127,9 +1235,32 @@ def _run_warehouse_ui_flow(
             not page.locator("[data-sku-management-error]").inner_text().strip(),
             "SKU management visible error state",
         )
+        persisted_sku_search_filter = page.locator(
+            '[data-sku-filter="search"]'
+        ).input_value().strip()
+        if persisted_sku_search_filter:
+            page.evaluate(
+                """() => {
+                  const input = document.querySelector('[data-sku-filter="search"]');
+                  input.value = '';
+                  input.dispatchEvent(new Event('input', {bubbles: true}));
+                  if (skuManagementSaveTimer) {
+                    window.clearTimeout(skuManagementSaveTimer);
+                    skuManagementSaveTimer = null;
+                  }
+                }"""
+            )
+            page.wait_for_function(
+                "expected => document.querySelectorAll('[data-sku-row-nm-id]').length === expected",
+                arg=len(list(sku_management_payload.get("rows") or [])),
+                timeout=60_000,
+            )
         sku_dom_summary = _sku_management_dom_summary(
             page,
             source_rows=list(sku_management_payload.get("rows") or []),
+        )
+        sku_dom_summary["persisted_search_filter_cleared_locally"] = (
+            persisted_sku_search_filter
         )
         page.locator('[data-sku-sort="profit_rub"]').scroll_into_view_if_needed(timeout=60_000)
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
@@ -2756,9 +2887,39 @@ def _sku_management_dom_summary(
         expected_row_count == len(source_nm_ids) and expected_row_count > 0,
         "SKU management status/source row count",
     )
+    search_input = page.locator('[data-sku-filter="search"]')
+    search_value = (
+        search_input.input_value().strip().casefold()
+        if search_input.count()
+        else ""
+    )
+    visible_source_rows = source_rows
+    if search_value:
+        visible_source_rows = [
+            item
+            for item in source_rows
+            if any(
+                search_value in str(value or "").casefold()
+                for value in (
+                    item.get("sku"),
+                    item.get("nm_id"),
+                    item.get("name"),
+                )
+            )
+        ]
+    visible_source_nm_ids = {
+        str(int(item.get("nm_id") or 0)) for item in visible_source_rows
+    }
+    visible_source_proxy_3_nm_ids = (
+        source_proxy_3_nm_ids & visible_source_nm_ids
+    )
     rows = page.locator("[data-sku-row-nm-id]")
     row_count = rows.count()
-    _assert(row_count == expected_row_count and row_count > 0, "SKU management rendered row count")
+    _assert(
+        row_count == len(visible_source_nm_ids) and row_count > 0,
+        "SKU management rendered row count "
+        + f"(dom={row_count}, expected={len(visible_source_nm_ids)}, search={search_value!r})",
+    )
     rendered_nm_ids: set[str] = set()
     visible_proxy_3_nm_ids: set[str] = set()
     for index in range(row_count):
@@ -2783,16 +2944,18 @@ def _sku_management_dom_summary(
         if profit_filled:
             visible_proxy_3_nm_ids.add(nm_id)
     _assert(
-        rendered_nm_ids == set(source_nm_ids),
+        rendered_nm_ids == visible_source_nm_ids,
         "SKU management source/rendered nmID completeness",
     )
     _assert(
-        visible_proxy_3_nm_ids == source_proxy_3_nm_ids,
+        visible_proxy_3_nm_ids == visible_source_proxy_3_nm_ids,
         "SKU management source/rendered Proxy 3 completeness",
     )
     _assert(visible_proxy_3_nm_ids, "SKU management consumes populated Proxy 3")
     return {
         "status": status_text,
+        "source_row_count": expected_row_count,
+        "search_filter": search_value,
         "row_count": row_count,
         "proxy_3_row_count": len(visible_proxy_3_nm_ids),
     }

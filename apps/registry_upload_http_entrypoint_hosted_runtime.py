@@ -2092,6 +2092,8 @@ def run_warehouse_july_recovery_command(args: argparse.Namespace) -> int:
             getattr(args, "batch_a_fingerprint", "") or ""
         ),
         backup_path=str(getattr(args, "backup_path", "") or ""),
+        source_sha256=str(getattr(args, "source_sha256", "") or ""),
+        business_date=str(getattr(args, "business_date", "") or ""),
     )
     output = str(getattr(args, "output", "") or "").strip()
     if action == "dry-run" and output:
@@ -8178,12 +8180,14 @@ def _run_remote_warehouse_july_recovery_action(
     reason: str = "",
     batch_a_fingerprint: str = "",
     backup_path: str = "",
+    source_sha256: str = "",
+    business_date: str = "",
 ) -> dict[str, Any]:
     action_name = f"warehouse-july-recovery-{action}"
     _ensure_active_hosted_runtime_target(target, action=action_name)
     if action not in {"dry-run", "apply", "rollback"}:
         raise ValueError(f"unsupported July warehouse action: {action}")
-    if batch not in {"a", "b", "transit"}:
+    if batch not in {"a", "b", "transit", "projection"}:
         raise ValueError(f"unsupported July warehouse batch: {batch}")
     if action in {"apply", "rollback"}:
         _ensure_target_allows_mutation(
@@ -8211,6 +8215,19 @@ def _run_remote_warehouse_july_recovery_action(
         "--batch",
         batch,
     ]
+    if batch == "projection" and action != "rollback":
+        if not source_sha256 or not business_date:
+            raise ValueError(
+                "projection recovery requires exact source SHA and business date"
+            )
+        runner_args.extend(
+            [
+                "--source-sha256",
+                source_sha256,
+                "--business-date",
+                business_date,
+            ]
+        )
     if batch == "transit":
         normalized_backup = Path(str(backup_path or ""))
         allowed_roots = (
@@ -8248,11 +8265,21 @@ def _run_remote_warehouse_july_recovery_action(
         expected_contract = {
             "a": "warehouse_historical_recovery_2026_07_v2",
             "b": "warehouse_early_wb_recovery_2026_07_v1",
+            "projection": (
+                "warehouse_business_projection_exact_functional_recovery_v1"
+            ),
         }[batch]
         if (
             not isinstance(plan, dict)
             or str(plan.get("contract_name") or "") != expected_contract
             or str(plan.get("fingerprint") or "") != fingerprint
+            or (
+                batch == "projection"
+                and (
+                    str(plan.get("source_sha256") or "") != source_sha256
+                    or str(plan.get("business_date") or "") != business_date
+                )
+            )
         ):
             raise ValueError(
                 "July warehouse reviewed plan identity/fingerprint mismatch"
@@ -9893,9 +9920,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Build one exact July warehouse recovery submanifest.",
     )
     july_recovery_dry_run.add_argument(
-        "--batch", choices=("a", "b", "transit"), required=True
+        "--batch", choices=("a", "b", "transit", "projection"), required=True
     )
     july_recovery_dry_run.add_argument("--backup-path", default="")
+    july_recovery_dry_run.add_argument("--source-sha256", default="")
+    july_recovery_dry_run.add_argument("--business-date", default="")
     july_recovery_dry_run.add_argument("--output", default="")
     july_recovery_dry_run.set_defaults(
         handler=run_warehouse_july_recovery_command,
@@ -9907,12 +9936,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Apply one exact human-gated July warehouse recovery batch.",
     )
     july_recovery_apply.add_argument(
-        "--batch", choices=("a", "b"), required=True
+        "--batch", choices=("a", "b", "projection"), required=True
     )
     july_recovery_apply.add_argument("--plan-file", required=True)
     july_recovery_apply.add_argument("--fingerprint", required=True)
     july_recovery_apply.add_argument("--approval-reference", required=True)
     july_recovery_apply.add_argument("--batch-a-fingerprint", default="")
+    july_recovery_apply.add_argument("--source-sha256", default="")
+    july_recovery_apply.add_argument("--business-date", default="")
     july_recovery_apply.set_defaults(
         handler=run_warehouse_july_recovery_command,
         warehouse_july_action="apply",
@@ -9923,7 +9954,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Restore exact before-images for one July warehouse batch.",
     )
     july_recovery_rollback.add_argument(
-        "--batch", choices=("a", "b"), required=True
+        "--batch", choices=("a", "b", "projection"), required=True
     )
     july_recovery_rollback.add_argument("--fingerprint", required=True)
     july_recovery_rollback.add_argument("--reason", required=True)
