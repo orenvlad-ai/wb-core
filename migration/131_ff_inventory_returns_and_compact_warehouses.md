@@ -301,6 +301,14 @@ Any hourly version/digest drift fails closed and requires a new dry-run; no
 inventory apply, physical ledger write or functional active-pointer mutation is
 part of this operation.
 
+After a successful apply, the hosted runner rebuilds a query-only current plan
+before handling a repeated command. That plan is expected to be `would_change =
+false` and therefore has a different no-op fingerprint. Exact repeat resolves
+the requested fingerprint through the retained recovery registry first, then
+requires the same source/date/scope/approval/non-target digest and verifies the
+active current rows against the durable revision rows and retained after
+digest. Only that proof returns T0; a changed target/source remains fail-closed.
+
 # 8. Verification
 
 - `python3 -m apps.ff_inventory_reconciliation_smoke`
