@@ -114,13 +114,35 @@ def main() -> None:
             assert metrics["2026-07-31"][ff_qty_key] == 12.0
             assert metrics["2026-08-02"][ff_capital_key] == 1200.0
 
-        repeated = apply_business_projection_recovery_plan(
+        reviewed_repeat = apply_business_projection_recovery_plan(
             runtime,
             plan,
             confirm_fingerprint=plan["fingerprint"],
             approval_reference="github-comment:projection-recovery-smoke",
         )
+        assert reviewed_repeat["idempotent"] is True
+        assert reviewed_repeat["readback"]["status"] == "reconciled"
+
+        repeated_plan = build_business_projection_recovery_plan(
+            runtime,
+            source_sha256=SOURCE_SHA,
+            business_date=BUSINESS_DATE,
+        )
+        assert repeated_plan["would_change"] is False
+        assert repeated_plan["fingerprint"] != plan["fingerprint"]
+        repeated = apply_business_projection_recovery_plan(
+            runtime,
+            repeated_plan,
+            confirm_fingerprint=plan["fingerprint"],
+            approval_reference="github-comment:projection-recovery-smoke",
+        )
         assert repeated["idempotent"] is True
+        assert repeated["fingerprint"] == plan["fingerprint"]
+        assert (
+            repeated["current_plan_fingerprint"]
+            == repeated_plan["fingerprint"]
+        )
+        assert repeated["readback"]["status"] == "reconciled"
         assert repeated["second_run"] == {
             "tier": "T0",
             "changed_rows": 0,

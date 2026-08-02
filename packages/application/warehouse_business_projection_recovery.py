@@ -378,8 +378,8 @@ def apply_business_projection_recovery_plan(
 ) -> dict[str, Any]:
     """Apply one exact reviewed plan under a target-scoped T1 journal."""
 
-    fingerprint = str(plan.get("fingerprint") or "")
-    if not fingerprint or fingerprint != str(confirm_fingerprint or ""):
+    confirmed_fingerprint = str(confirm_fingerprint or "").strip()
+    if not confirmed_fingerprint:
         raise WarehouseBusinessProjectionRecoveryError(
             "apply requires the exact current projection-recovery fingerprint"
         )
@@ -391,18 +391,38 @@ def apply_business_projection_recovery_plan(
         runtime_dir=runtime.runtime_dir,
         db_path=runtime.db_path,
     )
-    operation_id = recovery_operation_id(
+    confirmed_operation_id = recovery_operation_id(
         "targeted_warehouse_publication",
-        fingerprint,
+        confirmed_fingerprint,
     )
-    existing = registry.get_operation(operation_id)
+    existing = registry.get_operation(confirmed_operation_id)
     if (
         existing is not None
         and str(existing.get("lifecycle")) == RecoveryState.RETAINED.value
     ):
-        readback = readback_business_projection_recovery(runtime, plan=plan)
+        _validate_retained_repeat(
+            plan=plan,
+            recovery=existing,
+            approval_reference=str(approval_reference),
+            confirmed_fingerprint=confirmed_fingerprint,
+        )
+        readback = (
+            readback_business_projection_recovery(runtime, plan=plan)
+            if str(plan.get("fingerprint") or "") == confirmed_fingerprint
+            else _readback_retained_business_projection_recovery(
+                runtime,
+                fingerprint=confirmed_fingerprint,
+                recovery=existing,
+            )
+        )
+        result = public_plan(plan)
+        result["current_plan_fingerprint"] = str(
+            result.get("fingerprint") or ""
+        )
+        result["fingerprint"] = confirmed_fingerprint
+        result["revision_id"] = str(readback["revision_id"])
         return {
-            **public_plan(plan),
+            **result,
             "mode": "apply",
             "applied": False,
             "idempotent": True,
@@ -415,6 +435,15 @@ def apply_business_projection_recovery_plan(
             "readback": readback,
             "recovery_policy": existing,
         }
+    fingerprint = str(plan.get("fingerprint") or "")
+    if not fingerprint or fingerprint != confirmed_fingerprint:
+        raise WarehouseBusinessProjectionRecoveryError(
+            "apply requires the exact current projection-recovery fingerprint"
+        )
+    operation_id = recovery_operation_id(
+        "targeted_warehouse_publication",
+        fingerprint,
+    )
     if not bool(plan.get("would_change")):
         return {
             **public_plan(plan),
@@ -563,6 +592,130 @@ def apply_business_projection_recovery_plan(
         "projection": projection,
         "readback": readback,
         "recovery_policy": recovery,
+    }
+
+
+def _validate_retained_repeat(
+    *,
+    plan: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+    approval_reference: str,
+    confirmed_fingerprint: str,
+) -> None:
+    """Require a no-change current plan before accepting an exact T0 repeat."""
+
+    if (
+        str(plan.get("fingerprint") or "") != str(confirmed_fingerprint)
+        and bool(plan.get("would_change"))
+    ):
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery no longer matches current target rows"
+        )
+    recovery_scope = dict(recovery.get("scope") or {})
+    plan_scope = dict(plan.get("scope") or {})
+    for key in (
+        "source_sha256",
+        "business_date",
+        "projection_tables_only",
+        "physical_mutation",
+        "functional_active_pointer_mutation",
+        "target_sku_count",
+        "target_total_quantity",
+    ):
+        if recovery_scope.get(key) != plan_scope.get(key):
+            raise WarehouseBusinessProjectionRecoveryError(
+                f"retained projection recovery scope drifted: {key}"
+            )
+    if list(recovery_scope.get("target_dates") or []) != list(
+        plan_scope.get("target_dates") or []
+    ):
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery target dates drifted"
+        )
+    if str(recovery_scope.get("approval_reference") or "") != str(
+        approval_reference
+    ):
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery approval reference mismatch"
+        )
+    if str(recovery.get("non_target_digest") or "") != str(
+        plan.get("non_target_digest") or ""
+    ):
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery non-target digest drifted"
+        )
+
+
+def _readback_retained_business_projection_recovery(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    fingerprint: str,
+    recovery: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify the active rows against the durable retained revision."""
+
+    recovery_scope = dict(recovery.get("scope") or {})
+    target_dates = [str(item) for item in recovery_scope.get("target_dates") or []]
+    if not target_dates:
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery has no target dates"
+        )
+    with _connect(runtime.db_path, read_only=True) as conn:
+        revision = conn.execute(
+            f"SELECT * FROM {REVISION_TABLE} WHERE plan_fingerprint=?",
+            (str(fingerprint),),
+        ).fetchone()
+        if revision is None or str(revision["status"]) != "active":
+            raise WarehouseBusinessProjectionRecoveryError(
+                "retained projection recovery revision is not active"
+            )
+        revision_id = str(revision["revision_id"])
+        expected = [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT * FROM {ROW_TABLE} WHERE revision_id=? "
+                "ORDER BY as_of_date,nm_id",
+                (revision_id,),
+            ).fetchall()
+        ]
+        actual = _current_projection_rows(conn, target_dates=target_dates)
+        if [str(item["row_fingerprint"]) for item in actual] != [
+            str(item["row_fingerprint"]) for item in expected
+        ]:
+            raise WarehouseBusinessProjectionRecoveryError(
+                "retained projection recovery rows no longer match current projection"
+            )
+        state = conn.execute(
+            f"SELECT * FROM {STATE_TABLE} WHERE slot=1"
+        ).fetchone()
+        if (
+            state is None
+            or str(state["revision_id"]) != revision_id
+            or str(state["business_effective_date"]) != max(target_dates)
+        ):
+            raise WarehouseBusinessProjectionRecoveryError(
+                "retained projection recovery state is not active and fresh"
+            )
+        non_target = _non_target_digest(conn)
+        if non_target != str(recovery.get("non_target_digest") or ""):
+            raise WarehouseBusinessProjectionRecoveryError(
+                "retained projection recovery non-target digest changed"
+            )
+    after_digest = _digest(actual)
+    if after_digest != str(recovery.get("after_digest") or ""):
+        raise WarehouseBusinessProjectionRecoveryError(
+            "retained projection recovery after digest changed"
+        )
+    return {
+        "status": "reconciled",
+        "revision_id": revision_id,
+        "business_effective_date": max(target_dates),
+        "row_count": len(actual),
+        "target_dates": target_dates,
+        "non_target_digest": non_target,
+        "non_target_unchanged": True,
+        "physical_mutation": False,
+        "after_digest": after_digest,
     }
 
 
