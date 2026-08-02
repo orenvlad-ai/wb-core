@@ -1111,6 +1111,57 @@ def _metric_rows(
     return result
 
 
+def _preserve_cost_only_quantities(
+    metrics: dict[str, Any],
+    old_metrics: Mapping[str, Any],
+) -> None:
+    """Keep physical quantities immutable while refreshing their cost layer."""
+
+    quantity_cost_groups = [
+        (
+            own_stage_metric_key(stage, "qty"),
+            own_stage_metric_key(stage, "capital_rub"),
+            own_stage_metric_key(stage, "unit_cost_rub"),
+        )
+        for stage in OWN_PRODUCT_CAPITAL_STAGES
+    ]
+    quantity_cost_groups.extend(
+        (
+            own_stage_total_metric_key(stage, "qty"),
+            own_stage_total_metric_key(stage, "capital_rub"),
+            own_stage_total_metric_key(stage, "unit_cost_rub"),
+        )
+        for stage in OWN_PRODUCT_CAPITAL_STAGES
+    )
+    quantity_cost_groups.extend(
+        [
+            (
+                OWN_TOTAL_QTY_METRIC_KEY,
+                OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
+                OWN_AVG_COST_RUB_METRIC_KEY,
+            ),
+            (
+                OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+                OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
+                OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
+            ),
+        ]
+    )
+    for quantity_key, capital_key, unit_cost_key in quantity_cost_groups:
+        if quantity_key not in metrics or quantity_key not in old_metrics:
+            continue
+        metrics[quantity_key] = old_metrics[quantity_key]
+        if capital_key not in metrics or unit_cost_key not in metrics:
+            continue
+        capital = metrics[capital_key]
+        quantity = _decimal(metrics[quantity_key])
+        metrics[unit_cost_key] = (
+            _number(_decimal(capital) / quantity)
+            if capital not in (None, "") and quantity > ZERO
+            else None
+        )
+
+
 def _candidate_rows(
     conn: sqlite3.Connection,
     *,
@@ -1948,7 +1999,7 @@ def drain_warehouse_business_projection_outbox(
                         for key, value in dict(item["presentation"]).items()
                         if key in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
                     }
-                    if not has_canonical_event_proof:
+                    if cost_only or not has_canonical_event_proof:
                         current = conn.execute(
                             f"""
                             SELECT metrics_json
@@ -1962,29 +2013,32 @@ def drain_warehouse_business_projection_outbox(
                             if current is not None
                             else {}
                         )
-                        for metric_key in list(metrics):
-                            is_quantity = (
-                                metric_key.endswith("_qty")
-                                or metric_key.endswith("_qty_total")
-                            )
-                            if (
-                                (not cost_only or is_quantity)
-                                and metric_key in old_metrics
-                            ):
-                                metrics[metric_key] = old_metrics[metric_key]
-                                presentation[metric_key] = {
-                                    "state": "unconfirmed",
-                                    "tone": "warning",
-                                    "reason": (
-                                        "Source revision сохранена, но exact "
-                                        "event projection ещё не доказана; "
-                                        "показано последнее согласованное "
-                                        "значение."
-                                    ),
-                                    "source": (
-                                        "WebCore business-time projection"
-                                    ),
-                                }
+                        if not has_canonical_event_proof:
+                            for metric_key in list(metrics):
+                                is_quantity = (
+                                    metric_key.endswith("_qty")
+                                    or metric_key.endswith("_qty_total")
+                                )
+                                if (
+                                    (not cost_only or is_quantity)
+                                    and metric_key in old_metrics
+                                ):
+                                    metrics[metric_key] = old_metrics[metric_key]
+                                    presentation[metric_key] = {
+                                        "state": "unconfirmed",
+                                        "tone": "warning",
+                                        "reason": (
+                                            "Source revision сохранена, но exact "
+                                            "event projection ещё не доказана; "
+                                            "показано последнее согласованное "
+                                            "значение."
+                                        ),
+                                        "source": (
+                                            "WebCore business-time projection"
+                                        ),
+                                    }
+                        if cost_only:
+                            _preserve_cost_only_quantities(metrics, old_metrics)
                     provenance = {
                         "contract_name": CONTRACT_NAME,
                         "contract_version": CONTRACT_VERSION,

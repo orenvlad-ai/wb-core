@@ -25,7 +25,9 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa:
     OWN_AVG_COST_RUB_METRIC_KEY,
     OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_TOTAL_QTY_METRIC_KEY,
+    OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
     own_stage_metric_key,
+    own_stage_total_metric_key,
 )
 from packages.application.warehouse_business_projection import (  # noqa: E402
     CURRENT_ROW_TABLE,
@@ -147,6 +149,7 @@ def main() -> None:
             == 2
         )
 
+        _assert_cost_only_preserves_legacy_total_quantities(runtime, block)
         _assert_failure_keeps_last_good(runtime)
         _assert_concurrent_drain_is_exactly_once(runtime)
         _assert_partial_functional_source_keeps_quantities(runtime)
@@ -225,6 +228,59 @@ def _all_quantity_digest(runtime: RegistryUploadDbBackedRuntime) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _assert_cost_only_preserves_legacy_total_quantities(
+    runtime: RegistryUploadDbBackedRuntime,
+    block: OwnProductCapitalBlock,
+) -> None:
+    as_of_date = "2026-07-21"
+    quantity_key = own_stage_total_metric_key("FF", "qty")
+    unit_cost_key = own_stage_total_metric_key("FF", "unit_cost_rub")
+    with sqlite3.connect(runtime.db_path) as conn:
+        row = conn.execute(
+            f"SELECT metrics_json FROM {CURRENT_ROW_TABLE} WHERE as_of_date=? AND nm_id=0",
+            (as_of_date,),
+        ).fetchone()
+        assert row is not None
+        metrics = json.loads(str(row[0]))
+        metrics[quantity_key] = 11.0
+        metrics[OWN_TOTAL_QTY_TOTAL_METRIC_KEY] = 11.0
+        conn.execute(
+            f"UPDATE {CURRENT_ROW_TABLE} SET metrics_json=? WHERE as_of_date=? AND nm_id=0",
+            (
+                json.dumps(metrics, ensure_ascii=False, sort_keys=True),
+                as_of_date,
+            ),
+        )
+        conn.commit()
+    quantity_before = _all_quantity_digest(runtime)
+    block.record_order_level_cost_payment(
+        document_id="bank-fee-total-drift",
+        shipment_id="shipment-same-day",
+        effective_date=as_of_date,
+        capital_rub="110",
+        product_lines=LINES,
+        component="bank_fee",
+        actual_shipment_date=as_of_date,
+        actual_ff_acceptance_date=as_of_date,
+        expenses_complete=True,
+        provenance={
+            "source_sha256": sha256(b"bank-fee-total-drift").hexdigest(),
+            "business_date": as_of_date,
+        },
+    )
+    block.recalculate(date_from=as_of_date, date_to="2026-07-25")
+    assert _all_quantity_digest(runtime) == quantity_before
+    with sqlite3.connect(runtime.db_path) as conn:
+        row = conn.execute(
+            f"SELECT metrics_json FROM {CURRENT_ROW_TABLE} WHERE as_of_date=? AND nm_id=0",
+            (as_of_date,),
+        ).fetchone()
+    metrics = json.loads(str(row[0]))
+    assert metrics[quantity_key] == 11.0, metrics
+    assert metrics[OWN_TOTAL_QTY_TOTAL_METRIC_KEY] == 11.0, metrics
+    assert metrics[unit_cost_key] == metrics["total_own_capital_FF_capital_rub"] / 11.0
 
 
 def _insert_request(
