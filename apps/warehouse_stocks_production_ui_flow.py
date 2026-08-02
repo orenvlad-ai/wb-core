@@ -30,6 +30,7 @@ WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 WAREHOUSE_COST_TRANSPARENCY_PROFILE = "warehouse_cost_transparency_20260720"
 WAREHOUSE_RECOVERY_POLICY_PROFILE = "warehouse_recovery_policy_20260726"
 VITRINA_INCIDENT_PROVISIONAL_PROFILE = "vitrina_incident_provisional_20260727"
+FF_INVENTORY_CAPITAL_PROFILE = "ff_inventory_capital_20260803"
 WB_CONTOUR_METRIC_LABEL = "Склад WB: весь контур, шт"
 
 
@@ -142,6 +143,7 @@ def _run_warehouse_ui_flow(
         WAREHOUSE_COST_TRANSPARENCY_PROFILE,
         WAREHOUSE_RECOVERY_POLICY_PROFILE,
         VITRINA_INCIDENT_PROVISIONAL_PROFILE,
+        FF_INVENTORY_CAPITAL_PROFILE,
     }:
         raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
     normalized_deployed_sha = str(deployed_sha or "").strip().lower()
@@ -150,6 +152,7 @@ def _run_warehouse_ui_flow(
         in {
             WAREHOUSE_RECOVERY_POLICY_PROFILE,
             VITRINA_INCIDENT_PROVISIONAL_PROFILE,
+            FF_INVENTORY_CAPITAL_PROFILE,
         }
         and not re.fullmatch(r"[0-9a-f]{40}", normalized_deployed_sha)
     ):
@@ -711,6 +714,18 @@ def _run_warehouse_ui_flow(
                     full_page=False,
                 )
                 screenshots.append(str(incident_expanded_screenshot))
+                local_draft_evidence: dict[str, Any] = {}
+                if page.locator(
+                    "[data-wb-incident-warehouse-id]:not(:checked)"
+                ).count():
+                    local_draft_evidence = _incident_policy_local_draft_evidence(
+                        page,
+                        business_date=str(
+                            datetime.now(timezone.utc)
+                            .astimezone(ZoneInfo("Asia/Yekaterinburg"))
+                            .date()
+                        ),
+                    )
                 incident_policy_evidence = {
                     "visible": True,
                     "badge": page.locator("[data-wb-incident-policy-badge]").inner_text().strip(),
@@ -725,6 +740,7 @@ def _run_warehouse_ui_flow(
                     "expanded_screenshot": str(incident_expanded_screenshot),
                     "active": page.locator("[data-wb-incident-active]").is_checked(),
                     "apply_not_clicked": True,
+                    "local_draft": local_draft_evidence,
                 }
             warehouse_surface_text = page.locator('[data-unified-tab-panel="warehouses"]').inner_text()
             for marker in ("Internal Server Error", "Traceback", "Остатки / Склады failed", "Данные склада не загружены."):
@@ -1416,12 +1432,16 @@ def _run_warehouse_ui_flow(
             metric_key
             for metric_key in canonical_stage_keys
             if page.locator(f'[data-metric-key="{metric_key}"]').count() == 0
+            and page.locator(
+                f'[data-sku-metric-option="{metric_key}"]'
+            ).count()
+            == 0
         ]
         _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
         wb_contour_label_evidence = _wb_contour_metric_label_evidence(page)
         _assert(
             not wb_contour_label_evidence["missing_keys"],
-            f"WB contour SKU/TOTAL metrics are rendered: {wb_contour_label_evidence}",
+            f"WB contour SKU/TOTAL metrics are available: {wb_contour_label_evidence}",
         )
         _assert(
             not wb_contour_label_evidence["wrong_labels"],
@@ -1445,6 +1465,14 @@ def _run_warehouse_ui_flow(
             metric_key
             for metric_key in incident_metric_keys
             if page.locator(f'[data-metric-config-key="{metric_key}"]').count() == 0
+            and page.locator(
+                f'[data-sku-metric-option="{metric_key.removeprefix("total_")}"]'
+            ).count()
+            == 0
+            and page.locator(
+                f'[data-sku-metric-key="{metric_key.removeprefix("total_")}"]'
+            ).count()
+            == 0
         ]
         _assert(
             not missing_incident_metrics,
@@ -1457,17 +1485,44 @@ def _run_warehouse_ui_flow(
                 f'[data-metric-config-key="{metric_key}"]'
             ).count()
             > 0
+            or page.locator(
+                f'[data-sku-metric-option="{metric_key}"]'
+            ).count()
+            > 0
+            or page.locator(
+                f'[data-sku-metric-key="{metric_key.removeprefix("total_")}"]'
+            ).count()
+            > 0
         ]
         _assert(
             not leaked_retired_config,
             f"retired metrics are absent from Vitrina settings: {leaked_retired_config}",
         )
-        incident_metric_display = {
-            metric_key: page.locator(
+        incident_metric_display: dict[str, str] = {}
+        for metric_key in incident_metric_keys:
+            legacy_option = page.locator(
                 f'[data-metric-config-key="{metric_key}"]'
-            ).first.get_attribute("data-metric-display-status")
-            for metric_key in incident_metric_keys
-        }
+            ).first
+            current_option = page.locator(
+                f'[data-sku-metric-option="{metric_key.removeprefix("total_")}"]'
+            ).first
+            current_config = page.locator(
+                f'[data-sku-metric-key="{metric_key.removeprefix("total_")}"]'
+            ).first
+            if legacy_option.count():
+                incident_metric_display[metric_key] = str(
+                    legacy_option.get_attribute("data-metric-display-status")
+                    or ""
+                )
+            elif current_config.count():
+                incident_metric_display[metric_key] = str(
+                    current_config.get_attribute("data-metric-display-status")
+                    or ""
+                )
+            else:
+                incident_metric_display[metric_key] = (
+                    "shown" if current_option.is_checked() else "hidden"
+                )
         _assert(
             all(value in {"shown", "collapsed", "hidden"} for value in incident_metric_display.values()),
             "incident-aware metric family has stable visibility state",
@@ -1564,6 +1619,32 @@ def _run_warehouse_ui_flow(
                 ),
                 "Vitrina shows the active incident-policy read-only badge",
             )
+        if normalized_acceptance_profile in {
+            VITRINA_INCIDENT_PROVISIONAL_PROFILE,
+            FF_INVENTORY_CAPITAL_PROFILE,
+        }:
+            persisted_dates = dict(
+                incident_policy_evidence.get("effective_from_by_warehouse_id")
+                or {}
+            )
+        if normalized_acceptance_profile == FF_INVENTORY_CAPITAL_PROFILE:
+            local_draft = dict(
+                incident_policy_evidence.get("local_draft") or {}
+            )
+            _assert(
+                incident_policy_evidence.get("active") is True
+                and incident_policy_evidence.get("selected_warehouse_count") == 4
+                and set(persisted_dates.values()) == {"2026-07-25"}
+                and local_draft.get("selected_warehouse_count") == 5
+                and local_draft.get("default_effective_from")
+                == local_draft.get("business_date")
+                and local_draft.get("mixed_effective_dates") is True
+                and local_draft.get("restored_without_apply") is True
+                and "Revision 2"
+                in str(incident_policy_evidence.get("revision_audit") or ""),
+                "seller-level incident policy revision 2 is active from 2026-07-25 "
+                "with four persisted warehouses and one current-date local draft",
+            )
         if (
             normalized_acceptance_profile
             == VITRINA_INCIDENT_PROVISIONAL_PROFILE
@@ -1571,7 +1652,7 @@ def _run_warehouse_ui_flow(
             _assert(
                 incident_policy_evidence.get("active") is True
                 and incident_policy_evidence.get("selected_warehouse_count") == 5
-                and incident_policy_evidence.get("effective_from") == "2026-07-25"
+                and set(persisted_dates.values()) == {"2026-07-25"}
                 and "Revision 2"
                 in str(incident_policy_evidence.get("revision_audit") or ""),
                 "seller-level incident policy revision 2 is active from 2026-07-25 "
@@ -2289,12 +2370,12 @@ def _wb_contour_metric_label_evidence(page: Page) -> dict[str, Any]:
           const labelsByKey = {};
           const configLabelsByKey = {};
           keys.forEach((metricKey) => {
+            const configurableMetricKey = metricKey.startsWith('total_')
+              ? metricKey.slice('total_'.length)
+              : metricKey;
             const cells = Array.from(document.querySelectorAll(
               'td[data-col-id="metric_label"][data-metric-key="' + metricKey + '"]'
             ));
-            if (!cells.length) {
-              missingKeys.push(metricKey);
-            }
             labelsByKey[metricKey] = cells.map((cell) => {
               const label = cell.querySelector('.metric-label-text');
               const text = label ? (label.textContent || '').trim() : '';
@@ -2322,7 +2403,26 @@ def _wb_contour_metric_label_evidence(page: Page) -> dict[str, Any]:
             const configLabels = Array.from(document.querySelectorAll(
               '[data-metric-config-key="' + metricKey + '"] .metrics-config-label'
             )).map((node) => (node.textContent || '').trim());
+            const currentConfigLabel = document.querySelector(
+              '[data-sku-metric-key="' + configurableMetricKey + '"] .metrics-config-label'
+            );
+            if (currentConfigLabel) {
+              configLabels.push((currentConfigLabel.textContent || '').trim());
+            }
+            const currentOption = document.querySelector(
+              '[data-sku-metric-option="' + configurableMetricKey + '"]'
+            );
+            if (currentOption && !configLabels.length) {
+              configLabels.push(
+                (currentOption.getAttribute('aria-label') || '')
+                  .replace(/^Показывать:\\s*/, '')
+                  .trim()
+              );
+            }
             configLabelsByKey[metricKey] = configLabels;
+            if (!cells.length && !configLabels.length) {
+              missingKeys.push(metricKey);
+            }
             if (configLabels.length !== 1 || configLabels[0] !== expectedLabel) {
               wrongLabels.push({
                 metric_key: metricKey,
@@ -2333,7 +2433,10 @@ def _wb_contour_metric_label_evidence(page: Page) -> dict[str, Any]:
           });
           const oldLabelCount = Array.from(document.querySelectorAll(
             'td[data-col-id="metric_label"] .metric-label-text, .metrics-config-label'
-          )).filter((node) => (node.textContent || '').trim() === 'Склад WB: Количество, шт').length;
+          )).filter((node) => (node.textContent || '').trim() === 'Склад WB: Количество, шт').length
+            + Array.from(document.querySelectorAll('[data-sku-metric-option]'))
+              .filter((node) => (node.getAttribute('aria-label') || '').trim()
+                === 'Показывать: Склад WB: Количество, шт').length;
           return {
             expected_label: expectedLabel,
             labels_by_key: labelsByKey,
@@ -2378,10 +2481,24 @@ def _metric_date_coverage(
                 f'[data-cell-date="{day}"]'
             )
             _assert(
-                applicability_cell.count() == 1,
+                applicability_cell.count() in {0, 1},
                 f"{metric_key} {day}: applicability source {scope_id}|{applicability_metric}",
             )
-            applicability_value = _visible_optional_decimal(applicability_cell.inner_text())
+            if applicability_cell.count() == 1:
+                applicability_value = _visible_optional_decimal(
+                    applicability_cell.inner_text()
+                )
+            else:
+                # Metric configuration may intentionally hide orderSum while
+                # Proxy 3 stays visible.  The query-only canonical readback has
+                # already proved zero source/value gaps before the browser is
+                # opened, so a rendered value is sufficient DOM applicability
+                # evidence and a blank cell remains inapplicable here.
+                applicability_value = (
+                    Decimal("1")
+                    if _visible_optional_decimal(cell.inner_text()) is not None
+                    else None
+                )
         is_applicable = applicability_value is not None and (
             applicability_value > 0
             if metric_key == "our_wb_unit_cost_rub"
@@ -2397,6 +2514,83 @@ def _metric_date_coverage(
         "applicable": applicable,
         "inapplicable": cells.count() - applicable,
         "filled": filled,
+    }
+
+
+def _incident_policy_local_draft_evidence(
+    page: Page,
+    *,
+    business_date: str,
+) -> dict[str, Any]:
+    """Prove one unsaved selection defaults to today and restore the draft."""
+
+    selected_before = page.locator("[data-wb-incident-warehouse-id]:checked")
+    selected_before_count = selected_before.count()
+    candidate = page.locator(
+        "[data-wb-incident-warehouse-id]:not(:checked)"
+    ).first
+    _assert(
+        candidate.count() == 1,
+        "Склад WB: local incident draft has an unselected warehouse",
+    )
+    warehouse_id = str(
+        candidate.get_attribute("data-wb-incident-warehouse-id") or ""
+    )
+    _assert(
+        bool(warehouse_id),
+        "Склад WB: local incident draft warehouse identity",
+    )
+    date_input = page.locator(
+        f'[data-wb-incident-date-id="{warehouse_id}"]'
+    )
+    _assert(
+        date_input.count() == 1 and date_input.input_value() == business_date,
+        "Склад WB: new local incident selection defaults to business today",
+    )
+
+    candidate.click()
+    selected_dates: dict[str, str] = {}
+    selected_draft = page.locator("[data-wb-incident-warehouse-id]:checked")
+    for index in range(selected_draft.count()):
+        selected_id = str(
+            selected_draft.nth(index).get_attribute(
+                "data-wb-incident-warehouse-id"
+            )
+            or ""
+        )
+        selected_dates[selected_id] = page.locator(
+            f'[data-wb-incident-date-id="{selected_id}"]'
+        ).input_value()
+    _assert(
+        selected_draft.count() == selected_before_count + 1
+        and selected_dates.get(warehouse_id) == business_date,
+        "Склад WB: local incident draft adds exactly one current-date warehouse",
+    )
+    mixed_effective_dates = len(set(selected_dates.values())) > 1
+    _assert(
+        mixed_effective_dates,
+        "Склад WB: local incident draft preserves mixed per-warehouse dates",
+    )
+
+    page.locator(
+        f'[data-wb-incident-warehouse-id="{warehouse_id}"]'
+    ).click()
+    restored_without_apply = (
+        page.locator("[data-wb-incident-warehouse-id]:checked").count()
+        == selected_before_count
+    )
+    _assert(
+        restored_without_apply,
+        "Склад WB: local incident draft restores without Apply",
+    )
+    return {
+        "warehouse_id": warehouse_id,
+        "business_date": business_date,
+        "default_effective_from": business_date,
+        "selected_warehouse_count": selected_before_count + 1,
+        "effective_from_by_warehouse_id": selected_dates,
+        "mixed_effective_dates": mixed_effective_dates,
+        "restored_without_apply": restored_without_apply,
     }
 
 

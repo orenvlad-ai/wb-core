@@ -180,6 +180,16 @@ The full-width card uses an internal vertical disclosure. Collapsed summary
 shows enabled state, selected count and earliest date. Expanded desktop grid is
 4 columns, then 3/2/1 responsively, with no horizontal viewport overflow.
 Options sort by physical WB quantity descending, zero last, then name/ID.
+The production acceptance keeps the four persisted `2026-07-25` selections
+unchanged, adds one current-business-date fifth selection only to the local
+draft, proves mixed dates and restores the checkbox without Apply. A hidden
+`orderSum` metric row is not a UI failure: the canonical query-only readback
+already proves zero value gaps, while the browser separately requires rendered
+Proxy 3 values for every visible applicable cell.
+The immutable current closure command is `warehouse-ui-flow --acceptance-profile
+ff_inventory_capital_20260803 --deployed-sha <exact merge SHA>`; the earlier
+`vitrina_incident_provisional_20260727` profile remains frozen to its five-ID
+historical provisional snapshot.
 
 # 7. Release and production gates
 

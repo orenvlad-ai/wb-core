@@ -23,6 +23,7 @@ from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
 from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
     _allocated_amount_matches_eligible,
     _assert_warehouse_balance_cardinality,
+    _incident_policy_local_draft_evidence,
     _metric_date_coverage,
     _sku_management_dom_summary,
     _supplier_financial_detail_url,
@@ -105,6 +106,7 @@ def main() -> None:
         "operator supplier financial detail URL",
     )
     _assert_metric_coverage_applicability()
+    _assert_incident_policy_local_draft()
     _assert_sku_management_dom_evidence()
     with TemporaryDirectory(prefix="warehouse-browser-smoke-") as temp_dir:
         root = Path(temp_dir)
@@ -235,6 +237,46 @@ def _assert_metric_coverage_applicability() -> None:
         "zero-revenue margin is undefined",
     )
 
+    hidden_source_cells = "".join(
+        (
+            f'<td data-row-id="SKU:4|proxy_profit_3_rub" '
+            f'data-metric-key="proxy_profit_3_rub" data-cell-date="{day}">22 590 ₽</td>',
+            f'<td data-row-id="SKU:5|proxy_profit_3_rub" '
+            f'data-metric-key="proxy_profit_3_rub" data-cell-date="{day}">—</td>',
+            f'<td data-row-id="SKU:4|proxy_margin_3_pct" '
+            f'data-metric-key="proxy_margin_3_pct" data-cell-date="{day}">0</td>',
+            f'<td data-row-id="SKU:5|proxy_margin_3_pct" '
+            f'data-metric-key="proxy_margin_3_pct" data-cell-date="{day}">—</td>',
+        )
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_content(
+            "<table><tbody><tr>" + hidden_source_cells + "</tr></tbody></table>"
+        )
+        hidden_profit = _metric_date_coverage(
+            page,
+            metric_key="proxy_profit_3_rub",
+            day=day,
+        )
+        hidden_margin = _metric_date_coverage(
+            page,
+            metric_key="proxy_margin_3_pct",
+            day=day,
+        )
+        browser.close()
+    _assert(
+        hidden_profit
+        == {"total": 2, "applicable": 1, "inapplicable": 1, "filled": 1},
+        "hidden orderSum uses rendered Proxy 3 DOM applicability",
+    )
+    _assert(
+        hidden_margin
+        == {"total": 2, "applicable": 1, "inapplicable": 1, "filled": 1},
+        "hidden orderSum keeps a rendered zero-margin cell applicable",
+    )
+
 
 def _assert_sku_management_dom_evidence() -> None:
     source_rows = [
@@ -280,6 +322,41 @@ def _assert_sku_management_dom_evidence() -> None:
         browser.close()
     _assert(summary["row_count"] == 3, "DOM SKU count")
     _assert(summary["proxy_3_row_count"] == 2, "DOM visible Proxy 3 count")
+
+
+def _assert_incident_policy_local_draft() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_content(
+            """
+            <input type="checkbox" data-wb-incident-warehouse-id="1" checked>
+            <input type="date" data-wb-incident-date-id="1" value="2026-07-25">
+            <input type="checkbox" data-wb-incident-warehouse-id="2" checked>
+            <input type="date" data-wb-incident-date-id="2" value="2026-07-25">
+            <input type="checkbox" data-wb-incident-warehouse-id="3" checked>
+            <input type="date" data-wb-incident-date-id="3" value="2026-07-25">
+            <input type="checkbox" data-wb-incident-warehouse-id="4" checked>
+            <input type="date" data-wb-incident-date-id="4" value="2026-07-25">
+            <input type="checkbox" data-wb-incident-warehouse-id="5">
+            <input type="date" data-wb-incident-date-id="5" value="2026-08-03">
+            """
+        )
+        evidence = _incident_policy_local_draft_evidence(
+            page,
+            business_date="2026-08-03",
+        )
+        _assert(
+            evidence["selected_warehouse_count"] == 5
+            and evidence["mixed_effective_dates"] is True
+            and evidence["restored_without_apply"] is True,
+            "incident policy local draft evidence",
+        )
+        _assert(
+            page.locator("[data-wb-incident-warehouse-id]:checked").count() == 4,
+            "incident policy local draft restores persisted selection",
+        )
+        browser.close()
 
 
 def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
