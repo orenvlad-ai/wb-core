@@ -1432,6 +1432,34 @@ def moving_weighted_average(
     )
 
 
+def proportional_ff_outbound(
+    *, quantity: Any, capital: Any, outbound_quantity: Any
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Consume an FF pool at its current WAC without leaving Decimal residue.
+
+    A repeating Decimal WAC can leave an infinitesimal capital remainder when
+    the final physical units are consumed in more than one operation.  Full
+    depletion transfers the entire remaining capital; partial depletion keeps
+    the ordinary proportional calculation.
+    """
+
+    current_qty = _decimal(quantity)
+    current_capital = _decimal(capital)
+    outbound = _decimal(outbound_quantity)
+    if current_qty <= ZERO or current_capital <= ZERO or outbound <= ZERO:
+        raise ValueError("FF outbound inputs must be positive")
+    if outbound > current_qty:
+        raise ValueError("FF outbound cannot exceed the current quantity")
+    outbound_wac = current_capital / current_qty
+    remaining_qty = current_qty - outbound
+    remaining_capital = (
+        ZERO
+        if remaining_qty == ZERO
+        else current_capital - outbound * outbound_wac
+    )
+    return remaining_qty, remaining_capital, outbound_wac
+
+
 def roll_periodic_wac(
     *, quantity: Any, capital: Any, quantity_delta: Any, capital_delta: Any
 ) -> tuple[Decimal, Decimal, Decimal | None]:
@@ -5965,13 +5993,20 @@ class WarehouseFunctionalBlock:
                             raise WarehouseFunctionalError(
                                 f"canonical FF replay would be negative for nmId {nm_id} at {operation_id}"
                             )
-                        outbound_wac = (
-                            exact_cost["unit_cost_rub"]
-                            if exact_cost is not None
-                            else current_wac
-                        )
-                        remaining_qty = current_qty - outbound
-                        remaining_capital = current_capital - outbound * outbound_wac
+                        if exact_cost is None:
+                            (
+                                remaining_qty,
+                                remaining_capital,
+                                outbound_wac,
+                            ) = proportional_ff_outbound(
+                                quantity=current_qty,
+                                capital=current_capital,
+                                outbound_quantity=outbound,
+                            )
+                        else:
+                            outbound_wac = exact_cost["unit_cost_rub"]
+                            remaining_qty = current_qty - outbound
+                            remaining_capital = current_capital - outbound * outbound_wac
                         if remaining_capital < ZERO or (
                             remaining_qty > ZERO and remaining_capital <= ZERO
                         ) or (
