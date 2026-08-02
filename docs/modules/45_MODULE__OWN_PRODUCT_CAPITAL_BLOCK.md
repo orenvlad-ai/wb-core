@@ -128,8 +128,24 @@ Cost-only events preserve all quantity keys byte-for-byte and change
 capital/WAC once from the source business date. Physical movements carry exact
 or proportional capital with conservation. Event insert/delete,
 certification and official WB/WAC changes enqueue the projection in the same
-transaction. A complete candidate atomically replaces only its date/SKU/TOTAL
-rows; failure preserves last-good current rows.
+transaction. A functional/FF outbox row without complete event proof is only a
+durable replay signal: draining it marks the request complete but keeps every
+last-good projection row byte-for-byte. It cannot publish an unavailable or
+mixed replacement. Each successful hourly/emergency/targeted functional apply
+instead publishes its complete six-stage exact-date SKU/TOTAL metrics in the
+same SQLite transaction as the immutable functional version and active-pointer
+switch. A complete candidate atomically replaces only its date/SKU/TOTAL rows;
+failure preserves last-good current rows. Live source-revision revalidation is
+stricter than the persisted projection presentation and therefore cannot be
+overwritten by a green exact-version overlay before its targeted replay.
+
+The bounded `projection` recovery of migration 131 repairs an already mixed
+date window without editing the FF ledger or any functional version. It selects
+the latest exact good version for each date, verifies that its FF watermark is
+an exact append-only prefix and overlays only missing already-applied inventory
+document lines using their frozen Decimal quantity/capital. T1 before-images
+cover the projection revision/current/state rows; the physical ledger, active
+functional pointer and active balances are an exact non-target digest.
 
 Migration 127 publishes exact July history through that same owned seam. For
 `2026-07-19..29` the six-stage SKU/TOTAL rows come from exact functional

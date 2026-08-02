@@ -28,6 +28,12 @@ from packages.application.warehouse_historical_recovery import (  # noqa: E402
     public_plan as public_historical_plan,
     rollback_historical_recovery,
 )
+from packages.application.warehouse_business_projection_recovery import (  # noqa: E402
+    apply_business_projection_recovery_plan,
+    build_business_projection_recovery_plan,
+    public_plan as public_projection_plan,
+    rollback_business_projection_recovery,
+)
 from packages.application.warehouse_transit_historical_recovery import (  # noqa: E402
     apply_transit_historical_recovery_plan,
     build_transit_historical_recovery_plan,
@@ -40,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument(
         "--batch",
-        choices=("a", "b", "transit"),
+        choices=("a", "b", "transit", "projection"),
         required=True,
         help="A=19–29, B=01–18 partial WB, transit=query-only fact evidence.",
     )
@@ -51,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reason", default="")
     parser.add_argument("--batch-a-fingerprint", default="")
     parser.add_argument("--backup-path", default="")
+    parser.add_argument("--source-sha256", default="")
+    parser.add_argument("--business-date", default="")
     return parser
 
 
@@ -65,8 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         result = _run_batch_a(runtime, args)
     elif args.batch == "b":
         result = _run_batch_b(runtime, args)
-    else:
+    elif args.batch == "transit":
         result = _run_transit(runtime, args)
+    else:
+        result = _run_projection(runtime, args)
     print(
         json.dumps(
             result,
@@ -142,6 +152,35 @@ def _run_transit(
             approval_reference=str(args.approval_reference),
         )
     return public_transit_plan(plan)
+
+
+def _run_projection(
+    runtime: RegistryUploadDbBackedRuntime,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    if args.rollback:
+        return rollback_business_projection_recovery(
+            runtime,
+            fingerprint=str(args.fingerprint),
+            reason=str(args.reason or "operator requested bounded rollback"),
+        )
+    if not str(args.source_sha256 or "") or not str(args.business_date or ""):
+        raise ValueError(
+            "projection recovery requires --source-sha256 and --business-date"
+        )
+    plan = build_business_projection_recovery_plan(
+        runtime,
+        source_sha256=str(args.source_sha256),
+        business_date=str(args.business_date),
+    )
+    if args.apply:
+        return apply_business_projection_recovery_plan(
+            runtime,
+            plan,
+            confirm_fingerprint=str(args.fingerprint),
+            approval_reference=str(args.approval_reference),
+        )
+    return public_projection_plan(plan)
 
 
 if __name__ == "__main__":

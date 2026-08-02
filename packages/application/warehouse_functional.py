@@ -32,6 +32,8 @@ from packages.application.warehouse_archival_estimate import (
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 from packages.application.warehouse_business_projection import (
     ensure_functional_version_business_time_schema,
+    ensure_warehouse_business_projection_schema,
+    publish_functional_version_business_projection,
 )
 from packages.application.warehouse_event_order import (
     ff_operation_replay_sort_key as _ff_operation_replay_sort_key,
@@ -4101,8 +4103,10 @@ class WarehouseFunctionalBlock:
             or dict(normalized.get("wb_snapshot") or {}).get("snapshot_date")
         )
         version_id = "whfv_" + fingerprint.removeprefix("sha256:")[:24]
+        business_projection: dict[str, Any] | None = None
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
+            ensure_warehouse_business_projection_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
                 duplicate = conn.execute(
@@ -4452,6 +4456,20 @@ class WarehouseFunctionalBlock:
                     business_effective_date=business_effective_date,
                 )
                 _verify_version(conn, version_id=version_id, expected=normalized)
+                if kind in {
+                    "hourly_wb_sync",
+                    "emergency_rebuild",
+                    "targeted_recovery",
+                }:
+                    business_projection = (
+                        publish_functional_version_business_projection(
+                            conn,
+                            published_version_id=version_id,
+                            business_effective_date=business_effective_date,
+                            published_at=now,
+                            source_revision=fingerprint,
+                        )
+                    )
                 for request in normalized.get("targeted_recalc_requests") or []:
                     updated = conn.execute(
                         """UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
@@ -4501,7 +4519,13 @@ class WarehouseFunctionalBlock:
                 ),
             )
             backup = recovery
-        return {**readback, "idempotent": False, "backup": backup, "recovery_policy": recovery}
+        return {
+            **readback,
+            "idempotent": False,
+            "backup": backup,
+            "recovery_policy": recovery,
+            "business_projection": business_projection,
+        }
 
     def rollback_functional_cutover(
         self,

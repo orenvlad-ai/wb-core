@@ -6,6 +6,7 @@ layers and physical stage movements with Decimal-compatible SQLite text values.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -1937,13 +1938,32 @@ class OwnProductCapitalBlock:
                 load_current_business_projection_metrics,
             )
 
-            functional.update(
-                load_current_business_projection_metrics(
-                    self.runtime,
-                    as_of_date=as_of_date,
-                    requested_nm_ids=requested_nm_ids,
-                )
+            projected = load_current_business_projection_metrics(
+                self.runtime,
+                as_of_date=as_of_date,
+                requested_nm_ids=requested_nm_ids,
             )
+            for nm_id, projected_row in projected.items():
+                current_row = functional.setdefault(nm_id, {})
+                live_guard = {
+                    key: deepcopy(current_row.get(key))
+                    for key in (
+                        "presentation_state",
+                        "presentation_reason",
+                        "presentation_reasons",
+                        "stage_presentation",
+                    )
+                }
+                current_row.update(projected_row)
+                if (
+                    revalidate_current_sources
+                    and live_guard.get("presentation_state")
+                    in {"unconfirmed", "unavailable"}
+                ):
+                    # Projection rows own numeric warehouse metrics.  They do
+                    # not supersede a stricter live source-revision guard on
+                    # the current business date.
+                    current_row.update(live_guard)
             return functional
         if as_of_date >= "2026-07-01":
             canonical = self._load_canonical_daily_metric_lookup(as_of_date)

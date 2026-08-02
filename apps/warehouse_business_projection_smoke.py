@@ -403,6 +403,10 @@ def _assert_partial_functional_source_keeps_quantities(
     runtime: RegistryUploadDbBackedRuntime,
 ) -> None:
     quantity_before = _all_quantity_digest(runtime)
+    metrics_before = _current_metrics(runtime)
+    revision_before = load_warehouse_business_projection_status(runtime)[
+        "revision_no"
+    ]
     queued = enqueue_warehouse_targeted_recalculation(
         runtime=runtime,
         stable_source_id="supplier_costs:partial-smoke",
@@ -413,14 +417,21 @@ def _assert_partial_functional_source_keeps_quantities(
     )
     publication = dict(queued.get("business_projection") or {})
     assert publication.get("status") == "success", queued
+    assert publication.get("idempotent") is True, queued
+    assert publication.get("diagnostics", {}).get("last_good_preserved") is True
+    assert (
+        publication.get("diagnostics", {}).get(
+            "awaiting_exact_functional_replay"
+        )
+        is True
+    )
     after = _current_metrics(runtime)
     assert _all_quantity_digest(runtime) == quantity_before
-    for as_of_date in ("2026-07-24", "2026-07-25"):
-        assert after[as_of_date][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] is None
-        assert after[as_of_date][OWN_AVG_COST_RUB_METRIC_KEY] is None
+    assert after == metrics_before
     status = load_warehouse_business_projection_status(runtime)
     assert not status["updating"], status
     assert status["queue_counts"].get("queued") == 1, status
+    assert status["revision_no"] == revision_before, status
 
 
 def _assert_late_transit_cost_scope_is_bounded(

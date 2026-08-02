@@ -1880,6 +1880,142 @@ def _persist_projection_revision(
     }
 
 
+def publish_functional_version_business_projection(
+    conn: sqlite3.Connection,
+    *,
+    published_version_id: str,
+    business_effective_date: str,
+    published_at: str,
+    source_revision: str,
+) -> dict[str, Any]:
+    """Publish one exact functional business-date version into Web Vitrina.
+
+    A normal functional sync already owns the complete six-stage physical and
+    cost calculation.  Re-reading event-only daily state here can mix a fresh
+    functional version with an older partial capital projection.  This seam is
+    therefore deliberately version-bound and runs in the caller's transaction.
+    """
+
+    ensure_warehouse_business_projection_schema(conn)
+    ensure_functional_version_business_time_schema(conn)
+    selected_date = _iso_date(
+        business_effective_date,
+        field_name="business_effective_date",
+    )
+    version = conn.execute(
+        """
+        SELECT version.version_id,version.status,version.business_effective_date,
+               version.published_at,version.created_at,snapshot.snapshot_date
+        FROM sheet_vitrina_v1_warehouse_functional_versions AS version
+        JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
+          ON snapshot.version_id=version.version_id
+        WHERE version.version_id=?
+        """,
+        (str(published_version_id),),
+    ).fetchone()
+    if version is None or str(version["status"]) != "good":
+        raise WarehouseBusinessProjectionError(
+            "functional business projection requires one exact good version"
+        )
+    if (
+        str(version["business_effective_date"] or "") != selected_date
+        or str(version["snapshot_date"] or "") != selected_date
+    ):
+        raise WarehouseBusinessProjectionError(
+            "functional version business date and official snapshot date differ"
+        )
+    balances = _version_balances(conn, version_id=str(published_version_id))
+    affected_nm_ids = sorted(
+        {
+            int(item.get("nm_id") or 0)
+            for item in balances
+            if int(item.get("nm_id") or 0) > 0
+        }
+    )
+    if not balances or not affected_nm_ids:
+        raise WarehouseBusinessProjectionError(
+            "functional business projection has no balance rows"
+        )
+    metrics_by_nm = _metric_rows(
+        balances,
+        affected_nm_ids=affected_nm_ids,
+    )
+    rows: list[dict[str, Any]] = []
+    for nm_id, item in sorted(metrics_by_nm.items()):
+        provenance = {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "source": "canonical_functional_warehouse_version",
+            "business_effective_date": selected_date,
+            "as_of_date": selected_date,
+            "base_version_id": str(published_version_id),
+            "published_version_id": str(published_version_id),
+            "published_at": str(published_at),
+            "missing_exact_projection_date": False,
+        }
+        material = {
+            "as_of_date": selected_date,
+            "nm_id": int(nm_id),
+            "metrics": dict(item["metrics"]),
+            "presentation": dict(item["presentation"]),
+            "provenance": provenance,
+        }
+        rows.append(
+            {
+                **material,
+                "row_fingerprint": _fingerprint(material),
+            }
+        )
+    stable_source_id = f"functional_version:{published_version_id}"
+    plan_fingerprint = _fingerprint(
+        {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "stable_source_id": stable_source_id,
+            "source_revision": str(source_revision),
+            "business_effective_date": selected_date,
+            "published_version_id": str(published_version_id),
+            "candidate_fingerprints": [
+                str(item["row_fingerprint"]) for item in rows
+            ],
+        }
+    )
+    revision_id = "whbpr_functional_" + plan_fingerprint.removeprefix(
+        "sha256:"
+    )[:20]
+    result = _persist_projection_revision(
+        conn,
+        revision_id=revision_id,
+        stable_source_id=stable_source_id,
+        source_revision=str(source_revision),
+        business_effective_date=selected_date,
+        published_at=str(published_at),
+        plan_fingerprint=plan_fingerprint,
+        base_version_id=str(published_version_id),
+        published_version_id=str(published_version_id),
+        affected_nm_ids=affected_nm_ids,
+        source_kind="exact_functional_version",
+        rows=rows,
+        diagnostics={
+            "affected_dates": [selected_date],
+            "affected_sku_count": len(affected_nm_ids),
+            "candidate_row_count": len(rows),
+            "functional_balance_rows_read": len(balances),
+            "external_source_refresh_count": 0,
+            "full_vitrina_refresh_count": 0,
+            "all_history_rebuild": False,
+            "exact_functional_version": True,
+        },
+    )
+    return {
+        **result,
+        "plan_fingerprint": plan_fingerprint,
+        "business_effective_date": selected_date,
+        "published_version_id": str(published_version_id),
+        "affected_nm_ids": affected_nm_ids,
+    }
+
+
 def drain_warehouse_business_projection_outbox(
     runtime: RegistryUploadDbBackedRuntime,
     *,
@@ -1935,15 +2071,23 @@ def drain_warehouse_business_projection_outbox(
                 """,
                 (timestamp, *request_ids),
             )
+            projection_request_rows = [
+                item
+                for item in request_rows
+                if not str(item["source_kind"]).startswith(
+                    ("functional_", "ff_stock_")
+                )
+            ]
+            scope_rows = projection_request_rows or request_rows
             business_effective_date, affected_nm_ids = _resolve_outbox_scope(
-                conn, request_rows
+                conn, scope_rows
             )
             if not affected_nm_ids:
                 raise WarehouseBusinessProjectionError(
                     "coalesced source outbox has no affected SKU closure"
                 )
             cost_only = all(
-                _is_cost_only_outbox_request(item) for item in request_rows
+                _is_cost_only_outbox_request(item) for item in scope_rows
             )
             target_dates, date_scope = _bounded_outbox_target_dates(
                 conn,
@@ -1951,12 +2095,44 @@ def drain_warehouse_business_projection_outbox(
                 publication_business_date=business_date_from_timestamp(timestamp),
                 cost_only=cost_only,
             )
-            has_canonical_event_proof = any(
-                not str(item["source_kind"]).startswith(
-                    ("functional_", "ff_stock_")
+            has_canonical_event_proof = bool(projection_request_rows)
+            if not has_canonical_event_proof:
+                # These requests only prove that the full functional
+                # calculator must replay.  Publishing an event-only fallback
+                # here would replace last-good rows with a stale/partial mix.
+                conn.execute(
+                    f"""
+                    UPDATE {OUTBOX_TABLE}
+                    SET status='complete',finished_at=?,error=NULL
+                    WHERE request_id IN ({placeholders}) AND status='running'
+                    """,
+                    (timestamp, *request_ids),
                 )
-                for item in request_rows
-            )
+                conn.commit()
+                return {
+                    "status": "success",
+                    "idempotent": True,
+                    "request_count": len(request_rows),
+                    "business_effective_date": business_effective_date,
+                    "affected_nm_ids": affected_nm_ids,
+                    "affected_dates": target_dates,
+                    "changed_rows": 0,
+                    "changed_cells": 0,
+                    "diagnostics": {
+                        "last_good_preserved": True,
+                        "awaiting_exact_functional_replay": True,
+                        "replay_signal_request_count": len(request_rows),
+                        "external_source_refresh_count": 0,
+                        "full_vitrina_refresh_count": 0,
+                        "all_history_rebuild": False,
+                        "cost_only": cost_only,
+                        **date_scope,
+                        "elapsed_ms": round(
+                            (time.perf_counter() - started) * 1000,
+                            3,
+                        ),
+                    },
+                }
             candidate_rows: list[dict[str, Any]] = []
             missing_dates: list[str] = []
             daily_rows_read = 0
@@ -2043,7 +2219,10 @@ def drain_warehouse_business_projection_outbox(
                         "contract_name": CONTRACT_NAME,
                         "contract_version": CONTRACT_VERSION,
                         "source": "canonical_own_capital_events",
-                        "source_request_ids": request_ids,
+                        "source_request_ids": [
+                            str(request["request_id"])
+                            for request in projection_request_rows
+                        ],
                         "business_effective_date": business_effective_date,
                         "projection_effective_date": target_dates[0],
                         "as_of_date": as_of_date,
@@ -2103,7 +2282,7 @@ def drain_warehouse_business_projection_outbox(
                     "affected_nm_ids_json": item["affected_nm_ids_json"],
                     "source_kind": item["source_kind"],
                 }
-                for item in request_rows
+                for item in projection_request_rows
             ]
             source_revision = _fingerprint(source_material)
             plan_fingerprint = _fingerprint(
@@ -2126,7 +2305,10 @@ def drain_warehouse_business_projection_outbox(
                 "missing_exact_projection_dates": missing_dates,
                 "affected_date_count": len(target_dates),
                 "affected_sku_count": len(affected_nm_ids),
-                "source_request_count": len(request_rows),
+                "source_request_count": len(projection_request_rows),
+                "replay_signal_request_count": (
+                    len(request_rows) - len(projection_request_rows)
+                ),
                 "daily_rows_read": daily_rows_read,
                 "external_source_refresh_count": 0,
                 "full_vitrina_refresh_count": 0,
