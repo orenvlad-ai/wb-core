@@ -166,6 +166,33 @@ Before mutation:
 5. obtain the exact human production-mutation approval required by the current
    release protocol.
 
+The locked pre-apply evidence refreshed after recovery PR `#904` deployed as
+`27f6f429b7adb21872653270e53d73653abe4167` is:
+
+- successful current-source sync version
+  `whfv_36a244decde8ba5364e8815e`, with complete official stocks, zero negative
+  balances/cost gaps and retained T2 operation
+  `recovery_5d3e3d1e20c39c8fb783c475f0abfdcd`;
+- deployed recovery-policy readback classifies
+  `ff_inventory_reconciliation` as enabled `T1` with closure `sku_date`, while
+  canary fingerprint
+  `sha256:daa1e41e7943a66a4a7be2d98f5d8fbf387c81a3cf5fbacd1b67f58977b374eb`
+  covers T0/T1/T2, non-target digest and orphan scanning without business-data
+  mutation;
+- fresh query-only inventory fingerprint
+  `sha256:31ecb7cf69fba0adc0d5cefbe288d9663c8a0ce19af61b49fe1a0e2357e5afba`:
+  `48 250 -> 53 750`, return `5 250`, net inventory `+250`, 33 target SKUs,
+  three documents, zero blockers/missing costs/negative targets/unmatched or
+  ambiguous rows, and repeat apply specified as T0;
+- relevant ledger digest
+  `sha256:995cf60843a0fe2662f6b432e22dc17935879bce6c883b44c0eb9c444b9ebcaf`
+  and non-target digest
+  `sha256:044fcfdad4c53e8422686d7a0f4377a29a73be81f65bcd5541e53790842ea33b`
+  are unchanged from the prior reviewed plan. The fingerprint changed only
+  because the mandatory fresh sync advanced the active functional source and
+  complete-snapshot return proof; the quantity, cost, capital, document and
+  target/non-target invariants stayed exact.
+
 After apply:
 
 - all 33 target SKUs and total equal the workbook;
