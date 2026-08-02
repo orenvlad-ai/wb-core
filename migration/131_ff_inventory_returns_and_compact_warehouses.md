@@ -104,6 +104,11 @@ Vitrina/Finance projections. The missing supply is excluded from transit after
 return; active FF→WB is rebuilt only from debited, non-returned, unaccepted
 units. Conservation must hold per supply/SKU and in aggregate.
 
+A cost-only replay preserves every last-good SKU and aggregate physical
+quantity, including legacy `nm_id=0` totals, and recomputes WAC from the new
+capital over that preserved quantity. A historical aggregate mismatch therefore
+cannot create a physical movement or abort an otherwise safe cost publication.
+
 Published warehouse versions also own:
 
 - compact per-warehouse summary/balance read models and ETags;
