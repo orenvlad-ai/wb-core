@@ -258,7 +258,9 @@ class WbRegionalSupplyBlock:
             self.runtime,
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=stock_warehouse_rows,
-            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            snapshot_date=str(
+                getattr(stock_response, "snapshot_date", "") or report_date
+            ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
             pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),

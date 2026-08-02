@@ -54,6 +54,7 @@ FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
+FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
@@ -6807,6 +6808,147 @@ def _run_remote_vitrina_incident_rematerialization(
     return payload
 
 
+def run_ff_inventory_reconciliation_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file or resolve_target_file())
+    action = str(args.ff_inventory_action)
+    source_path = Path(str(args.source_file)).resolve()
+    if not source_path.is_file():
+        raise ValueError("FF inventory source workbook does not exist")
+    source_bytes = source_path.read_bytes()
+    payload = _run_remote_ff_inventory_reconciliation(
+        target,
+        action=action,
+        source_bytes=source_bytes,
+        source_filename=str(args.source_filename or source_path.name),
+        business_date=str(args.business_date),
+        return_supply_ids=tuple(str(item) for item in args.return_supply_id),
+        fingerprint=str(args.fingerprint or ""),
+        approval_reference=str(args.approval_reference or ""),
+        created_by=str(args.created_by or "operator"),
+        rollback_reason=str(args.rollback_reason or ""),
+    )
+    output = str(args.output or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("FF inventory evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": f"ff-inventory-reconciliation-{action}",
+            "source_sha256": "sha256:" + hashlib.sha256(source_bytes).hexdigest(),
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_ff_inventory_reconciliation(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    source_bytes: bytes,
+    source_filename: str,
+    business_date: str,
+    return_supply_ids: tuple[str, ...],
+    fingerprint: str,
+    approval_reference: str,
+    created_by: str,
+    rollback_reason: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"ff-inventory-reconciliation-{action}",
+    )
+    if action not in {"dry-run", "apply", "readback", "rollback"}:
+        raise ValueError(f"unsupported FF inventory action: {action}")
+    if action in {"apply", "rollback"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"ff-inventory-reconciliation-{action}",
+            dry_run=False,
+        )
+    normalized_date = date.fromisoformat(business_date).isoformat()
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("FF inventory reconciliation requires the canonical active runtime dir")
+    if not source_bytes:
+        raise ValueError("FF inventory source workbook is empty")
+    runner_args = [
+        "python3",
+        "apps/ff_inventory_reconciliation.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--source-base64-stdin",
+        "--source-filename",
+        source_filename,
+        "--business-date",
+        normalized_date,
+        "--created-by",
+        created_by,
+        "--compact",
+    ]
+    for supply_id in sorted({item.strip() for item in return_supply_ids if item.strip()}):
+        runner_args.extend(["--return-supply-id", supply_id])
+    if action == "apply":
+        if not fingerprint or not approval_reference:
+            raise ValueError("FF inventory apply requires exact fingerprint and approval reference")
+        runner_args.extend(
+            [
+                "--apply",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+            ]
+        )
+    elif action == "readback":
+        runner_args.append("--readback")
+    elif action == "rollback":
+        if not fingerprint or not approval_reference or not rollback_reason:
+            raise ValueError("FF inventory rollback requires fingerprint, approval reference and reason")
+        runner_args.extend(
+            [
+                "--rollback",
+                "--confirm-fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+                "--rollback-reason",
+                rollback_reason,
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        input=base64.b64encode(source_bytes).decode("ascii"),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode not in ({0, 2} if action == "dry-run" else {0}):
+        raise RuntimeError(
+            f"FF inventory reconciliation {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("FF inventory reconciliation returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("FF inventory reconciliation returned a non-object")
+    return payload
+
+
 def _run_remote_ads_historical_recovery(
     target: HostedRuntimeTarget,
     *,
@@ -9616,6 +9758,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         handler=run_vitrina_incident_rematerialization_command,
         vitrina_incident_action="apply",
     )
+
+    for command_name, action, help_text in (
+        (
+            "ff-inventory-reconciliation-dry-run",
+            "dry-run",
+            "Build the fresh query-only FF inventory/return manifest from the exact manager workbook.",
+        ),
+        (
+            "ff-inventory-reconciliation-apply",
+            "apply",
+            "Apply the exact approved FF inventory manifest through append-only documents.",
+        ),
+        (
+            "ff-inventory-reconciliation-readback",
+            "readback",
+            "Read back the exact FF inventory reconciliation and target balances.",
+        ),
+        (
+            "ff-inventory-reconciliation-rollback",
+            "rollback",
+            "Append exact compensating FF inventory documents without deleting audit history.",
+        ),
+    ):
+        command = subparsers.add_parser(command_name, help=help_text)
+        command.add_argument("--source-file", required=True)
+        command.add_argument("--source-filename", default="")
+        command.add_argument("--business-date", required=True)
+        command.add_argument("--return-supply-id", action="append", default=[])
+        command.add_argument("--fingerprint", default="")
+        command.add_argument("--approval-reference", default="")
+        command.add_argument("--created-by", default="operator")
+        command.add_argument("--rollback-reason", default="")
+        command.add_argument("--output", default="")
+        command.set_defaults(
+            handler=run_ff_inventory_reconciliation_command,
+            ff_inventory_action=action,
+        )
 
     archival_estimate_dry_run = subparsers.add_parser(
         "warehouse-archival-estimate-dry-run",

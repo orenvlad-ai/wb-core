@@ -19,7 +19,7 @@ from packages.contracts.stocks_block import StocksItem, StocksWarehouseRow
 
 
 POLICY_CONTRACT_NAME = "wb_warehouse_incident_policy"
-POLICY_CONTRACT_VERSION = 1
+POLICY_CONTRACT_VERSION = 2
 LEGACY_CONFIG_KEY = "wb_warehouse_exclusions"
 POLICY_STATUS_VALUES = {"active", "monitoring", "resolved", "disabled"}
 VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU = (
@@ -66,6 +66,112 @@ def _latest_policy(runtime: Any, *, seller_id: str) -> dict[str, Any] | None:
     return dict(record) if isinstance(record, Mapping) and record.get("status") == "ok" else None
 
 
+def _policy_entries(policy: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return v2 per-warehouse intervals, projecting v1 rows without mutation."""
+
+    raw_entries = list(policy.get("warehouse_entries") or [])
+    if not raw_entries:
+        identities = {
+            int(item.get("warehouse_id") or 0): str(item.get("warehouse_name") or "").strip()
+            for item in policy.get("warehouse_identities") or []
+        }
+        raw_entries = [
+            {
+                "warehouse_id": int(item),
+                "warehouse_name": identities.get(int(item), ""),
+                "effective_from": str(policy.get("effective_from") or ""),
+                "effective_to_exclusive": "",
+                "source": "v1_projection",
+            }
+            for item in policy.get("warehouse_ids") or []
+        ]
+    entries: list[dict[str, Any]] = []
+    for raw in raw_entries:
+        warehouse_id = int(raw.get("warehouse_id") or 0)
+        if warehouse_id <= 0:
+            continue
+        effective_from = _iso_date(
+            raw.get("effective_from") or policy.get("effective_from"),
+            field_name=f"warehouse_entries[{warehouse_id}].effective_from",
+        )
+        effective_to_exclusive = _iso_date(
+            raw.get("effective_to_exclusive"),
+            field_name=f"warehouse_entries[{warehouse_id}].effective_to_exclusive",
+            required=False,
+        )
+        if effective_to_exclusive and effective_to_exclusive <= effective_from:
+            raise WbIncidentPolicyError(
+                f"warehouseId {warehouse_id} effective_to_exclusive must be later than effective_from"
+            )
+        entries.append(
+            {
+                "warehouse_id": warehouse_id,
+                "warehouse_name": str(raw.get("warehouse_name") or "").strip(),
+                "effective_from": effective_from,
+                "effective_to_exclusive": effective_to_exclusive,
+                "source": str(raw.get("source") or "incident_policy_v2"),
+            }
+        )
+    ordered = sorted(
+        entries,
+        key=lambda item: (
+            int(item["warehouse_id"]),
+            str(item["effective_from"]),
+            str(item["effective_to_exclusive"]),
+        ),
+    )
+    previous_by_id: dict[int, dict[str, Any]] = {}
+    for entry in ordered:
+        warehouse_id = int(entry["warehouse_id"])
+        previous = previous_by_id.get(warehouse_id)
+        if previous is not None:
+            previous_end = str(previous.get("effective_to_exclusive") or "")
+            if not previous_end or str(entry["effective_from"]) < previous_end:
+                raise WbIncidentPolicyError(
+                    f"warehouseId {warehouse_id} has overlapping incident intervals"
+                )
+        previous_by_id[warehouse_id] = entry
+    return ordered
+
+
+def _entry_owns_date(entry: Mapping[str, Any], target_date: str) -> bool:
+    return (
+        str(entry.get("effective_from") or "") <= target_date
+        and (
+            not str(entry.get("effective_to_exclusive") or "")
+            or target_date < str(entry.get("effective_to_exclusive") or "")
+        )
+    )
+
+
+def _resolve_policy_record(record: Mapping[str, Any], *, target_date: str) -> dict[str, Any]:
+    result = dict(record)
+    entries = _policy_entries(result)
+    effective_entries = [item for item in entries if _entry_owns_date(item, target_date)]
+    overall_end = str(result.get("effective_to") or "")
+    configured_active = bool(result.get("active")) and str(result.get("policy_status") or "") in {
+        "active",
+        "monitoring",
+    }
+    active = configured_active and (not overall_end or target_date <= overall_end)
+    result.update(
+        {
+            "warehouse_entries": entries,
+            "effective_warehouse_entries": effective_entries,
+            "warehouse_ids": [int(item["warehouse_id"]) for item in effective_entries],
+            "warehouse_identities": [
+                {
+                    "warehouse_id": int(item["warehouse_id"]),
+                    "warehouse_name": str(item.get("warehouse_name") or ""),
+                }
+                for item in effective_entries
+            ],
+            "active": bool(active and effective_entries),
+        }
+    )
+    return result
+
+
 def _legacy_policy(runtime: Any, *, seller_id: str, snapshot_date: str) -> dict[str, Any] | None:
     records = runtime.list_sheet_vitrina_user_configs(config_key=LEGACY_CONFIG_KEY)
     payloads: list[dict[str, Any]] = []
@@ -103,6 +209,17 @@ def _legacy_policy(runtime: Any, *, seller_id: str, snapshot_date: str) -> dict[
         and snapshot_date == current_business_date_iso(),
         "warehouse_ids": list(selected) if not conflicting else [],
         "warehouse_identities": [],
+        "warehouse_entries": [
+            {
+                "warehouse_id": int(warehouse_id),
+                "warehouse_name": "",
+                "effective_from": snapshot_date,
+                "effective_to_exclusive": "",
+                "source": "legacy_user_config",
+            }
+            for warehouse_id in selected
+            if int(warehouse_id) > 0
+        ] if not conflicting else [],
         "reason": "Совместимая настройка исключения складов до миграции",
         "effective_from": snapshot_date,
         "effective_to": "",
@@ -169,19 +286,12 @@ def get_policy_state(
             "legacy_payloads": list((latest or {}).get("legacy_payloads") or []),
             "materialize_incident_metrics": materialize,
         }
-    result = dict(record)
-    effective_to = str(result.get("effective_to") or "")
-    active = bool(result.get("active")) and str(result.get("policy_status") or "") in {
-        "active",
-        "monitoring",
-    }
-    if effective_to and target_date > effective_to:
-        active = False
+    result = _resolve_policy_record(record, target_date=target_date)
     result.update(
         {
             "contract_name": POLICY_CONTRACT_NAME,
             "contract_version": POLICY_CONTRACT_VERSION,
-            "active": active,
+            "active": bool(result.get("active")),
             "migration_pending": False,
             "legacy_conflict": False,
             "materialize_incident_metrics": True,
@@ -214,6 +324,10 @@ def get_latest_policy_state(
         include_legacy=False,
     )
     result = dict(latest)
+    configured_entries = [
+        item for item in _policy_entries(result)
+        if not str(item.get("effective_to_exclusive") or "")
+    ]
     configured_active = bool(latest.get("active"))
     currently_effective = bool(current.get("active"))
     result.update(
@@ -221,11 +335,22 @@ def get_latest_policy_state(
             "contract_name": POLICY_CONTRACT_NAME,
             "contract_version": POLICY_CONTRACT_VERSION,
             "configured_active": configured_active,
+            "configured_warehouse_entries": configured_entries,
+            "warehouse_entries": configured_entries,
+            "warehouse_ids": [int(item["warehouse_id"]) for item in configured_entries],
+            "warehouse_identities": [
+                {
+                    "warehouse_id": int(item["warehouse_id"]),
+                    "warehouse_name": str(item.get("warehouse_name") or ""),
+                }
+                for item in configured_entries
+            ],
             "active": currently_effective,
             "currently_effective": currently_effective,
             "effective_revision": int(current.get("revision") or 0),
             "effective_warehouse_ids": list(current.get("warehouse_ids") or []),
             "effective_warehouse_identities": list(current.get("warehouse_identities") or []),
+            "effective_warehouse_entries": list(current.get("effective_warehouse_entries") or []),
             "effective_reason": str(current.get("reason") or ""),
             "effective_effective_from": str(current.get("effective_from") or ""),
             "effective_effective_to": str(current.get("effective_to") or ""),
@@ -248,34 +373,59 @@ def save_policy_revision(
 ) -> dict[str, Any]:
     owner = seller_id or canonical_seller_id()
     active = _bool(payload.get("active"))
-    try:
-        warehouse_ids = parse_excluded_wb_warehouse_ids(
-            {"excluded_wb_warehouse_ids": payload.get("excluded_wb_warehouse_ids", [])},
-            allow_legacy_elektrostal=False,
-        )
-    except ValueError as exc:
-        raise WbIncidentPolicyError(str(exc)) from exc
     reason = str(payload.get("reason") or "").strip()
-    effective_from = _iso_date(payload.get("effective_from"), field_name="effective_from")
+    raw_requested_entries = payload.get("warehouse_entries")
+    legacy_payload_shape = raw_requested_entries is None
+    change_date = _iso_date(
+        payload.get("change_effective_from")
+        or (payload.get("effective_from") if legacy_payload_shape else "")
+        or current_business_date_iso(),
+        field_name="change_effective_from",
+    )
     effective_to = _iso_date(payload.get("effective_to"), field_name="effective_to", required=False)
-    if effective_to and effective_to < effective_from:
-        raise WbIncidentPolicyError("effective_to cannot be earlier than effective_from")
     policy_status = str(payload.get("status") or ("active" if active else "disabled")).strip().lower()
     if policy_status not in POLICY_STATUS_VALUES:
         raise WbIncidentPolicyError("status must be active, monitoring, resolved, or disabled")
-    if active and not warehouse_ids:
-        raise WbIncidentPolicyError("active policy must select at least one warehouse")
-    if active and not reason:
-        raise WbIncidentPolicyError("active policy requires a reason")
 
     option_by_id = {
         int(option["warehouse_id"]): dict(option)
         for option in warehouse_options
         if option.get("warehouse_id") is not None
     }
-    identities: list[dict[str, Any]] = []
+    if raw_requested_entries is None:
+        try:
+            legacy_ids = parse_excluded_wb_warehouse_ids(
+                {"excluded_wb_warehouse_ids": payload.get("excluded_wb_warehouse_ids", [])},
+                allow_legacy_elektrostal=False,
+            )
+        except ValueError as exc:
+            raise WbIncidentPolicyError(str(exc)) from exc
+        legacy_from = _iso_date(payload.get("effective_from"), field_name="effective_from")
+        requested_entries = [
+            {"warehouse_id": int(warehouse_id), "effective_from": legacy_from}
+            for warehouse_id in legacy_ids
+        ]
+    elif not isinstance(raw_requested_entries, Sequence) or isinstance(raw_requested_entries, (str, bytes)):
+        raise WbIncidentPolicyError("warehouse_entries must be a list")
+    else:
+        requested_entries = [dict(item) for item in raw_requested_entries if isinstance(item, Mapping)]
+        if len(requested_entries) != len(raw_requested_entries):
+            raise WbIncidentPolicyError("every warehouse_entries item must be an object")
+
+    requested_by_id: dict[int, dict[str, Any]] = {}
     normalized_names: dict[str, int] = {}
-    for warehouse_id in warehouse_ids:
+    for requested in requested_entries:
+        warehouse_id = int(requested.get("warehouse_id") or 0)
+        if warehouse_id <= 0:
+            raise WbIncidentPolicyError(
+                "warehouseId 0 is a service bucket and cannot be an incident-policy destination"
+            )
+        if warehouse_id in requested_by_id:
+            raise WbIncidentPolicyError(f"warehouseId {warehouse_id} is duplicated")
+        warehouse_effective_from = _iso_date(
+            requested.get("effective_from"),
+            field_name=f"warehouse_entries[{warehouse_id}].effective_from",
+        )
         option = option_by_id.get(warehouse_id)
         if option is None or bool(option.get("temporarily_missing")):
             raise WbIncidentPolicyError(
@@ -291,14 +441,120 @@ def save_policy_revision(
                 f"warehouse name {warehouse_name!r} is ambiguous between IDs {other_id} and {warehouse_id}"
             )
         normalized_names[normalized_name] = warehouse_id
-        identities.append({"warehouse_id": warehouse_id, "warehouse_name": warehouse_name})
+        requested_by_id[warehouse_id] = {
+            "warehouse_id": warehouse_id,
+            "warehouse_name": warehouse_name,
+            "effective_from": warehouse_effective_from,
+            "effective_to_exclusive": "",
+            "source": "incident_policy_v2",
+        }
+
+    warehouse_ids = sorted(requested_by_id)
+    if active and not warehouse_ids:
+        raise WbIncidentPolicyError("active policy must select at least one warehouse")
+    if active and not reason:
+        raise WbIncidentPolicyError("active policy requires a reason")
 
     latest = _latest_policy(runtime, seller_id=owner)
     base_revision = payload.get("base_revision")
     if base_revision is not None and int(base_revision) != int((latest or {}).get("revision") or 0):
         raise WbIncidentPolicyError("WB incident policy revision conflict")
+    existing_entries = _policy_entries(latest or {}) if latest else []
+    closed_entries = [
+        dict(item) for item in existing_entries
+        if str(item.get("effective_to_exclusive") or "")
+    ]
+    existing_open = {
+        int(item["warehouse_id"]): dict(item)
+        for item in existing_entries
+        if not str(item.get("effective_to_exclusive") or "")
+    }
+    changed_dates: list[str] = []
+    configured_entries: list[dict[str, Any]] = []
+    for warehouse_id, requested in sorted(requested_by_id.items()):
+        previous = existing_open.get(warehouse_id)
+        if previous is not None:
+            if legacy_payload_shape:
+                requested["effective_from"] = str(previous.get("effective_from") or "")
+            if str(previous.get("effective_from") or "") != str(requested["effective_from"]):
+                raise WbIncidentPolicyError(
+                    f"warehouseId {warehouse_id} already starts at {previous.get('effective_from')}; "
+                    "an existing start date cannot be rewritten retroactively"
+                )
+            requested["source"] = str(previous.get("source") or "incident_policy_v2")
+        else:
+            prior_closed_dates = [
+                str(item.get("effective_to_exclusive") or "")
+                for item in closed_entries
+                if int(item.get("warehouse_id") or 0) == warehouse_id
+                and str(item.get("effective_to_exclusive") or "")
+            ]
+            if prior_closed_dates and str(requested["effective_from"]) < max(prior_closed_dates):
+                raise WbIncidentPolicyError(
+                    f"warehouseId {warehouse_id} cannot be re-selected before its prior interval closed"
+                )
+            changed_dates.append(str(requested["effective_from"]))
+        configured_entries.append(requested)
+    for warehouse_id, previous in sorted(existing_open.items()):
+        if warehouse_id in requested_by_id:
+            continue
+        if change_date > str(previous.get("effective_from") or ""):
+            closed = dict(previous)
+            closed["effective_to_exclusive"] = change_date
+            closed_entries.append(closed)
+        changed_dates.append(change_date)
+
+    identities = [
+        {
+            "warehouse_id": int(item["warehouse_id"]),
+            "warehouse_name": str(item.get("warehouse_name") or ""),
+            "effective_from": str(item["effective_from"]),
+        }
+        for item in configured_entries
+    ]
+    canonical_entries = sorted(
+        [*closed_entries, *configured_entries],
+        key=lambda item: (
+            int(item["warehouse_id"]),
+            str(item["effective_from"]),
+            str(item.get("effective_to_exclusive") or ""),
+        ),
+    )
+    latest_signature = {
+        "active": bool((latest or {}).get("active")),
+        "entries": [
+            (int(item["warehouse_id"]), str(item["effective_from"]))
+            for item in existing_entries
+            if not str(item.get("effective_to_exclusive") or "")
+        ],
+        "reason": str((latest or {}).get("reason") or ""),
+        "effective_to": str((latest or {}).get("effective_to") or ""),
+        "status": str((latest or {}).get("policy_status") or ""),
+    }
+    requested_signature = {
+        "active": active,
+        "entries": [(int(item["warehouse_id"]), str(item["effective_from"])) for item in configured_entries],
+        "reason": reason,
+        "effective_to": effective_to,
+        "status": policy_status,
+    }
+    if latest is not None and latest_signature == requested_signature:
+        result = get_latest_policy_state(
+            runtime,
+            snapshot_date=change_date,
+            seller_id=owner,
+        )
+        result["idempotency_status"] = "T0"
+        result["changed_from"] = ""
+        return result
+
+    if not changed_dates:
+        changed_dates.append(change_date)
+    revision_effective_from = min(changed_dates)
+    if effective_to and effective_to < revision_effective_from:
+        raise WbIncidentPolicyError("effective_to cannot be earlier than the changed interval")
     legacy_payloads = (
-        _legacy_policy(runtime, seller_id=owner, snapshot_date=effective_from) or {}
+        _legacy_policy(runtime, seller_id=owner, snapshot_date=revision_effective_from) or {}
     ).get("legacy_payloads") or []
     created_at = timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     saved = runtime.append_wb_incident_policy_revision(
@@ -306,23 +562,27 @@ def save_policy_revision(
         active=active,
         warehouse_ids=warehouse_ids,
         warehouse_identities=identities,
+        warehouse_entries=canonical_entries,
         reason=reason,
-        effective_from=effective_from,
+        effective_from=revision_effective_from,
         effective_to=effective_to,
         policy_status=policy_status,
         actor=str(actor or "").strip(),
         created_at=created_at,
-        source="incident_policy",
+        source="incident_policy_v2",
         legacy_payloads=legacy_payloads,
         expected_revision=int(base_revision) if base_revision is not None else None,
     )
     if saved.get("status") == "conflict":
         raise WbIncidentPolicyError("WB incident policy revision conflict")
-    return get_latest_policy_state(
+    result = get_latest_policy_state(
         runtime,
-        snapshot_date=current_business_date_iso(),
+        snapshot_date=change_date,
         seller_id=owner,
     )
+    result["idempotency_status"] = "applied"
+    result["changed_from"] = revision_effective_from
+    return result
 
 
 def _historical_rows_with_exact_identity(

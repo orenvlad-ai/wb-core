@@ -251,7 +251,9 @@ class FactoryOrderSupplyBlock:
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=list(getattr(stock_response, "warehouse_rows", []) or []),
             excluded_warehouse_ids=excluded_warehouse_ids,
-            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            snapshot_date=str(
+                getattr(stock_response, "snapshot_date", "") or snapshot_date
+            ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
             pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
@@ -460,7 +462,9 @@ class FactoryOrderSupplyBlock:
             self.runtime,
             items=list(getattr(stock_response, "items", []) or []),
             warehouse_rows=list(getattr(stock_response, "warehouse_rows", []) or []),
-            snapshot_date=str(getattr(stock_response, "snapshot_date", "") or ""),
+            snapshot_date=str(
+                getattr(stock_response, "snapshot_date", "") or stock_snapshot_date
+            ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
             pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),

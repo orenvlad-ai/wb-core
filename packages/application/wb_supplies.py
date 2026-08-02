@@ -472,10 +472,24 @@ class WbSuppliesBlock:
             )
             deleted_active_keys: list[str] = []
             skipped_historical_absent = 0
+            lifecycle_reconciliation: dict[str, Any] = {
+                "status": "skipped",
+                "reason": "active_reconciliation_incomplete",
+            }
             if active_reconciliation_complete:
+                lifecycle_reconciliation = self.ff_stock_ledger.reconcile_wb_supply_lifecycle(
+                    records=self.runtime.list_wb_supplies_cache_records(),
+                    active_authoritative_keys=active_authoritative_keys,
+                    observation_id=f"{run_id}:complete-active-slice",
+                    observed_at=synced_at,
+                    apply_returns=record_ff_movements,
+                )
                 deletion_result = self._delete_absent_active_supplies(
                     active_authoritative_keys=active_authoritative_keys,
                     merged_raw_rows=raw_rows,
+                    protected_supply_ids=set(
+                        lifecycle_reconciliation.get("protected_supply_ids") or []
+                    ),
                 )
                 deleted_active_keys = deletion_result["deleted_keys"]
                 skipped_historical_absent = deletion_result["skipped_historical_absent"]
@@ -589,6 +603,7 @@ class WbSuppliesBlock:
             "enrich": request["enrich"],
             "record_ff_movements": record_ff_movements,
             "ff_stock_debits": ff_stock_debits,
+            "ff_supply_lifecycle": lifecycle_reconciliation,
             "ff_auto_writeoff_checkpoint": ff_auto_writeoff_checkpoint,
             "warnings": warnings,
         }
@@ -643,11 +658,34 @@ class WbSuppliesBlock:
         checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
             reason="warehouse_functional_bounded_sync"
         )
+        supply_returns = self.ff_stock_ledger.apply_confirmed_wb_supply_returns()
+        returned_supply_ids = {
+            str(item).strip()
+            for item in supply_returns.get("returned_supply_ids") or []
+            if str(item).strip()
+        }
+        deleted_returned_records = 0
+        if returned_supply_ids:
+            delete_keys: list[str] = []
+            for record in self.runtime.list_wb_supplies_cache_records():
+                normalized = dict(record.get("normalized") or record)
+                supply_id = str(
+                    normalized.get("supply_id")
+                    or normalized.get("wb_supply_id")
+                    or record.get("supply_id")
+                    or record.get("wb_supply_id")
+                    or ""
+                ).strip()
+                if supply_id in returned_supply_ids:
+                    delete_keys.append(_record_primary_delete_key(record))
+            deleted_returned_records = self.runtime.delete_wb_supply_records(delete_keys)
         ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
             self.runtime.list_wb_supplies_cache_records()
         )
         return {
             "checkpoint": checkpoint,
+            "supply_returns": supply_returns,
+            "deleted_returned_supply_records": deleted_returned_records,
             "ff_stock_debits": ff_stock_debits,
         }
 
@@ -952,6 +990,9 @@ class WbSuppliesBlock:
     def transit_cost_coverage(self) -> dict[str, Any]:
         now_text = self.timestamp_factory()
         rows = self.runtime.list_wb_supplies()
+        awaiting_supply_creation = sum(
+            1 for row in rows if _awaits_real_wb_supply_id(row)
+        )
         eligible = {
             _transit_cost_supply_id(row): row
             for row in rows
@@ -974,6 +1015,7 @@ class WbSuppliesBlock:
             "errors": 0,
             "awaiting_recalculation": 0,
             "recalculation_error": 0,
+            "awaiting_supply_creation": awaiting_supply_creation,
         }
         error_taxonomy: dict[str, int] = {}
         last_success_at = ""
@@ -1755,17 +1797,27 @@ class WbSuppliesBlock:
         *,
         active_authoritative_keys: set[str],
         merged_raw_rows: list[Mapping[str, Any]],
+        protected_supply_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         raw_keys = _raw_identity_keys_from_rows(merged_raw_rows)
         delete_keys: list[str] = []
         skipped_historical_absent = 0
+        protected = {str(item) for item in (protected_supply_ids or set())}
         for record in self.runtime.list_wb_supplies_cache_records():
             normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
             status_id = _optional_int(normalized.get("status_id"))
             record_keys = _record_identity_keys(record)
+            supply_id = str(
+                normalized.get("supply_id")
+                or normalized.get("wb_supply_id")
+                or record.get("supply_id")
+                or record.get("wb_supply_id")
+                or ""
+            ).strip()
             if status_id in ACTIVE_RECONCILE_STATUS_IDS:
                 if record_keys and not (record_keys & active_authoritative_keys) and not (record_keys & raw_keys):
-                    delete_keys.append(_record_primary_delete_key(record))
+                    if supply_id not in protected:
+                        delete_keys.append(_record_primary_delete_key(record))
             elif status_id in HISTORICAL_STATUS_IDS and record_keys and not (record_keys & raw_keys):
                 skipped_historical_absent += 1
         deleted_count = self.runtime.delete_wb_supply_records(delete_keys)
@@ -3514,11 +3566,20 @@ def _row_with_transit_cost_enrichment(
     result = dict(row)
     enrichment = _lookup_transit_cost_enrichment(row, enrichments)
     amount = _optional_number(enrichment.get("amount")) if enrichment else None
-    status = str(enrichment.get("status") or "") if enrichment else ""
+    awaiting_supply_creation = _awaits_real_wb_supply_id(row)
+    status = (
+        "awaiting_supply_creation"
+        if awaiting_supply_creation
+        else str(enrichment.get("status") or "") if enrichment else ""
+    )
     confidence = str(enrichment.get("confidence") or "") if enrichment else ""
     is_success = _is_canonical_seller_portal_transit_enrichment(enrichment)
     result["seller_portal_transit_cost"] = amount if is_success else None
-    result["seller_portal_transit_cost_display"] = str(enrichment.get("amount_label") or _format_effective_cost(amount)) if is_success else "—"
+    result["seller_portal_transit_cost_display"] = (
+        str(enrichment.get("amount_label") or _format_effective_cost(amount))
+        if is_success
+        else "Ожидает создания поставки" if awaiting_supply_creation else "—"
+    )
     result["seller_portal_transit_cost_source"] = str(enrichment.get("source") or "") if enrichment else ""
     result["seller_portal_transit_cost_evidence_type"] = str(enrichment.get("evidence_type") or "") if enrichment else ""
     result["seller_portal_transit_cost_fetched_at"] = str(enrichment.get("fetched_at") or "") if enrichment else ""
@@ -3550,8 +3611,12 @@ def _row_with_transit_cost_enrichment(
         result["effective_cost_source"] = SELLER_PORTAL_TRANSIT_COST_SOURCE
     else:
         result["effective_cost_total"] = None
-        result["effective_cost_display"] = "—"
-        result["effective_cost_source"] = "unknown"
+        result["effective_cost_display"] = (
+            "Ожидает создания поставки" if awaiting_supply_creation else "—"
+        )
+        result["effective_cost_source"] = (
+            "awaiting_supply_creation" if awaiting_supply_creation else "unknown"
+        )
     return result
 
 
@@ -3596,13 +3661,34 @@ def _row_identity_values(row: Mapping[str, Any]) -> set[str]:
 
 
 def _transit_cost_supply_id(row: Mapping[str, Any]) -> str:
-    for key in ("wb_supply_id", "visible_number", "supply_id"):
-        value = str(row.get(key) or "").strip()
-        if value.startswith("supply:"):
-            value = value.removeprefix("supply:")
-        if value and value.isdigit():
-            return value
+    value = str(row.get("wb_supply_id") or "").strip()
+    if value.startswith("supply:"):
+        value = value.removeprefix("supply:")
+    if value.isdigit():
+        return value
+    if _optional_int(row.get("status_id")) == 1:
+        return ""
+    cache_key = str(row.get("cache_key") or "").strip()
+    if cache_key.startswith("preorder:"):
+        return ""
+    for key in ("supply_id", "visible_number"):
+        fallback = str(row.get(key) or "").strip().removeprefix("supply:")
+        if fallback.isdigit():
+            return fallback
     return ""
+
+
+def _awaits_real_wb_supply_id(row: Mapping[str, Any]) -> bool:
+    has_transit = bool(
+        row.get("has_transit_cost_marker")
+        or str(row.get("transit_warehouse_id") or "").strip()
+        or str(row.get("transit_warehouse_name") or "").strip()
+    )
+    return bool(
+        has_transit
+        and _optional_int(row.get("status_id")) == 1
+        and not _transit_cost_supply_id(row)
+    )
 
 
 def _is_transit_cost_enrichment_candidate(row: Mapping[str, Any]) -> bool:

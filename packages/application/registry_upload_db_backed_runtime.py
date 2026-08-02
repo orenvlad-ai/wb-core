@@ -1523,6 +1523,7 @@ class RegistryUploadDbBackedRuntime:
         active: bool,
         warehouse_ids: Iterable[int],
         warehouse_identities: Iterable[Mapping[str, Any]],
+        warehouse_entries: Iterable[Mapping[str, Any]] = (),
         reason: str,
         effective_from: str,
         effective_to: str,
@@ -1541,6 +1542,7 @@ class RegistryUploadDbBackedRuntime:
         _validate_timestamp(created_at, field_name="created_at")
         normalized_ids = sorted({int(item) for item in warehouse_ids})
         identities = [dict(item) for item in warehouse_identities]
+        entries = [dict(item) for item in warehouse_entries]
         legacy = [dict(item) for item in legacy_payloads]
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
@@ -1568,6 +1570,7 @@ class RegistryUploadDbBackedRuntime:
                     active,
                     warehouse_ids_json,
                     warehouse_identities_json,
+                    warehouse_entries_json,
                     reason,
                     effective_from,
                     effective_to,
@@ -1577,7 +1580,7 @@ class RegistryUploadDbBackedRuntime:
                     source,
                     legacy_payloads_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_seller_id,
@@ -1585,6 +1588,7 @@ class RegistryUploadDbBackedRuntime:
                     1 if active else 0,
                     json.dumps(normalized_ids, ensure_ascii=False, sort_keys=True),
                     json.dumps(identities, ensure_ascii=False, sort_keys=True),
+                    json.dumps(entries, ensure_ascii=False, sort_keys=True),
                     str(reason or ""),
                     normalized_from,
                     normalized_to,
@@ -10270,6 +10274,7 @@ def _wb_incident_policy_row_to_dict(
 ) -> dict[str, Any]:
     if row is None:
         return {"status": "missing", "seller_id": seller_id, "revision": 0}
+    column_names = set(row.keys())
     return {
         "status": "ok",
         "seller_id": str(row["seller_id"]),
@@ -10277,6 +10282,11 @@ def _wb_incident_policy_row_to_dict(
         "active": bool(row["active"]),
         "warehouse_ids": _loads_json_list(row["warehouse_ids_json"]),
         "warehouse_identities": _loads_json_list(row["warehouse_identities_json"]),
+        "warehouse_entries": (
+            _loads_json_list(row["warehouse_entries_json"])
+            if "warehouse_entries_json" in column_names
+            else []
+        ),
         "reason": str(row["reason"] or ""),
         "effective_from": str(row["effective_from"] or ""),
         "effective_to": str(row["effective_to"] or ""),
@@ -10653,6 +10663,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             active INTEGER NOT NULL CHECK (active IN (0, 1)),
             warehouse_ids_json TEXT NOT NULL DEFAULT '[]',
             warehouse_identities_json TEXT NOT NULL DEFAULT '[]',
+            warehouse_entries_json TEXT NOT NULL DEFAULT '[]',
             reason TEXT NOT NULL DEFAULT '',
             effective_from TEXT NOT NULL,
             effective_to TEXT NOT NULL DEFAULT '',
@@ -10897,6 +10908,42 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_lines_by_nm
         ON sheet_vitrina_v1_ff_stock_operation_lines(nm_id);
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_inventory_reconciliations (
+            reconciliation_id TEXT PRIMARY KEY,
+            source_sha256 TEXT NOT NULL,
+            source_filename TEXT NOT NULL,
+            source_content_type TEXT NOT NULL,
+            source_file_blob BLOB NOT NULL,
+            business_date TEXT NOT NULL,
+            plan_fingerprint TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            approval_reference TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            operation_ids_json TEXT NOT NULL,
+            before_digest TEXT NOT NULL,
+            non_target_digest TEXT NOT NULL,
+            after_digest TEXT NOT NULL,
+            reconciliation_json TEXT NOT NULL,
+            UNIQUE(source_sha256,business_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_inventory_cost_bases (
+            basis_version_id TEXT NOT NULL,
+            nm_id INTEGER NOT NULL,
+            effective_from TEXT NOT NULL,
+            unit_cost_rub TEXT NOT NULL,
+            basis_kind TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            source_reference TEXT NOT NULL,
+            approval_reference TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(basis_version_id,nm_id)
+        );
+
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_reservation_operations (
             operation_id TEXT PRIMARY KEY,
             source_key TEXT NOT NULL UNIQUE,
@@ -10935,6 +10982,27 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             watermark_source_created_at TEXT,
             watermark_supply_date TEXT,
             diagnostics_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_wb_supply_lifecycle (
+            supply_id TEXT PRIMARY KEY,
+            first_seen_complete_snapshot_at TEXT NOT NULL,
+            last_seen_complete_snapshot_at TEXT NOT NULL,
+            last_observation_id TEXT NOT NULL,
+            last_observation_at TEXT NOT NULL,
+            consecutive_missing_complete_snapshots INTEGER NOT NULL DEFAULT 0,
+            lifecycle_state TEXT NOT NULL,
+            original_debit_operation_id TEXT NOT NULL,
+            return_operation_id TEXT NOT NULL,
+            return_source_revision TEXT NOT NULL,
+            last_record_json TEXT NOT NULL,
+            diagnostics_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS ff_stock_wb_supply_lifecycle_state
+        ON sheet_vitrina_v1_ff_stock_wb_supply_lifecycle(
+            lifecycle_state,consecutive_missing_complete_snapshots,updated_at
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_plan_report_monthly_baseline (
@@ -12111,6 +12179,12 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipment_lines",
         column_name="price_conformity_context_json",
         column_sql="TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_wb_incident_policy_revisions",
+        column_name="warehouse_entries_json",
+        column_sql="TEXT NOT NULL DEFAULT '[]'",
     )
     _ensure_column(
         conn,

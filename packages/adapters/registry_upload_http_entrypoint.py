@@ -72,6 +72,7 @@ from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.partner_report import PartnerReportError
 from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
+from packages.application.warehouse_functional import WarehouseFunctionalError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
@@ -4115,14 +4116,41 @@ def _build_handler(
                     if parsed.path == DEFAULT_WAREHOUSES_PATH:
                         payload = entrypoint.handle_warehouses_overview_request()
                     else:
-                        warehouse_key = urllib_parse.unquote(
+                        relative = urllib_parse.unquote(
                             parsed.path[len(DEFAULT_WAREHOUSES_PREFIX) :]
-                        ).strip()
-                        if not warehouse_key or "/" in warehouse_key:
+                        ).strip("/")
+                        parts = [item for item in relative.split("/") if item]
+                        if not parts:
                             raise WarehouseOpeningSnapshotError("invalid warehouse path")
-                        payload = entrypoint.handle_warehouse_detail_request(warehouse_key)
-                except WarehouseOpeningSnapshotError as exc:
-                    status = HTTPStatus.NOT_FOUND if str(exc).startswith("unknown warehouse:") else HTTPStatus.BAD_REQUEST
+                        warehouse_key = parts[0]
+                        if len(parts) == 1:
+                            payload = entrypoint.handle_warehouse_detail_request(warehouse_key)
+                        elif len(parts) == 2 and parts[1] == "documents":
+                            query = _flatten_query_params(parsed.query)
+                            payload = entrypoint.handle_warehouse_documents_request(
+                                warehouse_key,
+                                page=int(query.get("page") or 1),
+                                limit=int(query.get("limit") or 25),
+                            )
+                        elif len(parts) == 3 and parts[1] == "documents":
+                            payload = entrypoint.handle_warehouse_document_detail_request(
+                                warehouse_key,
+                                parts[2],
+                            )
+                        elif len(parts) == 3 and parts[1] == "balances":
+                            payload = entrypoint.handle_warehouse_balance_detail_request(
+                                warehouse_key,
+                                int(parts[2]),
+                            )
+                        else:
+                            raise WarehouseOpeningSnapshotError("invalid warehouse path")
+                except (WarehouseOpeningSnapshotError, WarehouseFunctionalError, ValueError) as exc:
+                    message = str(exc)
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if message.startswith("unknown warehouse:") or "not found" in message
+                        else HTTPStatus.BAD_REQUEST
+                    )
                     _write_json_response(
                         self,
                         status,
@@ -4136,7 +4164,7 @@ def _build_handler(
                         {"error": "Остатки / Склады failed"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                _write_etag_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_FF_STOCKS_PATH:
@@ -6397,6 +6425,8 @@ def _write_json_response(
     handler: BaseHTTPRequestHandler,
     status: HTTPStatus,
     payload: Any,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> None:
     if _payload_is_sqlite_contention(payload):
         state = current_sqlite_contention_state()
@@ -6442,8 +6472,28 @@ def _write_json_response(
         if str(payload.get("code") or "") == "business_data_maintenance":
             handler.send_header("Retry-After", "5")
     handler.send_header("Content-Length", str(len(body)))
+    for key, value in dict(extra_headers or {}).items():
+        handler.send_header(str(key), str(value))
     handler.end_headers()
     _write_response_body(handler, body)
+
+
+def _write_etag_json_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    payload: Any,
+) -> None:
+    etag = str(payload.get("etag") or "") if isinstance(payload, Mapping) else ""
+    if etag and str(handler.headers.get("If-None-Match") or "").strip() == etag:
+        handler.send_response(HTTPStatus.NOT_MODIFIED.value)
+        handler.send_header("ETag", etag)
+        handler.send_header("Cache-Control", "private, no-cache")
+        handler.end_headers()
+        return
+    headers = {"Cache-Control": "private, no-cache"}
+    if etag:
+        headers["ETag"] = etag
+    _write_json_response(handler, status, payload, extra_headers=headers)
 
 
 def _payload_is_sqlite_contention(payload: Any) -> bool:

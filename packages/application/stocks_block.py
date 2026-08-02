@@ -354,7 +354,7 @@ def build_wb_warehouse_exclusion(
     for warehouse_id, option in sorted(
         options_by_id.items(),
         key=lambda item: (
-            -float(item[1]["total_contour"]),
+            -float(item[1]["stock_quantity"]),
             str(item[1]["warehouse_name"]).casefold(),
             item[0],
         ),

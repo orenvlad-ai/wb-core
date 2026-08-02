@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-43-FF-STOCK-LEDGER-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать canonical contract server-owned FF quantity and reservation ledgers: единый пользовательский физический/зарезервированный/доступный остаток в `Остатки -> Склады и себестоимость -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, guarded WB movements и расчётный источник `Остатки ФФ`."
-scope: "Operator supply contour for FF quantity operations and physically justified WB-supply reservations plus the reused balance source for the unified warehouse screen: runtime SQLite operation/reservation headers and lines, previews, original manual Excel storage, protected legacy HTTP routes, operator audit journal, idempotent supplier/WB movements, identity/availability guards and factory-order/WB regional stock_ff source. Cost freshness is independent and cannot reserve physically available goods."
+scope: "Operator supply contour for FF quantity operations and physically justified WB-supply reservations plus the reused balance source for the unified warehouse screen: runtime SQLite operation/reservation/lifecycle headers and lines, audited inventory reconciliation, original manual Excel storage, protected legacy HTTP routes, idempotent supplier/WB movements, exact FF debit-cost snapshots, identity/availability guards and factory-order/WB regional stock_ff source."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -27,6 +27,8 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint"
   - "sheet_vitrina_v1_ff_stock_reservation_operations"
   - "sheet_vitrina_v1_ff_stock_reservation_lines"
+  - "sheet_vitrina_v1_ff_stock_wb_supply_lifecycle"
+  - "sheet_vitrina_v1_ff_inventory_reconciliations"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -40,6 +42,8 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
+  - "apps/ff_inventory_reconciliation.py"
+  - "apps/ff_inventory_reconciliation_smoke.py"
   - "apps/warehouse_targeted_replay_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
   - "apps/factory_order_supply_smoke.py"
@@ -47,7 +51,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus a separate append-only reservation ledger. An eligible confirmed WB supply is debited atomically when its exact whole composition is physically available; missing transit/services/storage/paid-acceptance cost changes only cost freshness and never creates a reserve. Reservation is limited to physical shortage or unresolved composition/identity. Supplier receipt automatically rechecks reservations. Manual Excel documents require preview then explicit confirm, and ordinary WB operations retain checkpoint/activation guards."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory targets use one content-addressed dry-run/apply/compensating-rollback contour."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -173,6 +177,55 @@ Activation and balance guards:
 - A WB record whose business date (`source_created_at` / API `createDate`, then `supply_date` / `fact_date`) is earlier than the activation operation is skipped as historical cache/backfill evidence.
 - If the cached WB goods composition would make any SKU balance negative, the whole automatic writeoff is skipped with diagnostics instead of silently creating a negative balance.
 - Repeated sync/backfill/detail enrichment remains idempotent by `wb_supply_debit:<cache_key or supply_id>` and does not duplicate an existing writeoff.
+
+### Exact debit cost and automatic return lifecycle
+
+Before a new physical FF debit the ledger freezes `cost_snapshot` on every
+line from the active functional `ff` balance: exact `version_id`, business
+date, plan fingerprint, positive WAC and signed capital. A publication older
+than an intervening positive FF movement is rejected as
+`wb_supply_ff_cost_snapshot_missing`; the supply remains reserved until the
+functional replay publishes its new FF WAC. Several debits in one bounded run
+may reuse the same pre-run WAC because a proportional debit does not change
+moving WAC. Transit, FF services, storage and WB acceptance remain downstream
+cost layers and may be completed later without repeating the physical debit.
+
+`sheet_vitrina_v1_ff_stock_wb_supply_lifecycle` records complete official
+supply observations. One missing response is `missing_debounced`, and repeating
+the same observation id does not advance the counter. A proven cancelled
+status is immediate evidence; otherwise two distinct complete active-slice
+observations are required. Only `packed - accepted` is returned, and every
+return line inherits the exact original FF debit WAC/capital. The economic
+return identity is one idempotent operation per original debit and canonical
+supply-source revision; later observation timestamps/proof revisions cannot
+mint another movement after a crash or lost lifecycle pointer. Reappearance
+after return is recorded but creates neither a second debit nor a second
+return. A cache row with no physical debit needs no stock return and may be
+removed after debounce; historical accepted rows retain their ordinary cache
+preservation rule.
+
+### Audited manager inventory reconciliation
+
+`apps/ff_inventory_reconciliation.py` is the only runner for a manager XLSX
+physical target. Dry-run is default. It validates exact headers/business date,
+unique `nmId`, one active nomenclature identity, current FF balances, confirmed
+supply-return proofs and a frozen same-SKU FF cost basis no later than the
+business date. The hierarchy is exact original debit, same-date FF WAC, last
+earlier FF WAC, latest certified landed inbound cost, then only an explicit
+positive row in `sheet_vitrina_v1_ff_inventory_cost_bases` whose source type is
+`exact_original_source_debit` or `business_approved_estimate`; the latter also
+requires immutable approval and provenance fields. Proven returns are separate documents. Remaining positive and
+negative SKU deltas become one inventory receipt and one inventory writeoff,
+respectively; direct balance updates and synthetic zero cost are forbidden.
+The source bytes/SHA-256, per-SKU before/return/inventory/target/cost/capital,
+source revisions, target and non-target digests, approval reference and exact
+operation ids form the immutable manifest/fingerprint.
+
+Apply requires that exact fresh fingerprint and human approval reference,
+rechecks all guards under `BEGIN IMMEDIATE`, stores the XLSX content-addressed
+evidence and appends documents atomically. Exact repeat is T0. Readback proves
+every target SKU and total. Recovery tier T1 appends exact inverse-cost
+compensating documents; it never deletes or rewrites the source/audit history.
 
 ## 6.1. Bounded Targeted Checkpoint Reconciliation
 

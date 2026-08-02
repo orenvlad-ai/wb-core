@@ -119,7 +119,7 @@ def _check_shared_warehouse_exclusion() -> None:
     assert len(
         [item for item in selected["options"] if item["warehouse_name"] == "Одинаковое имя"]
     ) == 2
-    assert [item["warehouse_id"] for item in selected["options"]] == [120762, 0, 999]
+    assert [item["warehouse_id"] for item in selected["options"]] == [120762, 999, 0]
     missing = build_wb_warehouse_exclusion(
         items=items,
         warehouse_rows=rows,

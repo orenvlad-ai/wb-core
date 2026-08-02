@@ -261,6 +261,12 @@ def main() -> None:
         if initial.get("sync", {}).get("new_rows") != 2:
             raise AssertionError(f"active deletion seed must load planned and accepted rows, got {initial.get('sync')}")
         source.rows = []
+        first_gap = block.sync_supplies({"limit": 1000})
+        if (
+            first_gap.get("sync", {}).get("deleted_active_rows") != 0
+            or runtime.load_wb_supply_record("8001") is None
+        ):
+            raise AssertionError(f"one complete API gap must be debounced, got {first_gap.get('sync')}")
         deleted = block.sync_supplies({"limit": 1000})
         deleted_sync = deleted.get("sync", {})
         remaining_ids = [row.get("wb_supply_id") for row in block.list_supplies({"size_filter": "all"}).get("rows", [])]
@@ -421,7 +427,7 @@ def main() -> None:
             or first_debits.get("created_count") != 0
             or first_debits.get("skipped_reasons", {}).get("wb_supply_before_auto_writeoff_checkpoint") != 1
             or first_debits.get("skipped_reasons", {}).get(
-                "wb_supply_reserved_waiting_for_validated_downstream_costs"
+                "wb_supply_ff_cost_snapshot_missing"
             ) != 1
             or float(
                 (first_debits.get("reservation_summary") or {}).get(
@@ -434,14 +440,14 @@ def main() -> None:
         ):
             raise AssertionError(
                 f"sync must skip baseline-known supply and reserve the post-checkpoint "
-                f"supply while validated downstream cost is missing, "
+                f"supply while the exact FF cost snapshot is missing, "
                 f"got checkpoint={checkpoint} debits={first_debits} balance={balance_after_first}"
             )
         operations = runtime.list_ff_stock_operations(limit=20)
         wb_ops = [item for item in operations if item.get("source_type") == "wb_supply"]
         if wb_ops:
             raise AssertionError(
-                f"missing validated cost must not create a physical WB debit, got {wb_ops}"
+                f"missing exact FF cost must not create a physical WB debit, got {wb_ops}"
             )
 
         second = block.sync_supplies({"limit": 1000})

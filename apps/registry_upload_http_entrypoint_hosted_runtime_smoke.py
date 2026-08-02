@@ -3367,6 +3367,46 @@ def main() -> None:
     )
     if cleanup_apply_args.cleanup_apply is not True:
         raise AssertionError("hosted runner must explicitly distinguish cleanup apply")
+    with TemporaryDirectory(prefix="ff-inventory-hosted-smoke-") as inventory_temp_dir:
+        inventory_source = Path(inventory_temp_dir) / "manager.xlsx"
+        inventory_source.write_bytes(b"fixture-xlsx")
+        inventory_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-inventory-reconciliation-apply",
+                "--source-file",
+                str(inventory_source),
+                "--business-date",
+                "2026-07-31",
+                "--return-supply-id",
+                "41132380",
+                "--fingerprint",
+                "sha256:inventory-fixture",
+                "--approval-reference",
+                "github-comment:fixture",
+            ]
+        )
+        if (
+            inventory_args.handler is not hosted_runtime.run_ff_inventory_reconciliation_command
+            or inventory_args.ff_inventory_action != "apply"
+        ):
+            raise AssertionError("hosted runner must expose the gated FF inventory apply command")
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_ff_inventory_reconciliation",
+                return_value={"status": "applied", "fingerprint": "sha256:inventory-fixture"},
+            ) as inventory_remote,
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_ff_inventory_reconciliation_command(inventory_args)
+        inventory_call = inventory_remote.call_args.kwargs
+        if (
+            inventory_call.get("business_date") != "2026-07-31"
+            or inventory_call.get("return_supply_ids") != ("41132380",)
+            or inventory_call.get("fingerprint") != "sha256:inventory-fixture"
+            or inventory_call.get("approval_reference") != "github-comment:fixture"
+        ):
+            raise AssertionError("hosted FF inventory apply lost its exact manifest gate inputs")
     opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
     if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
         raise AssertionError("hosted runner must expose canonical warehouse opening commands")

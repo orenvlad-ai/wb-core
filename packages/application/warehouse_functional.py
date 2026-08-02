@@ -3490,6 +3490,88 @@ class WarehouseFunctionalBlock:
             raise WarehouseFunctionalError("functional cutover must be applied before emergency rebuild")
         return self._build_plan(kind="emergency_rebuild", wb_payload=self._last_good_wb_payload())
 
+    def wb_warehouse_exclusion_options(
+        self,
+        *,
+        excluded_warehouse_ids: Iterable[int] = (),
+    ) -> dict[str, Any]:
+        """Read compact warehouse options from the active immutable WB snapshot.
+
+        This method is deliberately local-only: opening the warehouse page must
+        never trigger an official WB fetch or publish a new functional version.
+        """
+
+        selected = sorted(
+            {
+                int(warehouse_id)
+                for warehouse_id in excluded_warehouse_ids
+                if int(warehouse_id) >= 0
+            }
+        )
+        with _connect_readonly(self.runtime.db_path) as conn:
+            active_version_id = self._active_version_id(connection=conn)
+            row = conn.execute(
+                """SELECT *
+                   FROM sheet_vitrina_v1_warehouse_wb_option_read_models
+                   WHERE version_id=?""",
+                (active_version_id,),
+            ).fetchone()
+        if row is None:
+            raise WarehouseFunctionalError(
+                "active warehouse version has no compact WB option read model; "
+                "run the canonical warehouse functional publication"
+            )
+        payload = dict(_loads(row["payload_json"], {}))
+        options = [dict(item) for item in payload.get("options") or []]
+        selected_set = set(selected)
+        seen_ids: set[int] = set()
+        for option in options:
+            warehouse_id = int(option.get("warehouse_id") or 0)
+            seen_ids.add(warehouse_id)
+            option["selected"] = warehouse_id in selected_set
+        missing_selected = sorted(selected_set - seen_ids)
+        for warehouse_id in missing_selected:
+            service_group = warehouse_id == 0
+            options.append(
+                {
+                    "warehouse_id": warehouse_id,
+                    "warehouse_name": (
+                        "Остальные — служебная группа WB"
+                        if service_group
+                        else f"warehouseId {warehouse_id}"
+                    ),
+                    "stock_quantity": 0.0,
+                    "in_way_to_client": 0.0,
+                    "in_way_from_client": 0.0,
+                    "total_contour": 0.0,
+                    "temporarily_missing": True,
+                    "selected": True,
+                    "destination_eligible": not service_group,
+                    "service_group": service_group,
+                    "message": (
+                        "Агрегированные остатки, которые WB не привязал к конкретному складу"
+                        if service_group
+                        else "Склад временно отсутствует в текущем снимке"
+                    ),
+                }
+            )
+        options.sort(
+            key=lambda item: (
+                -float(item.get("stock_quantity") or 0.0),
+                str(item.get("warehouse_name") or "").casefold(),
+                int(item.get("warehouse_id") or 0),
+            )
+        )
+        return {
+            **payload,
+            "contract_version": 2,
+            "active_version_id": active_version_id,
+            "read_model_etag": str(row["etag"]),
+            "excluded_wb_warehouse_ids": selected,
+            "temporarily_missing_selected_ids": missing_selected,
+            "options": options,
+        }
+
     def build_targeted_recovery_plan(
         self,
         *,
@@ -4333,6 +4415,14 @@ class WarehouseFunctionalBlock:
                         (now, now, version_id, now),
                     )
                 self._insert_documents(conn, version_id=version_id, plan=normalized, created_at=now)
+                _materialize_compact_warehouse_read_models(
+                    conn,
+                    version_id=version_id,
+                    plan=normalized,
+                    created_at=now,
+                    effective_at=publication_effective_at,
+                    business_effective_date=business_effective_date,
+                )
                 _verify_version(conn, version_id=version_id, expected=normalized)
                 for request in normalized.get("targeted_recalc_requests") or []:
                     updated = conn.execute(
@@ -4507,6 +4597,10 @@ class WarehouseFunctionalBlock:
                         (version_id,),
                     )
                     conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_wb_option_read_models WHERE version_id=?",
+                        (version_id,),
+                    )
+                    conn.execute(
                         "DELETE FROM sheet_vitrina_v1_warehouse_unmatched_doprinato WHERE version_id=?",
                         (version_id,),
                     )
@@ -4516,6 +4610,10 @@ class WarehouseFunctionalBlock:
                     )
                     conn.execute(
                         "DELETE FROM sheet_vitrina_v1_warehouse_functional_documents WHERE version_id=?",
+                        (version_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM sheet_vitrina_v1_warehouse_functional_read_models WHERE version_id=?",
                         (version_id,),
                     )
                     conn.execute(
@@ -4610,9 +4708,446 @@ class WarehouseFunctionalBlock:
             "total": _total_summary(summaries),
         }
 
+    def compact_warehouse_detail(self, warehouse_key: str) -> dict[str, Any]:
+        """Read one active compact model without duplicate global readback."""
+
+        if warehouse_key not in STAGES:
+            raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        with _connect_readonly(self.runtime.db_path) as conn:
+            active = conn.execute(
+                """
+                SELECT version.* FROM sheet_vitrina_v1_warehouse_functional_active active
+                JOIN sheet_vitrina_v1_warehouse_functional_versions version
+                  ON version.version_id=active.version_id WHERE active.slot=1
+                """
+            ).fetchone()
+            if active is None:
+                return {
+                    "contract_name": CONTRACT_NAME,
+                    "contract_version": CONTRACT_VERSION,
+                    "status": "not_initialized",
+                    "balances": [],
+                    "documents": [],
+                }
+            version_id = str(active["version_id"])
+            model = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_warehouse_functional_read_models
+                WHERE version_id=? AND warehouse_key=?
+                """,
+                (version_id, warehouse_key),
+            ).fetchone()
+            if model is not None:
+                payload = dict(_loads(model["payload_json"], {}))
+                stored_etag = str(model["etag"] or "")
+            else:
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT version_id,warehouse_key,nm_id,quantity,wac_rub,
+                               capital_rub,cost_covered_quantity,quality,certified,
+                               wb_quantity,wb_in_way_to_client,wb_in_way_from_client
+                        FROM sheet_vitrina_v1_warehouse_functional_balances
+                        WHERE version_id=? AND warehouse_key=? ORDER BY nm_id
+                        """,
+                        (version_id, warehouse_key),
+                    ).fetchall()
+                ]
+                public_rows = [
+                    {
+                        **item,
+                        "line_id": f"{version_id}:{warehouse_key}:{int(item['nm_id'])}",
+                        "average_unit_cost_rub": item.get("wac_rub"),
+                        "physical_quantity": item.get("quantity"),
+                        "reserved_quantity": "0",
+                        "available_quantity": item.get("quantity"),
+                        "unsecured_reservation_quantity": "0",
+                        "reservation_supply_ids": [],
+                        "quality_presentation": _warehouse_quality_presentation(item.get("quality")),
+                        "cost_status_presentation": _warehouse_balance_status_presentation(
+                            item.get("quality"), certified=bool(item.get("certified"))
+                        ),
+                        "provenance_available": True,
+                    }
+                    for item in rows
+                ]
+                summaries = _summaries([_line_from_payload(item) for item in rows])
+                summary = summaries[warehouse_key]
+                payload = {
+                    "contract_name": CONTRACT_NAME,
+                    "contract_version": CONTRACT_VERSION,
+                    "status": "ready",
+                    "read_model": "compact_fallback_v1",
+                    "active_version": _version_public(active),
+                    "warehouse": {
+                        "warehouse_key": warehouse_key,
+                        "warehouse_name": STAGE_NAMES[warehouse_key],
+                        **summary,
+                        "sku_count": summary["sku_count"],
+                        "total_quantity": summary["quantity"],
+                        "total_capital_rub": summary["capital_rub"],
+                        "average_unit_cost_rub": summary["wac_rub"],
+                        "updated_at": str(active["effective_at"]),
+                        "source_basis": "canonical compact functional warehouse projection",
+                    },
+                    "balances": public_rows,
+                    "documents": [],
+                    "documents_page": {"loaded": False, "page": 1, "limit": 25},
+                }
+                stored_etag = ""
+            sync = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1"
+            ).fetchone()
+            reservation_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT supply_id,nm_id,quantity
+                    FROM sheet_vitrina_v1_warehouse_functional_ff_reservations
+                    WHERE version_id=? ORDER BY supply_id,nm_id
+                    """,
+                    (version_id,),
+                ).fetchall()
+            ]
+            document_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_functional_documents
+                    WHERE warehouse_key=?
+                    """,
+                    (warehouse_key,),
+                ).fetchone()[0]
+            )
+            names = _nomenclature_names_from_connection(conn)
+        ff_reservations = _ff_reservation_public_state_from_snapshot(
+            reservations=reservation_rows,
+            balances=[
+                item for item in payload.get("balances") or []
+                if str(item.get("warehouse_key") or "") == STAGE_FF
+            ],
+        ) if warehouse_key == STAGE_FF else {"by_nm": {}, "rows": []}
+        reservations_by_nm = dict(ff_reservations.get("by_nm") or {})
+        balances: list[dict[str, Any]] = []
+        balance_nm_ids: set[int] = set()
+        for raw in payload.get("balances") or []:
+            item = dict(raw)
+            nm_id = int(item.get("nm_id") or 0)
+            balance_nm_ids.add(nm_id)
+            identity = names.get(nm_id, {})
+            reservation = reservations_by_nm.get(str(nm_id), {})
+            physical = _decimal(item.get("quantity"))
+            reserved = _decimal(reservation.get("quantity")) if warehouse_key == STAGE_FF else ZERO
+            cost_status = dict(item.get("cost_status_presentation") or {})
+            identity_warning = str(identity.get("warning") or "")
+            balances.append(
+                {
+                    **item,
+                    "sku": identity.get("sku") or str(nm_id),
+                    "nomenclature_name": identity.get("name") or "",
+                    "barcode": identity.get("barcode") or "",
+                    "identity_source": identity.get("source") or "nm_id",
+                    "physical_quantity": _text(physical),
+                    "reserved_quantity": _text(reserved),
+                    "available_quantity": _text(max(physical - reserved, ZERO)),
+                    "unsecured_reservation_quantity": _text(max(reserved - physical, ZERO)),
+                    "reservation_supply_ids": list(reservation.get("supply_ids") or []),
+                    "identity_warning": identity_warning,
+                    "quality_tone": "warning" if identity_warning else str(cost_status.get("tone") or "warning"),
+                    "warning": " · ".join(
+                        value for value in (
+                            str(cost_status.get("label_ru") or ""), identity_warning
+                        ) if value
+                    ),
+                    "provenance": None,
+                    "human_evidence": None,
+                    "provenance_available": True,
+                }
+            )
+        if warehouse_key == STAGE_FF:
+            for nm_key, reservation in sorted(reservations_by_nm.items(), key=lambda item: int(item[0])):
+                nm_id = int(nm_key)
+                if nm_id in balance_nm_ids:
+                    continue
+                identity = names.get(nm_id, {})
+                quantity = _text(_decimal(reservation.get("quantity")))
+                balances.append(
+                    {
+                        "line_id": f"reservation:{nm_id}",
+                        "version_id": version_id,
+                        "warehouse_key": STAGE_FF,
+                        "nm_id": nm_id,
+                        "sku": identity.get("sku") or str(nm_id),
+                        "nomenclature_name": identity.get("name") or "",
+                        "barcode": identity.get("barcode") or "",
+                        "quantity": "0",
+                        "physical_quantity": "0",
+                        "reserved_quantity": quantity,
+                        "available_quantity": "0",
+                        "unsecured_reservation_quantity": quantity,
+                        "capital_rub": "0",
+                        "wac_rub": None,
+                        "average_unit_cost_rub": None,
+                        "certified": False,
+                        "quality": "reservation_waiting_for_receipt",
+                        "quality_tone": "warning",
+                        "warning": "Ожидает поступления",
+                        "reservation_supply_ids": list(reservation.get("supply_ids") or []),
+                        "provenance_available": False,
+                    }
+                )
+        sync_payload = dict(sync) if sync is not None else {}
+        status = _summary_status(balances, warehouse_key, sync_payload)
+        status_presentation = _warehouse_status_presentation(status=status, sync=sync_payload)
+        warehouse = dict(payload.get("warehouse") or {})
+        warehouse.update(
+            {
+                "status": status,
+                "status_label": status_presentation["label_ru"],
+                "status_description": status_presentation["description_ru"],
+                "ff_reservations": ff_reservations if warehouse_key == STAGE_FF else None,
+            }
+        )
+        if warehouse_key == STAGE_WB:
+            warehouse["wb_contour"] = {
+                "quantity": warehouse.get("wb_quantity") or "0",
+                "in_way_to_client": warehouse.get("wb_in_way_to_client") or "0",
+                "in_way_from_client": warehouse.get("wb_in_way_from_client") or "0",
+                "total": warehouse.get("total_quantity") or warehouse.get("quantity") or "0",
+                "formula_ru": "Всего в контуре WB = На складах WB + В пути к покупателям + В пути возврата на WB.",
+            }
+        result = {
+            **payload,
+            "probe_shape": {
+                "warehouse_key": warehouse_key,
+                "required_collections": ["balances"],
+                "documents_lazy": True,
+                "provenance_lazy": True,
+            },
+            "active_version": _version_public(active),
+            "sync": sync_payload,
+            "sync_presentation": status_presentation,
+            "warehouse": warehouse,
+            "balances": balances,
+            "documents": [],
+            "documents_page": {
+                "loaded": False,
+                "page": 1,
+                "limit": 25,
+                "total_count": document_count,
+            },
+            "legacy_ff_route": "/v1/sheet-vitrina-v1/supply/ff-stocks" if warehouse_key == STAGE_FF else None,
+        }
+        result["etag"] = stored_etag or (
+            '"sha256:'
+            + _hash({"version_id": version_id, "warehouse_key": warehouse_key})
+            + '"'
+        )
+        result["payload_bytes"] = len(_json(result).encode("utf-8"))
+        return result
+
+    def warehouse_documents_page(
+        self,
+        warehouse_key: str,
+        *,
+        page: int = 1,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        if warehouse_key not in STAGES:
+            raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        normalized_limit = min(100, max(1, int(limit)))
+        normalized_page = max(1, int(page))
+        offset = (normalized_page - 1) * normalized_limit
+        with _connect_readonly(self.runtime.db_path) as conn:
+            total = int(conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_functional_documents WHERE warehouse_key=?",
+                (warehouse_key,),
+            ).fetchone()[0])
+            rows = [dict(row) for row in conn.execute(
+                """
+                SELECT document.document_id,document.version_id,document.warehouse_key,
+                       document.document_type,document.occurred_at,document.source_id,
+                       document.source_fingerprint,document.quantity,document.capital_rub,
+                       document.created_at,COUNT(line.line_id) AS sku_count
+                FROM sheet_vitrina_v1_warehouse_functional_documents document
+                LEFT JOIN sheet_vitrina_v1_warehouse_functional_document_lines line
+                  ON line.document_id=document.document_id
+                 AND line.version_id=document.version_id
+                WHERE document.warehouse_key=?
+                GROUP BY document.document_id,document.version_id,document.warehouse_key,
+                         document.document_type,document.occurred_at,document.source_id,
+                         document.source_fingerprint,document.quantity,document.capital_rub,
+                         document.created_at
+                ORDER BY document.occurred_at DESC,document.created_at DESC,document.document_id
+                LIMIT ? OFFSET ?
+                """,
+                (warehouse_key, normalized_limit, offset),
+            ).fetchall()]
+        labels = {
+            "functional_cutover": "Функциональный cutover",
+            "warehouse_sync": "Почасовая версия склада",
+            "wb_final_acceptance_discrepancy": "Расхождение финальной приёмки",
+            "wb_doprinato": "Доприёмка WB",
+            "wb_unmatched_doprinato_audit": "Неразнесённая доприёмка",
+            "wb_pre_cutover_unmatched_audit": "Доприёмка до границы учёта",
+        }
+        documents = []
+        directions = {
+            "wb_final_acceptance_discrepancy": (STAGE_FF_TO_WB, STAGE_DISCREPANCY),
+            "wb_doprinato": (STAGE_DISCREPANCY, STAGE_WB),
+            "wb_unmatched_doprinato_audit": ("transitional_audit", "non_stock"),
+            "wb_pre_cutover_unmatched_audit": ("pre_cutover_audit", "non_stock"),
+        }
+        for item in rows:
+            quantity = _decimal(item.get("quantity"))
+            capital = _decimal(item.get("capital_rub"))
+            warehouse_from, warehouse_to = directions.get(
+                str(item.get("document_type") or ""), ("source", warehouse_key)
+            )
+            documents.append(
+                {
+                    **item,
+                    "document_number": str(item.get("document_id") or ""),
+                    "document_type_label": labels.get(str(item.get("document_type") or ""), str(item.get("document_type") or "")),
+                    "warehouse_name": STAGE_NAMES[warehouse_key],
+                    "warehouse_from_key": warehouse_from,
+                    "warehouse_to_key": warehouse_to,
+                    "source_basis": str(item.get("source_id") or ""),
+                    "total_quantity": _text(quantity),
+                    "total_cost_rub": _text(capital / quantity) if quantity else None,
+                    "total_capital_rub": _text(capital),
+                    "status_label": "Проведено",
+                    "detail_loaded": False,
+                    "lines": [],
+                }
+            )
+        payload = {
+            "contract_name": CONTRACT_NAME,
+            "status": "ready",
+            "warehouse_key": warehouse_key,
+            "documents": documents,
+            "page": {
+                "page": normalized_page,
+                "limit": normalized_limit,
+                "total_count": total,
+                "page_count": max(1, (total + normalized_limit - 1) // normalized_limit),
+                "has_next": offset + normalized_limit < total,
+            },
+        }
+        payload["etag"] = '"sha256:' + _hash(payload) + '"'
+        payload["payload_bytes"] = len(_json(payload).encode("utf-8"))
+        return payload
+
+    def warehouse_document_detail(
+        self,
+        warehouse_key: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        if warehouse_key not in STAGES:
+            raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        with _connect_readonly(self.runtime.db_path) as conn:
+            names = _nomenclature_names_from_connection(conn)
+            document = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_warehouse_functional_documents
+                WHERE warehouse_key=? AND document_id=?
+                ORDER BY created_at DESC,version_id DESC LIMIT 1
+                """,
+                (warehouse_key, document_id),
+            ).fetchone()
+            if document is None:
+                raise WarehouseFunctionalError("warehouse document not found")
+            lines = [dict(row) for row in conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_warehouse_functional_document_lines
+                WHERE document_id=? AND version_id=? ORDER BY nm_id,line_id
+                """,
+                (document_id, str(document["version_id"])),
+            ).fetchall()]
+        item = _document_public(document)
+        public_lines = []
+        parent_quality = str((item.get("provenance") or {}).get("quality") or "")
+        for line in lines:
+            provenance = _loads(line.get("provenance_json"), {})
+            nm_id = int(line.get("nm_id") or 0)
+            identity = names.get(nm_id, {})
+            quality = str(provenance.get("quality") or parent_quality)
+            public_lines.append(
+                {
+                    **line,
+                    "provenance": provenance,
+                    "sku": identity.get("sku") or str(nm_id),
+                    "nomenclature_name": identity.get("name") or "",
+                    "barcode": identity.get("barcode") or "",
+                    "average_unit_cost_rub": line.get("wac_rub"),
+                    "quality_presentation": _warehouse_quality_presentation(quality),
+                    "human_evidence": _warehouse_human_evidence(
+                        provenance,
+                        quantity=line.get("quantity"),
+                        capital_rub=line.get("capital_rub"),
+                        quality=quality,
+                        fallback_date=item.get("occurred_at"),
+                    ),
+                }
+            )
+        payload = {
+            "contract_name": CONTRACT_NAME,
+            "status": "ready",
+            "document": {
+                **item,
+                "document_number": document_id,
+                "warehouse_name": STAGE_NAMES[warehouse_key],
+                "source_basis": str(item.get("source_id") or ""),
+                "human_evidence": _warehouse_human_evidence(
+                    item.get("provenance"),
+                    quantity=item.get("quantity"),
+                    capital_rub=item.get("capital_rub"),
+                    quality=(item.get("provenance") or {}).get("quality"),
+                    fallback_date=item.get("occurred_at"),
+                ),
+                "detail_loaded": True,
+                "lines": public_lines,
+            },
+        }
+        payload["etag"] = '"sha256:' + _hash(payload) + '"'
+        return payload
+
+    def warehouse_balance_detail(self, warehouse_key: str, nm_id: int) -> dict[str, Any]:
+        if warehouse_key not in STAGES or int(nm_id) <= 0:
+            raise WarehouseFunctionalError("invalid warehouse balance identity")
+        with _connect_readonly(self.runtime.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT balance.* FROM sheet_vitrina_v1_warehouse_functional_active active
+                JOIN sheet_vitrina_v1_warehouse_functional_balances balance
+                  ON balance.version_id=active.version_id
+                WHERE active.slot=1 AND balance.warehouse_key=? AND balance.nm_id=?
+                """,
+                (warehouse_key, int(nm_id)),
+            ).fetchone()
+            if row is None:
+                raise WarehouseFunctionalError("warehouse balance not found")
+        item = _balance_public(dict(row))
+        return {
+            "contract_name": CONTRACT_NAME,
+            "status": "ready",
+            "warehouse_key": warehouse_key,
+            "nm_id": int(nm_id),
+            "provenance": item["provenance"],
+            "human_evidence": _warehouse_human_evidence(
+                item["provenance"],
+                quantity=item.get("quantity"),
+                capital_rub=item.get("capital_rub"),
+                quality=item.get("quality"),
+            ),
+        }
+
     def warehouse_detail(self, warehouse_key: str) -> dict[str, Any]:
         if warehouse_key not in STAGES:
             raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        compact = self.compact_warehouse_detail(warehouse_key)
+        if compact.get("status") == "ready":
+            return compact
         readback = self.readback()
         if readback.get("status") != "ready":
             return readback
@@ -4868,59 +5403,14 @@ class WarehouseFunctionalBlock:
         }
 
     def _nomenclature_names(self) -> dict[int, dict[str, str]]:
-        result: dict[int, dict[str, str]] = {}
         try:
-            state = self.runtime.load_current_state()
+            with _connect_readonly(self.runtime.db_path) as conn:
+                return _nomenclature_names_from_connection(conn)
         except Exception:
-            state = None
-        if state is not None:
-            for item in state.config_v2:
-                nm_id = int(item.nm_id)
-                result[nm_id] = {
-                    "sku": str(getattr(item, "sku", "") or getattr(item, "display_name", "") or nm_id),
-                    "name": str(getattr(item, "display_name", "") or ""),
-                    "barcode": str(getattr(item, "barcode", "") or ""),
-                    "source": "config_v2",
-                    "warning": "",
-                }
-        active_by_nm: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
-        try:
-            for item in self.runtime.list_nomenclature_items(active_only=True):
-                nm_id = int(item.get("nm_id") or 0)
-                if nm_id > 0:
-                    active_by_nm[nm_id].append(dict(item))
-        except Exception:
-            active_by_nm = defaultdict(list)
-        for nm_id, candidates in active_by_nm.items():
-            identities = {
-                (
-                    str(item.get("our_sku") or item.get("vendor_code") or "").strip(),
-                    str(item.get("nomenclature_name") or item.get("wb_title") or "").strip(),
-                    str(item.get("barcode") or "").strip(),
-                )
-                for item in candidates
-            }
-            if len(identities) != 1:
-                current = result.setdefault(
-                    nm_id,
-                    {"sku": str(nm_id), "name": "", "barcode": "", "source": "nm_id"},
-                )
-                current["warning"] = "Неоднозначная активная номенклатура — требуется проверка"
-                continue
-            sku, name, barcode = next(iter(identities))
-            current = result.get(nm_id, {})
-            result[nm_id] = {
-                "sku": sku or str(current.get("sku") or nm_id),
-                "name": name or str(current.get("name") or ""),
-                "barcode": barcode or str(current.get("barcode") or ""),
-                "source": "active_nomenclature_exact_nm_id",
-                "warning": "",
-            }
-        return result
+            return {}
 
     def _warehouse_documents(self, warehouse_key: str) -> list[dict[str, Any]]:
-        with _connect(self.runtime.db_path) as conn:
-            ensure_warehouse_functional_schema(conn)
+        with _connect_readonly(self.runtime.db_path) as conn:
             rows = conn.execute(
                 """SELECT document.*
                    FROM sheet_vitrina_v1_warehouse_functional_documents document
@@ -5425,6 +5915,7 @@ class WarehouseFunctionalBlock:
                     delta = _decimal(raw_line.get("quantity_delta"))
                     if nm_id <= 0 or delta == ZERO:
                         continue
+                    exact_cost = _ff_ledger_line_cost_snapshot(raw_line)
                     pool = ff_pools.setdefault(
                         nm_id,
                         {"quantity": ZERO, "capital": ZERO, "operations": [], "opening_version_id": ""},
@@ -5433,7 +5924,14 @@ class WarehouseFunctionalBlock:
                     current_capital = _decimal(pool["capital"])
                     current_wac = current_capital / current_qty if current_qty > ZERO else None
                     if delta > ZERO:
-                        if source_type == "supplier_shipment":
+                        if exact_cost is not None:
+                            inbound_wac = exact_cost["unit_cost_rub"]
+                            inbound_provenance = {
+                                "quality": exact_cost["quality"],
+                                "source": "frozen_ff_ledger_cost_snapshot",
+                                **dict(exact_cost["provenance"]),
+                            }
+                        elif source_type == "supplier_shipment":
                             flow = supplier_flow_costs.get((source_object_id, nm_id))
                             if flow is None:
                                 raise WarehouseFunctionalError(
@@ -5467,12 +5965,35 @@ class WarehouseFunctionalBlock:
                             raise WarehouseFunctionalError(
                                 f"canonical FF replay would be negative for nmId {nm_id} at {operation_id}"
                             )
-                        pool["quantity"] = current_qty - outbound
-                        pool["capital"] = current_capital - outbound * current_wac
-                        inbound_wac = current_wac
-                        inbound_provenance = {"quality": "proportional_wac_outbound"}
+                        outbound_wac = (
+                            exact_cost["unit_cost_rub"]
+                            if exact_cost is not None
+                            else current_wac
+                        )
+                        remaining_qty = current_qty - outbound
+                        remaining_capital = current_capital - outbound * outbound_wac
+                        if remaining_capital < ZERO or (
+                            remaining_qty > ZERO and remaining_capital <= ZERO
+                        ) or (
+                            remaining_qty == ZERO and remaining_capital != ZERO
+                        ):
+                            raise WarehouseFunctionalError(
+                                f"FF outbound {operation_id}:{nm_id} would make capital non-positive"
+                            )
+                        pool["quantity"] = remaining_qty
+                        pool["capital"] = remaining_capital
+                        inbound_wac = outbound_wac
+                        inbound_provenance = (
+                            {
+                                "quality": exact_cost["quality"],
+                                "source": "frozen_ff_ledger_cost_snapshot",
+                                **dict(exact_cost["provenance"]),
+                            }
+                            if exact_cost is not None
+                            else {"quality": "proportional_wac_outbound"}
+                        )
                         if source_type in {"wb_supply", "wb_supply_targeted_reconciliation"} and source_object_id:
-                            ff_outbound_wac_by_supply_nm[(source_object_id, nm_id)] = current_wac
+                            ff_outbound_wac_by_supply_nm[(source_object_id, nm_id)] = outbound_wac
                     pool["operations"].append(
                         {
                             "operation_id": operation_id,
@@ -6595,6 +7116,20 @@ class WarehouseFunctionalBlock:
                 self.timestamp_factory(),
             ),
         )
+        compact_options = _compact_wb_option_read_model(payload)
+        compact_etag = '"' + _hash(compact_options) + '"'
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_wb_option_read_models(
+                   version_id,etag,payload_json,payload_bytes,created_at
+               ) VALUES(?,?,?,?,?)""",
+            (
+                version_id,
+                compact_etag,
+                _json(compact_options),
+                len(_json(compact_options).encode("utf-8")),
+                self.timestamp_factory(),
+            ),
+        )
 
     def _insert_documents(
         self, conn: sqlite3.Connection, *, version_id: str, plan: Mapping[str, Any], created_at: str
@@ -6804,6 +7339,10 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
             page_count INTEGER NOT NULL,page_offsets_json TEXT NOT NULL,raw_row_count INTEGER NOT NULL,
             raw_rows_digest TEXT NOT NULL,raw_rows_json TEXT NOT NULL,items_json TEXT NOT NULL,created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_wb_option_read_models(
+            version_id TEXT PRIMARY KEY,etag TEXT NOT NULL,payload_json TEXT NOT NULL,
+            payload_bytes INTEGER NOT NULL,created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_unmatched_doprinato(
             unmatched_id TEXT PRIMARY KEY,version_id TEXT NOT NULL,source_id TEXT NOT NULL,
             business_date TEXT,nm_id INTEGER NOT NULL,quantity TEXT NOT NULL,matched_quantity TEXT NOT NULL,
@@ -6830,6 +7369,11 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS warehouse_functional_document_lines_document
         ON sheet_vitrina_v1_warehouse_functional_document_lines(document_id,nm_id);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_functional_read_models(
+            version_id TEXT NOT NULL,warehouse_key TEXT NOT NULL,
+            etag TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,PRIMARY KEY(version_id,warehouse_key)
+        );
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_supplier_flows(
             supplier_flow_id TEXT PRIMARY KEY,shipment_id TEXT NOT NULL UNIQUE,invoice_no TEXT,
             created_at TEXT NOT NULL,source_fingerprint TEXT NOT NULL
@@ -7634,6 +8178,139 @@ def _summaries(lines: Iterable[WarehouseLine]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _materialize_compact_warehouse_read_models(
+    conn: sqlite3.Connection,
+    *,
+    version_id: str,
+    plan: Mapping[str, Any],
+    created_at: str,
+    effective_at: str,
+    business_effective_date: str,
+) -> None:
+    """Freeze compact active-tab payloads without raw provenance/documents."""
+
+    plan_lines = [dict(item) for item in plan.get("lines") or []]
+    summaries = _summaries([_line_from_payload(item) for item in plan_lines])
+    reservations = [dict(item) for item in plan.get("ff_reservations") or []]
+    reservations_by_nm: defaultdict[int, dict[str, Any]] = defaultdict(
+        lambda: {"quantity": ZERO, "supply_ids": []}
+    )
+    for item in reservations:
+        nm_id = int(item.get("nm_id") or 0)
+        if nm_id <= 0:
+            continue
+        reservations_by_nm[nm_id]["quantity"] += _decimal(item.get("quantity"))
+        supply_id = str(item.get("supply_id") or "")
+        if supply_id and supply_id not in reservations_by_nm[nm_id]["supply_ids"]:
+            reservations_by_nm[nm_id]["supply_ids"].append(supply_id)
+    version = {
+        "version_id": version_id,
+        "version_kind": str(plan.get("plan_kind") or "hourly_wb_sync"),
+        "effective_at": effective_at,
+        "business_effective_date": business_effective_date,
+        "plan_fingerprint": str(plan.get("plan_fingerprint") or ""),
+    }
+    for stage in STAGES:
+        compact_lines: list[dict[str, Any]] = []
+        for item in plan_lines:
+            if str(item.get("warehouse_key") or "") != stage:
+                continue
+            nm_id = int(item.get("nm_id") or 0)
+            reservation = reservations_by_nm.get(nm_id, {})
+            physical = _decimal(item.get("quantity"))
+            reserved = _decimal(reservation.get("quantity")) if stage == STAGE_FF else ZERO
+            compact_lines.append(
+                {
+                    "line_id": f"{version_id}:{stage}:{nm_id}",
+                    "version_id": version_id,
+                    "warehouse_key": stage,
+                    "nm_id": nm_id,
+                    "quantity": _text(physical),
+                    "physical_quantity": _text(physical),
+                    "reserved_quantity": _text(reserved),
+                    "available_quantity": _text(max(physical - reserved, ZERO)),
+                    "unsecured_reservation_quantity": _text(max(reserved - physical, ZERO)),
+                    "reservation_supply_ids": sorted(reservation.get("supply_ids") or []),
+                    "wac_rub": item.get("wac_rub"),
+                    "average_unit_cost_rub": item.get("wac_rub"),
+                    "capital_rub": item.get("capital_rub"),
+                    "cost_covered_quantity": item.get("cost_covered_quantity"),
+                    "coverage_share": item.get("coverage_share"),
+                    "quality": item.get("quality"),
+                    "certified": bool(item.get("certified")),
+                    "quality_presentation": _warehouse_quality_presentation(item.get("quality")),
+                    "cost_status_presentation": _warehouse_balance_status_presentation(
+                        item.get("quality"), certified=bool(item.get("certified"))
+                    ),
+                    "provenance_available": True,
+                }
+            )
+        summary = dict(summaries[stage])
+        compact_unmatched = []
+        if stage == STAGE_DISCREPANCY:
+            for item in plan.get("unmatched_doprinato") or []:
+                provenance = dict(item.get("provenance") or {})
+                compact_unmatched.append(
+                    {
+                        "source_id": str(item.get("source_id") or ""),
+                        "source_fingerprint": str(item.get("source_fingerprint") or ""),
+                        "business_date": str(item.get("business_date") or ""),
+                        "nm_id": int(item.get("nm_id") or 0),
+                        "quantity": item.get("quantity"),
+                        "matched_quantity": item.get("matched_quantity"),
+                        "reason": str(item.get("reason") or ""),
+                        "human_evidence": _warehouse_human_evidence(
+                            provenance,
+                            quantity=item.get("quantity"),
+                            capital_rub=None,
+                            quality=str(provenance.get("quality") or "unmatched_audit"),
+                            fallback_date=str(item.get("business_date") or ""),
+                        ),
+                        "provenance": None,
+                        "provenance_available": True,
+                    }
+                )
+        payload = {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": "ready",
+            "read_model": "compact_v1",
+            "active_version": version,
+            "warehouse": {
+                "warehouse_key": stage,
+                "warehouse_name": STAGE_NAMES[stage],
+                **summary,
+                "sku_count": summary["sku_count"],
+                "total_quantity": summary["quantity"],
+                "total_capital_rub": summary["capital_rub"],
+                "average_unit_cost_rub": summary["wac_rub"],
+                "updated_at": version["effective_at"],
+                "source_basis": "canonical compact functional warehouse projection",
+            },
+            "balances": compact_lines,
+            "documents": [],
+            "documents_page": {
+                "loaded": False,
+                "limit": 25,
+                "page": 1,
+            },
+            "unmatched_doprinato": compact_unmatched,
+        }
+        body = _json(payload)
+        etag = '"sha256:' + hashlib.sha256(body.encode("utf-8")).hexdigest() + '"'
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_read_models(
+                version_id,warehouse_key,etag,payload_json,payload_bytes,created_at
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(version_id,warehouse_key) DO UPDATE SET
+                etag=excluded.etag,payload_json=excluded.payload_json,
+                payload_bytes=excluded.payload_bytes,created_at=excluded.created_at
+            """,
+            (version_id, stage, etag, body, len(body.encode("utf-8")), created_at),
+        )
+
+
 def _validate_historical_projection_calendar(
     projection: Iterable[Mapping[str, Any]],
     *,
@@ -7674,6 +8351,143 @@ def _wb_snapshot_quantities(items: Iterable[Mapping[str, Any]]) -> dict[int, Dec
             raise WarehouseFunctionalError(f"negative official WB contour quantity for nmId {nm_id}")
         result[nm_id] = quantity
     return result
+
+
+def _compact_wb_option_read_model(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize the incident selector without retaining per-SKU detail."""
+
+    raw_rows = [
+        dict(row)
+        for row in snapshot.get("raw_rows") or []
+        if isinstance(row, Mapping)
+    ]
+    if not bool(snapshot.get("pagination_complete")):
+        raise WarehouseFunctionalError(
+            "cannot materialize compact WB warehouse options from an incomplete snapshot"
+        )
+    snapshot_date = str(snapshot.get("snapshot_date") or "")
+    latest_timestamp_by_nm: dict[int, str] = {}
+    for row in raw_rows:
+        row_date = str(row.get("snapshot_date") or snapshot_date)
+        if row_date != snapshot_date:
+            continue
+        nm_id = int(row.get("nmId") or row.get("nm_id") or 0)
+        row_timestamp = str(row.get("snapshot_ts") or "")
+        if nm_id > 0 and row_timestamp:
+            latest_timestamp_by_nm[nm_id] = max(
+                latest_timestamp_by_nm.get(nm_id, ""), row_timestamp
+            )
+    options_by_id: dict[int, dict[str, Any]] = {}
+    actual_stock_total = ZERO
+    for row in raw_rows:
+        row_date = str(row.get("snapshot_date") or snapshot_date)
+        if row_date != snapshot_date:
+            continue
+        nm_id = int(row.get("nmId") or row.get("nm_id") or 0)
+        row_timestamp = str(row.get("snapshot_ts") or "")
+        if row_timestamp and row_timestamp != latest_timestamp_by_nm.get(nm_id):
+            continue
+        raw_warehouse_id = row.get(
+            "warehouseId", row.get("warehouseID", row.get("warehouse_id"))
+        )
+        if raw_warehouse_id in (None, "") or isinstance(raw_warehouse_id, bool):
+            continue
+        try:
+            warehouse_id = int(str(raw_warehouse_id).strip())
+        except ValueError:
+            continue
+        if warehouse_id < 0:
+            continue
+        quantity = max(
+            _decimal(
+                row.get("stockCount")
+                if row.get("stockCount") is not None
+                else row.get("quantity")
+            ),
+            ZERO,
+        )
+        to_client = max(
+            _decimal(
+                row.get("inWayToClient")
+                if row.get("inWayToClient") is not None
+                else row.get("in_way_to_client")
+            ),
+            ZERO,
+        )
+        from_client = max(
+            _decimal(
+                row.get("inWayFromClient")
+                if row.get("inWayFromClient") is not None
+                else row.get("in_way_from_client")
+            ),
+            ZERO,
+        )
+        service_group = warehouse_id == 0
+        option = options_by_id.setdefault(
+            warehouse_id,
+            {
+                "warehouse_id": warehouse_id,
+                "warehouse_name": (
+                    "Остальные — служебная группа WB"
+                    if service_group
+                    else str(
+                        row.get("warehouseName")
+                        or row.get("warehouse_name")
+                        or f"warehouseId {warehouse_id}"
+                    ).strip()
+                ),
+                "stock_quantity": ZERO,
+                "in_way_to_client": ZERO,
+                "in_way_from_client": ZERO,
+                "temporarily_missing": False,
+                "destination_eligible": not service_group,
+                "service_group": service_group,
+                "message": (
+                    "Агрегированные остатки, которые WB не привязал к конкретному складу"
+                    if service_group
+                    else ""
+                ),
+            },
+        )
+        option["stock_quantity"] += quantity
+        option["in_way_to_client"] += to_client
+        option["in_way_from_client"] += from_client
+        actual_stock_total += quantity
+    options: list[dict[str, Any]] = []
+    for option in options_by_id.values():
+        total_contour = (
+            option["stock_quantity"]
+            + option["in_way_to_client"]
+            + option["in_way_from_client"]
+        )
+        if total_contour <= ZERO:
+            continue
+        options.append(
+            {
+                **option,
+                "stock_quantity": float(option["stock_quantity"]),
+                "in_way_to_client": float(option["in_way_to_client"]),
+                "in_way_from_client": float(option["in_way_from_client"]),
+                "total_contour": float(total_contour),
+            }
+        )
+    options.sort(
+        key=lambda item: (
+            -float(item["stock_quantity"]),
+            str(item["warehouse_name"]).casefold(),
+            int(item["warehouse_id"]),
+        )
+    )
+    return {
+        "contract_name": "wb_warehouse_calculation_exclusion",
+        "contract_version": 2,
+        "snapshot_date": snapshot_date,
+        "fetched_at": str(snapshot.get("fetched_at") or ""),
+        "pagination_complete": True,
+        "raw_rows_digest": str(snapshot.get("raw_rows_digest") or ""),
+        "actual_stock_total_mp": float(actual_stock_total),
+        "options": options,
+    }
 
 
 def _wb_snapshot_integrity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -8661,6 +9475,35 @@ def _clone(value: Any) -> Any:
     return json.loads(_json(value))
 
 
+def _ff_ledger_line_cost_snapshot(
+    row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return an exact immutable line cost, never a synthetic fallback."""
+
+    raw = row.get("raw")
+    if not isinstance(raw, Mapping):
+        raw = _loads(row.get("raw_json"), {})
+    snapshot = raw.get("cost_snapshot") if isinstance(raw, Mapping) else None
+    if not isinstance(snapshot, Mapping):
+        return None
+    unit_cost = _optional_decimal(snapshot.get("unit_cost_rub"))
+    capital_delta = _optional_decimal(snapshot.get("capital_delta_rub"))
+    quantity_delta = _decimal(row.get("quantity_delta"))
+    if unit_cost is None or unit_cost <= ZERO or capital_delta is None:
+        raise WarehouseFunctionalError("invalid frozen FF ledger cost snapshot")
+    if capital_delta != quantity_delta * unit_cost:
+        raise WarehouseFunctionalError("frozen FF ledger cost snapshot does not conserve capital")
+    quality = str(snapshot.get("quality") or "").strip()
+    if not quality:
+        raise WarehouseFunctionalError("frozen FF ledger cost snapshot quality is missing")
+    return {
+        "unit_cost_rub": unit_cost,
+        "capital_delta_rub": capital_delta,
+        "quality": quality,
+        "provenance": dict(snapshot.get("provenance") or {}),
+    }
+
+
 def _decimal(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return value
@@ -8708,6 +9551,65 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _nomenclature_names_from_connection(
+    conn: sqlite3.Connection,
+) -> dict[int, dict[str, str]]:
+    """Resolve UI identities through a query-only connection."""
+
+    result: dict[int, dict[str, str]] = {}
+    current = conn.execute(
+        "SELECT bundle_version FROM registry_upload_current_state WHERE slot=1"
+    ).fetchone()
+    if current is not None:
+        for row in conn.execute(
+            """SELECT nm_id,display_name FROM registry_upload_config_v2
+               WHERE bundle_version=? ORDER BY display_order,nm_id""",
+            (str(current["bundle_version"]),),
+        ).fetchall():
+            nm_id = int(row["nm_id"])
+            result[nm_id] = {
+                "sku": str(row["display_name"] or nm_id),
+                "name": str(row["display_name"] or ""),
+                "barcode": "",
+                "source": "config_v2",
+                "warning": "",
+            }
+    active_by_nm: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in conn.execute(
+        """SELECT nm_id,our_sku,vendor_code,nomenclature_name,wb_title,barcode
+           FROM sheet_vitrina_v1_nomenclature_items
+           WHERE is_active=1 AND nm_id IS NOT NULL AND nm_id>0
+           ORDER BY nm_id,item_id"""
+    ).fetchall():
+        active_by_nm[int(row["nm_id"])].append(dict(row))
+    for nm_id, candidates in active_by_nm.items():
+        identities = {
+            (
+                str(item.get("our_sku") or item.get("vendor_code") or "").strip(),
+                str(item.get("nomenclature_name") or item.get("wb_title") or "").strip(),
+                str(item.get("barcode") or "").strip(),
+            )
+            for item in candidates
+        }
+        if len(identities) != 1:
+            existing = result.setdefault(
+                nm_id,
+                {"sku": str(nm_id), "name": "", "barcode": "", "source": "nm_id"},
+            )
+            existing["warning"] = "Неоднозначная активная номенклатура — требуется проверка"
+            continue
+        sku, name, barcode = next(iter(identities))
+        existing = result.get(nm_id, {})
+        result[nm_id] = {
+            "sku": sku or str(existing.get("sku") or nm_id),
+            "name": name or str(existing.get("name") or ""),
+            "barcode": barcode or str(existing.get("barcode") or ""),
+            "source": "active_nomenclature_exact_nm_id",
+            "warning": "",
+        }
+    return result
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:

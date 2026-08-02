@@ -39,6 +39,7 @@ from packages.application.warehouse_functional_lock import (  # noqa: E402
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
+from packages.application.warehouse_update_journal import WarehouseUpdateJournal  # noqa: E402
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     apply_supplier_cost_state_replay_plan,
     build_supplier_cost_state_replay_plan,
@@ -279,7 +280,13 @@ def _run(
                 raise
     if args.command in {"hourly-sync", "manual-sync"}:
         phase_timings_ms: dict[str, float] = {}
+        journal = WarehouseUpdateJournal(db_path=runtime.db_path)
+        durable_run_id = ""
+        durable_phase = ""
         with warehouse_functional_write_lock(runtime.runtime_dir) as lock_evidence:
+            durable_run_id = journal.start(
+                trigger_source="hourly" if args.command == "hourly-sync" else "manual"
+            )
             phase_timings_ms["warehouse_lock_wait"] = float(
                 lock_evidence.get("wait_ms") or 0
             )
@@ -294,6 +301,8 @@ def _run(
                     phase_timings_ms,
                     block.calculation_parameters.prepare_functional_economics_backup,
                 )
+                durable_phase = "wb_supply_registry"
+                journal.phase_started(durable_run_id, durable_phase)
                 supply_refresh = _run_sync_phase(
                     "refresh_official_supply_state",
                     phase_timings_ms,
@@ -302,26 +311,46 @@ def _run(
                         record_ff_movements=False,
                     ),
                 )
+                journal.phase_finished(durable_run_id, durable_phase, details=supply_refresh)
+                durable_phase = "transit_enrichment"
+                journal.phase_started(durable_run_id, durable_phase)
                 transit_cost_collection = _run_sync_phase(
                     "collect_autonomous_transit_costs",
                     phase_timings_ms,
                     lambda: _collect_autonomous_transit_costs(runtime),
                 )
+                journal.phase_finished(durable_run_id, durable_phase, details=transit_cost_collection)
+                durable_phase = "cost_materialization"
+                journal.phase_started(durable_run_id, durable_phase)
                 downstream_cost_layers = _run_sync_phase(
                     "materialize_downstream_cost_layers",
                     phase_timings_ms,
                     lambda: _materialize_downstream_cost_layers(runtime),
                 )
+                journal.phase_finished(durable_run_id, durable_phase, details=downstream_cost_layers)
+                durable_phase = "ff_ledger_reservations"
+                journal.phase_started(durable_run_id, durable_phase)
                 ff_state = _run_sync_phase(
                     "reconcile_functional_ff_state",
                     phase_timings_ms,
                     lambda: WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state(),
                 )
+                journal.phase_finished(durable_run_id, durable_phase, details=ff_state)
+                durable_phase = "official_complete_wb_stocks"
+                journal.phase_started(durable_run_id, durable_phase)
                 plan = _run_sync_phase(
                     "build_sync_plan",
                     phase_timings_ms,
                     block.build_sync_plan,
                 )
+                journal.phase_finished(
+                    durable_run_id,
+                    durable_phase,
+                    item_count=int(dict(plan.get("diff") or {}).get("changed_line_count") or 0),
+                    details={"plan_fingerprint": plan.get("plan_fingerprint")},
+                )
+                durable_phase = "functional_publication"
+                journal.phase_started(durable_run_id, durable_phase)
                 result = _run_sync_phase(
                     "publish_functional_version",
                     phase_timings_ms,
@@ -330,7 +359,14 @@ def _run(
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
                     ),
                 )
+                journal.phase_finished(
+                    durable_run_id,
+                    durable_phase,
+                    details=dict(result.get("active_version") or {}),
+                )
                 backup_result = result.get("recovery_policy")
+                durable_phase = "dependent_replay_economics"
+                journal.phase_started(durable_run_id, durable_phase)
                 proxy_recalculation = _run_sync_phase(
                     "process_targeted_recalculations",
                     phase_timings_ms,
@@ -374,7 +410,17 @@ def _run(
                     lambda: _run_bounded_recovery_retention(runtime),
                 )
                 completed_backup = backup_result
-                return {
+                journal.phase_finished(
+                    durable_run_id,
+                    durable_phase,
+                    item_count=int(proxy_recalculation.get("request_count") or 0),
+                    details={
+                        "proxy_targeted_recalculation": proxy_recalculation,
+                        "finance_cost_recalculation": finance_cost_recalculation,
+                        "transit_cost_replays": transit_cost_replays,
+                    },
+                )
+                payload = {
                     "status": "success",
                     "mode": args.command,
                     "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
@@ -402,7 +448,27 @@ def _run(
                         "backup_archive": economics_publication.get("backup_archive"),
                     },
                 }
+                journal.finish(durable_run_id, status="success", result=payload)
+                return payload
             except Exception as exc:
+                if durable_phase:
+                    try:
+                        journal.phase_finished(
+                            durable_run_id,
+                            durable_phase,
+                            status="failed",
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass
+                try:
+                    journal.finish(
+                        durable_run_id,
+                        status="failed",
+                        error=f"{durable_phase}: {exc}" if durable_phase else str(exc),
+                    )
+                except Exception:
+                    pass
                 failure = _sync_failure_record(
                     exc,
                     sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,

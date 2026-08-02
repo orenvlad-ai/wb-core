@@ -141,6 +141,7 @@ def main() -> None:
     _test_semantic_digest_ignores_volatile_capture_identity()
     _test_source_capture_exposes_calculation_timestamp()
     _test_supply_refresh_completeness_gate()
+    _test_incident_option_handler_is_local_read_only()
     _test_guarded_publication()
     print("warehouse functional smoke: ok")
 
@@ -246,6 +247,26 @@ def _test_finance_recalculation_is_the_last_cost_writer() -> None:
             any(retention > line for retention in retention_lines),
             "Finance recalculation must finish before final retention and unlock",
         )
+    manual_source = inspect.getsource(
+        RegistryUploadHttpEntrypoint.handle_warehouse_manual_sync_request
+    )
+    _assert(
+        manual_source.index("publish_current_functional_economics")
+        < manual_source.index("recalculate_stale_cost_weeks")
+        < manual_source.index("finalize_completed_wb_transit_cost_recalculations"),
+        "operator manual sync publishes and verifies Finance before completing its dependent phase",
+    )
+
+
+def _test_incident_option_handler_is_local_read_only() -> None:
+    source = inspect.getsource(
+        RegistryUploadHttpEntrypoint.handle_wb_warehouse_exclusion_options_request
+    )
+    _assert(
+        "warehouse_functional_block.wb_warehouse_exclusion_options" in source
+        and "factory_order_supply_block.build_wb_warehouse_exclusion_options" not in source,
+        "opening the WB warehouse incident panel reads the active local version without an external producer",
+    )
 
 
 def _test_source_mutation_removes_green_balance_status() -> None:
@@ -2843,7 +2864,18 @@ def _test_guarded_publication() -> None:
                 "page_offsets": [0],
                 "raw_row_count": 1,
                 "raw_rows_digest": "sha256:rows",
-                "raw_rows": [{"nmId": 104}],
+                "raw_rows": [
+                    {
+                        "snapshot_date": NOW[:10],
+                        "snapshot_ts": NOW,
+                        "nmId": 104,
+                        "warehouseId": 507,
+                        "warehouseName": "Коледино",
+                        "stockCount": 1,
+                        "inWayToClient": 0,
+                        "inWayFromClient": 0,
+                    }
+                ],
                 "items": [
                     {
                         "nm_id": 104,
@@ -2931,6 +2963,17 @@ def _test_guarded_publication() -> None:
         _assert(applied["reconciliation"]["positive_cost_gap_count"] == 0, "positive cost coverage")
         _assert(applied["cutover"]["cutover_at"] == NOW, "cutover timestamp is atomic apply time")
         _assert(applied["active_version"]["effective_at"] == NOW, "opening version starts at apply time")
+        compact_options = block.wb_warehouse_exclusion_options(
+            excluded_warehouse_ids=(507, 999),
+        )
+        _assert(
+            compact_options["active_version_id"] == applied["active_version"]["version_id"]
+            and compact_options["options"][0]["warehouse_id"] == 507
+            and compact_options["options"][0]["stock_quantity"] == 1.0
+            and compact_options["options"][0]["selected"] is True
+            and compact_options["temporarily_missing_selected_ids"] == [999],
+            "incident selector reads sorted compact options from the active local version",
+        )
         repeated = block.apply_plan(
             plan,
             confirm_fingerprint=plan["plan_fingerprint"],
@@ -3441,12 +3484,29 @@ def _test_guarded_publication() -> None:
             wb_detail.get("probe_shape")
             == {
                 "warehouse_key": "wb",
-                "required_collections": ["balances", "documents"],
+                "required_collections": ["balances"],
+                "documents_lazy": True,
+                "provenance_lazy": True,
             },
-            "warehouse detail declares its bounded probe shape before large collections",
+            "warehouse detail declares its compact lazy probe shape",
         )
-        _assert((wb_detail.get("documents") or [])[0].get("lines"), "warehouse documents persist their own lines")
-        document_line = (wb_detail.get("documents") or [])[0]["lines"][0]
+        _assert(wb_detail.get("documents") == [], "initial warehouse response excludes documents")
+        _assert(
+            int(wb_detail.get("payload_bytes") or 0) < 500_000,
+            "initial warehouse response stays within the compact payload budget",
+        )
+        documents_page = entrypoint.handle_warehouse_documents_request("wb", page=1, limit=25)
+        _assert(documents_page["documents"], "warehouse documents load lazily")
+        _assert(
+            all(not item.get("lines") for item in documents_page["documents"]),
+            "document pages exclude line/provenance payloads",
+        )
+        document_detail = entrypoint.handle_warehouse_document_detail_request(
+            "wb",
+            documents_page["documents"][0]["document_id"],
+        )
+        _assert(document_detail["document"].get("lines"), "expanded document exposes its lines")
+        document_line = document_detail["document"]["lines"][0]
         _assert(
             document_line["quality_presentation"]["code"] != "provisional",
             "persisted document line retains its actual quality",
@@ -3463,7 +3523,12 @@ def _test_guarded_publication() -> None:
             "warehouse identity records exact-key provenance",
         )
         _assert(wb_balance["quality_presentation"]["label_ru"], "warehouse quality has a Russian label")
-        _assert(wb_balance["human_evidence"]["items"], "warehouse row exposes structured human evidence")
+        _assert(wb_balance["human_evidence"] is None, "initial balance defers provenance")
+        wb_balance_detail = entrypoint.handle_warehouse_balance_detail_request("wb", 104)
+        _assert(
+            wb_balance_detail["human_evidence"]["items"],
+            "expanded balance exposes structured human evidence",
+        )
         runtime.save_nomenclature_item(
             {
                 "item_id": "nom-104-conflict",

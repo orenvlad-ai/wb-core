@@ -173,6 +173,7 @@ from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
 )
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
+from packages.application.warehouse_update_journal import WarehouseUpdateJournal
 from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
@@ -1104,6 +1105,10 @@ class RegistryUploadHttpEntrypoint:
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
+        self.warehouse_update_journal = WarehouseUpdateJournal(
+            db_path=self.runtime.db_path,
+            timestamp_factory=self.activated_at_factory,
+        )
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
         self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerSessionRecoveryController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
@@ -3304,7 +3309,7 @@ class RegistryUploadHttpEntrypoint:
         settings = self.sku_management_block.get_warehouse_exclusion_settings(
             user_key=user_key
         )
-        return self.factory_order_supply_block.build_wb_warehouse_exclusion_options(
+        return self.warehouse_functional_block.wb_warehouse_exclusion_options(
             excluded_warehouse_ids=tuple(
                 settings.get("effective_excluded_wb_warehouse_ids")
                 if settings.get("active")
@@ -5206,10 +5211,45 @@ class RegistryUploadHttpEntrypoint:
         return functional if functional.get("status") == "ready" else self.warehouse_stocks_block.overview()
 
     def handle_warehouse_detail_request(self, warehouse_key: str) -> dict[str, Any]:
-        functional = self.warehouse_functional_block.readback()
-        if functional.get("status") == "ready":
-            return self.warehouse_functional_block.warehouse_detail(warehouse_key)
-        return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
+        functional = self.warehouse_functional_block.warehouse_detail(warehouse_key)
+        return (
+            functional
+            if functional.get("status") == "ready"
+            else self.warehouse_stocks_block.warehouse_detail(warehouse_key)
+        )
+
+    def handle_warehouse_documents_request(
+        self,
+        warehouse_key: str,
+        *,
+        page: int = 1,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        return self.warehouse_functional_block.warehouse_documents_page(
+            warehouse_key,
+            page=page,
+            limit=limit,
+        )
+
+    def handle_warehouse_document_detail_request(
+        self,
+        warehouse_key: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        return self.warehouse_functional_block.warehouse_document_detail(
+            warehouse_key,
+            document_id,
+        )
+
+    def handle_warehouse_balance_detail_request(
+        self,
+        warehouse_key: str,
+        nm_id: int,
+    ) -> dict[str, Any]:
+        return self.warehouse_functional_block.warehouse_balance_detail(
+            warehouse_key,
+            nm_id,
+        )
 
     def handle_warehouse_recovery_status_request(self) -> dict[str, Any]:
         """Return one durable operator view for every warehouse recovery tier."""
@@ -5220,55 +5260,135 @@ class RegistryUploadHttpEntrypoint:
         ).public_status()
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
-        with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
+        durable_run_id = ""
+        active_phase = ""
+
+        def run_phase(phase_key: str, operation: Callable[[], Any]) -> Any:
+            nonlocal active_phase
+            active_phase = phase_key
+            self.warehouse_update_journal.phase_started(durable_run_id, phase_key)
             try:
+                value = operation()
+            except Exception as exc:
+                self.warehouse_update_journal.phase_finished(
+                    durable_run_id,
+                    phase_key,
+                    status="failed",
+                    error=str(exc),
+                )
+                raise
+            item_count = 0
+            if isinstance(value, Mapping):
+                item_count = int(
+                    value.get("changed_rows")
+                    or value.get("processed_count")
+                    or value.get("request_count")
+                    or value.get("row_count")
+                    or 0
+                )
+            self.warehouse_update_journal.phase_finished(
+                durable_run_id,
+                phase_key,
+                item_count=item_count,
+                details=dict(value) if isinstance(value, Mapping) else {},
+            )
+            return value
+
+        try:
+            with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
+                durable_run_id = self.warehouse_update_journal.start(
+                    trigger_source="manual"
+                )
                 economics_backup = (
                     self.calculation_parameters_block.prepare_functional_economics_backup()
                 )
-                supply_payload = self.wb_supplies_block.sync_functional_sources(
-                    record_ff_movements=False
+                supply_payload = run_phase(
+                    "wb_supply_registry",
+                    lambda: self.wb_supplies_block.sync_functional_sources(
+                        record_ff_movements=False
+                    ),
                 )
-                transit_cost_collection = (
-                    self.wb_supplies_block.collect_all_due_transit_costs()
+                transit_cost_collection = run_phase(
+                    "transit_enrichment",
+                    self.wb_supplies_block.collect_all_due_transit_costs,
                 )
-                downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
-                    opening_date="2026-07-01"
+                downstream_cost_layers = run_phase(
+                    "cost_materialization",
+                    lambda: self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                        opening_date="2026-07-01"
+                    ),
                 )
-                ff_state = self.wb_supplies_block.reconcile_functional_ff_state()
-                plan = self.warehouse_functional_block.build_sync_plan()
-                result = self.warehouse_functional_block.apply_plan(
-                    plan,
-                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                ff_state = run_phase(
+                    "ff_ledger_reservations",
+                    self.wb_supplies_block.reconcile_functional_ff_state,
                 )
-                proxy_recalculation = (
-                    self.calculation_parameters_block.process_pending_targeted_recalculations(
-                        verified_backup=economics_backup,
+                plan = run_phase(
+                    "official_complete_wb_stocks",
+                    self.warehouse_functional_block.build_sync_plan,
+                )
+                result = run_phase(
+                    "functional_publication",
+                    lambda: self.warehouse_functional_block.apply_plan(
+                        plan,
+                        confirm_fingerprint=str(plan["plan_fingerprint"]),
+                    ),
+                )
+                def dependent_replay() -> dict[str, Any]:
+                    proxy_recalculation = (
+                        self.calculation_parameters_block.process_pending_targeted_recalculations(
+                            verified_backup=economics_backup,
+                        )
                     )
-                )
-                if str(proxy_recalculation.get("status") or "") == "failed":
-                    raise RuntimeError(
-                        "targeted Proxy recalculation failed: "
-                        + str(proxy_recalculation.get("error") or "unknown error")
+                    if str(proxy_recalculation.get("status") or "") == "failed":
+                        raise RuntimeError(
+                            "targeted Proxy recalculation failed: "
+                            + str(proxy_recalculation.get("error") or "unknown error")
+                        )
+                    economics_publication = (
+                        proxy_recalculation
+                        if int(proxy_recalculation.get("request_count") or 0) > 0
+                        else self.calculation_parameters_block.publish_current_functional_economics(
+                            verified_backup=economics_backup,
+                        )
                     )
-                economics_publication = (
-                    proxy_recalculation
-                    if int(proxy_recalculation.get("request_count") or 0) > 0
-                    else self.calculation_parameters_block.publish_current_functional_economics(
-                        verified_backup=economics_backup,
+                    finance_cost_recalculation = (
+                        self.wb_finance_weekly_block.recalculate_stale_cost_weeks(
+                            date_from=date(2026, 7, 1)
+                        )
                     )
-                )
-                transit_cost_replays = (
-                    self.runtime.finalize_completed_wb_transit_cost_recalculations(
-                        completed_at=self.activated_at_factory(),
+                    transit_cost_replays = (
+                        self.runtime.finalize_completed_wb_transit_cost_recalculations(
+                            completed_at=self.activated_at_factory(),
+                        )
                     )
+                    return {
+                        "proxy_recalculation": proxy_recalculation,
+                        "economics_publication": economics_publication,
+                        "finance_cost_recalculation": finance_cost_recalculation,
+                        "transit_cost_replays": transit_cost_replays,
+                    }
+
+                dependent = run_phase("dependent_replay_economics", dependent_replay)
+        except Exception as exc:
+            self.warehouse_functional_block.record_failed_sync(exc)
+            if durable_run_id:
+                self.warehouse_update_journal.finish(
+                    durable_run_id,
+                    status="failed",
+                    error=f"{active_phase}: {exc}" if active_phase else str(exc),
                 )
-            except Exception as exc:
-                self.warehouse_functional_block.record_failed_sync(exc)
-                raise
+            raise
         sync = dict(supply_payload.get("sync") or {})
-        return {
+        proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
+        economics_publication = dict(dependent.get("economics_publication") or {})
+        finance_cost_recalculation = dict(
+            dependent.get("finance_cost_recalculation") or {}
+        )
+        transit_cost_replays = dict(dependent.get("transit_cost_replays") or {})
+        payload = {
             "status": "success",
             "mode": "manual_sync",
+            "durable_run_id": durable_run_id,
             "official_supply_sync": {
                 "run_id": str(sync.get("run_id") or ""),
                 "changed_rows": int(sync.get("changed_rows") or 0),
@@ -5282,6 +5402,7 @@ class RegistryUploadHttpEntrypoint:
             "active_version": result.get("active_version"),
             "sync": result.get("sync"),
             "proxy_targeted_recalculation": proxy_recalculation,
+            "wb_finance_cost_recalculation": finance_cost_recalculation,
             "wb_transit_cost_replays": transit_cost_replays,
             "functional_economics_publication": {
                 "plan_fingerprint": economics_publication.get("plan_fingerprint"),
@@ -5290,6 +5411,12 @@ class RegistryUploadHttpEntrypoint:
                 "backup_archive": economics_publication.get("backup_archive"),
             },
         }
+        self.warehouse_update_journal.finish(
+            durable_run_id,
+            status="success",
+            result=payload,
+        )
+        return payload
 
     def handle_warehouse_manual_sync_start_request(self) -> dict[str, Any]:
         operation = "warehouse_current_source_sync"
@@ -5319,6 +5446,28 @@ class RegistryUploadHttpEntrypoint:
         if job is None:
             job = self.operator_jobs.latest_relevant_job(operations=(operation,))
         if job is None:
+            durable = self.warehouse_update_journal.public_status()
+            manual = dict(durable.get("manual_updates") or {})
+            if str(manual.get("status") or "") != "never":
+                return {
+                    "contract_name": "warehouse_current_source_sync_status",
+                    "status": str(manual.get("status") or "never"),
+                    "run_id": str(manual.get("run_id") or ""),
+                    "user_status": (
+                        "Выполняется обновление всех складов и себестоимостей"
+                        if str(manual.get("status") or "") == "running"
+                        else "Последнее ручное обновление сохранено в журнале"
+                    ),
+                    "short_log": [],
+                    "last_attempt_at": str(manual.get("last_attempt_at") or ""),
+                    "last_success_at": str(manual.get("last_success_at") or ""),
+                    "finished_at": str(manual.get("finished_at") or ""),
+                    "changed_warehouses": 0,
+                    "changed_skus": 0,
+                    "functional_version_id": str(manual.get("functional_version_id") or ""),
+                    "business_date": str(manual.get("business_date") or ""),
+                    "durable_journal": durable,
+                }
             return {
                 "contract_name": "warehouse_current_source_sync_status",
                 "status": "never",
@@ -5331,6 +5480,7 @@ class RegistryUploadHttpEntrypoint:
                 "changed_skus": 0,
                 "functional_version_id": "",
                 "business_date": "",
+                "durable_journal": durable,
             }
         return self._warehouse_manual_sync_status_payload(job)
 
@@ -5422,6 +5572,7 @@ class RegistryUploadHttpEntrypoint:
             "functional_version_id": str(result.get("functional_version_id") or ""),
             "business_date": str(result.get("business_date") or ""),
             "technical_details": result,
+            "durable_journal": self.warehouse_update_journal.public_status(),
         }
 
     def handle_warehouse_emergency_preview_request(self) -> dict[str, Any]:
