@@ -59,6 +59,8 @@ Passport фиксирует цель, expected result, execution contour, includ
 6. печатает один фиксированный короткий report block на active task;
 7. освобождает run lease.
 
+Локальный `queue-status` использует `GITHUB_TOKEN`, если он передан явно, а при его отсутствии читает уже существующую авторизацию через `gh auth token`. Токен не печатается и не сохраняется в registry/JSONL. Этот fallback ограничен read-only командой Watcher: в GitHub Actions отсутствие `GITHUB_TOKEN` остаётся ошибкой, mutation-команды не получают локальный fallback.
+
 Report format не расширяется произвольными секциями:
 
 ```text

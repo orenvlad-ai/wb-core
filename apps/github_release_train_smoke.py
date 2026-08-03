@@ -85,6 +85,7 @@ from apps.github_release_train import (  # noqa: E402
     terminalize_finance_deploy_lease,
     transition_label_set,
     upsert_status_comment,
+    _queue_status_api_from_env,
 )
 from apps.github_release_train_wait import (  # noqa: E402
     EXIT_AWAIT_PHASE_CAPABILITY,
@@ -4018,6 +4019,58 @@ def _assert_continuity_classification_matrix() -> None:
     print(f"continuity_classification_matrix: {len(completed)}/20 ok")
 
 
+def _assert_queue_status_local_auth_contract() -> None:
+    reader_calls: list[str] = []
+
+    def local_token() -> str:
+        reader_calls.append("called")
+        return "local-token"
+
+    local_api = _queue_status_api_from_env(
+        environ={},
+        gh_token_reader=local_token,
+    )
+    assert local_api.repository == "orenvlad-ai/wb-core"
+    assert local_api.token == "local-token"
+    assert reader_calls == ["called"]
+
+    reader_calls.clear()
+    explicit_api = _queue_status_api_from_env(
+        environ={
+            "GITHUB_REPOSITORY": "example/repository",
+            "GITHUB_TOKEN": "explicit-token",
+            "GITHUB_API_URL": "https://github.example/api/v3",
+        },
+        gh_token_reader=local_token,
+    )
+    assert explicit_api.repository == "example/repository"
+    assert explicit_api.token == "explicit-token"
+    assert explicit_api.api_url == "https://github.example/api/v3"
+    assert reader_calls == []
+
+    try:
+        _queue_status_api_from_env(
+            environ={"GITHUB_REPOSITORY": "personal/repository"},
+            gh_token_reader=local_token,
+        )
+    except ValueError as exc:
+        assert "restricted to orenvlad-ai/wb-core" in str(exc)
+    else:
+        raise AssertionError("local gh fallback must be restricted to wb-core")
+    assert reader_calls == []
+
+    try:
+        _queue_status_api_from_env(
+            environ={"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/repository"},
+            gh_token_reader=local_token,
+        )
+    except ValueError as exc:
+        assert str(exc) == "GITHUB_TOKEN is required in GitHub Actions"
+    else:
+        raise AssertionError("Actions queue-status must fail closed without GITHUB_TOKEN")
+    assert reader_calls == []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--continuity-only", action="store_true")
@@ -4030,6 +4083,7 @@ def main() -> int:
         _assert_goal_shepherd_regressions()
         _assert_phase_local_goal_regressions()
         return 0
+    _assert_queue_status_local_auth_contract()
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
     _assert_orchestration_lane_and_legacy_retirement()

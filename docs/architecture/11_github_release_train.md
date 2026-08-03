@@ -301,6 +301,8 @@ Post-plan `DISPATCH_REQUEST` создаёт отдельную user-owned Codex 
 
 Один Luna Watcher каждые 10 минут читает local registry, exact Codex thread snapshots и read-only `python3 apps/github_release_train.py queue-status`. Он не хранит release truth в chat history и не подменяет Release Train. Watcher может выполнять только deterministic registration, bounded retry/replacement, incident arbitration, exact orchestration admission/lane release и bounded idle follow-up; merge/deploy/ack/UI acceptance выполняют существующие repo-owned paths и task owner по exact evidence.
 
+Для локального Watcher `queue-status` принимает явный `GITHUB_TOKEN` либо, только вне GitHub Actions, безопасно читает credential из уже авторизованного `gh`. Credential не выводится и не становится local-registry state. Actions без `GITHUB_TOKEN` и все mutation-команды по-прежнему fail closed.
+
 Каждый run получает generation-bound lease. Exact threads читаются пакетами не более восьми, active turns только наблюдаются. Registration является основным acquisition path; fallback-discovery разрешён только для pinned tasks с доказанным project/repository `orenvlad-ai/wb-core`. Сторонние, projectless, личные и медицинские chats исключены.
 
 Отчёт по active task имеет только поля `Статус`, `Задача`, `Прогресс · Осталось`, `С прошлого отчёта`, `Сейчас`; `Блокер` появляется только при доказанной strict human-only причине. После фразы владельца «Задача принята» task становится `ACCEPTED` и пропадает из следующего отчёта; Watcher не выполняет unpin.
