@@ -23,7 +23,13 @@ related_modules:
   - "packages/application/wb_prices_management.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
   - "packages/adapters/wb_prices_management.py"
+  - "packages/adapters/templates/sheet_vitrina_v1_ui_system.css"
+  - "packages/adapters/templates/sheet_vitrina_v1_operator.html"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+  - "packages/adapters/templates/sheet_vitrina_v1_settings.html"
+  - "packages/adapters/templates/sheet_vitrina_v1_instructions.html"
+  - "packages/adapters/templates/sheet_vitrina_v1_supplier.html"
+  - "packages/adapters/templates/sheet_vitrina_v1_supplier_safe.html"
 related_tables:
   - "DATA_VITRINA"
 related_endpoints:
@@ -72,6 +78,7 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/supplier"
   - "GET/POST/PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments..."
 related_runners:
+  - "apps/sheet_vitrina_v1_ui_system_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"
@@ -125,7 +132,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Vitrina no longer renders a shared Seller-session badge or any login/recovery controls in data monitoring surfaces. `Настройки → Источники и сессии` is the only recovery UI; source groups keep local `Проверить` / `Повторить сбор`. Compact header labels are `С инцидентами`, `Снимок: <date/time>` and `Метрики`, with verified narrow wrapping. Metric presentation payload v4 remains unchanged."
+update_note: "All complete `sheet_vitrina_v1` HTML surfaces now receive one shared final-cascade UI system with common tokens, navigation hierarchy, control/card/table/modal geometry, local wide-table overflow and responsive layout safety; business behavior and feature JavaScript remain unchanged. Vitrina no longer renders a shared Seller-session badge or any login/recovery controls in data monitoring surfaces. `Настройки → Источники и сессии` is the only recovery UI; source groups keep local `Проверить` / `Повторить сбор`. Compact header labels are `С инцидентами`, `Снимок: <date/time>` and `Метрики`, with verified narrow wrapping. Metric presentation payload v4 remains unchanged."
 ---
 
 # 1. Идентификатор и статус
@@ -151,6 +158,9 @@ update_note: "Vitrina no longer renders a shared Seller-session badge or any log
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
   - canonical entrypoint for the unified `sheet_vitrina_v1` UI; the main tab strip contains only work sections `Витрина`, `Поставки`, `Отчёты`, `Отзывы`, `Реклама`, `Цены`, `Исследования`; `Настройки` is a right-side shell action next to `Выйти` and activates the embedded settings panel inside the same shell.
+  - all six complete server-rendered HTML templates (`operator`, `web_vitrina`, `settings`, `instructions`, internal supplier and supplier-safe) plus generated login/forbidden/setup/instruction-error documents receive exactly one final cascade marked `data-sheet-vitrina-ui-system="v1"`. The shared layer owns design tokens, typography and spacing rhythm, control/card/badge/table/modal geometry, focus/reduced-motion behavior and responsive containment; feature markup, JavaScript, route authorization and business semantics remain owned by their existing surfaces.
+  - navigation hierarchy is explicit and semantic: main product sections use the largest level, section/group tabs use the middle level and local warehouse/settings/feedbacks/prices/research views use the compact level. Warehouse navigation names its section and detail switchers separately so the visual hierarchy does not depend on DOM position or label length.
+  - wide registries and business tables scroll inside their nearest bounded wrapper. Technical identifiers wrap inside their cards, while the document itself remains viewport-bounded; this includes the fixed-layout multilingual internal/safe supplier registries and compact SKU/warehouse values.
   - shell visibility is section-aware: runtime `allowed_sections` controls which work tabs/actions are shown and which matching `/v1/...` APIs are allowed. `settings` allows the settings surface; `settings + manage_users` is required for `Настройки -> Пользователи`. `supply_operator` legacy users map to only `Поставки`; supplier-only users do not receive the full shell.
   - `GET /sheet-vitrina-v1/operator` remains a compatibility entry and renders the same unified shell instead of the former narrow operator-only page; embedded operator-only panels are reserved for the unified tabs and internal compatibility probes
   - compact table header inside `Витрина`: visible source badge `sheet_vitrina_v1`, explanatory ready-snapshot copy, grid-library/row/column diagnostics and `Снимок/Вчера/Сегодня/TZ` technical line are not rendered. The former standalone `Таблица` title is not rendered; the header line is a two-zone layout: left zone contains only the compact dynamic object label, and the right zone is anchored to the table/header right edge near the load action with short browser-owned `обн:` timestamp, short server freshness `свеж:` timestamp, the compact icon-only load-status lamp, unlabeled in-header controls and `Загрузить` / `Загрузить и обновить`. The separate visual freshness badge `акт` / `стар` is not rendered. The dynamic object label may ellipsis/truncate with title and must not move the right-side controls/status/action when its text changes from `Итого` to a long SKU label.
@@ -278,6 +288,15 @@ contains only its monitoring projection.
   - `packages/adapters/registry_upload_http_entrypoint.py`
 - live page shell:
   - `packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html`
+- shared final-cascade UI system:
+  - `packages/adapters/templates/sheet_vitrina_v1_ui_system.css`
+  - injected once by `packages/adapters/registry_upload_http_entrypoint.py` into the operator, web-vitrina, settings, instructions, supplier, supplier-safe and generated auth/message documents
+- sibling full-document surfaces covered by the shared system:
+  - `packages/adapters/templates/sheet_vitrina_v1_operator.html`
+  - `packages/adapters/templates/sheet_vitrina_v1_settings.html`
+  - `packages/adapters/templates/sheet_vitrina_v1_instructions.html`
+  - `packages/adapters/templates/sheet_vitrina_v1_supplier.html`
+  - `packages/adapters/templates/sheet_vitrina_v1_supplier_safe.html`
 - upstream seams:
   - `packages/application/sheet_vitrina_v1_web_vitrina.py`
   - `packages/application/web_vitrina_view_model.py`
@@ -285,6 +304,8 @@ contains only its monitoring projection.
 
 # 5. Кодовые части
 
+- shared UI-system browser regression:
+  - `apps/sheet_vitrina_v1_ui_system_browser_smoke.py`
 - targeted composition smoke:
   - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py`
 - targeted funnel metric smoke:
@@ -336,6 +357,8 @@ contains only its monitoring projection.
 
 # 6. Какой smoke подтверждён
 
+- `apps/sheet_vitrina_v1_ui_system_browser_smoke.py`
+  - confirms the single shared cascade and non-empty render across 13 route families at 1920, 1280 and 760 px (39 combinations), no document-level horizontal overflow or wide table escaping a local scroller, normalized Inter-based typography/control geometry, no page/console/HTTP errors, and the explicit warehouse navigation hierarchy `38px > 34px > 30px` with a 16px content gap and contained long technical values
 - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py`
   - confirms `composition_name/version`, source chain, state namespace, filter surface, timestamp-format hint for compact `Свежесть` and human-readable activity payload fields
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
@@ -469,7 +492,7 @@ contains only its monitoring projection.
 - export layer
 - grid virtualization / advanced resizing UX
 - legacy Google Sheets/export contour migration
-- broad parity campaign with every operator/report/supply surface
+- replacement of feature-owned markup or JavaScript with a separate frontend platform
 - any browser-side business truth assembly
 `Товарный капитал — наши данные` renders canonical server rows only. `Недопринято WB` is shown by the two catalog metrics (quantity and weighted cost) without a separate warehouse/stage, expansion, age/color state or action. Its capital is already included in `ФФ → WB`; page/TOTAL composition must not add it a second time.
 

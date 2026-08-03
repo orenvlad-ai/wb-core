@@ -285,7 +285,8 @@ def _assert_browser_ui(base_url: str, username: str, password: str) -> None:
                     "instruction topic links must be keyboard-operable and mark the current section: "
                     f"hash={current_hash!r}, aria-current={current_value!r}"
                 )
-            if ":focus-visible" not in frame.locator("style").inner_text():
+            style_text = "\n".join(frame.locator("style").all_inner_texts())
+            if ":focus-visible" not in style_text:
                 raise AssertionError("instruction topic links must define a visible keyboard focus state")
             page.set_viewport_size({"width": 390, "height": 844})
             if not frame.locator(".topics-mobile").is_visible():

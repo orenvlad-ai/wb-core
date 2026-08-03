@@ -3019,6 +3019,27 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
         frame.locator('[data-report-section-button="daily"]').wait_for(timeout=10000)
     else:
         raise AssertionError(f"unsupported embedded operator tab {embedded_tab!r}")
+    frame.locator("body").evaluate(
+        """(body, embeddedTab) => new Promise((resolve, reject) => {
+          const deadline = performance.now() + 1000;
+          const waitForSemanticStyle = () => {
+            const panel = document.querySelector(`[data-tab-panel="${embeddedTab}"]`);
+            const primary = panel ? panel.querySelector('.primary-button') : null;
+            const border = primary ? getComputedStyle(primary).borderTopColor : '';
+            if (/139\\D+92\\D+246/.test(border)) {
+              resolve();
+              return;
+            }
+            if (performance.now() >= deadline) {
+              reject(new Error(`primary action accent style did not stabilize: ${border}`));
+              return;
+            }
+            requestAnimationFrame(waitForSemanticStyle);
+          };
+          waitForSemanticStyle();
+        })""",
+        embedded_tab,
+    )
     payload = frame.locator("body").evaluate(
         """(body, embeddedTab) => {
           const numbers = value => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);

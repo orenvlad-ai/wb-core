@@ -397,6 +397,52 @@ SUPPLIER_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "she
 SUPPLIER_SAFE_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier_safe.html"
 SETTINGS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_settings.html"
 INSTRUCTIONS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_instructions.html"
+UI_SYSTEM_CSS_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_ui_system.css"
+
+
+def _inject_sheet_vitrina_ui_system(template: str) -> str:
+    """Append the shared visual-system cascade to a complete HTML document."""
+
+    marker = 'data-sheet-vitrina-ui-system="v1"'
+    if marker in template:
+        return template
+    if "</head>" not in template:
+        raise ValueError("sheet_vitrina_v1 HTML template must contain </head>")
+    css = UI_SYSTEM_CSS_PATH.read_text(encoding="utf-8")
+    return template.replace(
+        "</head>",
+        f'  <style {marker}>\n{css}\n  </style>\n</head>',
+        1,
+    )
+
+
+def _render_sheet_vitrina_message_page(
+    title: str,
+    detail: str,
+    *,
+    lang: str = "ru",
+) -> str:
+    document = f"""<!doctype html>
+<html lang="{html.escape(lang, quote=True)}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ display: grid; place-items: center; padding: 24px; }}
+    .message-page {{ width: min(520px, 100%); border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 24px; box-shadow: var(--shadow); }}
+    .message-page h1 {{ margin: 0; }}
+    .message-page p {{ margin: 12px 0 0; color: var(--muted); line-height: 1.6; }}
+  </style>
+</head>
+<body>
+  <main class="message-page">
+    <h1>{html.escape(title)}</h1>
+    <p>{html.escape(detail)}</p>
+  </main>
+</body>
+</html>"""
+    return _inject_sheet_vitrina_ui_system(document)
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -7037,7 +7083,11 @@ def _write_login_form_response(
   </main>
 </body>
 </html>"""
-    _write_html_response(handler, HTTPStatus.OK, body)
+    _write_html_response(
+        handler,
+        HTTPStatus.OK,
+        _inject_sheet_vitrina_ui_system(body),
+    )
 
 
 def _write_auth_setup_error(handler: BaseHTTPRequestHandler, path: str) -> None:
@@ -7051,7 +7101,11 @@ def _write_auth_setup_error(handler: BaseHTTPRequestHandler, path: str) -> None:
     _write_html_response(
         handler,
         HTTPStatus.SERVICE_UNAVAILABLE,
-        "<!doctype html><meta charset=\"utf-8\"><title>WebCore auth</title><p>WebCore auth is required but not configured.</p>",
+        _render_sheet_vitrina_message_page(
+            "WebCore auth",
+            "WebCore auth is required but not configured.",
+            lang="en",
+        ),
     )
 
 
@@ -7066,7 +7120,10 @@ def _write_auth_forbidden(handler: BaseHTTPRequestHandler, path: str) -> None:
     _write_html_response(
         handler,
         HTTPStatus.FORBIDDEN,
-        "<!doctype html><meta charset=\"utf-8\"><title>Forbidden</title><p>Недостаточно прав для этого раздела.</p>",
+        _render_sheet_vitrina_message_page(
+            "Недостаточно прав",
+            "У текущей учётной записи нет доступа к этому разделу.",
+        ),
     )
 
 
@@ -8524,7 +8581,9 @@ def _render_sheet_vitrina_operator_ui(
             operator_ui_context.get("stock_report_active_sku_source") or "current_registry_config_v2"
         ),
     }
-    template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return (
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
         .replace(
@@ -8573,7 +8632,9 @@ def _render_sheet_vitrina_supplier_ui(
         if can_recheck_prices
         else ""
     )
-    template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return (
         template.replace(
             "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
@@ -8599,7 +8660,9 @@ def _render_sheet_vitrina_supplier_safe_ui() -> str:
         "can_view_internal_costs": False,
         "can_price_check": False,
     }
-    template = SUPPLIER_SAFE_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        SUPPLIER_SAFE_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return template.replace(
         "__SHEET_VITRINA_V1_SUPPLIER_SAFE_CONFIG_JSON__",
         json.dumps(config_payload, ensure_ascii=False),
@@ -8641,7 +8704,9 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "embedded": bool(embedded),
         "can_manage_users": bool(can_manage_users),
     }
-    template = SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return (
         template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
         .replace(
@@ -8732,7 +8797,9 @@ def _render_sheet_vitrina_instructions_ui(
         for section in instruction.sections
     )
     updates_html = _render_operator_instruction_updates(resolved_business_date)
-    template = INSTRUCTIONS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        INSTRUCTIONS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return (
         template.replace("__INSTRUCTION_LIST__", instruction_list)
         .replace("__TOPIC_NAV__", topic_nav)
@@ -8860,14 +8927,10 @@ def _render_operator_instruction_block(
 
 
 def _render_instruction_error_page(title: str, detail: str) -> str:
-    return (
-        "<!doctype html><meta charset=\"utf-8\"><title>"
-        + html.escape(title)
-        + "</title><main><h1>"
-        + html.escape(title)
-        + "</h1><p>"
-        + html.escape(detail)
-        + "</p></main>"
+    return _render_sheet_vitrina_message_page(
+        title,
+        detail,
+        lang="ru",
     )
 
 
@@ -8984,7 +9047,9 @@ def _render_sheet_vitrina_web_vitrina_ui(
             DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
         ),
     }
-    template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = _inject_sheet_vitrina_ui_system(
+        WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
