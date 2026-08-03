@@ -35,6 +35,9 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     CANONICAL_REPOSITORY,
     IncidentDisposition,
     IncidentStatus,
+    OBJECTIVE_PROGRESS_STAGES,
+    OBSERVED_EARLY_STAGES,
+    ProgressStage,
     RetryObservation,
     STRICT_HUMAN_REASONS,
     SuccessionStatus,
@@ -42,19 +45,31 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     canonical_digest,
     classify_incident,
     incident_key,
+    objective_stage_from_pr_states,
+    previous_progress_stage,
+    progress_percent,
+    progress_stage_for_percent,
     report_status,
     transition_allowed,
     validate_arbiter_decision,
     validate_attention_event_id,
     validate_digest,
     validate_envelope_id,
+    validate_progress_stage_for_contour,
     validate_task_passport,
     validate_task_id,
+    validate_terminal_evidence,
     validate_visible_text,
 )
 
 
 DEFAULT_HOME = Path.home() / ".wb-core" / "orchestrator" / "v1"
+WATCHER_CONTRACT = json.loads(
+    (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+DEFAULT_WATCHER_MAX_RUNS = int(WATCHER_CONTRACT["watcher"]["rotate_after_runs"])
 ACTIVE_INCIDENT_STATES = (
     IncidentStatus.OPEN.value,
     IncidentStatus.WAITING_RESOURCE.value,
@@ -81,10 +96,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     passport_digest TEXT NOT NULL,
     status TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1,
-    progress_percent INTEGER NOT NULL DEFAULT 0 CHECK(progress_percent BETWEEN 0 AND 100),
+    progress_percent INTEGER NOT NULL DEFAULT 5 CHECK(progress_percent BETWEEN 0 AND 100),
     eta_text TEXT NOT NULL DEFAULT 'уточняется',
-    last_delta TEXT NOT NULL DEFAULT 'Задача зарегистрирована.',
-    current_action TEXT NOT NULL DEFAULT 'Исполнитель начинает работу.',
+    last_delta TEXT NOT NULL DEFAULT 'Исполнитель запущен и зарегистрирован.',
+    current_action TEXT NOT NULL DEFAULT 'Выполняется первичный технический анализ.',
     blocker TEXT NOT NULL DEFAULT '',
     human_reason TEXT NOT NULL DEFAULT '',
     curator_thread_id TEXT NOT NULL,
@@ -247,8 +262,20 @@ CREATE TABLE IF NOT EXISTS watchers (
     automation_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN ('PREPARED','ACTIVE','RETIRED')),
     run_count INTEGER NOT NULL DEFAULT 0,
-    max_runs INTEGER NOT NULL DEFAULT 720 CHECK(max_runs > 0),
+    max_runs INTEGER NOT NULL DEFAULT __DEFAULT_WATCHER_MAX_RUNS__ CHECK(max_runs > 0),
     last_run_at TEXT,
+    context_compaction_item_id TEXT NOT NULL DEFAULT '',
+    context_compaction_readback_digest TEXT NOT NULL DEFAULT '',
+    context_compaction_at TEXT,
+    automation_enabled_readback_digest TEXT NOT NULL DEFAULT '',
+    automation_enabled_at TEXT,
+    liveness_required INTEGER NOT NULL DEFAULT 1 CHECK(liveness_required IN (0,1)),
+    liveness_heartbeat_digest TEXT NOT NULL DEFAULT '',
+    liveness_end_run_digest TEXT NOT NULL DEFAULT '',
+    liveness_confirmed_at TEXT,
+    liveness_failure_count INTEGER NOT NULL DEFAULT 0,
+    last_liveness_failure_digest TEXT NOT NULL DEFAULT '',
+    last_liveness_failure_at TEXT,
     smoke_digest TEXT NOT NULL DEFAULT '',
     smoke_at TEXT,
     title_readback_digest TEXT NOT NULL DEFAULT '',
@@ -279,7 +306,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
-"""
+""".replace("__DEFAULT_WATCHER_MAX_RUNS__", str(DEFAULT_WATCHER_MAX_RUNS))
 
 
 def _now() -> str:
@@ -295,6 +322,16 @@ def _load_object(raw: str, *, field: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError(f"{field} must be a JSON object")
     return loaded
+
+
+def _parse_timestamp(raw: str, *, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 class Registry:
@@ -341,7 +378,8 @@ class Registry:
                 connection.execute("ALTER TABLE watchers ADD COLUMN last_run_at TEXT")
             if "max_runs" not in watcher_columns:
                 connection.execute(
-                    "ALTER TABLE watchers ADD COLUMN max_runs INTEGER NOT NULL DEFAULT 720"
+                    "ALTER TABLE watchers ADD COLUMN max_runs INTEGER NOT NULL DEFAULT "
+                    f"{DEFAULT_WATCHER_MAX_RUNS}"
                 )
             if "smoke_digest" not in watcher_columns:
                 connection.execute(
@@ -388,6 +426,18 @@ class Registry:
                     "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_at TEXT"
                 )
             for column, definition in (
+                ("context_compaction_item_id", "TEXT NOT NULL DEFAULT ''"),
+                ("context_compaction_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("context_compaction_at", "TEXT"),
+                ("automation_enabled_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("automation_enabled_at", "TEXT"),
+                ("liveness_required", "INTEGER NOT NULL DEFAULT 0"),
+                ("liveness_heartbeat_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("liveness_end_run_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("liveness_confirmed_at", "TEXT"),
+                ("liveness_failure_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_liveness_failure_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("last_liveness_failure_at", "TEXT"),
                 ("title_readback_digest", "TEXT NOT NULL DEFAULT ''"),
                 ("pin_readback_digest", "TEXT NOT NULL DEFAULT ''"),
                 ("automation_readback_digest", "TEXT NOT NULL DEFAULT ''"),
@@ -401,6 +451,11 @@ class Registry:
                     connection.execute(
                         f"ALTER TABLE watchers ADD COLUMN {column} {definition}"
                     )
+            connection.execute(
+                "UPDATE watchers SET automation_enabled_readback_digest=automation_readback_digest,"
+                "automation_enabled_at=COALESCE(automation_enabled_at,created_at) "
+                "WHERE automation_enabled_readback_digest='' AND automation_readback_digest<>''"
+            )
             task_threads_sql_row = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_threads'"
             ).fetchone()
@@ -458,7 +513,7 @@ class Registry:
                 "WHERE status IN ('OPEN','WAITING_RESOURCE','CLAIMED','DECIDED','DELIVERED','VERIFIED')"
             )
             connection.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version','5') "
+                "INSERT INTO meta(key,value) VALUES('schema_version','7') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         if self.db_path.exists():
@@ -675,8 +730,9 @@ class Registry:
                 }
             connection.execute(
                 "INSERT INTO tasks(task_id,title,repo,project_id,objective,passport_json,"
-                "passport_digest,status,curator_thread_id,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "passport_digest,status,progress_percent,last_delta,current_action,"
+                "curator_thread_id,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     identity,
                     visible_task_title,
@@ -686,6 +742,9 @@ class Registry:
                     _json(validated_passport),
                     digest,
                     TaskStatus.WORKING.value,
+                    progress_percent(ProgressStage.EXECUTOR_STARTED),
+                    "Исполнитель запущен и зарегистрирован.",
+                    "Выполняется первичный технический анализ.",
                     curator_thread_id.strip(),
                     timestamp,
                     timestamp,
@@ -1111,6 +1170,397 @@ class Registry:
             ).fetchone()
         return envelope
 
+    @staticmethod
+    def _task_contour(task: Mapping[str, object]) -> str:
+        passport = json.loads(str(task["passport_json"]))
+        return str(passport["scope"]["execution_contour"])
+
+    @staticmethod
+    def _latest_progress_checkpoint(
+        connection: sqlite3.Connection, task_id: str
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            "SELECT seq,occurred_at,payload_json FROM events "
+            "WHERE entity_type='task' AND entity_id=? AND event_type='progress-checkpoint' "
+            "ORDER BY seq DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "seq": int(row["seq"]),
+            "occurred_at": row["occurred_at"],
+            **json.loads(row["payload_json"]),
+        }
+
+    def record_progress_checkpoint(
+        self,
+        *,
+        task_id: str,
+        expected_revision: int,
+        stage: ProgressStage,
+        evidence_digest: str,
+        eta: str,
+        delta: str,
+        current: str,
+    ) -> dict[str, object]:
+        """Persist a bounded executor milestone without assigning a percentage."""
+
+        identity = validate_task_id(task_id)
+        digest = validate_digest(evidence_digest)
+        if expected_revision <= 0:
+            raise ValueError("expected_revision must be positive")
+        if stage not in OBSERVED_EARLY_STAGES:
+            raise ValueError("executor checkpoints are limited to early work milestones")
+        visible = {
+            "eta": validate_visible_text(eta, field="eta", task_id=identity),
+            "delta": validate_visible_text(delta, field="delta", task_id=identity),
+            "current": validate_visible_text(
+                current, field="current action", task_id=identity
+            ),
+        }
+        with self.transaction() as connection:
+            task = self.task(identity, connection)
+            latest = self._latest_progress_checkpoint(connection, identity)
+            stable_payload = {
+                "source_revision": expected_revision,
+                "stage": stage.value,
+                "evidence_digest": digest,
+                **visible,
+            }
+            if latest is not None and all(
+                latest.get(key) == value for key, value in stable_payload.items()
+            ):
+                return {
+                    "task_id": identity,
+                    "stage": stage.value,
+                    "evidence_digest": digest,
+                    "idempotent": True,
+                }
+            if int(task["revision"]) != expected_revision:
+                raise RuntimeError(
+                    f"stale task revision: expected {expected_revision}, actual {task['revision']}"
+                )
+            if TaskStatus(task["status"]) in {
+                TaskStatus.DONE_PENDING_HANDOFF,
+                TaskStatus.DONE_AWAITING_ACCEPTANCE,
+                TaskStatus.ACCEPTED,
+                TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+                TaskStatus.TERMINAL_FAILURE,
+            }:
+                raise RuntimeError("terminal tasks do not accept progress checkpoints")
+            contour = self._task_contour(task)
+            validate_progress_stage_for_contour(stage, contour)
+            if progress_percent(stage) < int(task["progress_percent"]):
+                raise RuntimeError(
+                    "an executor checkpoint cannot invalidate proven progress"
+                )
+            recorded_at = _now()
+            sequence = self.event(
+                connection,
+                "task",
+                identity,
+                "progress-checkpoint",
+                {**stable_payload, "recorded_at": recorded_at},
+            )
+        self.flush_events()
+        return {
+            "task_id": identity,
+            "stage": stage.value,
+            "evidence_digest": digest,
+            "recorded_at": recorded_at,
+            "sequence": sequence,
+        }
+
+    def progress_state(self, *, task_id: str) -> dict[str, object]:
+        identity = validate_task_id(task_id)
+        with self.connect() as connection:
+            task = self.task(identity, connection)
+            checkpoint = self._latest_progress_checkpoint(connection, identity)
+        return {
+            "task_id": identity,
+            "revision": int(task["revision"]),
+            "status": task["status"],
+            "execution_contour": self._task_contour(task),
+            "progress_percent": int(task["progress_percent"]),
+            "progress_stage": progress_stage_for_percent(
+                int(task["progress_percent"])
+            ).value,
+            "updated_at": task["updated_at"],
+            "latest_executor_checkpoint": checkpoint,
+        }
+
+    @staticmethod
+    def _progress_status_target(
+        current_status: TaskStatus, stage: ProgressStage, *, invalidation: bool
+    ) -> TaskStatus:
+        if invalidation:
+            return TaskStatus.RECOVERING
+        desired = current_status
+        if progress_percent(stage) >= progress_percent(ProgressStage.DEPLOYED_VERIFYING):
+            desired = TaskStatus.VERIFYING
+        elif progress_percent(stage) >= progress_percent(ProgressStage.RELEASE_RUNNING):
+            desired = TaskStatus.RELEASE_OWNED
+        elif progress_percent(stage) >= progress_percent(ProgressStage.RELEASE_ADMITTED):
+            desired = TaskStatus.READY_FOR_RELEASE
+        if transition_allowed(current_status, desired):
+            return desired
+        for candidate in (
+            TaskStatus.READY_FOR_RELEASE,
+            TaskStatus.RELEASE_OWNED,
+            TaskStatus.VERIFYING,
+        ):
+            if candidate != current_status and transition_allowed(
+                current_status, candidate
+            ):
+                return candidate
+        return current_status
+
+    def apply_progress(
+        self,
+        *,
+        task_id: str,
+        expected_revision: int,
+        run_owner: str,
+        objective_stage: ProgressStage | None = None,
+        objective_evidence_digest: str = "",
+        objective_at: str = "",
+        observed_stage: ProgressStage | None = None,
+        observed_evidence_digest: str = "",
+        observed_at: str = "",
+        eta: str = "",
+        delta: str = "",
+        current: str = "",
+        invalidate: bool = False,
+        invalidation_reason: str = "",
+    ) -> dict[str, object]:
+        """Materialize the strongest proven stage once per Watcher heartbeat."""
+
+        identity = validate_task_id(task_id)
+        if expected_revision <= 0 or not run_owner.strip():
+            raise ValueError("progress application requires revision and run owner")
+        if objective_stage is not None:
+            if not invalidate and objective_stage not in OBJECTIVE_PROGRESS_STAGES:
+                raise ValueError("objective progress must use a GitHub/release stage")
+            if objective_stage in {
+                ProgressStage.PRE_EXECUTOR,
+                ProgressStage.TECHNICAL_COMPLETE,
+            }:
+                raise ValueError("objective progress cannot use a boundary stage")
+            objective_digest = validate_digest(objective_evidence_digest)
+            objective_time = _parse_timestamp(objective_at, field="objective_at")
+        elif objective_evidence_digest or objective_at:
+            raise ValueError("objective evidence requires an objective stage")
+        else:
+            objective_digest = ""
+            objective_time = None
+        if observed_stage is not None:
+            if observed_stage not in OBSERVED_EARLY_STAGES:
+                raise ValueError("observed progress is limited to early work stages")
+            observed_digest = validate_digest(observed_evidence_digest)
+            observed_time = _parse_timestamp(observed_at, field="observed_at")
+        elif observed_evidence_digest or observed_at:
+            raise ValueError("observed evidence requires an observed stage")
+        else:
+            observed_digest = ""
+            observed_time = None
+        if objective_stage is None and observed_stage is None and not invalidate:
+            # A fresh stored executor checkpoint may be the only evidence source.
+            pass
+        supplied_visible = any((eta.strip(), delta.strip(), current.strip()))
+        if supplied_visible and not all((eta.strip(), delta.strip(), current.strip())):
+            raise ValueError("eta, delta and current must be supplied together")
+        visible = None
+        if supplied_visible:
+            visible = {
+                "eta": validate_visible_text(eta, field="eta", task_id=identity),
+                "delta": validate_visible_text(delta, field="delta", task_id=identity),
+                "current": validate_visible_text(
+                    current, field="current action", task_id=identity
+                ),
+            }
+        with self.transaction() as connection:
+            task = self.task(identity, connection)
+            prior_application = connection.execute(
+                "SELECT payload_json FROM events WHERE entity_type='task' AND entity_id=? "
+                "AND event_type='progress-applied' AND json_extract(payload_json,'$.run_owner')=? "
+                "ORDER BY seq DESC LIMIT 1",
+                (identity, run_owner.strip()),
+            ).fetchone()
+            if prior_application is not None:
+                return {
+                    "task_id": identity,
+                    "revision": int(task["revision"]),
+                    "idempotent": True,
+                    "reason": "already-applied-in-this-heartbeat",
+                }
+            if int(task["revision"]) != expected_revision:
+                raise RuntimeError(
+                    f"stale task revision: expected {expected_revision}, actual {task['revision']}"
+                )
+            contour = self._task_contour(task)
+            current_stage = progress_stage_for_percent(
+                int(task["progress_percent"])
+            )
+            if current_stage == ProgressStage.TECHNICAL_COMPLETE:
+                raise RuntimeError("technical completion is terminal-only")
+            updated_time = _parse_timestamp(str(task["updated_at"]), field="updated_at")
+            candidates: list[
+                tuple[int, int, ProgressStage, dict[str, str], str, str]
+            ] = []
+            checkpoint = self._latest_progress_checkpoint(connection, identity)
+            if checkpoint is not None:
+                checkpoint_stage = ProgressStage(str(checkpoint["stage"]))
+                checkpoint_time = _parse_timestamp(
+                    str(checkpoint["recorded_at"]), field="checkpoint recorded_at"
+                )
+                if (
+                    int(checkpoint["source_revision"]) == expected_revision
+                    and checkpoint_time > updated_time
+                ):
+                    validate_progress_stage_for_contour(checkpoint_stage, contour)
+                    checkpoint_visible = {
+                        field: str(checkpoint[field])
+                        for field in ("eta", "delta", "current")
+                    }
+                    candidates.append(
+                        (
+                            progress_percent(checkpoint_stage),
+                            1,
+                            checkpoint_stage,
+                            checkpoint_visible,
+                            str(checkpoint["evidence_digest"]),
+                            str(checkpoint["recorded_at"]),
+                        )
+                    )
+            if observed_stage is not None and observed_time is not None:
+                validate_progress_stage_for_contour(observed_stage, contour)
+                if observed_time <= updated_time:
+                    raise ValueError("observed evidence is not newer than task state")
+                if visible is None:
+                    raise ValueError("observed evidence requires visible progress text")
+                candidates.append(
+                    (
+                        progress_percent(observed_stage),
+                        2,
+                        observed_stage,
+                        visible,
+                        observed_digest,
+                        observed_at,
+                    )
+                )
+            if objective_stage is not None and objective_time is not None:
+                validate_progress_stage_for_contour(objective_stage, contour)
+                if not invalidate:
+                    linked_pr_stage = objective_stage_from_pr_states(
+                        str(row["state"])
+                        for row in connection.execute(
+                            "SELECT state FROM task_prs WHERE task_id=?", (identity,)
+                        ).fetchall()
+                    )
+                    if (
+                        linked_pr_stage is None
+                        or progress_percent(linked_pr_stage)
+                        < progress_percent(objective_stage)
+                    ):
+                        raise ValueError(
+                            "linked PR state does not prove the objective progress stage"
+                        )
+                if objective_time <= updated_time:
+                    raise ValueError("objective evidence is not newer than task state")
+                if visible is None:
+                    raise ValueError("objective evidence requires visible progress text")
+                candidates.append(
+                    (
+                        progress_percent(objective_stage),
+                        3,
+                        objective_stage,
+                        visible,
+                        objective_digest,
+                        objective_at,
+                    )
+                )
+            if invalidate:
+                if objective_stage is None or observed_stage is not None:
+                    raise ValueError("invalidation requires only objective evidence")
+                expected_previous = previous_progress_stage(current_stage)
+                if objective_stage != expected_previous:
+                    raise ValueError("invalidation is limited to the previous milestone")
+                reason = validate_visible_text(
+                    invalidation_reason,
+                    field="invalidation reason",
+                    task_id=identity,
+                )
+                if visible is None:
+                    raise ValueError("invalidation requires visible progress text")
+                target_stage = objective_stage
+                chosen_visible = {**visible, "delta": reason}
+                chosen_digest = objective_digest
+                evidence_time = objective_at
+                chosen_source = "objective-invalidation"
+            else:
+                if invalidation_reason.strip():
+                    raise ValueError("invalidation reason requires --invalidate")
+                if not candidates:
+                    raise RuntimeError("no fresh progress evidence is available")
+                strongest = max(candidates, key=lambda item: (item[0], item[1]))
+                target_stage = strongest[2]
+                chosen_visible = strongest[3]
+                chosen_digest = strongest[4]
+                evidence_time = strongest[5]
+                chosen_source = {
+                    1: "executor-checkpoint",
+                    2: "observed",
+                    3: "objective",
+                }[strongest[1]]
+                if progress_percent(target_stage) < progress_percent(current_stage):
+                    target_stage = current_stage
+            target_status = self._progress_status_target(
+                TaskStatus(task["status"]), target_stage, invalidation=invalidate
+            )
+            next_revision = expected_revision + 1
+            connection.execute(
+                "UPDATE tasks SET status=?,revision=?,progress_percent=?,eta_text=?,"
+                "last_delta=?,current_action=?,blocker='',human_reason='',updated_at=? "
+                "WHERE task_id=?",
+                (
+                    target_status.value,
+                    next_revision,
+                    progress_percent(target_stage),
+                    chosen_visible["eta"],
+                    chosen_visible["delta"],
+                    chosen_visible["current"],
+                    _now(),
+                    identity,
+                ),
+            )
+            self.event(
+                connection,
+                "task",
+                identity,
+                "progress-applied",
+                {
+                    "run_owner": run_owner.strip(),
+                    "from_stage": current_stage.value,
+                    "to_stage": target_stage.value,
+                    "progress_percent": progress_percent(target_stage),
+                    "source": chosen_source,
+                    "evidence_digest": chosen_digest,
+                    "evidence_at": evidence_time,
+                    "invalidation": invalidate,
+                    "revision": next_revision,
+                },
+            )
+        self.flush_events()
+        return {
+            "task_id": identity,
+            "revision": next_revision,
+            "status": target_status.value,
+            "progress_stage": target_stage.value,
+            "progress_percent": progress_percent(target_stage),
+            "invalidation": invalidate,
+        }
+
     def update_task(
         self,
         *,
@@ -1163,6 +1613,25 @@ class Registry:
             }
             if not 0 <= int(values["progress_percent"]) <= 100:
                 raise ValueError("progress must be between 0 and 100")
+            mapped_stage = progress_stage_for_percent(
+                int(values["progress_percent"])
+            )
+            validate_progress_stage_for_contour(
+                mapped_stage, self._task_contour(before)
+            )
+            if progress is not None:
+                if int(values["progress_percent"]) < int(before["progress_percent"]):
+                    raise ValueError(
+                        "progress invalidation requires the evidence-backed apply-progress path"
+                    )
+                if (
+                    mapped_stage == ProgressStage.TECHNICAL_COMPLETE
+                    and int(before["progress_percent"])
+                    != progress_percent(ProgressStage.TECHNICAL_COMPLETE)
+                ):
+                    raise ValueError(
+                        "100% is reserved for terminal technical-completion evidence"
+                    )
             if any(
                 not str(values[field]).strip()
                 for field in ("eta_text", "last_delta", "current_action")
@@ -1321,6 +1790,7 @@ class Registry:
         kind: AttentionKind,
         evidence_summary: str,
         evidence_digest: str,
+        completion_evidence_class: str = "",
         backfill: bool = False,
         eta: str | None = None,
         delta: str | None = None,
@@ -1367,6 +1837,39 @@ class Registry:
                     f"stale task revision: expected {expected_revision}, actual {task['revision']}"
                 )
             before_status = TaskStatus(task["status"])
+            contour = self._task_contour(task)
+            if kind == AttentionKind.TECHNICAL_COMPLETION:
+                validate_terminal_evidence(contour, completion_evidence_class)
+                if completion_evidence_class in {"release:done", "release:production"}:
+                    required_pr_state = (
+                        "done"
+                        if completion_evidence_class == "release:done"
+                        else "production"
+                    )
+                    pr_states = {
+                        str(row["state"]).casefold().removeprefix("release:")
+                        for row in connection.execute(
+                            "SELECT state FROM task_prs WHERE task_id=?", (identity,)
+                        ).fetchall()
+                    }
+                    allowed_terminal_states = {
+                        "done",
+                        "superseded",
+                        "retired",
+                    }
+                    if required_pr_state == "production":
+                        allowed_terminal_states.add("production")
+                    if (
+                        required_pr_state not in pr_states
+                        or not pr_states.issubset(allowed_terminal_states)
+                    ):
+                        raise RuntimeError(
+                            "technical completion requires only linked canonical terminal PR states"
+                        )
+            elif completion_evidence_class.strip():
+                raise ValueError(
+                    "completion evidence class is valid only for technical completion"
+                )
             pending_by_kind = {
                 AttentionKind.TECHNICAL_COMPLETION: TaskStatus.DONE_PENDING_HANDOFF,
                 AttentionKind.TERMINAL_FAILURE: TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
@@ -3019,7 +3522,7 @@ class Registry:
         title_readback_digest: str,
         pin_readback_digest: str,
         automation_readback_digest: str,
-        max_runs: int = 720,
+        max_runs: int = DEFAULT_WATCHER_MAX_RUNS,
     ) -> dict[str, object]:
         if (
             generation <= 0
@@ -3068,8 +3571,9 @@ class Registry:
                 }
             connection.execute(
                 "INSERT INTO watchers(generation,thread_id,host_id,automation_id,status,max_runs,"
-                "title_readback_digest,pin_readback_digest,automation_readback_digest,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "title_readback_digest,pin_readback_digest,automation_readback_digest,"
+                "automation_enabled_readback_digest,automation_enabled_at,liveness_required,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     generation,
                     thread_id.strip(),
@@ -3080,6 +3584,9 @@ class Registry:
                     readback_digests["title_readback_digest"],
                     readback_digests["pin_readback_digest"],
                     readback_digests["automation_readback_digest"],
+                    readback_digests["automation_readback_digest"],
+                    _now(),
+                    1,
                     _now(),
                 ),
             )
@@ -3126,11 +3633,14 @@ class Registry:
             if updated:
                 connection.execute(
                     "UPDATE watchers SET title_readback_digest=?,pin_readback_digest=?,"
-                    "automation_readback_digest=? WHERE generation=?",
+                    "automation_readback_digest=?,automation_enabled_readback_digest=?,"
+                    "automation_enabled_at=? WHERE generation=?",
                     (
                         evidence["title_readback_digest"],
                         evidence["pin_readback_digest"],
                         evidence["automation_readback_digest"],
+                        evidence["automation_readback_digest"],
+                        _now(),
                         generation,
                     ),
                 )
@@ -3182,6 +3692,48 @@ class Registry:
         self.flush_events()
         return {"generation": generation, "status": "SMOKE_PASSED", "evidence_digest": digest}
 
+    def confirm_watcher_automation_enabled(
+        self,
+        *,
+        generation: int,
+        automation_id: str,
+        readback_digest: str,
+    ) -> dict[str, object]:
+        identity = automation_id.strip()
+        if generation <= 0 or not identity:
+            raise ValueError("exact watcher generation and automation id are required")
+        digest = validate_digest(readback_digest)
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if watcher is None or watcher["automation_id"] != identity:
+                raise RuntimeError("automation enabled readback belongs to a different watcher")
+            if watcher["status"] == "RETIRED" and (
+                not int(watcher["retirement_required"]) or watcher["archived_at"]
+            ):
+                raise RuntimeError("retired watcher automation is no longer in handover")
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET automation_enabled_readback_digest=?,"
+                "automation_enabled_at=? WHERE generation=?",
+                (digest, timestamp, generation),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "automation-enabled-readback",
+                {"automation_id": identity, "readback_digest": digest},
+            )
+        self.flush_events()
+        return {
+            "generation": generation,
+            "automation_id": identity,
+            "automation_enabled": True,
+            "readback_digest": digest,
+        }
+
     def activate_watcher(self, *, generation: int) -> dict[str, object]:
         with self.transaction() as connection:
             prepared = connection.execute("SELECT * FROM watchers WHERE generation=?", (generation,)).fetchone()
@@ -3222,6 +3774,137 @@ class Registry:
                 ).fetchall()
             ]
 
+    def record_watcher_liveness_failure(
+        self,
+        *,
+        generation: int,
+        automation_id: str,
+        failure_digest: str,
+    ) -> dict[str, object]:
+        identity = automation_id.strip()
+        if generation <= 0 or not identity:
+            raise ValueError("exact watcher generation and automation id are required")
+        digest = validate_digest(failure_digest)
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if (
+                watcher is None
+                or watcher["status"] != "ACTIVE"
+                or watcher["automation_id"] != identity
+            ):
+                raise RuntimeError("liveness failure belongs to a non-active watcher")
+            if watcher["liveness_confirmed_at"]:
+                raise RuntimeError("watcher liveness is already confirmed")
+            if watcher["last_liveness_failure_digest"] == digest:
+                return {
+                    "generation": generation,
+                    "recorded": False,
+                    "idempotent": True,
+                    "failure_count": int(watcher["liveness_failure_count"]),
+                    "recovery_action": "retry-active-successor-same-automation",
+                }
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET liveness_failure_count=liveness_failure_count+1,"
+                "last_liveness_failure_digest=?,last_liveness_failure_at=? WHERE generation=?",
+                (digest, timestamp, generation),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "post-activation-liveness-failed",
+                {
+                    "failure_digest": digest,
+                    "recovery_action": "retry-active-successor-same-automation",
+                },
+            )
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+        self.flush_events()
+        return {
+            "generation": generation,
+            "recorded": True,
+            "failure_count": int(watcher["liveness_failure_count"]),
+            "recovery_action": "retry-active-successor-same-automation",
+        }
+
+    def confirm_watcher_liveness(
+        self,
+        *,
+        generation: int,
+        automation_id: str,
+        automation_enabled_readback_digest: str,
+        heartbeat_readback_digest: str,
+        end_run_readback_digest: str,
+    ) -> dict[str, object]:
+        identity = automation_id.strip()
+        if generation <= 0 or not identity:
+            raise ValueError("exact watcher generation and automation id are required")
+        enabled_digest = validate_digest(automation_enabled_readback_digest)
+        heartbeat_digest = validate_digest(heartbeat_readback_digest)
+        end_digest = validate_digest(end_run_readback_digest)
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if (
+                watcher is None
+                or watcher["status"] != "ACTIVE"
+                or watcher["automation_id"] != identity
+            ):
+                raise RuntimeError("liveness proof belongs to a non-active watcher")
+            if int(watcher["run_count"]) < 1 or not watcher["last_run_at"]:
+                raise RuntimeError("liveness proof requires a successful active begin-run")
+            active_lease = connection.execute(
+                "SELECT 1 FROM runtime_leases WHERE name='watcher-run' AND generation=?",
+                (generation,),
+            ).fetchone()
+            if active_lease is not None:
+                raise RuntimeError("liveness proof requires successful end-run first")
+            if watcher["liveness_confirmed_at"]:
+                if (
+                    watcher["automation_enabled_readback_digest"] != enabled_digest
+                    or watcher["liveness_heartbeat_digest"] != heartbeat_digest
+                    or watcher["liveness_end_run_digest"] != end_digest
+                ):
+                    raise RuntimeError("watcher liveness already has different evidence")
+                return {
+                    "generation": generation,
+                    "liveness": "PROVEN",
+                    "idempotent": True,
+                }
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET automation_enabled_readback_digest=?,automation_enabled_at=?,"
+                "liveness_heartbeat_digest=?,liveness_end_run_digest=?,liveness_confirmed_at=? "
+                "WHERE generation=?",
+                (
+                    enabled_digest,
+                    timestamp,
+                    heartbeat_digest,
+                    end_digest,
+                    timestamp,
+                    generation,
+                ),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "post-activation-liveness-confirmed",
+                {
+                    "automation_enabled_readback_digest": enabled_digest,
+                    "heartbeat_readback_digest": heartbeat_digest,
+                    "end_run_readback_digest": end_digest,
+                },
+            )
+        self.flush_events()
+        return {"generation": generation, "liveness": "PROVEN"}
+
     def confirm_watcher_retirement(
         self,
         *,
@@ -3248,6 +3931,10 @@ class Registry:
                 or successor["status"] != "ACTIVE"
             ):
                 raise RuntimeError("watcher retirement does not follow an active successor")
+            if int(successor["liveness_required"]) and not successor["liveness_confirmed_at"]:
+                raise RuntimeError(
+                    "old watcher cannot retire before successor post-activation liveness proof"
+                )
             if watcher["archived_at"]:
                 if (
                     watcher["automation_paused_digest"] != paused_digest
@@ -3284,6 +3971,93 @@ class Registry:
             "status": "ARCHIVED",
         }
 
+    @staticmethod
+    def _watcher_rotation_state(watcher: Mapping[str, Any]) -> dict[str, object]:
+        run_limit_due = int(watcher["run_count"]) >= int(watcher["max_runs"])
+        compaction_due = bool(watcher["context_compaction_readback_digest"])
+        reasons: list[str] = []
+        if run_limit_due:
+            reasons.append("run-limit")
+        if compaction_due:
+            reasons.append("context-compaction")
+        return {
+            "run_count": int(watcher["run_count"]),
+            "max_runs": int(watcher["max_runs"]),
+            "rotation_due": bool(reasons),
+            "rotation_reasons": reasons,
+        }
+
+    def record_watcher_context_compaction(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        thread_id: str,
+        item_id: str,
+        readback_digest: str,
+    ) -> dict[str, object]:
+        """Record an exact typed Desktop readback, never a context-size heuristic."""
+        if (
+            generation <= 0
+            or not owner.strip()
+            or not thread_id.strip()
+            or not item_id.strip()
+        ):
+            raise ValueError("exact watcher generation, lease owner, thread and item are required")
+        digest = validate_digest(readback_digest)
+        now = time.time()
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if watcher is None or watcher["status"] != "ACTIVE":
+                raise RuntimeError("context compaction evidence requires the active generation")
+            if watcher["thread_id"] != thread_id.strip():
+                raise RuntimeError("context compaction evidence belongs to a different watcher")
+            lease = connection.execute(
+                "SELECT * FROM runtime_leases WHERE name='watcher-run'"
+            ).fetchone()
+            if (
+                lease is None
+                or lease["owner"] != owner.strip()
+                or int(lease["generation"]) != generation
+                or float(lease["expires_at"]) <= now
+            ):
+                raise RuntimeError("context compaction evidence requires the current watcher lease")
+            if watcher["context_compaction_readback_digest"]:
+                same_evidence = (
+                    watcher["context_compaction_item_id"] == item_id.strip()
+                    and watcher["context_compaction_readback_digest"] == digest
+                )
+                state = self._watcher_rotation_state(watcher)
+                return {
+                    "generation": generation,
+                    "recorded": False,
+                    "idempotent": same_evidence,
+                    "already_due": True,
+                    **state,
+                }
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET context_compaction_item_id=?,"
+                "context_compaction_readback_digest=?,context_compaction_at=? "
+                "WHERE generation=?",
+                (item_id.strip(), digest, timestamp, generation),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "context-compaction-observed",
+                {"item_id": item_id.strip(), "readback_digest": digest},
+            )
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            state = self._watcher_rotation_state(watcher)
+        self.flush_events()
+        return {"generation": generation, "recorded": True, **state}
+
     def begin_run(self, *, generation: int, owner: str, lease_seconds: int) -> dict[str, object]:
         if lease_seconds <= 0 or lease_seconds > 600:
             raise ValueError("lease_seconds must be between 1 and 600")
@@ -3302,16 +4076,14 @@ class Registry:
                 and int(lease["generation"]) == generation
             ):
                 watcher = connection.execute(
-                    "SELECT run_count,max_runs FROM watchers WHERE generation=?",
+                    "SELECT * FROM watchers WHERE generation=?",
                     (generation,),
                 ).fetchone()
                 return {
                     "acquired": True,
                     "generation": generation,
                     "owner": owner,
-                    "run_count": int(watcher["run_count"]),
-                    "max_runs": int(watcher["max_runs"]),
-                    "rotation_due": int(watcher["run_count"]) >= int(watcher["max_runs"]),
+                    **self._watcher_rotation_state(watcher),
                     "idempotent": True,
                 }
             connection.execute(
@@ -3324,15 +4096,13 @@ class Registry:
                 (_now(), generation),
             )
             watcher = connection.execute(
-                "SELECT run_count,max_runs FROM watchers WHERE generation=?", (generation,)
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
             ).fetchone()
         return {
             "acquired": True,
             "generation": generation,
             "owner": owner,
-            "run_count": int(watcher["run_count"]),
-            "max_runs": int(watcher["max_runs"]),
-            "rotation_due": int(watcher["run_count"]) >= int(watcher["max_runs"]),
+            **self._watcher_rotation_state(watcher),
         }
 
     def end_run(self, *, generation: int, owner: str) -> dict[str, object]:
@@ -3366,6 +4136,9 @@ class Registry:
                         (row["task_id"],),
                     ).fetchall()
                 ]
+                payload["latest_executor_checkpoint"] = (
+                    self._latest_progress_checkpoint(connection, row["task_id"])
+                )
                 result.append(payload)
             return result
 
@@ -3627,9 +4400,45 @@ class Registry:
             self.flush_events()
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
 
+    def heartbeat_response(self, *, automation_id: str) -> str:
+        """Wrap the sole canonical report in the Desktop heartbeat contract."""
+
+        identity = automation_id.strip()
+        if not identity:
+            raise ValueError("heartbeat response requires an automation id")
+        report = self.report(record=True)
+        with self.connect() as connection:
+            has_active_blocks = bool(self._visible_envelopes(connection))
+            has_owner_attention = bool(
+                connection.execute(
+                    "SELECT 1 FROM attention_events WHERE state IN ('PENDING','LEASED','SENT','RETRY') LIMIT 1"
+                ).fetchone()
+            )
+            has_owner_incident = bool(
+                connection.execute(
+                    "SELECT 1 FROM incidents WHERE status IN (?,?,?,?,?,?) LIMIT 1",
+                    ACTIVE_INCIDENT_STATES,
+                ).fetchone()
+            )
+        should_notify = (
+            has_active_blocks or has_owner_attention or has_owner_incident
+        )
+        decision = "NOTIFY" if should_notify else "DONT_NOTIFY"
+        message = report if should_notify else "Нет активных задач."
+        # XML escaping is transport serialization only: the parsed message text
+        # is byte-for-byte the canonical report stdout for every NOTIFY run.
+        return (
+            "<heartbeat>"
+            f"<automation_id>{html.escape(identity, quote=False)}</automation_id>"
+            f"<decision>{decision}</decision>"
+            f"<message>{html.escape(message, quote=False)}</message>"
+            "</heartbeat>"
+        )
+
     def integrity(self) -> dict[str, object]:
         with self.connect() as connection:
             quick = connection.execute("PRAGMA quick_check").fetchone()[0]
+            watcher_count = int(connection.execute("SELECT count(*) FROM watchers").fetchone()[0])
             active_watchers = int(connection.execute("SELECT count(*) FROM watchers WHERE status='ACTIVE'").fetchone()[0])
             stale_locks = int(
                 connection.execute(
@@ -3725,7 +4534,8 @@ class Registry:
                 connection.execute(
                     "SELECT count(*) FROM watchers WHERE status='ACTIVE' AND "
                     "(title_readback_digest='' OR pin_readback_digest='' "
-                    "OR automation_readback_digest='')"
+                    "OR automation_readback_digest='' OR automation_enabled_readback_digest='' "
+                    "OR automation_enabled_at IS NULL OR automation_paused_digest<>'')"
                 ).fetchone()[0]
             )
             incomplete_watcher_retirements = int(
@@ -3735,10 +4545,32 @@ class Registry:
                     "OR archive_readback_digest='' OR archived_at IS NULL)"
                 ).fetchone()[0]
             )
+            invalid_watcher_handover = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers old LEFT JOIN watchers successor "
+                    "ON successor.generation=old.successor_generation "
+                    "WHERE old.retirement_required=1 AND (successor.generation IS NULL "
+                    "OR (old.archived_at IS NULL AND successor.status<>'ACTIVE') OR "
+                    "(successor.liveness_required=1 AND successor.liveness_confirmed_at IS NULL AND ("
+                    "old.automation_paused_digest<>'' OR old.archive_readback_digest<>'' "
+                    "OR old.archived_at IS NOT NULL)) OR "
+                    "(old.archived_at IS NOT NULL AND ((successor.liveness_required=1 "
+                    "AND successor.liveness_confirmed_at IS NULL) "
+                    "OR old.automation_paused_digest='' OR old.archive_readback_digest='')))"
+                ).fetchone()[0]
+            )
+            effective_enabled_automations = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers WHERE status='ACTIVE' "
+                    "AND automation_enabled_readback_digest<>'' AND automation_enabled_at IS NOT NULL "
+                    "AND automation_paused_digest=''"
+                ).fetchone()[0]
+            )
+            active_generation_ok = watcher_count == 0 or active_watchers == 1
         return {
             "ok": (
                 quick == "ok"
-                and active_watchers <= 1
+                and active_generation_ok
                 and stale_locks == 0
                 and invalid_human_blocks == 0
                 and unsmoked_active_watchers == 0
@@ -3750,10 +4582,13 @@ class Registry:
                 and invalid_active_role_pins == 0
                 and invalid_owner_notifications == 0
                 and invalid_active_watcher_readbacks == 0
-                and incomplete_watcher_retirements == 0
+                and invalid_watcher_handover == 0
+                and (watcher_count == 0 or effective_enabled_automations >= 1)
             ),
             "sqlite": quick,
             "active_watchers": active_watchers,
+            "exactly_one_active_generation": active_generation_ok,
+            "effective_enabled_automations": effective_enabled_automations,
             "stale_locks": stale_locks,
             "invalid_human_blocks": invalid_human_blocks,
             "unsmoked_active_watchers": unsmoked_active_watchers,
@@ -3766,6 +4601,7 @@ class Registry:
             "invalid_owner_notifications": invalid_owner_notifications,
             "invalid_active_watcher_readbacks": invalid_active_watcher_readbacks,
             "incomplete_watcher_retirements": incomplete_watcher_retirements,
+            "invalid_watcher_handover": invalid_watcher_handover,
             "event_count": event_count,
         }
 
@@ -3894,6 +4730,49 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--repo-owned-remediation-available", action="store_true")
     update.add_argument("--remediation-exhausted", action="store_true")
 
+    checkpoint = commands.add_parser("checkpoint-progress")
+    checkpoint.add_argument("--task-id", required=True)
+    checkpoint.add_argument("--expected-revision", type=int, required=True)
+    checkpoint.add_argument(
+        "--stage",
+        choices=sorted(stage.value for stage in OBSERVED_EARLY_STAGES),
+        required=True,
+    )
+    checkpoint.add_argument("--evidence-digest", required=True)
+    checkpoint.add_argument("--eta", required=True)
+    checkpoint.add_argument("--delta", required=True)
+    checkpoint.add_argument("--current", required=True)
+
+    progress_state = commands.add_parser("progress-state")
+    progress_state.add_argument("--task-id", required=True)
+
+    apply_progress = commands.add_parser("apply-progress")
+    apply_progress.add_argument("--task-id", required=True)
+    apply_progress.add_argument("--expected-revision", type=int, required=True)
+    apply_progress.add_argument("--run-owner", required=True)
+    apply_progress.add_argument(
+        "--objective-stage",
+        choices=sorted(
+            stage.value
+            for stage in ProgressStage
+            if stage
+            not in {ProgressStage.PRE_EXECUTOR, ProgressStage.TECHNICAL_COMPLETE}
+        ),
+    )
+    apply_progress.add_argument("--objective-evidence-digest", default="")
+    apply_progress.add_argument("--objective-at", default="")
+    apply_progress.add_argument(
+        "--observed-stage",
+        choices=sorted(stage.value for stage in OBSERVED_EARLY_STAGES),
+    )
+    apply_progress.add_argument("--observed-evidence-digest", default="")
+    apply_progress.add_argument("--observed-at", default="")
+    apply_progress.add_argument("--eta", default="")
+    apply_progress.add_argument("--delta", default="")
+    apply_progress.add_argument("--current", default="")
+    apply_progress.add_argument("--invalidate", action="store_true")
+    apply_progress.add_argument("--invalidation-reason", default="")
+
     link = commands.add_parser("link-pr")
     link.add_argument("--task-id", required=True)
     link.add_argument("--pr", type=int, required=True)
@@ -3913,6 +4792,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enqueue_attention.add_argument("--evidence-summary", required=True)
     enqueue_attention.add_argument("--evidence-digest", required=True)
+    enqueue_attention.add_argument("--completion-evidence-class", default="")
     enqueue_attention.add_argument("--backfill", action="store_true")
     enqueue_attention.add_argument("--eta")
     enqueue_attention.add_argument("--delta")
@@ -4052,7 +4932,7 @@ def build_parser() -> argparse.ArgumentParser:
     watcher.add_argument("--title-readback-digest", required=True)
     watcher.add_argument("--pin-readback-digest", required=True)
     watcher.add_argument("--automation-readback-digest", required=True)
-    watcher.add_argument("--max-runs", type=int, default=720)
+    watcher.add_argument("--max-runs", type=int, default=DEFAULT_WATCHER_MAX_RUNS)
     watcher_readback = commands.add_parser("confirm-watcher-readback")
     watcher_readback.add_argument("--generation", type=int, required=True)
     watcher_readback.add_argument("--thread-id", required=True)
@@ -4060,6 +4940,10 @@ def build_parser() -> argparse.ArgumentParser:
     watcher_readback.add_argument("--title-readback-digest", required=True)
     watcher_readback.add_argument("--pin-readback-digest", required=True)
     watcher_readback.add_argument("--automation-readback-digest", required=True)
+    automation_enabled = commands.add_parser("confirm-watcher-automation-enabled")
+    automation_enabled.add_argument("--generation", type=int, required=True)
+    automation_enabled.add_argument("--automation-id", required=True)
+    automation_enabled.add_argument("--readback-digest", required=True)
     smoke = commands.add_parser("smoke-watcher")
     smoke.add_argument("--generation", type=int, required=True)
     smoke.add_argument("--evidence-digest", required=True)
@@ -4080,10 +4964,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watcher_retirement.add_argument("--automation-paused-digest", required=True)
     watcher_retirement.add_argument("--archive-readback-digest", required=True)
+    compaction = commands.add_parser("record-watcher-context-compaction")
+    compaction.add_argument("--generation", type=int, required=True)
+    compaction.add_argument("--owner", required=True)
+    compaction.add_argument("--thread-id", required=True)
+    compaction.add_argument("--item-id", required=True)
+    compaction.add_argument("--readback-digest", required=True)
+    liveness_failure = commands.add_parser("record-watcher-liveness-failure")
+    liveness_failure.add_argument("--generation", type=int, required=True)
+    liveness_failure.add_argument("--automation-id", required=True)
+    liveness_failure.add_argument("--failure-digest", required=True)
+    liveness = commands.add_parser("confirm-watcher-liveness")
+    liveness.add_argument("--generation", type=int, required=True)
+    liveness.add_argument("--automation-id", required=True)
+    liveness.add_argument("--automation-enabled-readback-digest", required=True)
+    liveness.add_argument("--heartbeat-readback-digest", required=True)
+    liveness.add_argument("--end-run-readback-digest", required=True)
 
     commands.add_parser("list")
     commands.add_parser("snapshot")
     commands.add_parser("report")
+    heartbeat_response = commands.add_parser("heartbeat-response")
+    heartbeat_response.add_argument("--automation-id", required=True)
     commands.add_parser("integrity")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -4155,6 +5057,43 @@ def main() -> int:
                 repo_owned_remediation_available=args.repo_owned_remediation_available,
                 remediation_exhausted=args.remediation_exhausted,
             )
+        elif args.command == "checkpoint-progress":
+            result = registry.record_progress_checkpoint(
+                task_id=args.task_id,
+                expected_revision=args.expected_revision,
+                stage=ProgressStage(args.stage),
+                evidence_digest=args.evidence_digest,
+                eta=args.eta,
+                delta=args.delta,
+                current=args.current,
+            )
+        elif args.command == "progress-state":
+            result = registry.progress_state(task_id=args.task_id)
+        elif args.command == "apply-progress":
+            result = registry.apply_progress(
+                task_id=args.task_id,
+                expected_revision=args.expected_revision,
+                run_owner=args.run_owner,
+                objective_stage=(
+                    ProgressStage(args.objective_stage)
+                    if args.objective_stage
+                    else None
+                ),
+                objective_evidence_digest=args.objective_evidence_digest,
+                objective_at=args.objective_at,
+                observed_stage=(
+                    ProgressStage(args.observed_stage)
+                    if args.observed_stage
+                    else None
+                ),
+                observed_evidence_digest=args.observed_evidence_digest,
+                observed_at=args.observed_at,
+                eta=args.eta,
+                delta=args.delta,
+                current=args.current,
+                invalidate=args.invalidate,
+                invalidation_reason=args.invalidation_reason,
+            )
         elif args.command == "link-pr":
             result = registry.link_pr(task_id=args.task_id, pr=args.pr, role=args.role, head_sha=args.head_sha, state=args.state)
         elif args.command == "accept":
@@ -4166,6 +5105,7 @@ def main() -> int:
                 kind=AttentionKind(args.kind),
                 evidence_summary=args.evidence_summary,
                 evidence_digest=args.evidence_digest,
+                completion_evidence_class=args.completion_evidence_class,
                 backfill=args.backfill,
                 eta=args.eta,
                 delta=args.delta,
@@ -4319,6 +5259,12 @@ def main() -> int:
                 pin_readback_digest=args.pin_readback_digest,
                 automation_readback_digest=args.automation_readback_digest,
             )
+        elif args.command == "confirm-watcher-automation-enabled":
+            result = registry.confirm_watcher_automation_enabled(
+                generation=args.generation,
+                automation_id=args.automation_id,
+                readback_digest=args.readback_digest,
+            )
         elif args.command == "smoke-watcher":
             result = registry.smoke_watcher(
                 generation=args.generation,
@@ -4339,12 +5285,37 @@ def main() -> int:
                 automation_paused_digest=args.automation_paused_digest,
                 archive_readback_digest=args.archive_readback_digest,
             )
+        elif args.command == "record-watcher-context-compaction":
+            result = registry.record_watcher_context_compaction(
+                generation=args.generation,
+                owner=args.owner,
+                thread_id=args.thread_id,
+                item_id=args.item_id,
+                readback_digest=args.readback_digest,
+            )
+        elif args.command == "record-watcher-liveness-failure":
+            result = registry.record_watcher_liveness_failure(
+                generation=args.generation,
+                automation_id=args.automation_id,
+                failure_digest=args.failure_digest,
+            )
+        elif args.command == "confirm-watcher-liveness":
+            result = registry.confirm_watcher_liveness(
+                generation=args.generation,
+                automation_id=args.automation_id,
+                automation_enabled_readback_digest=args.automation_enabled_readback_digest,
+                heartbeat_readback_digest=args.heartbeat_readback_digest,
+                end_run_readback_digest=args.end_run_readback_digest,
+            )
         elif args.command == "list":
             result = registry.active_tasks()
         elif args.command == "snapshot":
             result = registry.snapshot()
         elif args.command == "report":
             print(registry.report(record=True))
+            return 0
+        elif args.command == "heartbeat-response":
+            print(registry.heartbeat_response(automation_id=args.automation_id))
             return 0
         elif args.command == "integrity":
             result = registry.integrity()

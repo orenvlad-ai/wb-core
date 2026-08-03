@@ -49,6 +49,143 @@ EXECUTION_CONTOURS = frozenset(
 )
 
 
+class ProgressStage(str, Enum):
+    PRE_EXECUTOR = "pre-executor"
+    EXECUTOR_STARTED = "executor-started"
+    PREFLIGHT_COMPLETE = "preflight-complete"
+    IMPLEMENTATION_STARTED = "implementation-started"
+    MAIN_DIFF_READY = "main-diff-ready"
+    PRIMARY_CHECKS_PASSED = "primary-checks-passed"
+    FULL_CHECKS_PASSED = "full-checks-passed"
+    PR_CREATED = "pr-created"
+    RELEASE_ADMITTED = "release-admitted"
+    RELEASE_RUNNING = "release-running"
+    DEPLOYED_VERIFYING = "deployed-verifying"
+    TECHNICAL_COMPLETE = "technical-complete"
+
+
+PROGRESS_PERCENT_BY_STAGE = {
+    ProgressStage.PRE_EXECUTOR: 0,
+    ProgressStage.EXECUTOR_STARTED: 5,
+    ProgressStage.PREFLIGHT_COMPLETE: 15,
+    ProgressStage.IMPLEMENTATION_STARTED: 25,
+    ProgressStage.MAIN_DIFF_READY: 40,
+    ProgressStage.PRIMARY_CHECKS_PASSED: 55,
+    ProgressStage.FULL_CHECKS_PASSED: 65,
+    ProgressStage.PR_CREATED: 72,
+    ProgressStage.RELEASE_ADMITTED: 80,
+    ProgressStage.RELEASE_RUNNING: 88,
+    ProgressStage.DEPLOYED_VERIFYING: 95,
+    ProgressStage.TECHNICAL_COMPLETE: 100,
+}
+PROGRESS_STAGES = tuple(PROGRESS_PERCENT_BY_STAGE)
+EXECUTOR_CHECKPOINT_STAGES = frozenset(
+    {
+        ProgressStage.PREFLIGHT_COMPLETE,
+        ProgressStage.IMPLEMENTATION_STARTED,
+        ProgressStage.MAIN_DIFF_READY,
+        ProgressStage.PRIMARY_CHECKS_PASSED,
+        ProgressStage.FULL_CHECKS_PASSED,
+    }
+)
+OBSERVED_EARLY_STAGES = EXECUTOR_CHECKPOINT_STAGES
+OBJECTIVE_PROGRESS_STAGES = frozenset(
+    {
+        ProgressStage.PR_CREATED,
+        ProgressStage.RELEASE_ADMITTED,
+        ProgressStage.RELEASE_RUNNING,
+        ProgressStage.DEPLOYED_VERIFYING,
+    }
+)
+OBJECTIVE_PR_STATE_STAGE = {
+    "open": ProgressStage.PR_CREATED,
+    "draft": ProgressStage.PR_CREATED,
+    "checks-pending": ProgressStage.PR_CREATED,
+    "ci-green": ProgressStage.RELEASE_ADMITTED,
+    "staged": ProgressStage.RELEASE_ADMITTED,
+    "ready": ProgressStage.RELEASE_ADMITTED,
+    "admitted": ProgressStage.RELEASE_ADMITTED,
+    "awaiting-agent": ProgressStage.RELEASE_ADMITTED,
+    "blocked": ProgressStage.RELEASE_ADMITTED,
+    "running": ProgressStage.RELEASE_RUNNING,
+    "release-running": ProgressStage.RELEASE_RUNNING,
+    "merged": ProgressStage.RELEASE_RUNNING,
+    "deployed": ProgressStage.DEPLOYED_VERIFYING,
+    "awaiting-ui": ProgressStage.DEPLOYED_VERIFYING,
+    "verifying": ProgressStage.DEPLOYED_VERIFYING,
+    "done": ProgressStage.RELEASE_RUNNING,
+    "production": ProgressStage.DEPLOYED_VERIFYING,
+}
+TERMINAL_EVIDENCE_BY_CONTOUR = {
+    "read-only": "diagnostic-complete",
+    "user-artifact": "artifact-verified",
+    "repo-only": "release:done",
+    "live-runtime": "release:production",
+    "production-mutation": "release:production",
+    "archived-gas-guard": "release:done",
+}
+
+
+def progress_percent(stage: ProgressStage) -> int:
+    return PROGRESS_PERCENT_BY_STAGE[stage]
+
+
+def progress_stage_for_percent(percent: int) -> ProgressStage:
+    for stage, mapped_percent in PROGRESS_PERCENT_BY_STAGE.items():
+        if mapped_percent == percent:
+            return stage
+    raise ValueError("progress must equal a centralized evidence-backed milestone")
+
+
+def previous_progress_stage(stage: ProgressStage) -> ProgressStage:
+    index = PROGRESS_STAGES.index(stage)
+    if index <= 1:
+        raise ValueError("executor-started progress cannot be invalidated")
+    return PROGRESS_STAGES[index - 1]
+
+
+def objective_stage_from_pr_states(states: Iterable[str]) -> ProgressStage | None:
+    normalized = [
+        state.strip().casefold().removeprefix("release:") for state in states
+    ]
+    stages = [
+        OBJECTIVE_PR_STATE_STAGE[state]
+        for state in normalized
+        if state in OBJECTIVE_PR_STATE_STAGE
+    ]
+    if not stages:
+        return None
+    return max(stages, key=progress_percent)
+
+
+def validate_progress_stage_for_contour(
+    stage: ProgressStage, execution_contour: str
+) -> ProgressStage:
+    if execution_contour not in EXECUTION_CONTOURS:
+        raise ValueError("unknown execution contour")
+    if stage == ProgressStage.PRE_EXECUTOR:
+        raise ValueError("registered tasks already have a started executor")
+    if (
+        execution_contour in {"read-only", "user-artifact"}
+        and stage in OBJECTIVE_PROGRESS_STAGES
+    ):
+        raise ValueError("this execution contour has no GitHub/release progress stages")
+    if execution_contour == "repo-only" and stage == ProgressStage.DEPLOYED_VERIFYING:
+        raise ValueError("repo-only tasks do not have a deploy verification stage")
+    return stage
+
+
+def validate_terminal_evidence(
+    execution_contour: str, evidence_class: str
+) -> str:
+    expected = TERMINAL_EVIDENCE_BY_CONTOUR.get(execution_contour)
+    if expected is None or evidence_class.strip() != expected:
+        raise ValueError(
+            "technical completion evidence does not match the execution contour"
+        )
+    return expected
+
+
 class TaskStatus(str, Enum):
     DISCUSSION = "DISCUSSION"
     DISPATCHING = "DISPATCHING"

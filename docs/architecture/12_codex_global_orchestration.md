@@ -40,13 +40,14 @@ Passport фиксирует цель, expected result, execution contour, includ
 Основные операции:
 
 - `init`, `register-task`, `add-thread`, `confirm-role-pin`, `bind-acceptance`, `reconcile-acceptance`, `link-pr`, `update-task`;
+- `checkpoint-progress`, `progress-state`, `apply-progress`;
 - `enqueue-attention`, `reserve-attention`, `mark-attention-sent`, `retry-attention`, `attention`, `ack-attention`;
 - `prepare-owner-handoff`, `confirm-owner-notification`, `accept-curator`;
 - `register-executor-succession`, `pending-executor-archives`, `confirm-executor-archive`;
 - `record-failure`, `resolve-failure`;
 - `open-incident`, `claim-incident`, `attach-arbiter`, `decide`, `deliver`, `verify`, `close-incident`;
 - `prepare-watcher`, `confirm-watcher-readback`, `smoke-watcher`, `activate-watcher`, `pending-watcher-retirements`, `confirm-watcher-retirement`, `begin-run`, `end-run`;
-- `list`, `snapshot`, `report`, `integrity`, `serve`.
+- `list`, `snapshot`, `report`, `heartbeat-response`, `integrity`, `serve`.
 
 `serve` допускает только loopback bind и не имеет mutation endpoints. Registry не вызывает Codex или GitHub самостоятельно: действия исполняет Watcher через поддержанные Desktop/GitHub interfaces.
 
@@ -59,12 +60,42 @@ Passport фиксирует цель, expected result, execution contour, includ
 3. читает exact registered targets пакетами не больше восьми через `wait_threads(timeoutMs: 0)`;
 4. active target только наблюдает; idle non-terminal target получает ровно один bounded follow-up;
 5. сохраняет evidence-backed progress/failure/task revision и обслуживает revision-bound attention outbox;
-6. печатает без изменений stdout единственного repo-owned renderer `python3 apps/codex_task_orchestrator.py report`, один короткий блок на active acceptance envelope;
+6. завершает scheduled run единственным stdout `python3 apps/codex_task_orchestrator.py heartbeat-response --automation-id <ID>`; wrapper сам помещает canonical report в `message` и выбирает `NOTIFY/DONT_NOTIFY`;
 7. освобождает run lease.
 
 Локальный `queue-status` использует `GITHUB_TOKEN`, если он передан явно, а при его отсутствии читает уже существующую авторизацию через `gh auth token`. Токен не печатается и не сохраняется в registry/JSONL. Этот fallback ограничен read-only командой Watcher: в GitHub Actions отсутствие `GITHUB_TOKEN` остаётся ошибкой, mutation-команды не получают локальный fallback.
 
+## Evidence-backed progress
+
+`register-task` выполняется только после доказанного `TARGET_CREATE_READBACK`, поэтому новый active task materialize-ится сразу как `executor-started = 5%`. Значение `0%` остаётся только pre-executor понятием и не является нормальным зарегистрированным состоянием. Единственный mapper находится в `apps/codex_task_orchestrator_spec.py`; executor, Watcher prompt и renderer не хранят собственные magic numbers:
+
+| Доказанный этап | Прогресс |
+|---|---:|
+| executor запущен | 5% |
+| preflight/анализ завершён | 15% |
+| реализация начата | 25% |
+| основной diff готов | 40% |
+| первичные проверки прошли | 55% |
+| полные проверки и semantic review прошли | 65% |
+| PR создан | 72% |
+| CI/admission/release stage доказаны | 80% |
+| merge/release выполняются | 88% |
+| deploy выполнен, идёт финальная проверка | 95% |
+| применимое техническое завершение доказано | 100% |
+
+Executor вызывает `checkpoint-progress` только на meaningful раннем milestone: передаёт stage, evidence digest, реалистичный ETA range, свежий русский delta и следующий шаг. Команда пишет существующий append-only `events` audit и не меняет task revision/percentage. Отдельной checkpoint table и нового control plane нет. Повтор того же payload идемпотентен; устаревший task revision и downgrade fail closed.
+
+Watcher читает `progress-state` и bounded thread readback. Если checkpoint валиден и новее materialized task state, он может быть применён. Если checkpoint отсутствует, но readback доказывает свежие file/test facts, Watcher передаёт только минимальный observed early-stage floor с evidence timestamp/digest и свежими delta/current; elapsed time и heartbeat count доказательством не являются. GitHub/Release Train truth сначала связывается через `link-pr`: `open/draft → PR`, `ci-green/staged/ready/admitted → admission`, `running/merged → release`, `deployed/awaiting-ui/production → final verification`. Только такой linked objective state может подтвердить поздний milestone и он сильнее self-report.
+
+Revision-bound `apply-progress` выбирает сильнейшее свежее evidence и materialize-ит task fields. Один `run_owner` может сделать не больше одного meaningful progress transition для task за heartbeat. Процент может остаться прежним, когда новые delta/current описывают содержательную работу. Нижележащий test finding сам по себе не уменьшает ранее доказанный progress. Если objective truth опроверг прежний milestone, explicit invalidation допускает ровно один предыдущий уровень, переводит task в recovery и требует русское объяснение; последующий доказанный stage возвращает обычное движение. Corrective/new task всегда регистрируется отдельно и начинает свой member progress с 5%.
+
+`100%` не принимает generic `update-task` или `apply-progress`. Только `enqueue-attention TECHNICAL_COMPLETION` materialize-ит terminal progress после contour-aware proof: `diagnostic-complete` для read-only, `artifact-verified` для user artifact, linked `release:done` для repo-only и linked `release:production` для live/runtime, LOOP и production mutation. Repo-only не имеет 95% deploy stage. Terminal percentage не заменяет durable attention delivery, curator acknowledgement, acceptance-envelope completion или фразу владельца `Задача принята`.
+
 Visible report не строится Watcher-ом из raw `snapshot`. Единственная repo-owned функция агрегирует обязательных members acceptance envelope без двойного учёта: user-level progress равен минимальному доказанному progress required-member, ETA/delta/current берутся из его текущего critical path, а terminal root ждёт всех required corrective children. Независимые envelopes дают отдельные blocks. Технические task IDs, UUID, revisions, digests, enums, registry/queue/lease/follow-up/batch facts остаются только в audit/evidence. Статусы и тексты user layer — короткие русские; GitHub, Watcher, PR и C1/C2/C3 разрешены, когда полезны владельцу.
+
+Platform heartbeat response тоже repo-owned. `heartbeat-response` вызывает `report(record=True)` и сериализует ровно один `<heartbeat>` wrapper. При одном или нескольких active acceptance envelopes `decision=NOTIFY` обязателен на каждом scheduled run, а parsed XML `message` равен canonical report stdout. Поэтому unchanged fingerprint остаётся видимым periodic update: renderer заменяет delta на краткое `Изменений нет; работа продолжается: ...`, но wrapper не превращает его в `DONT_NOTIFY`. Несколько независимых envelopes сохраняются отдельными русскими blocks в одном message. Никакого plain report, summary или diagnostics после wrapper Watcher не добавляет. XML escaping относится только к transport serialization; parsed message text остаётся исходным report.
+
+`DONT_NOTIFY` возвращается только при одновременном отсутствии active report blocks, due/sent owner-relevant attention и active incident. Quiet message — короткое `Нет активных задач.`. Pending owner delivery fail-safe даёт `NOTIFY`; обычно такой state всё равно имеет active envelope. Решение вычисляется из durable registry при каждом run, поэтому chat context compaction и generation rotation не меняют поведение.
 
 Report format не расширяется произвольными секциями:
 
@@ -95,7 +126,7 @@ Curator и current active executor никогда автоматически н�
 
 Только после этого Watcher/curator вызывает supported `set_thread_archived` для exact predecessor, проверяет searchable exact readback и фиксирует digest через `confirm-executor-archive`. Archive не удаляет thread, GitHub или audit. Terminal executor без successor остаётся current; final acceptance не архивирует и не снимает pin у current curator/current executor.
 
-Generation rotation готовит новый Luna Watcher из trusted `origin/main`, даёт ему title, закрепляет и получает exact title/pin/automation readbacks до `prepare-watcher`. Smoke fail closed без любого readback и включает outbox capability и канонический report: один русский block на текущий acceptance envelope, доказанный meaningful progress и отсутствие raw enum/task ID/UUID/revision/digest/internal jargon. После `smoke-watcher` atomic activation делает старое поколение stale/no-op; только затем его heartbeat ставится на паузу, старый Watcher searchable-архивируется с readback, а оба evidence фиксируются через `confirm-watcher-retirement`.
+Generation rotation готовит новый Luna Watcher из trusted `origin/main`, даёт ему title, закрепляет и получает exact title/pin/enabled-automation readbacks до `prepare-watcher`. Smoke fail closed без любого readback и включает outbox capability и канонический heartbeat report: initial 5%, свежий ранний fallback, objective late stage, отсутствие time-based progress, fresh same-stage delta/current, `NOTIFY` для unchanged active envelopes, `DONT_NOTIFY` только для полностью quiet registry, независимые русские blocks минимум двух acceptance envelopes и отсутствие raw enum/task ID/UUID/revision/digest/internal jargon. Пока successor готовится, старая automation непрерывно работает. После `smoke-watcher` atomic activation делает старое поколение stale/no-op, но не pause его automation. Successor сначала обязан доказать первый post-cutover active `begin-run`, полный heartbeat wrapper, successful `end-run` и собственный enabled-automation readback через `confirm-watcher-liveness`. Только после этого старая automation ставится на паузу, старый Watcher searchable-архивируется с readback, а оба evidence фиксируются через `confirm-watcher-retirement`. Эта последовательность не ждёт idle tasks: весь user-level state остаётся в registry/JSONL, а objective evidence перечитывается из current GitHub и trusted repo.
 
 ## Retry, replacement и Sol-арбитр
 
@@ -149,11 +180,13 @@ Actions сверяет manifest digest, exact PR/head/merge, merged blocked stat
 
 ## Watcher rotation
 
-Каждое generation имеет `max_runs` (v1 default 720). Rotation выполняет одну recoverable последовательность:
+`packages/contracts/codex_watcher_v1.json` централизованно задаёт `max_runs=48`: при cadence 10 минут planned rotation наступает примерно каждые восемь часов. Boundary точный: run 47 ещё не требует rotation, run 48 уже возвращает `rotation_due=true`. Дополнительный ранний trigger использует только доказанный supported Desktop readback: `read_thread` возвращает typed turn item `items[].type=contextCompaction`. Active Watcher bounded-читает собственные последние turns и при таком exact item под текущей lease вызывает `record-watcher-context-compaction` с item ID и digest полного bounded readback. Размер чата, число токенов, elapsed time и визуальная длина не считаются signal. Если exact typed item не предоставлен automation surface, ранняя detection недоступна и безопасный deterministic fallback — только hard 48-run cap.
 
-`prepare new Luna thread/automation → immediate readback smoke → record smoke digest → atomic activate → old begin-run returns stale-generation → archive old thread`
+Rotation выполняет одну recoverable последовательность, не ожидая пустой очереди или отсутствия active tasks:
 
-Activate без smoke и title/pin/automation readback запрещён. Unique active Watcher index и generation-bound lease исключают overlap. Chat context не переносится; новый Watcher восстанавливается только из registry, JSONL, current GitHub и current repo contracts. Active Watcher остаётся pinned до безопасной rotation; old generation и arbiter threads можно архивировать автоматически только после successor activation/readback, но curator/executor unpin никогда не автоматизируется.
+`prepare new Luna thread + title/pin/enabled 10-minute automation readbacks while old remains enabled → read-only canary/smoke → record smoke digest → atomic activate → old begin-run returns stale-generation → successor active begin-run/full heartbeat/end-run + liveness readback → pause old automation → searchable archive old thread → confirm retirement evidence`
+
+Activate без smoke и title/pin/enabled-automation readback запрещён. Enabled evidence состоит из supported Desktop `automation_update mode=view` и exact local `automation.toml` readback с `status=ACTIVE`; его digest фиксирует `confirm-watcher-automation-enabled`. Unique active Watcher index и generation-bound lease исключают dual mutation authority; временно две enabled scheduled automations допустимы. Empty report, `DONT_NOTIFY`, rotation due и preactivation никогда не меняют automation state. Chat context не переносится; новый Watcher восстанавливается только из registry, JSONL, current GitHub и current repo contracts. Failure до activation оставляет старое generation active и не требует rollback. Если первый successor run после activation не завершился, old authority не восстанавливается и old automation не pause: `record-watcher-liveness-failure` оставляет successor единственным active generation и задаёт bounded retry той же automation. Это минимальный Desktop-compatible handover: platform не предоставляет транзакцию, объединяющую SQLite generation switch и внешний automation scheduler, поэтому exact no-gap доказывается enabled readbacks до/после cutover и lease isolation, а не заявлением невозможной внешней атомарности. Незавершённые liveness/pause/archive/retirement steps остаются resumable. Active Watcher остаётся pinned до безопасной rotation; old generation и arbiter threads можно архивировать автоматически только после successor liveness, но curator/executor unpin никогда не автоматизируется.
 
 ## Rollout и rollback
 
@@ -161,8 +194,8 @@ Rollout v1:
 
 1. merge code/docs through current Release Train with enforcement still false;
 2. initialize local registry from trusted `origin/main`;
-3. create/title/pin one Luna Watcher, capture exact title/pin/automation readbacks, attach one 10-minute heartbeat, prepare/smoke/activate generation;
-4. register a bounded pilot task and verify exact readback, fallback repository filtering, report format, retry counts, incident/arbiter lifecycle, rotation no-op and acceptance exclusion;
+3. create/title/pin one Luna Watcher, capture exact title/pin/enabled-automation readbacks, attach one 10-minute heartbeat, prepare/smoke/activate generation and prove its first active heartbeat liveness;
+4. на двух независимых fixture/pilot envelopes проверить initial 5%, свежий bounded early floor, linked objective late stage, отсутствие time-based начисления, same-stage delta/current, terminal contour и раздельные русские report blocks;
 5. pause legacy per-chat heartbeat automations only after the global Watcher owns both periodic reporting and durable attention delivery; corrective predecessor archive требует отдельного succession/readback proof и не выводится из самого запуска Watcher;
 6. retire manifest PRs through trusted-main exact commands;
 7. enable `WB_CORE_ORCHESTRATION_REQUIRED` only after successful pilot and empty/conflict-free release lane readback.
