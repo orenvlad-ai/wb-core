@@ -327,7 +327,12 @@ def _run(
                     phase_timings_ms,
                     lambda: _materialize_downstream_cost_layers(runtime),
                 )
-                journal.phase_finished(durable_run_id, durable_phase, details=downstream_cost_layers)
+                journal.phase_finished(
+                    durable_run_id,
+                    durable_phase,
+                    item_count=int(downstream_cost_layers),
+                    details={"changed_rows": int(downstream_cost_layers)},
+                )
                 durable_phase = "ff_ledger_reservations"
                 journal.phase_started(durable_run_id, durable_phase)
                 ff_state = _run_sync_phase(
