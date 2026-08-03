@@ -1054,10 +1054,15 @@ def deploy_current_checkout(
                 pr=int(release_pr),
                 head=release_head,
                 merge=release_merge,
-                failed_stage=stage
-                if stage in {"daemon-reload", "restart", "probes", "readback"}
-                else "sync",
-                require_deployment_complete=False,
+                failed_stage=(
+                    "readback"
+                    if stage == "metadata-complete"
+                    else stage
+                    if stage in {"daemon-reload", "restart", "probes", "readback"}
+                    else "sync"
+                ),
+                require_deployment_complete=stage == "metadata-complete",
+                allow_repairs=stage != "metadata-complete",
             )
             summary["transport_reconciliation"] = reconciliation
             if not bool(reconciliation.get("healthy")):
@@ -1107,7 +1112,6 @@ def deploy_current_checkout(
     run_stage(
         "metadata-complete",
         deploy_completion_metadata_command,
-        allow_transport_reconciliation=False,
     )
     return summary
 

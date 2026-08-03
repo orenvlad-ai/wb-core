@@ -24,6 +24,8 @@ Task class и task continuity независимы. `TaskContinuity` в `apps/gi
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
 - `apps/github_release_train_wait.py` — bounded CLI waiter и канонический Goal queue shepherd для Codex;
 - `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
+- `apps/codex_task_orchestrator.py` — local registry, Watcher lease, incidents, resource locks, reports и dashboard;
+- [`12_codex_global_orchestration.md`](12_codex_global_orchestration.md) — authoritative admission/lane и Desktop orchestration contract;
 - `.github/pull_request_template.md` — PR closure checklist.
 
 ## Eligibility И Labels
@@ -37,11 +39,13 @@ Queue eligibility требует одновременно:
 - ровно одну известную `scope:*` label;
 - отсутствие `release:blocked`, `release:halted` и `release:superseded`.
 
-LOOP дополнительно требует exact-head repo-owned registration proof. Один `loop:root-*` или `release:ready`, добавленный вручную, eligibility не доказывает.
+При `WB_CORE_ORCHESTRATION_REQUIRED=true` любой STANDARD и LOOP дополнительно требуют exact-head Actions-owned orchestration admission proof и совпадающий logical task на active `release:lane-owner`. LOOP также требует exact-head repo-owned new/recovery registration proof. Ручные `loop:root-*`, `release:ready`, admission marker или lane label eligibility не доказывают. Feature flag по умолчанию выключен до end-to-end Desktop пилота.
 
-Основные state labels:
+Основные state/lease labels:
 
-- `release:ready` — task owner закончил pre-release proof и явно поставил PR в очередь;
+- `release:staged` — STANDARD executor закончил pre-release proof и ждёт exact orchestration admission;
+- `release:ready` — trusted-main command доказал admission/lane (и для LOOP registration) и поставил PR в очередь;
+- `release:lane-owner` — отдельный logical-task lease на anchor PR; он удерживает critical lane через несколько PR/deploy/UI/recovery;
 - `release:running` — worker выполняет sync/baseline/release;
 - `release:awaiting-agent` — LOOP прошёл sync/baseline и ждёт exact-head acknowledgement активной Codex-сессии;
 - `release:needs-resume` — non-terminal overlay на активном LOOP `ready/running/awaiting-agent/awaiting-ui`: owner heartbeat истёк, но primary state и gate не изменяются;
@@ -51,8 +55,9 @@ LOOP дополнительно требует exact-head repo-owned registratio
 - `release:production` — terminal success STANDARD live/runtime, Actions-terminalized human-gated production mutation или принятой LOOP-цепочки;
 - `release:halted` — failure после merge; вся очередь остановлена.
 - `release:superseded` — terminal audit state незамёрженной LOOP-итерации, однозначно заменённой завершённой production recovery-chain; root/task/scope/history сохраняются, активные queue/failure labels снимаются.
+- `release:retired` — terminal exact-evidence state для перечисленного legacy manifest; он не создаёт новую release identity и не снимает labels вручную.
 
-Active states: `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
+Active states: `release:staged`, `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`, `release:retired`. `release:lane-owner` — не state, а lease overlay, который может оставаться на terminal anchor до closure всей логической задачи. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
 
 Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query, marker names и Goal disposition contract. Runtime, waiter/shepherd и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance, halted recovery и production-mutation completion требуют repo-owned marker и exact PR/head/gate/merge/deployed/evidence.
 
@@ -114,20 +119,40 @@ Handler доказывает active merged `release:awaiting-ui` gate, его ex
 
 Repeated enrollment events идемпотентны, включая отложенную повторную доставку после перехода PR в `running`, `awaiting-agent` или `blocked`: доказанная exact identity остаётся неизменной, state не откатывается в `ready`, workflow повторно не dispatch-ится. Underlying runner operations называются `enqueue-loop-new` и `enqueue-loop-recovery`, но durable proof создаёт trusted-main command handler; agents не назначают root/ready вручную.
 
+При включённом `WB_CORE_ORCHESTRATION_REQUIRED` repo-owned LOOP registration создаёт identity/ready, но selection и merge дополнительно требуют exact orchestration admission и совпадающий logical lane. Для same-root recovery активный predecessor `release:awaiting-ui` разрешает той же logical task сохранить lane; другая task ждёт.
+
 ## STANDARD Flow
 
-STANDARD PR проходит существующую последовательность без agent acknowledgement:
+STANDARD executor после targeted checks, semantic review, fixes/recheck и docs sync ставит `release:staged`, а не `release:ready`. Глобальный Watcher читает exact Task Passport/revision/head и публикует trusted-main command:
+
+```text
+/wb-core orchestration admit <PR> head <HEAD_SHA> task <TASK_ID> revision <REVISION> passport sha256:<PASSPORT_DIGEST>
+```
+
+Handler доказывает current PR/head, successful baseline, exact registration и available logical lane, создаёт Actions-owned admission marker, приобретает/проверяет `release:lane-owner` и атомарно переводит PR в `release:ready`. Если lane принадлежит другой задаче, PR остаётся staged в normal waiting. Если lane принадлежит той же задаче, следующий PR получает admission proof, но ждёт terminal/releasable predecessor без потери mapping.
+
+После адмиссии STANDARD PR проходит существующую последовательность без agent acknowledgement:
 
 1. worker выбирает старейший eligible PR;
 2. синхронизирует branch с current `main`;
 3. явно dispatch-ит `baseline-ci.yml` и ждёт новый successful `baseline` на final head SHA;
-4. повторно проверяет exact head/base/task/scope/mergeability;
+4. повторно проверяет exact head/base/task/scope/mergeability и admission/lane;
 5. squash-merges только проверенный head;
 6. `scope:repo-only` получает `release:done` без deploy;
 7. `scope:live-runtime` checkout-ит exact merge SHA, вызывает canonical `deploy-and-verify` и получает `release:production`;
 8. worker best-effort удаляет feature branch и dispatch-ит следующий queue run.
 
 `scope:production-mutation` никогда не выпускается автоматически и до merge получает `release:blocked` с требованием отдельного human-gated production-mutation protocol.
+
+Если trusted-main sync изменил STANDARD head, старый admission больше не exact. Worker без blocker возвращает PR в `release:staged`, оставляет audit comment и ждёт re-admission нового head. Непосредственно перед merge exact admission/lane проверяются снова.
+
+Logical lane освобождает только trusted-main command после terminal closure всей задачи либо доказанно safe parking:
+
+```text
+/wb-core orchestration release-lane <ANCHOR_PR> task <TASK_ID> outcome <completed|parked> evidence sha256:<EVIDENCE_HASH>
+```
+
+Parking запрещён при merged ambiguity, `release:running`, `release:awaiting-ui` или `release:halted`. Закрытый/merged legacy backlog из versioned manifest переводится в `release:retired` только `/wb-core orchestration retire-legacy ...` после exact head/merge/manifest/digest proof из trusted `main`; ручное снятие legacy labels запрещено.
 
 ## Production-Mutation Terminalization
 
@@ -270,29 +295,21 @@ Workflow запускает queue observation каждые пять минут. 
 
 Shepherd выдаёт `TAKEOVER_PREDECESSOR` только при одновременных machine evidence: `release:needs-resume`, exact status `owner=unowned`, отсутствие подтверждённого живого owner, проверенный exact head/root, для UI gate — exact deployed SHA, repo-owned resume command и сохранение root isolation. Takeover без overlay запрещён. После resume агент восстанавливает predecessor context из PR/status/diff/docs, завершает его точный stage, выполняет UI Flow при `awaiting-ui`, принимает только exact deployed SHA, ждёт terminal predecessor и повторно продолжает shepherd собственного PR. UI defect создаёт same-root recovery либо сохраняет gate fail-closed. Resume/takeover никогда автоматически не выполняет ack-agent или accept-ui.
 
-## Desktop Thread Heartbeat И Canonical Monitoring
+## Глобальный Watcher И Canonical Monitoring
 
-Post-plan launch из `discussion-only` initiating thread классифицируется как `DISPATCH_REQUEST`, а не как permission на implementation в этом thread. Supported dispatch создаёт отдельную user-owned Codex task через `create_thread` или актуальный эквивалент; `spawn_agent`/subagent не является target. В той же неоткладываемой `launch operation` инициатор последовательно выполняет `TARGET_CREATE_READBACK` с exact target ID и bounded `wait_threads(timeoutMs: 0)`, затем `MONITOR_ATTACH_READBACK` ниже. Creation failure означает fail closed без same-thread implementation. Уже подтверждённый target при доказанной недоступности recurring monitoring продолжает execution, а инициатор публикует честный `MONITORING_CAPABILITY_LIMITATION`.
+Post-plan `DISPATCH_REQUEST` создаёт отдельную user-owned Codex task и подтверждает её через `TARGET_CREATE_READBACK`. Та же launch operation формирует versioned Task Passport, pin/title curator и executor, регистрирует exact task/thread/PR resources в локальном registry и проверяет одно active generation глобального Watcher. Per-task heartbeat automation больше не является частью контракта.
 
-Если recurring thread-heartbeat capability фактически доступна, preferred 10-минутная role PR-backed задачи — `external supervisor reporter`: automation с initiating reporting Chat/thread как destination и bounded exact target list в durable prompt. Только `external supervisor reporter` удовлетворяет user intent на monitoring/periodic progress+ETA reports во время active target turn. `self recovery heartbeat` (legacy `self-heartbeat`) внутри target является mutually-exclusive silent idle-resume fallback, не reporter и не удовлетворяет reporting intent.
+Один Luna Watcher каждые 10 минут читает local registry, exact Codex thread snapshots и read-only `python3 apps/github_release_train.py queue-status`. Он не хранит release truth в chat history и не подменяет Release Train. Watcher может выполнять только deterministic registration, bounded retry/replacement, incident arbitration, exact orchestration admission/lane release и bounded idle follow-up; merge/deploy/ack/UI acceptance выполняют существующие repo-owned paths и task owner по exact evidence.
 
-Перед create читаются existing initiating-thread automations и exact target identities. Свободный initiating thread получает один reporter; если reporter уже обслуживает другую non-terminal задачу, он update/reuse-ится как multi-target supervisor с сохранением прежних targets, а не заменяется self fallback и не дублируется. Destination thread остаётся initiating reporting thread, а target task identities живут в prompt/list. Если multi-target operation фактически недоступна, capability limitation сообщается явно; recovery fallback не выдаётся за reporting monitor.
+Каждый run получает generation-bound lease. Exact threads читаются пакетами не более восьми, active turns только наблюдаются. Registration является основным acquisition path; fallback-discovery разрешён только для pinned tasks с доказанным project/repository `orenvlad-ai/wb-core`. Сторонние, projectless, личные и медицинские chats исключены.
 
-Monitor не создаёт второй state machine:
+Отчёт по active task имеет только поля `Статус`, `Задача`, `Прогресс · Осталось`, `С прошлого отчёта`, `Сейчас`; `Блокер` появляется только при доказанной strict human-only причине. После фразы владельца «Задача принята» task становится `ACCEPTED` и пропадает из следующего отчёта; Watcher не выполняет unpin.
 
-- не хранит собственную копию `class/scope/state/head/queue/gate`, progress или ownership truth;
-- external reporter только read-only наблюдает GitHub и target state и сам не меняет code, labels, comments, transitions или production;
-- active target он не будит; при idle/non-terminal отправляет ровно один bounded follow-up, после которого target Codex запускает `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`;
-- target после resume следует canonical disposition и не выполняет ack-agent, accept-ui, resume/takeover или recovery без exact evidence;
-- external reporter и self recovery heartbeat не работают одновременно для одной exact target identity;
-- terminal target удаляется из durable list с сохранением остальных non-terminal targets; reporter останавливается/удаляется только при пустом list либо explicit user stop.
+Повтор failure fingerprint хранится в registry: bounded retry → unclaimed incident и replacement для второй пустой system error → claim/Sol arbiter на третьей; успешный replacement stales неclaim-нутый case. Одинаковая содержательная ошибка открывает incident на третьем наблюдении. Один active incident на task, resource locks и stale revision/evidence checks исключают конкурирующие решения. Арбитр получает Task Passport и fresh bounded evidence, а не chat history; после доказанного transition Watcher сначала архивирует arbiter thread и затем закрывает incident.
 
-Create/update выполняется supported automation tool без hardcoded raw schedule syntax. Readback обязан доказать `ACTIVE`, cadence 10 минут, initiating destination, reporter role и все exact target IDs в durable prompt, сохранение предыдущих non-terminal targets и отсутствие exact-target self/duplicate. Immediate `wait_threads(timeoutMs: 0)` batch smoke и первая evidence-backed строка `[<target>] Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.` в initiating chat обязательны; target names/IDs и progress weights однозначны, successful create-call без readback — не completion, progress без evidence не начисляется.
+Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter обновляет PR ownership heartbeat по своему contract, а Desktop Watcher наблюдает Codex tasks каждые 10 минут. Watcher не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого LOOP owner без exact-head status heartbeat и не обходит `release:needs-resume`.
 
-При proven terminal result reporter до cleanup публикует отдельный `TERMINAL_MONITOR_SUMMARY`: однозначно сообщает, что задача успешно завершена, либо честно фиксирует partial/terminal failure, даёт 2–5 коротких proven пунктов о результате и строку `Проверено: <checks/evidence>; canonical terminal state: <release:done | release:production | verified user artifact | другой contour-specific result>.` Только затем exact target удаляется из durable list с readback; pause/delete разрешён при пустом list. Одна финальная progress-line либо silent cleanup без итогового summary не являются корректным завершением мониторинга, а при blocker нельзя писать ложное «готово».
-
-Cadence намеренно различается: GitHub Actions наблюдает durable queue каждые пять минут, CLI waiter по умолчанию обновляет waiting heartbeat каждые 300 секунд, а Desktop supervisor наблюдает target каждые 10 минут. 10-минутный observation не заменяет и не замедляет 5-минутный GitHub worker, не меняет `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES`, не доказывает живого owner без canonical exact-head status heartbeat и не обходит `release:needs-resume`. Если Desktop capability недоступна или локальный компьютер/проект выключен, GitHub monitoring остаётся canonical; task продолжается обычным waiter/shepherd при следующем доступном turn.
-
+Ротация Watcher выполняется `prepare → smoke → atomic activate → old generation no-op → pause old automation → archive old task`. Registry/JSONL/dashboard живут локально на Mac; Mac и Codex Desktop должны быть включены. Внешний управляющий сервис, Entire и Telegram не являются v1 dependency. Полный контракт: [`12_codex_global_orchestration.md`](12_codex_global_orchestration.md).
 ## Exclusive Production UI Gate
 
 После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он повторно проверяет зарегистрированный root/proof, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.
@@ -397,13 +414,15 @@ readback. Отдельный production-environment workflow `resume-halted` с�
 halted только после healthy exact PR/head/merge/target JSON evidence; ручное
 снятие label не считается reconciliation.
 
+Если transport оборвался на финальном `metadata-complete`, внутренний runner может признать settling успешным только после bounded readback с `deployment_complete=true` для exact SHA и всеми probes; в этой фазе repairs запрещены. Workflow не запускает общий reconciliation после произвольной deploy/public-probe ошибки и никогда не маскирует её базовым exact-SHA health readback.
+
 ## Канонический Мониторинг
 
-[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%2Cfinance%3Amigration-deploy-lease%22+sort%3Acreated-asc) намеренно не использует `is:open`: merged PR имеет GitHub state `closed`, но LOOP с `release:awaiting-ui` и terminal anchor с `finance:migration-deploy-lease` остаются active global gates и обязаны быть видимыми. Comma-OR qualifier включает active release labels и Finance lease; `-label:release:superseded` исключает доказанно заменённые итерации. Terminal `release:production` и `release:done` без отдельного global lease не включаются, а `sort:created-asc` сохраняет queue order. PR-specific evidence по-прежнему исследуется по точной ссылке, comments и workflow runs.
+[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Astaged%2Crelease%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%2Crelease%3Alane-owner%2Cfinance%3Amigration-deploy-lease%22+sort%3Acreated-asc) намеренно не использует `is:open`: staged work, merged LOOP с `release:awaiting-ui`, logical `release:lane-owner` и terminal anchor с `finance:migration-deploy-lease` остаются active и обязаны быть видимыми. Comma-OR qualifier включает active release labels и leases; `-label:release:superseded` исключает доказанно заменённые итерации. Terminal `release:production`, `release:done` и `release:retired` без отдельного global lease не включаются; `sort:created-asc` сохраняет queue order. PR-specific evidence по-прежнему исследуется по exact ссылке, comments и workflow runs; machine snapshot для Watcher даёт `python3 apps/github_release_train.py queue-status`.
 
 ## Baseline И Security Boundary
 
-`baseline-ci.yml` выполняет `compileall`, `git diff --check` и `apps/github_release_train_smoke.py`. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
+`baseline-ci.yml` выполняет `compileall`, `git diff --check`, `apps/codex_task_orchestrator_smoke.py` и `apps/github_release_train_smoke.py`, затем остальные repository regression smokes. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
 
 `pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP, Finance lease и production-mutation commands проходят exact parsing и association checks. Finance lease workflow использует production secrets только для `--read-only` exact deployed-SHA readback; acquire/rebind/release меняют лишь GitHub durable state и не запускают Finance runner. Production-mutation command preflight работает без production secrets; SSH material получает только следующий job с GitHub Environment `production` после успешного immutable-evidence preflight. Required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Production-mutation terminalizer выполняет только `--read-only` deploy readback и GitHub terminal state transition; Release Train не выполняет WB writes, backfill или production business mutation.
 

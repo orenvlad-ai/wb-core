@@ -40,6 +40,36 @@ permissions:
   pull-requests: write
 
 jobs:
+  orchestration_command:
+    name: Apply Watcher admission, lane release or legacy retirement
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/wb-core orchestration ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
+      ORCHESTRATION_COMMAND: ${{ github.event.comment.body }}
+      ORCHESTRATION_ACTOR: ${{ github.event.comment.user.login }}
+      ORCHESTRATION_ASSOCIATION: ${{ github.event.comment.author_association }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply exact orchestration transition
+        run: >-
+          python3 apps/github_release_train.py handle-comment
+          --pr "${{ github.event.issue.number }}"
+          --command "$ORCHESTRATION_COMMAND"
+          --actor "$ORCHESTRATION_ACTOR"
+          --association "$ORCHESTRATION_ASSOCIATION"
+
   loop_command:
     name: Handle LOOP enrollment, correction, acknowledgement or UI acceptance
     if: >-
@@ -379,6 +409,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES: ${{ vars.WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -428,6 +459,7 @@ jobs:
       agent_acknowledged: ${{ steps.prepare.outputs.agent_acknowledged }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -515,6 +547,7 @@ jobs:
     timeout-minutes: 20
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -575,6 +608,7 @@ jobs:
     environment: production
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
       WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
       WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
     steps:
@@ -657,7 +691,8 @@ jobs:
           --contour production-verified
 
       - name: Open production UI gate for LOOP
-        if: needs.prepare.outputs.task_class == 'task:loop'
+        if: >-
+          needs.prepare.outputs.task_class == 'task:loop'
         run: >-
           python3 apps/github_release_train.py await-ui
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -679,9 +714,9 @@ jobs:
 
       - name: Halt queue after merged release failure
         if: >-
-          failure() &&
           steps.merge.outputs.merge_sha != '' &&
-          steps.merge.outputs.skip_release != 'true'
+          steps.merge.outputs.skip_release != 'true' &&
+          failure()
         run: >-
           python3 apps/github_release_train.py halt-merged
           --pr "${{ needs.select.outputs.pr_number }}"

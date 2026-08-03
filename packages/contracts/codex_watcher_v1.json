@@ -1,0 +1,48 @@
+{
+  "schema": "wb-core-codex-watcher/v1",
+  "repository": "orenvlad-ai/wb-core",
+  "registry_home": "~/.wb-core/orchestrator/v1",
+  "dashboard": "http://127.0.0.1:8766",
+  "cadence_minutes": 10,
+  "watcher": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "medium",
+    "target_batch_limit": 8,
+    "lease_seconds": 540,
+    "rotate_after_runs": 720
+  },
+  "arbiter": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "one_active_case_per_task": true,
+    "stale_decision_check": true
+  },
+  "retry_policy": {
+    "first_empty_system_error": "retry-same-executor-once",
+    "second_empty_system_error": "open-unclaimed-incident-and-replace-executor",
+    "third_identical_fingerprint": "open-sol-arbiter",
+    "unbounded_restart_loop": false
+  },
+  "fallback_discovery": {
+    "enabled": true,
+    "require_local_codex_thread": true,
+    "require_pinned": true,
+    "require_repository_remote": "orenvlad-ai/wb-core",
+    "exclude_projectless_and_non_repository_threads": true
+  },
+  "report": {
+    "lines": ["Статус", "Задача", "Прогресс · Осталось", "С прошлого отчёта", "Сейчас", "Блокер"],
+    "blocker_only_for_strict_human_reason": true,
+    "accepted_phrase": "Задача принята"
+  },
+  "feature_flag": {
+    "name": "WB_CORE_ORCHESTRATION_REQUIRED",
+    "default": false,
+    "enable_only_after_pilot": true
+  },
+  "optional_layers": {
+    "entire_observability": false,
+    "telegram": false,
+    "native_app_notifications": true
+  }
+}

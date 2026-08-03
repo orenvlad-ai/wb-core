@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import shlex
 import sys
@@ -35,12 +36,16 @@ from apps.github_release_train import (  # noqa: E402
     PRODUCTION_LABEL,
     PRODUCTION_MUTATION_LABEL,
     READY_LABEL,
+    RELEASE_LANE_OWNER_LABEL,
     REPO_ONLY_LABEL,
+    RETIRED_LABEL,
     RUNNING_LABEL,
+    STAGED_LABEL,
     STANDARD_TASK_LABEL,
     SUPERSEDED_LABEL,
     ReleaseBlocked,
     ReleaseClassificationBlocked,
+    ReleaseReadmissionRequired,
     ReleaseTrainError,
     accept_loop_ui,
     acquire_finance_deploy_lease,
@@ -51,6 +56,7 @@ from apps.github_release_train import (  # noqa: E402
     enqueue_loop_new,
     enqueue_loop_recovery,
     handle_loop_comment,
+    handle_orchestration_comment,
     finance_deploy_lease_state,
     loop_ack_label,
     loop_root_label,
@@ -70,10 +76,12 @@ from apps.github_release_train import (  # noqa: E402
     resume_loop_owner,
     retry_blocked_release,
     require_deploy_environment,
+    release_lane_state,
     scope_from_labels,
     select_candidate,
     set_release_state,
     task_class_from_labels,
+    terminal_state_proven,
     terminalize_finance_deploy_lease,
     transition_label_set,
     upsert_status_comment,
@@ -461,6 +469,242 @@ def _assert_standard_repo_only_and_live() -> None:
     repeated = merge_candidate(api, candidate)
     assert repeated.skip_release
     assert len(api.merges) == 2
+
+
+def _assert_orchestration_lane_and_legacy_retirement() -> None:
+    api = FakeApi()
+    first = _pull(
+        60,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T01:00:00Z",
+    )
+    second = _pull(
+        61,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T02:00:00Z",
+        sha=SHA_B,
+    )
+    direct_ready = _pull(
+        62,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T00:00:00Z",
+        sha=SHA_C,
+    )
+    same_task_next = _pull(
+        63,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T01:30:00Z",
+        sha=SHA_C,
+    )
+    api.pulls = {60: first, 61: second, 62: direct_ready, 63: same_task_next}
+    api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    passport = "sha256:" + "1" * 64
+    evidence = "sha256:" + "2" * 64
+    assert handle_orchestration_comment(
+        api,
+        60,
+        f"/wb-core orchestration admit 60 head {SHA_A} task task-alpha-01 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    assert RELEASE_LANE_OWNER_LABEL in _labels(first)
+    assert READY_LABEL in _labels(first) and STAGED_LABEL not in _labels(first)
+    selected = select_candidate(api, orchestration_required=True)
+    assert selected["pr_number"] == 60
+    lane = release_lane_state(api)
+    assert lane["task_id"] == "task-alpha-01" and lane["owner_pr"] == 60
+
+    assert handle_orchestration_comment(
+        api,
+        63,
+        f"/wb-core orchestration admit 63 head {SHA_C} task task-alpha-01 revision 2 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "waiting-own-pr"
+    assert STAGED_LABEL in _labels(same_task_next)
+    assert any(
+        "wb-core-orchestration-admission-proof" in body
+        for number, body in api.comments
+        if number == 63
+    )
+
+    assert handle_orchestration_comment(
+        api,
+        61,
+        f"/wb-core orchestration admit 61 head {SHA_B} task task-bravo-02 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "waiting-other-task"
+    assert STAGED_LABEL in _labels(second)
+
+    set_release_state(api, 60, RUNNING_LABEL)
+    set_release_state(api, 60, DONE_LABEL)
+    try:
+        handle_orchestration_comment(
+            api,
+            60,
+            f"/wb-core orchestration release-lane 60 task task-alpha-01 revision 2 outcome completed evidence {evidence}",
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+        )
+    except ReleaseBlocked:
+        pass
+    else:
+        raise AssertionError("same-task staged PR must keep the logical release lane")
+    assert handle_orchestration_comment(
+        api,
+        63,
+        f"/wb-core orchestration admit 63 head {SHA_C} task task-alpha-01 revision 2 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    set_release_state(api, 63, RUNNING_LABEL)
+    set_release_state(api, 63, DONE_LABEL)
+    assert handle_orchestration_comment(
+        api,
+        60,
+        f"/wb-core orchestration release-lane 60 task task-alpha-01 revision 2 outcome completed evidence {evidence}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "released"
+    assert release_lane_state(api) == {"status": "idle"}
+    assert handle_orchestration_comment(
+        api,
+        60,
+        f"/wb-core orchestration release-lane 60 task task-alpha-01 revision 2 outcome completed evidence {evidence}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "already-released"
+    assert handle_orchestration_comment(
+        api,
+        61,
+        f"/wb-core orchestration admit 61 head {SHA_B} task task-bravo-02 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    assert select_candidate(api, orchestration_required=True)["pr_number"] == 61
+
+    sync_api = FakeApi()
+    sync_pull = _pull(
+        80,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T04:00:00Z",
+    )
+    sync_api.pulls = {80: sync_pull}
+    sync_api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    assert handle_orchestration_comment(
+        sync_api,
+        80,
+        f"/wb-core orchestration admit 80 head {SHA_A} task task-sync-080 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    sync_api.comparisons = [{"behind_by": 1}, {"behind_by": 0}]
+    try:
+        prepare_candidate(
+            sync_api,
+            "orenvlad-ai/wb-core",
+            80,
+            check_name="baseline",
+            timeout_seconds=1,
+            poll_seconds=0,
+            orchestration_required=True,
+        )
+    except ReleaseReadmissionRequired as exc:
+        assert exc.head_sha == SHA_B and exc.task_id == "task-sync-080"
+    else:
+        raise AssertionError("trusted main sync must require exact-head re-admission")
+    assert STAGED_LABEL in _labels(sync_pull) and BLOCKED_LABEL not in _labels(sync_pull)
+
+    loop_api = FakeApi()
+    loop = _pull(
+        90,
+        labels=[LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL],
+        created_at="2026-08-03T05:00:00Z",
+    )
+    loop_api.pulls = {90: loop}
+    loop_api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    enqueue_loop_new(
+        loop_api,
+        90,
+        SHA_A,
+        actor="orenvlad-ai",
+        association="OWNER",
+    )
+    assert select_candidate(loop_api, orchestration_required=True)["found"] is False
+    assert handle_orchestration_comment(
+        loop_api,
+        90,
+        f"/wb-core orchestration admit 90 head {SHA_A} task task-loop-090 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    assert select_candidate(loop_api, orchestration_required=True)["pr_number"] == 90
+
+    lane_retry = _pull(
+        91,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T05:10:00Z",
+        sha=SHA_B,
+    )
+    loop_api.pulls[91] = lane_retry
+    assert retry_blocked_release(
+        loop_api,
+        91,
+        expected_head_sha=SHA_B,
+        check_name="baseline",
+        orchestration_required=False,
+    ) == STAGED_LABEL
+    assert STAGED_LABEL in _labels(lane_retry) and READY_LABEL not in _labels(lane_retry)
+
+    manifest_path = ROOT / "migration" / "release_train_legacy_retirement_20260803.json"
+    manifest = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    legacy = _pull(
+        843,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL],
+        created_at="2026-07-28T06:40:00Z",
+        sha="6ed1756b1de9555c4f522fdcc2156cd519be707d",
+    )
+    legacy["merged"] = True
+    legacy["state"] = "closed"
+    legacy["merge_commit_sha"] = "7e246c839203923c6775cbf1a6e34dc81cb7c036"
+    api.pulls[843] = legacy
+    assert handle_orchestration_comment(
+        api,
+        843,
+        "/wb-core orchestration retire-legacy 843 head "
+        f"6ed1756b1de9555c4f522fdcc2156cd519be707d manifest {manifest}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == RETIRED_LABEL
+    assert RETIRED_LABEL in _labels(legacy) and BLOCKED_LABEL not in _labels(legacy)
+    assert terminal_state_proven(api, legacy) is True
+    assert handle_orchestration_comment(
+        api,
+        843,
+        "/wb-core orchestration retire-legacy 843 head "
+        f"6ed1756b1de9555c4f522fdcc2156cd519be707d manifest {manifest}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == RETIRED_LABEL
 
 
 def _assert_loop_handshake_and_gate() -> tuple[FakeApi, dict[str, Any]]:
@@ -2677,6 +2921,7 @@ def _assert_workflow_contract() -> None:
         )
     )
     assert "name: baseline" in baseline
+    assert "python3 apps/codex_task_orchestrator_smoke.py" in baseline
     for required in (
         "issue_comment:",
         "release:awaiting-agent",
@@ -2707,6 +2952,15 @@ def _assert_workflow_contract() -> None:
         "finance:migration-deploy-lease",
         "finance:migration-deploy-lease-audit",
         "wb-core-finance-migration-deploy-lease-binding",
+        "release:staged",
+        "release:lane-owner",
+        "release:retired",
+        "/wb-core orchestration ",
+        "admit, release-lane or retire-legacy",
+        "WB_CORE_ORCHESTRATION_REQUIRED",
+        "wb-core-orchestration-admission-proof",
+        "wb-core-release-lane-proof",
+        "wb-core-legacy-retirement-proof",
         "--read-only",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",
@@ -2716,6 +2970,10 @@ def _assert_workflow_contract() -> None:
     assert release.count("environment: production") == 4
     assert "reconcile_halted:" in release
     assert "resume-halted" in release
+    assert "Reconcile bounded exact-SHA settling state" not in release
+    assert 'if stage == "metadata-complete"' in (
+        ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py"
+    ).read_text(encoding="utf-8")
 
 
 def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
@@ -2742,12 +3000,34 @@ def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
 
 def _assert_codex_task_class_and_monitor_contract() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    execution = (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
-        encoding="utf-8"
-    )
+    execution = (
+        ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
     release_train = (
         ROOT / "docs" / "architecture" / "11_github_release_train.md"
     ).read_text(encoding="utf-8")
+    orchestration = (
+        ROOT / "docs" / "architecture" / "12_codex_global_orchestration.md"
+    ).read_text(encoding="utf-8")
+    watcher_prompt = (
+        ROOT / "docs" / "policies" / "codex_watcher_prompt_v1.md"
+    ).read_text(encoding="utf-8")
+    arbiter_prompt = (
+        ROOT / "docs" / "policies" / "codex_arbiter_prompt_v1.md"
+    ).read_text(encoding="utf-8")
+    watcher_config = json.loads(
+        (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    passport_schema = json.loads(
+        (
+            ROOT
+            / "packages"
+            / "contracts"
+            / "codex_task_passport_v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
 
     for source in (agents, execution):
         folded = source.casefold()
@@ -2762,68 +3042,28 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
             "user-owned Codex task",
             "create_thread",
             "spawn_agent",
-            "initiating discussion thread не начинает implementation",
-        ):
-            assert required.casefold() in folded
-        assert "ACTIVE_ADDITION" in source and "ACTIVE_LOOP_RECOVERY" in source
-        assert "неоднознач" in folded and "отдельн" in folded
-        assert "subagent" in folded and "не являются dispatch" in folded
-        assert "ни одно исключение не разрешает `discussion-only` implementation" in folded
-
-    for source in (agents, execution, release_train):
-        folded = source.casefold()
-        for required in (
-            "DISPATCH_REQUEST",
-            "launch operation",
             "TARGET_CREATE_READBACK",
-            "MONITOR_ATTACH_READBACK",
-            "create_thread",
-            "spawn_agent",
             "wait_threads(timeoutMs: 0)",
-            "fail closed",
+            "Task Passport",
+            "register-task",
             "MONITORING_CAPABILITY_LIMITATION",
         ):
             assert required.casefold() in folded
-        assert "target" in folded and "monitor" in folded and "readback" in folded
-        for terminal_required in (
-            "TERMINAL_MONITOR_SUMMARY",
-            "успешно завершена",
-            "2–5",
-            "Проверено:",
-            "canonical terminal state",
-            "release:done",
-            "release:production",
-            "verified user artifact",
-            "partial",
-            "terminal failure",
-            "ложн",
-            "только после",
-            "silent cleanup",
-            "не являются корректным завершением мониторинга",
-        ):
-            assert terminal_required.casefold() in folded
+        assert "ACTIVE_ADDITION" in source and "ACTIVE_LOOP_RECOVERY" in source
+        assert "ни одно исключение не разрешает `discussion-only` implementation" in folded
 
-    explicit_classes = (
-        "`КЛАСС ЗАДАЧИ: СТАНДАРТ`",
-        "`КЛАСС ЗАДАЧИ: LOOP`",
-        "`КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`",
-    )
-    automatic_messages = (
-        "`Класс задачи: стандарт — определён автоматически`",
-        "`Класс задачи: loop — определён автоматически`",
-        "`Класс задачи: диагностика — определён автоматически`",
-    )
-    classification_rules = (
-        "исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`",
-        "deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`",
-        "обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`",
-    )
     for source in (agents, execution):
-        for required in (*explicit_classes, *automatic_messages, *classification_rules):
-            assert required in source
-        assert "неоднознач" in source and "всегда" in source and "`стандарт`" in source
+        folded = source.casefold()
+        assert "пользователь не выбирает" in folded
+        assert "не начинает prompt специальной строкой" in folded or (
+            "не начинает prompt" in folded and "специальной строкой" in folded
+        )
+        assert "неоднознач" in folded and "`стандарт`" in folded
+        for mode in ("диагностик", "стандарт", "loop"):
+            assert mode in folded
 
     for source in (agents, execution, release_train):
+        folded = source.casefold()
         for required in (
             "NEW_TASK",
             "ACTIVE_ADDITION",
@@ -2835,96 +3075,69 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
             "enqueue-new",
             "enqueue-recovery",
             "correct-to-new",
+            "--resume-owner --no-ack-agent",
+            "deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>",
         ):
-            assert required.casefold() in source.casefold()
+            assert required.casefold() in folded
         assert "root > PR" in source or "root больше номера PR" in source
-        assert "retry-blocked" in source and "classification" in source.casefold()
+        assert "retry-blocked" in source and "classification" in folded
+
+    for source in (agents, execution, release_train, orchestration):
+        folded = source.casefold()
+        for required in (
+            "глобальн",
+            "watcher",
+            "task passport",
+            "release:staged",
+            "release:lane-owner",
+            "strict human",
+            "задача принята",
+        ):
+            assert required in folded
+        assert "10" in folded and "минут" in folded
+        assert "retired" in folded
+    for source in (execution, release_train, orchestration):
+        assert "release:retired" in source
+    assert "## Глобальный Watcher И Арбитр" in execution
+    assert "## Глобальный Watcher И Canonical Monitoring" in release_train
+    assert "# Global Codex Orchestration v1" in orchestration
+
+    for required in (
+        "begin-run",
+        "wait_threads(timeoutMs: 0)",
+        "record-failure",
+        "REPLACE_EXECUTOR",
+        "close-incident",
+        "archive readback",
+        "rotation_due=true",
+        "Задача принята",
+        "Блокер",
+    ):
+        assert required.casefold() in watcher_prompt.casefold()
+    for required in (
+        "wb-core-arbiter-brief/v1",
+        "Do not request or reconstruct the full chat",
+        "wb-core-arbiter-decision/v1",
+        "task_revision",
+        "evidence_digest",
+    ):
+        assert required in arbiter_prompt
+
+    assert watcher_config["schema"] == "wb-core-codex-watcher/v1"
+    assert watcher_config["repository"] == "orenvlad-ai/wb-core"
+    assert watcher_config["cadence_minutes"] == 10
+    assert watcher_config["watcher"]["model"] == "gpt-5.6-luna"
+    assert watcher_config["arbiter"]["model"] == "gpt-5.6-sol"
+    assert watcher_config["watcher"]["target_batch_limit"] == 8
+    assert watcher_config["feature_flag"]["default"] is False
+    assert passport_schema["properties"]["schema"]["const"] == (
+        "wb-core-task-passport/v1"
+    )
+    assert passport_schema["additionalProperties"] is False
 
     for source in (agents, release_train):
         assert CANONICAL_MONITOR_URL in source
         assert "apps/github_release_train_spec.py" in source
-    for source in (agents, execution, release_train):
-        assert "--resume-owner --no-ack-agent" in source
-    for source in (agents, execution, release_train):
-        assert "deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>" in source
-    for required in (
-        "task title",
-        "class",
-        "stage",
-        "root",
-        "last action",
-        "intervention",
-        "resume command",
-    ):
-        assert required in release_train
-
-    assert "## Thread heartbeat automation" in agents
-    assert "## Thread Heartbeat Automation" in execution
-    assert "## Desktop Thread Heartbeat И Canonical Monitoring" in release_train
-    for source in (agents, execution, release_train):
-        folded = source.casefold()
-        for required in (
-            "ровно один",
-            "10 минут",
-            "exact target",
-            "capability",
-            "external supervisor",
-            "self-heartbeat",
-            "mutually-exclusive",
-            "не создаёт второй state machine",
-            "terminal failure",
-            "durable prompt",
-            "automation tool",
-            "active",
-            "external supervisor reporter",
-            "self recovery heartbeat",
-            "multi-target",
-            "reporting intent",
-        ):
-            assert required.casefold() in folded
-        assert "только `external supervisor reporter`" in folded
-        assert "`self recovery heartbeat`" in source
-        assert "не удовлетворяет reporting intent" in source
-        assert "wait_threads(timeoutMs: 0)" in source
-        assert "initiating" in folded and "destination" in folded
-        assert "non-terminal target" in folded
-        assert "successful create-call" in folded and "не completion" in folded
-        assert "progress без evidence не начисляется" in folded
-        assert "progress weights" in folded
-        assert "terminal target" in folded
-        assert "FREQ=" not in source
-        assert "и только иначе — self-heartbeat" not in source
-    for source in (agents, execution):
-        assert "Chat → Codex" in source
-        assert "создаваемой либо получаемой" in source
-        assert "bounded follow-up" in source
-        assert "update" in source and "duplicate" in source
-        assert "`ACTIVE`" in source
-        assert "[<" in source
-        assert (
-            "Прогресс ≈<процент>% · ETA ≈<диапазон> · "
-            "сделано: <одна короткая фраза>."
-        ) in source
-        assert "ETA ≈зависит от" in source
-        assert "компьютер и Desktop должны быть запущены" in source
-    for required_example in (
-        "Один новый target, свободный initiating thread",
-        "Второй параллельный target при active reporter",
-        "Reporter unavailable",
-        "Terminal cleanup одного из нескольких targets",
-    ):
-        assert required_example in execution
-    assert "сохранив первый non-terminal exact target" in execution
-    assert "сохранение остальных targets" in execution
-    assert "каждые пять минут" in release_train
-    assert "каждые 300 секунд" in release_train
-    assert "каждые 10 минут" in release_train
-    assert "WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES" in release_train
-    assert "если capability недоступна" in agents.casefold()
-    assert "если automation capability недоступна" in execution.casefold()
-    assert "active target он не будит" in release_train
-    assert "read-only наблюдает GitHub" in release_train
-
     query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
     tokens = shlex.split(query)
     assert "is:pr" in tokens
@@ -2934,10 +3147,13 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     label_tokens = [token for token in tokens if token.startswith("label:")]
     assert len(label_tokens) == 1
     assert set(label_tokens[0].removeprefix("label:").split(",")) == (
-        MONITORED_RELEASE_LABELS | {FINANCE_DEPLOY_LEASE_LABEL}
+        MONITORED_RELEASE_LABELS
+        | {RELEASE_LANE_OWNER_LABEL, FINANCE_DEPLOY_LEASE_LABEL}
     )
+    assert STAGED_LABEL in MONITORED_RELEASE_LABELS
     assert DONE_LABEL not in MONITORED_RELEASE_LABELS
     assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
+    assert RETIRED_LABEL in TERMINAL_LABELS
 
     closed_merged_gate = {
         "kind": "pr",
@@ -2954,7 +3170,6 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         query,
         {"kind": "pr", "state": "closed", "merged": True, "labels": {PRODUCTION_LABEL}},
     )
-
 
 def _assert_machine_classification_and_state_spec() -> None:
     for line, expected in EXPLICIT_TASK_PROMPTS.items():
@@ -3817,6 +4032,7 @@ def main() -> int:
         return 0
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
+    _assert_orchestration_lane_and_legacy_retirement()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
     _assert_foreign_gate_waiting_and_queue_progress()

@@ -10,7 +10,7 @@ Codex ведёт задачу автономно до проверяемого �
 
 Без явной пользовательской границы нельзя завершать задачу на плане, гипотезе, незакоммиченном diff, только локальных проверках или открытом PR. Допустимый незавершённый финал — точный внешний blocker, который нельзя устранить текущими правами или доступными repo-owned средствами.
 
-Старые project packs, prompt footer templates и прежние служебные mode-строки не требуются. Новый task prompt по возможности начинается явной строкой класса из корневого `AGENTS.md`; её отсутствие запускает deterministic auto-classification, а не блокирующий запрос пользователю.
+Старые project packs, prompt footer templates и прежние служебные mode-строки не требуются. Пользователь не выбирает служебный класс и не начинает prompt специальной строкой: Codex выбирает внутренний режим по требуемому результату. Это не расширяет requested scope и authority.
 
 ## Prompt Contract И Technical Path Revalidation
 
@@ -32,28 +32,20 @@ Codex до выполнения повторно проверяет предло
 
 ## Task Class И Execution Contour
 
-Task class и execution contour ортогональны:
+Internal task mode и execution contour ортогональны:
 
 - `ДИАГНОСТИКА` задаёт строго read-only orchestration и никогда не создаёт branch/PR;
 - `СТАНДАРТ` задаёт полный применимый closure; для PR-backed изменений это отдельный PR и GitHub Release Train, а для чистого `user-artifact` — фактическое создание и проверка файла без GitHub closure;
 - `LOOP` задаёт итерационный live/runtime closure с pre-deploy agent handshake и обязательным production UI acceptance.
 
-Execution contour (`read-only`, `user-artifact`, `repo-only`, `live/runtime`, `production data mutation/backfill`, `archived GAS guard`) описывает техническую границу. PR-backed `СТАНДАРТ` получает GitHub label `task:standard`, `LOOP` — `task:loop`; диагностическая задача и non-PR `user-artifact` в Release Train не входят. Явная строка имеет приоритет, а при её отсутствии класс определяется автоматически по правилам ниже.
-
-Явные строки класса:
-
-- `КЛАСС ЗАДАЧИ: СТАНДАРТ`;
-- `КЛАСС ЗАДАЧИ: LOOP`;
-- `КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`.
-
-Если явной строки нет, Codex до начала работы выбирает класс по contract order:
+Execution contour (`read-only`, `user-artifact`, `repo-only`, `live/runtime`, `production data mutation/backfill`, `archived GAS guard`) описывает техническую границу. PR-backed `СТАНДАРТ` получает GitHub label `task:standard`, `LOOP` — `task:loop`; диагностическая задача и non-PR `user-artifact` в Release Train не входят. Codex выбирает режим по contract order:
 
 - создание или изменение пользовательского файла вне репозитория — `стандарт` с contour `user-artifact`; требуемая запись файла не является `ДИАГНОСТИКОЙ`;
 - исключительно read-only анализ без изменений code, GitHub state и production — `диагностика`;
 - deploy с последующими production UI Flow, Playwright-проверками и итерациями до live-результата — `loop`;
 - обычная реализация, repo-only изменение или неоднозначный случай — `стандарт`.
 
-Неоднозначный выбор всегда завершается `стандарт`, поэтому отдельное уточнение класса не требуется. Codex начинает автоматически классифицированную работу сообщением `Класс задачи: стандарт — определён автоматически`, `Класс задачи: loop — определён автоматически` или `Класс задачи: диагностика — определён автоматически` и кратко фиксирует основание. Класс определяет orchestration, но не расширяет requested scope или authority.
+Неоднозначный выбор всегда завершается `стандарт`, поэтому отдельное уточнение класса не требуется. Режим определяет orchestration, но не расширяет requested scope или authority.
 
 Task class и task continuity определяются независимо. Machine-readable continuity из `apps/github_release_train_spec.py` имеет четыре значения:
 
@@ -109,14 +101,15 @@ Successful create-call, client/UI-card без ready target ID, непровер�
 
 ### Одна Launch Operation
 
-`TARGET_CREATE_READBACK` и `MONITOR_ATTACH_READBACK` ниже образуют одну `launch operation` в одном initiating turn. Monitoring нельзя откладывать до следующего turn, первого PR, инициативы target или напоминания пользователя:
+Dispatch и постановка на глобальный учёт образуют одну `launch operation` в одном initiating turn:
 
-1. перед target create/monitor update прочитать existing initiating-thread heartbeat automations и все exact target identities;
+1. сформировать versioned Task Passport по [`codex_task_passport_v1.schema.json`](../../packages/contracts/codex_task_passport_v1.schema.json): цель, expected result, scope, constraints, acceptance/closure, autonomy envelope, exact source/curator/executor identities и initial resources;
 2. выполнить `TARGET_CREATE_READBACK`;
-3. немедленно выполнить `MONITOR_ATTACH_READBACK` по разделу `Thread Heartbeat Automation` для exact созданного target;
-4. сообщить пользователю exact target identity, create/readback evidence и monitor/readback evidence.
+3. переименовать и pin куратора/исполнителя, затем атомарно зарегистрировать exact identities в local registry через `apps/codex_task_orchestrator.py register-task`;
+4. проверить, что ровно одно active generation глобального Watcher читает новую запись;
+5. только после target/readback/registry evidence сообщить пользователю exact target identity и статус monitoring.
 
-Эта последовательность имеет два разных fail semantics. Неподтверждённый target creation останавливает dispatch fail closed и никогда не разрешает same-thread implementation. Если target уже создан и подтверждён, но recurring monitoring capability после bounded проверки действительно недоступна, отдельная target execution продолжается; initiating thread сообщает `MONITORING_CAPABILITY_LIMITATION`, не утверждает, что reporter работает, и не выдаёт silent self recovery heartbeat за monitoring. Monitoring limitation не отменяет созданный target, а creation blocker не может быть переименован в monitoring limitation.
+Неподтверждённый target creation останавливает dispatch fail closed и не разрешает same-thread implementation. Если target подтверждён, но registry/Watcher временно недоступен, execution продолжается с честным `MONITORING_CAPABILITY_LIMITATION`. Fallback-discovery может подбирать только pinned tasks проекта/repository `orenvlad-ai/wb-core`; projectless, личные и сторонние chats запрещены.
 
 ## Phase-Local Preflight И Dependency Planning
 
@@ -183,102 +176,45 @@ abort-path снять нельзя.
 
 Scope должен быть явным и bounded. Не добавляй unrelated redesign, application/business logic, production config или runtime data к docs/governance задаче.
 
-## Thread Heartbeat Automation
+## Глобальный Watcher И Арбитр
 
-Этот protocol применяется только тогда, когда в текущем контексте фактически доступен callable automation contract для recurring heartbeat, чтения target thread state, bounded follow-up и supported stop/delete. Название macOS, Desktop, Codex, ChatGPT, IDE, CLI, project path или client version само по себе capability не доказывает. Недоступность capability не является blocker, не меняет task class/continuity/closure и не разрешает утверждать, что monitor создан.
+Полный authoritative contract находится в [Codex Global Orchestration](12_codex_global_orchestration.md). Реализация использует локальные SQLite WAL registry, append-only JSONL audit и localhost dashboard под `~/.wb-core/orchestrator/v1`; chat history не является state. Mac и Codex Desktop должны быть включены. Внешний управляющий сервис, Entire и Telegram не являются зависимостями v1.
 
-Для `DISPATCH_REQUEST` create/update/readback здесь является стадией `MONITOR_ATTACH_READBACK` той же `launch operation`, которая уже выполнила `TARGET_CREATE_READBACK`; отложенное attachment нарушает dispatch contract.
+Одна Luna-задача Watcher имеет единственную 10-минутную heartbeat automation. Per-curator, per-executor, external supervisor reporter и self-heartbeat automations не создаются. Каждый run сначала получает generation-bound lease через `begin-run`; overlap и stale generation завершаются no-op. Watcher читает registry snapshot, `queue-status` и exact thread snapshots пакетами не более восьми. Полный thread читается только при changed cursor или attention. Active turn только наблюдается; idle non-terminal target получает не более одного bounded follow-up.
 
-### Mutually-Exclusive Роли И Reporting Intent
+Exact registration после dispatch является основным acquisition path. Fallback-discovery ограничен pinned tasks с доказанным project/repository `orenvlad-ai/wb-core`; совпадение имени, темы или текста не достаточно. Сторонние, projectless, личные и медицинские chats исключаются.
 
-Для каждой новой нетерминальной задачи, создаваемой либо получаемой на capability-enabled поверхности, нужна ровно одна active monitoring role для exact target task/thread identity. Одна reporter automation может обслуживать bounded multi-target list, но один target не может одновременно принадлежать external и self roles:
+Watcher публикует по каждой active task только contiguous формат:
 
-1. `external supervisor reporter` — preferred Chat → Codex role. Automation имеет destination/attachment в инициирующем Chat/thread, а её durable prompt содержит bounded список exact target thread identities. Reporter независимо читает каждый target status и last proven progress, поэтому способен публиковать отчёты в initiating thread, пока long-running target turns остаются active;
-2. `self recovery heartbeat` (backward-compatible name `self-heartbeat`) прикреплён к самой target thread. Он только проверяет idle state и возобновляет ближайшее безопасное действие; это не independent observer и не reporter;
-3. external reporter и self recovery heartbeat никогда не работают одновременно для одной target identity и не создают новую task, branch, PR, LOOP root или continuity.
+```text
+Статус: <machine-grounded status>
+Задача: <короткое имя · Cn>
+Прогресс: ≈<процент> · Осталось: ≈<оценка>
+С прошлого отчёта: <одно доказанное изменение>
+Сейчас: <следующее безопасное действие или ожидание>
+Блокер: <строгая human-only причина и минимальное действие>
+```
 
-Явный user intent имеет semantic priority: запрос «мониторинга», «отчётов каждые N минут», процента/ETA либо наблюдения в исходном чате удовлетворяет только `external supervisor reporter`. Silent `self recovery heartbeat` не удовлетворяет reporting intent, не обещает periodic reports во время active turn и не может быть представлен фразой «мониторинг работает» без явного сообщения, что periodic reports отсутствуют.
+Строка `Блокер` существует только при registry state `AWAITING_HUMAN`, strict human-only причине из Task Passport, exact evidence, исчерпанной repo-owned remediation и отсутствии оставшихся safe phases. После exact фразы владельца «Задача принята» state становится `ACCEPTED`, и задача исключается из следующего отчёта. Watcher не снимает pin; пользовательский unpin всегда ручной.
 
-### Chat → Codex Conflict Resolution
+Повтор failure fingerprint хранится в registry, а не в памяти чата. Для пустой system error первое наблюдение даёт bounded retry, второе открывает unclaimed incident и создаёт replacement executor, третье claim-ит этот case для свежего Sol-арбитра. Успешный replacement вызывает `resolve-failure` и переводит неclaim-нутый case в `STALE`. Для одинаковой содержательной ошибки первое и второе наблюдения дают bounded retry, третье открывает и claim-ит incident. Один active incident на task, resource locks и stale-revision/digest check запрещают конкурирующие решения.
 
-После появления пригодных initiating и target thread identities инициатор либо принимающий Codex при первой безопасной возможности выполняет deterministic algorithm:
+Арбитр получает только versioned Task Passport, fresh task/PR/thread state, fingerprint history, attempted remediation, resource set и expected transition. Он read-only анализирует один incident и возвращает versioned bounded decision. Watcher повторно проверяет revision/evidence digest, доставляет разрешённое действие владельцу, доказывает transition, архивирует arbiter thread и только затем закрывает incident. Решение остаётся в JSONL audit.
 
-1. до create читает existing heartbeat automations, attached/destination initiating thread и exact monitored target identities независимо от automation name;
-2. если exact target уже входит в active external reporter, сохраняет его и не создаёт duplicate либо self heartbeat;
-3. если reporter отсутствует, создаёт preferred `external supervisor reporter` с initiating thread как destination и exact target в durable target list;
-4. если initiating thread уже имеет active external reporter для другой non-terminal задачи, update/reuse эту единственную automation как multi-target supervisor: новый exact target добавляется к bounded list, а все прежние non-terminal targets сохраняются;
-5. если конкурентная доставка оставила exact-target duplicate, сохраняется external reporter, а duplicate/self automation останавливается либо удаляется с readback;
-6. если supported tool фактически не способен выполнить multi-target update или immediate target batch read, сообщает точную capability limitation. Только после этого допустим mutually-exclusive `self recovery heartbeat` как silent idle-resume safeguard; он не закрывает user request на reports и не разрешает обещать их.
+Для PR-backed задач Watcher управляет admission и logical lane, но Release Train остаётся единственным механическим владельцем sync/checks/merge/deploy/verify. STANDARD после pre-release proof получает `release:staged`; Watcher публикует exact trusted-main `orchestration admit`, который связывает PR/head/task/revision/passport digest, приобретает или проверяет `release:lane-owner` и только затем ставит `release:ready`. LOOP сохраняет свой repo-owned enqueue/ack/UI contract, но admission и lane тоже обязательны при включённом enforcement. Изменение STANDARD head во время trusted-main sync возвращает PR в `release:staged` для exact re-admission без ложного blocker.
 
-Multi-target list ограничивается фактическим callable batch contract. Если active targets больше поддерживаемого batch, нельзя молча потерять старый target или создать conflicting reporter: требуется явно зафиксировать capability limitation и сохранить уже обслуживаемые non-terminal targets до безопасного решения.
+Legacy PR из versioned migration manifest получают terminal `release:retired` только через trusted-main exact-evidence command; Watcher никогда не снимает их legacy labels вручную.
 
-Destination semantics не зависят от числа targets: automation attachment/destination — initiating reporting Chat/thread; exact monitored target identities находятся в durable prompt/target list. Destination thread нельзя выдавать за monitored target task.
+Ротация Watcher выполняется по generation/run-count: prepare нового поколения → smoke exact registry/thread/automation contract → atomic activate → старое поколение теряет lease и становится no-op → pause старой automation → archive старой Watcher task. В registry остаются поколения и audit. Одновременно активна ровно одна generation и одна Watcher heartbeat automation.
 
-### Create/Update И Readback
+Repo-native contracts:
 
-Automation создаётся или обновляется только поддерживаемым automation tool. Protocol не hardcode-ит raw schedule syntax: tool сам сериализует schedule. После каждого create/update обязателен readback сохранённого состояния:
+- [`codex_task_passport_v1.schema.json`](../../packages/contracts/codex_task_passport_v1.schema.json);
+- [`codex_watcher_v1.json`](../../packages/contracts/codex_watcher_v1.json);
+- [`codex_watcher_prompt_v1.md`](../policies/codex_watcher_prompt_v1.md);
+- [`codex_arbiter_prompt_v1.md`](../policies/codex_arbiter_prompt_v1.md).
 
-- status равен `ACTIVE`;
-- cadence равна 10 минутам;
-- destination/monitor thread равен exact initiating reporting thread для external reporter либо самой target thread для self recovery role;
-- durable prompt явно содержит роль `external supervisor reporter` и каждый exact active target ID;
-- update сохранил все предыдущие non-terminal targets и добавил новый target без неоднозначных name/ID;
-- для тех же targets не существует active self recovery heartbeat либо duplicate reporter;
-- immediate bounded target batch `wait_threads(timeoutMs: 0)` успешно читает fresh status каждого listed target;
-- первый evidence-backed status report опубликован в initiating chat: одна подписанная строка на каждый осмысленно наблюдаемый target.
-
-Если любой invariant не подтверждён, исправляется существующая automation через update; новый duplicate не создаётся. UI-card, successful create-call без readback, совпадающее name monitor или active silent self heartbeat без periodic report — не completion.
-
-### Supervisor Run Contract
-
-Каждый 10-минутный запуск external supervisor reporter одним bounded target batch читает фактическое состояние всех listed target tasks и обрабатывает каждую отдельно:
-
-- `active`: supervisor не будит target и не отправляет follow-up; он читает last proven stage и публикует пользователю краткий status report;
-- `idle + non-terminal`: supervisor отправляет target ровно один bounded follow-up продолжить ближайшее безопасное действие в исходных scope, authority, class и continuity, затем сообщает о resume;
-- `human-only`: supervisor не имитирует продолжение, а сообщает exact blocker и минимальное действие пользователя;
-- `terminal success`, доказанный `terminal failure` или explicit user stop: supervisor публикует финальный статус и удаляет exact target из durable list с update/readback.
-
-Reporter automation остаётся `ACTIVE`, пока в list есть хотя бы один non-terminal target. Она останавливается/удаляется только после cleanup последнего target либо explicit user stop всего reporter. `Self recovery heartbeat` при запуске из target thread сначала проверяет, что основной turn idle и external reporter для exact target отсутствует; только после этого продолжает ближайшее безопасное действие. Он не расширяет authorization, не повторяет небезопасную mutation и не подменяет active task owner. Временная ошибка, отсутствие state changes, elapsed time или внешний queue wait сами по себе не являются terminal failure.
-
-### Progress Report
-
-Каждый осмысленный supervisor run публикует отдельную короткую подписанную строку для каждого наблюдаемого target:
-
-`[<однозначное target name/ID>] Прогресс ≈<процент>% · ETA ≈<диапазон> · сделано: <одна короткая фраза>.`
-
-Name/ID и progress weights для разных targets должны быть однозначны. Progress без evidence не начисляется: процент строится только по доказанным этапам применимого closure, а ETA — по оставшимся проверяемым этапам. Нельзя повышать процент из-за количества heartbeat runs или выдумывать ETA при внешнем ожидании. В последнем случае поле формулируется как `ETA ≈зависит от <точная внешняя зависимость>`; `сделано` называет последнее подтверждённое изменение/проверку. Active-target report может повторить последний proven stage, но обязан честно указать текущую зависимость, а не приписывать monitor новый progress.
-
-### Terminal Summary До Cleanup
-
-Когда exact target достигает доказанного terminal result, external supervisor reporter сначала публикует в initiating/reporting thread отдельный `TERMINAL_MONITOR_SUMMARY`:
-
-- при success однозначно сообщает, что задача успешно завершена;
-- перечисляет 2–5 коротких пунктов с тем, что фактически реализовано/изменено, только по proven evidence;
-- отдельной строкой пишет `Проверено: <checks/evidence>; canonical terminal state: <release:done | release:production | verified user artifact | другой contour-specific result>.`;
-- при partial result или terminal failure вместо success называет точный незавершённый результат/blocker и не использует ложное «готово».
-
-Только после публикации этого summary reporter удаляет exact target из durable list, сохраняет остальные non-terminal targets и readback-подтверждает update. Pause/delete разрешён только при пустом list либо explicit user stop всего reporter. Одна финальная progress-line или silent cleanup без короткого итогового summary не являются корректным завершением мониторинга.
-
-### Нормативные Примеры
-
-- **Один новый target, свободный initiating thread.** Создать один `external supervisor reporter`, destination = initiating thread, durable list = exact target; затем readback, `wait_threads(timeoutMs: 0)` и первая подписанная report line.
-- **Второй параллельный target при active reporter.** Update existing reporter в multi-target mode, сохранив первый non-terminal exact target и добавив второй; выполнить batch smoke и опубликовать две отдельные строки. Silent self fallback и второй reporter не создаются.
-- **Reporter unavailable.** Явно сообщить, что periodic reports в initiating thread технически недоступны. Допустимый `self recovery heartbeat` может только молча возобновлять idle target, не удовлетворяет reporting intent и не называется работающим reporting monitor.
-- **Terminal cleanup одного из нескольких targets.** Опубликовать финальную строку terminal target, удалить только его из durable list, readback-подтвердить сохранение остальных targets и оставить reporter `ACTIVE`; pause/delete допустимы только после последнего target либо explicit user stop.
-
-### PR-Backed `wb-core`
-
-External supervisor является только read-only observation/resume layer. Для PR-backed `wb-core` durable truth остаётся в GitHub: supervisor читает фактический PR/Release Train state, но сам не меняет labels/comments/code/production и при idle отправляет bounded follow-up target Codex. Возобновлённый target вызывает canonical:
-
-`python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`
-
-Target интерпретирует `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE` и выполняет только разрешённое действие. Monitor не создаёт второй state machine, не выполняет automatic ack/acceptance и не объявляет blocker вопреки disposition. `TAKEOVER_PREDECESSOR` допустим только по existing exact `release:needs-resume` lost-owner proof; наличие thread monitor само ownership не передаёт.
-
-10-минутный Desktop supervisor и 5-минутное GitHub observation независимы по назначению: первый наблюдает/resume-ит exact target thread, второй обслуживает durable repository queue и публикует `release:needs-resume` после своего threshold. Supervisor не меняет schedule/threshold worker, не заменяет waiter status comment и не снимает fail-closed gates. Если automation capability недоступна, canonical waiter/shepherd и обычная task continuity продолжают работать без деградации.
-
-### Cleanup И Local Availability
-
-Cleanup выполняет reporter только после обязательного `TERMINAL_MONITOR_SUMMARY` для доказанного terminal target state либо после explicit user stop и readback-подтверждает, что exact target удалён из list, а предыдущие non-terminal targets сохранены. Automation останавливается/удаляется только при пустом active target list либо explicit stop всего reporter; одной финальной фразы без supported result недостаточно. Self recovery heartbeat выполняет собственный cleanup только при доказанном отсутствии external reporter. Для задач с локальными файлами действует эксплуатационное ограничение: компьютер и Desktop должны быть запущены, а проект и target files — оставаться доступны. Это availability limitation, а не новый source of truth и не разрешение копировать локальные данные в другую систему.
+Недоступность Desktop create/read/wait/pin/title/archive/automation capability не имитируется. Repository implementation и GitHub closure продолжаются независимо; enforcement `WB_CORE_ORCHESTRATION_REQUIRED` остаётся выключенным до доказанного end-to-end локального пилота.
 
 ## Шесть Execution-Контуров
 
@@ -425,7 +361,7 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 - использовать отдельную branch/worktree и отдельный PR для каждого независимого change;
 - добавить ровно одну task label: `task:standard` или `task:loop`;
 - добавить ровно одну label `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`;
-- ставить STANDARD `release:ready` только после targeted checks, semantic review, fixes/recheck и docs sync;
+- ставить STANDARD `release:staged` только после targeted checks, semantic review, fixes/recheck и docs sync; `release:ready` добавляет только trusted-main orchestration admission для exact head/task/revision/passport digest и active logical lane;
 - LOOP после successful baseline регистрировать только одной из разных repo-owned commands: `/wb-core loop enqueue-new <PR> head <HEAD_SHA>` или `/wb-core loop enqueue-recovery <PR> head <HEAD_SHA> gate <ACTIVE_GATE_PR> root <ROOT>`; вручную `loop:root-*`/`release:ready` не назначать;
 - для STANDARD наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
 - для уже human-gated, merged, deployed и reconciled production-mutation STANDARD использовать только exact terminalization command выше; не снимать `release:blocked` вручную и не создавать marker локальным token;

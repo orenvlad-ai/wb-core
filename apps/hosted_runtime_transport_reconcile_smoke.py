@@ -103,11 +103,14 @@ def main() -> None:
     assert healthy.operations == ["readback"]
 
     incomplete = ScenarioRunner(
-        [_result(payload=_evidence(deployment_complete=False))]
+        [
+            _result(payload=_evidence(deployment_complete=False)),
+            _result(payload=_evidence()),
+        ]
     )
     result = _run(incomplete)
-    assert result["status"] == "halted" and result["healthy"] is False
-    assert incomplete.operations == ["readback"]
+    assert result["status"] == "reconciled" and result["healthy"] is True
+    assert incomplete.operations == ["readback", "readback"]
 
     # Disconnect before metadata and after metadata cannot be healed by service retries.
     before_metadata = ScenarioRunner([_result(payload=_evidence(OLD, OLD))])
