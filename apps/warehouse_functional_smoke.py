@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import copy
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
@@ -137,6 +139,7 @@ def main() -> None:
     _test_versioned_parameters_and_reference()
     _test_initial_settings_preserve_outer_transaction()
     _test_external_optimistic_recheck()
+    _test_hourly_and_manual_cost_materialization_journal_details()
     _test_downstream_cost_refresh_recalculates_finance_before_unlock()
     _test_finance_recalculation_is_the_last_cost_writer()
     _test_semantic_digest_ignores_volatile_capture_identity()
@@ -225,6 +228,151 @@ def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
         and result["non_target_preserved"] is True,
         "last cost writer must expose exact Finance post-verify/non-target evidence",
     )
+
+
+def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
+    class FakeCalculationParameters:
+        def prepare_functional_economics_backup(self):
+            return {"status": "ready"}
+
+        def process_pending_targeted_recalculations(self, *, verified_backup):
+            return {"status": "success", "request_count": 0}
+
+        def publish_current_functional_economics(self, *, verified_backup):
+            return {
+                "plan_fingerprint": "sha256:fixture-economics",
+                "changed_snapshot_count": 0,
+                "database_written": False,
+                "backup_archive": {},
+            }
+
+    class FakeBlock:
+        def __init__(self) -> None:
+            self.calculation_parameters = FakeCalculationParameters()
+
+        def timestamp_factory(self):
+            return "2026-08-03T08:00:00Z"
+
+        def build_sync_plan(self):
+            return {
+                "plan_fingerprint": "sha256:fixture-plan",
+                "diff": {"changed_line_count": 0},
+            }
+
+        def apply_plan(self, plan, *, confirm_fingerprint):
+            return {
+                "active_version": {
+                    "version_id": "whfv_fixture",
+                    "business_effective_date": "2026-08-03",
+                },
+                "recovery_policy": {"status": "ready"},
+                "sync": {"status": "success"},
+                "reconciliation": {"status": "success"},
+            }
+
+        def record_failed_sync(self, failure):
+            raise AssertionError(f"successful fixture recorded failure: {failure}")
+
+    class FakeRuntime:
+        def __init__(self, runtime_dir: Path) -> None:
+            self.runtime_dir = runtime_dir
+            self.db_path = runtime_dir / "registry.sqlite3"
+
+        def finalize_completed_wb_transit_cost_recalculations(self, *, completed_at):
+            return {"status": "success", "completed_at": completed_at}
+
+    for command, trigger_source in (
+        ("hourly-sync", "hourly"),
+        ("manual-sync", "manual"),
+    ):
+        for changed_rows in (53, 0):
+            with tempfile.TemporaryDirectory(prefix="warehouse-materialization-journal-") as tmp:
+                runtime_dir = Path(tmp) / "runtime"
+                runtime_dir.mkdir()
+                runtime = FakeRuntime(runtime_dir)
+                with (
+                    patch(
+                        "apps.warehouse_functional_runner.RegistryUploadDbBackedRuntime",
+                        return_value=runtime,
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner.WarehouseFunctionalBlock",
+                        return_value=FakeBlock(),
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._fresh_stocks_block",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner.warehouse_functional_write_lock",
+                        return_value=nullcontext({"wait_ms": 0}),
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._run_bounded_recovery_retention",
+                        return_value={"status": "success"},
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._refresh_official_supply_state",
+                        return_value={"status": "success"},
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._collect_autonomous_transit_costs",
+                        return_value={"status": "success"},
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._materialize_downstream_cost_layers",
+                        return_value=changed_rows,
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner.WbSuppliesBlock"
+                    ) as supplies_block,
+                    patch(
+                        "apps.warehouse_functional_runner._recalculate_downstream_finance_cost",
+                        return_value={"status": "success"},
+                    ),
+                ):
+                    supplies_block.return_value.reconcile_functional_ff_state.return_value = {
+                        "status": "success"
+                    }
+                    result = _run(
+                        argparse.Namespace(
+                            runtime_dir=str(runtime_dir),
+                            command=command,
+                            backup_dir=str(Path(tmp) / "backups"),
+                        ),
+                        sqlite_busy_timeout_ms=120_000,
+                    )
+                with sqlite3.connect(runtime.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    phase = conn.execute(
+                        "SELECT status,item_count,details_json "
+                        "FROM sheet_vitrina_v1_warehouse_update_phases "
+                        "WHERE phase_key='cost_materialization'"
+                    ).fetchone()
+                    durable_run = conn.execute(
+                        "SELECT trigger_source,status,result_json "
+                        "FROM sheet_vitrina_v1_warehouse_update_runs"
+                    ).fetchone()
+            _assert(
+                result["status"] == "success"
+                and result["downstream_cost_layers_materialized"] == changed_rows,
+                f"{command} preserves the scalar materialization result for {changed_rows}",
+            )
+            _assert(
+                phase["status"] == "success"
+                and phase["item_count"] == changed_rows
+                and json.loads(phase["details_json"]) == {"changed_rows": changed_rows},
+                f"{command} journals structured materialization evidence for {changed_rows}",
+            )
+            _assert(
+                durable_run["trigger_source"] == trigger_source
+                and durable_run["status"] == "success"
+                and json.loads(durable_run["result_json"])[
+                    "downstream_cost_layers_materialized"
+                ]
+                == changed_rows,
+                f"{command} durably completes for materialization count {changed_rows}",
+            )
 
 
 def _test_finance_recalculation_is_the_last_cost_writer() -> None:
