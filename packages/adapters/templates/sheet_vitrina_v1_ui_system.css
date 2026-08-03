@@ -1,0 +1,507 @@
+/*
+ * Shared visual system for every sheet_vitrina_v1 HTML surface.
+ *
+ * The templates intentionally keep their feature-specific CSS close to their
+ * markup. This final cascade layer supplies the common product language and
+ * layout safety contract without coupling the feature JavaScript together.
+ */
+:root {
+  color-scheme: dark;
+  --ui-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --ui-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ui-font-size-xs: 11px;
+  --ui-font-size-sm: 12px;
+  --ui-font-size-md: 14px;
+  --ui-font-size-lg: 16px;
+  --ui-font-size-xl: 20px;
+  --ui-font-size-2xl: 26px;
+  --ui-line-tight: 1.25;
+  --ui-line-normal: 1.45;
+  --ui-line-relaxed: 1.6;
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-5: 20px;
+  --ui-space-6: 24px;
+  --ui-space-8: 32px;
+  --ui-control-sm: 30px;
+  --ui-control-md: 36px;
+  --ui-control-lg: 40px;
+  --ui-radius-sm: 6px;
+  --ui-radius-md: 8px;
+  --ui-radius-lg: 10px;
+  --ui-radius-pill: 999px;
+  --ui-bg: #0f1115;
+  --ui-surface: #17191f;
+  --ui-surface-subtle: #1f222a;
+  --ui-surface-elevated: #242832;
+  --ui-control: #111318;
+  --ui-control-hover: #282d38;
+  --ui-border: #2b3038;
+  --ui-border-strong: #3a414d;
+  --ui-text: #f4f4f5;
+  --ui-text-muted: #9fa8b5;
+  --ui-text-subtle: #c5cad3;
+  --ui-accent: #8B5CF6;
+  --ui-accent-hover: #A78BFA;
+  --ui-accent-active: #7C3AED;
+  --ui-accent-soft: rgba(139, 92, 246, .15);
+  --ui-accent-border: rgba(139, 92, 246, .46);
+  --ui-focus: #93c5fd;
+  --ui-success: #86efac;
+  --ui-success-soft: rgba(34, 197, 94, .14);
+  --ui-warning: #fbbf24;
+  --ui-warning-soft: rgba(245, 158, 11, .15);
+  --ui-danger: #fca5a5;
+  --ui-danger-soft: rgba(248, 113, 113, .14);
+  --ui-info: #7dd3fc;
+  --ui-info-soft: rgba(56, 189, 248, .13);
+  --ui-shadow: 0 18px 44px rgba(0, 0, 0, .28);
+
+  /* Legacy aliases keep all feature templates on the same token values. */
+  --page-bg: var(--ui-bg);
+  --bg: var(--ui-bg);
+  --panel-bg: var(--ui-surface);
+  --panel: var(--ui-surface);
+  --surface: var(--ui-surface);
+  --panel-subtle: var(--ui-surface-subtle);
+  --panel-2: var(--ui-surface-subtle);
+  --panel-elevated: var(--ui-surface-elevated);
+  --control-bg: var(--ui-control);
+  --control: var(--ui-control);
+  --control-bg-hover: var(--ui-control-hover);
+  --border: var(--ui-border);
+  --line: var(--ui-border);
+  --border-strong: var(--ui-border-strong);
+  --text: var(--ui-text);
+  --muted: var(--ui-text-muted);
+  --muted-strong: var(--ui-text-subtle);
+  --accent: var(--ui-accent);
+  --accent-2: var(--ui-info);
+  --accent-hover: var(--ui-accent-hover);
+  --accent-active: var(--ui-accent-active);
+  --accent-soft: var(--ui-accent-soft);
+  --accent-border: var(--ui-accent-border);
+  --accent-focus: rgba(147, 197, 253, .35);
+  --success: var(--ui-success);
+  --success-bg: var(--ui-success-soft);
+  --success-text: var(--ui-success);
+  --warning: var(--ui-warning);
+  --warning-bg: var(--ui-warning-soft);
+  --warning-text: var(--ui-warning);
+  --danger: var(--ui-danger);
+  --danger-bg: var(--ui-danger-soft);
+  --error-bg: var(--ui-danger-soft);
+  --error-text: var(--ui-danger);
+  --neutral-bg: rgba(148, 163, 184, .13);
+  --radius: var(--ui-radius-md);
+  --shadow: var(--ui-shadow);
+  font-family: var(--ui-font-sans);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  background: var(--ui-bg);
+  font-family: var(--ui-font-sans);
+  font-size: 14px;
+  line-height: var(--ui-line-normal);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+body {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 50% -20%, rgba(255, 255, 255, .055), transparent 34rem),
+    var(--ui-bg);
+  color: var(--ui-text);
+  font-family: var(--ui-font-sans);
+  font-size: var(--ui-font-size-md);
+  line-height: var(--ui-line-normal);
+}
+main, header, nav, section, article, aside, form, fieldset, div, label { min-width: 0; }
+img, svg, video, canvas { max-width: 100%; }
+iframe { max-width: 100%; }
+a { color: inherit; }
+code, pre, samp, kbd { font-family: var(--ui-font-mono); }
+pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+:focus-visible {
+  outline: 2px solid var(--ui-focus) !important;
+  outline-offset: 2px !important;
+}
+::selection { background: rgba(139, 92, 246, .34); color: var(--ui-text); }
+
+h1, h2, h3, h4, h5, h6 {
+  max-width: 100%;
+  color: var(--ui-text);
+  font-family: var(--ui-font-sans);
+  font-weight: 750;
+  line-height: var(--ui-line-tight);
+  letter-spacing: -.012em;
+  overflow-wrap: anywhere;
+}
+h1 { font-size: clamp(23px, 2.3vw, var(--ui-font-size-2xl)); }
+h2 { font-size: var(--ui-font-size-xl); }
+h3 { font-size: var(--ui-font-size-lg); }
+p, li, dd, dt, figcaption { overflow-wrap: anywhere; }
+
+button, input, select, textarea, .button, .button-link, .action-button {
+  font-family: var(--ui-font-sans);
+  font-size: var(--ui-font-size-md);
+  line-height: var(--ui-line-normal);
+}
+button, .button, .button-link, .action-button {
+  min-height: var(--ui-control-md);
+  border-radius: var(--ui-radius-md);
+  padding: 7px 12px;
+  font-weight: 700;
+}
+input, select, textarea, .input {
+  min-height: var(--ui-control-md);
+  max-width: 100%;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-control);
+  color: var(--ui-text);
+  padding: 7px 9px;
+}
+input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity: .8; }
+button:not(:disabled), .button:not(.is-disabled), .button-link { cursor: pointer; }
+button:disabled, .button:disabled, .button.is-disabled, [aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: .5;
+  filter: saturate(.7);
+}
+.action-button.primary-button {
+  /* Keep the semantic accent outline deterministic as embedded surfaces mount. */
+  transition-property: background-color, color, transform;
+}
+
+/* Shared surface geometry. */
+.panel, .block, .card, .warehouse-card, .warehouse-incident-card,
+.activity-card, .dataset-card, .report-card, .plan-report-card,
+.plan-report-projection-card, .calculation-card, .source-card,
+.sku-quick-card, .spp-test-card, .auto-update-card,
+.autoanswers-control-card, .autoanswers-list-card,
+.autoanswers-progress-card, .autoanswers-run-cap-card,
+.autoanswers-limits-usage-card, .operator-modal-card, .system-modal-card {
+  border-color: var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+}
+.panel, .block, .card, .warehouse-card, .activity-card,
+.dataset-card, .report-card, .plan-report-card, .source-card { min-width: 0; max-width: 100%; }
+.operator-embed-panel { margin-top: var(--ui-space-3); }
+
+/* Level 1 navigation: main product areas. */
+.shell-header {
+  align-items: center;
+  margin: 0 0 var(--ui-space-3);
+  padding: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: rgba(23, 25, 31, .94);
+}
+.unified-tab-strip { gap: 4px; }
+.unified-tab-button {
+  min-height: 38px;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: var(--ui-font-size-md);
+  font-weight: 700;
+  line-height: var(--ui-line-tight);
+  white-space: nowrap;
+}
+.unified-tab-button:hover { background: var(--ui-control-hover); border-color: var(--ui-border-strong); }
+.unified-tab-button.is-active,
+.unified-tab-button[aria-selected="true"] {
+  border-color: var(--ui-accent-border);
+  background: var(--ui-accent-soft);
+  color: var(--ui-text);
+}
+.shell-actions { gap: 6px; }
+.shell-logout-link {
+  min-height: 34px;
+  border-radius: 7px;
+  background: var(--ui-control);
+  color: var(--ui-text-subtle);
+  padding: 6px 10px;
+  font-size: var(--ui-font-size-sm);
+}
+.shell-logout-link:hover { border-color: var(--ui-accent-border); background: var(--ui-control-hover); color: var(--ui-text); }
+
+/* Level 2 navigation: major groups inside an area. */
+.tab-strip, .subsection-strip, .settings-group-tabs, .card-tabs {
+  max-width: 100%;
+  gap: 5px;
+  margin-bottom: var(--ui-space-3);
+  padding: 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+}
+.tab-button, .subsection-button, .settings-group-tabs .settings-tab-button, .card-tab-button {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-muted);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: var(--ui-line-tight);
+}
+.tab-button:hover, .subsection-button:hover, .settings-group-tabs .settings-tab-button:hover,
+.card-tab-button:hover { border-color: var(--ui-border-strong); background: var(--ui-control-hover); color: var(--ui-text); transform: none; }
+.tab-button.is-active, .subsection-button.is-active,
+.settings-group-tabs .settings-tab-button.is-active, .card-tab-button[aria-selected="true"] {
+  border-color: var(--ui-accent-border);
+  background: var(--ui-accent-soft);
+  color: var(--ui-text);
+  box-shadow: none;
+}
+
+/* Level 3 navigation: local views and filters. */
+.warehouse-switcher, .settings-tabs, .feedbacks-subtabs,
+.prices-subtabs, .research-section-tabs {
+  width: fit-content;
+  max-width: 100%;
+  gap: 4px;
+  margin: 0 0 var(--ui-space-4);
+  padding: 3px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-subtle);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.warehouse-switch, .settings-tabs .settings-tab-button,
+.feedbacks-subtab-button, .prices-subtab-button, .research-section-tab {
+  min-height: var(--ui-control-sm);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ui-text-muted);
+  padding: 5px 9px;
+  font-size: var(--ui-font-size-sm);
+  font-weight: 700;
+  line-height: var(--ui-line-tight);
+  white-space: nowrap;
+}
+.warehouse-switch:hover, .settings-tabs .settings-tab-button:hover,
+.feedbacks-subtab-button:hover, .prices-subtab-button:hover, .research-section-tab:hover {
+  border-color: var(--ui-border-strong);
+  background: var(--ui-control-hover);
+  color: var(--ui-text);
+}
+.warehouse-switch.is-active, .settings-tabs .settings-tab-button.is-active,
+.feedbacks-subtab-button.is-active, .prices-subtab-button.is-active,
+.research-section-tab.is-active {
+  border-color: var(--ui-accent-border);
+  background: var(--ui-control);
+  color: var(--ui-text);
+}
+.warehouse-section-switcher {
+  margin-bottom: var(--ui-space-2);
+  border-color: var(--ui-border-strong);
+  background: var(--ui-surface);
+}
+.warehouse-section-switcher .warehouse-switch {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.warehouse-detail-switcher {
+  margin-top: 0;
+  margin-bottom: var(--ui-space-4);
+}
+
+/* Status vocabulary is intentionally identical across feature surfaces. */
+.badge, .pill, .status-pill, .warehouse-status, .prices-badge,
+.ads-status-pill, .autoanswers-status, .sku-management-status,
+.feedbacks-tag-chip, .feedbacks-complaint-status, .cell-badge,
+.dataset-status, .wb-supplies-chip, .metrics-config-group-badge,
+.metrics-config-scope-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 24px;
+  max-width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-pill);
+  padding: 3px 8px;
+  font-size: var(--ui-font-size-xs);
+  font-weight: 750;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.badge.neutral, .pill, .status-pill.tone-neutral, .warehouse-status[data-tone="neutral"] {
+  background: var(--neutral-bg); color: var(--ui-text-subtle);
+}
+.badge.success, .badge.green, .pill.success, .tone-success,
+.warehouse-status[data-tone="success"] { background: var(--ui-success-soft); color: var(--ui-success); }
+.badge.warning, .badge.yellow, .pill.warning, .tone-warning,
+.warehouse-status[data-tone="warning"] { background: var(--ui-warning-soft); color: var(--ui-warning); }
+.badge.error, .badge.red, .pill.error, .tone-error,
+.warehouse-status[data-tone="error"] { background: var(--ui-danger-soft); color: var(--ui-danger); }
+
+/* Wide content scrolls locally; page and card geometry never expands with it. */
+.table-wrap, .instructions-table-wrap, .registry-wrap, .registry,
+.line-table, .table-shell, .table-scroll, .warehouse-table-wrap,
+.shipment-summary-table-wrap, .district-table-wrap, .regional-planning-table-wrap,
+.shipment-registry-table-wrap, .cny-account-table-wrap, .wb-supplies-table-wrap,
+.stock-report-table-wrap, .plan-report-table-wrap, .partner-report-table-wrap,
+.wb-finance-table-wrap, .autoanswers-table-wrap, .ads-table-wrap,
+.prices-table-wrap, .spp-test-table-wrap, .sku-management-table-shell,
+.research-result-table-scroll, .sku-quick-history, .vitrina-schedule-table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+table { border-color: var(--ui-border); color: var(--ui-text); }
+table:not(.vitrina-table) { font-size: var(--ui-font-size-sm); line-height: 1.35; }
+table:not(.vitrina-table) th, table:not(.vitrina-table) td {
+  padding: 8px 9px;
+  border-color: var(--ui-border);
+}
+table:not(.vitrina-table) th {
+  background: var(--ui-surface-subtle);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 750;
+  letter-spacing: .015em;
+  text-transform: none;
+}
+table:not(.vitrina-table) td { background: var(--ui-surface); color: var(--ui-text); }
+table:not(.vitrina-table) tbody tr:hover td { background: rgba(139, 92, 246, .055); }
+td, th { overflow-wrap: anywhere; }
+.warehouse-table { min-width: 840px; }
+.warehouse-table th, .warehouse-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.warehouse-table th *, .warehouse-table td * {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.supplier-registry-table {
+  width: 100%;
+  min-width: 2280px;
+  table-layout: fixed;
+}
+.supplier-safe-registry-table {
+  width: 100%;
+  min-width: 1500px;
+  table-layout: fixed;
+}
+.supplier-registry-table th, .supplier-registry-table td,
+.supplier-safe-registry-table th, .supplier-safe-registry-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Technical values remain readable and contained even without JS-supplied title. */
+.warehouse-summary {
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--ui-space-3);
+}
+.warehouse-summary-item { min-width: 0; overflow: hidden; padding: var(--ui-space-3); }
+.warehouse-summary-label { font-size: var(--ui-font-size-sm); line-height: var(--ui-line-normal); }
+.warehouse-summary-value,
+[data-warehouse-auto-version], [data-warehouse-update-run-id],
+[data-warehouse-update-version], [data-warehouse-recovery-technical],
+[data-warehouse-update-technical], .technical-line, .technical-value,
+.job-id, .run-id, .version, [data-technical] {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-font-size-sm);
+  line-height: var(--ui-line-normal);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Embedded surfaces inherit the same rhythm without double framing. */
+body.is-embedded { overflow-x: hidden; }
+body.is-embedded main, body.is-embedded .page { max-width: 100%; }
+body.is-embedded .panel, body.is-embedded .block { box-shadow: none; }
+.operator-panel, .settings-panels, .settings-group-panel,
+.unified-tab-panel, .warehouse-panel, .feedbacks-panel,
+.ads-panel, .prices-panel, .sku-management-panel, .research-panel { min-width: 0; max-width: 100%; }
+
+@media (max-width: 1100px) {
+  .page, main { max-width: 100%; }
+  .shell-header { align-items: stretch; flex-direction: column; }
+  .unified-tab-strip { flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+  .shell-actions { justify-content: flex-start; }
+  .research-form-grid, .autoanswers-control-grid, .autoanswers-filter-grid,
+  .calculation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  details[open] > .column-manager-panel {
+    position: fixed;
+    inset: 88px 12px auto 12px;
+    z-index: 80;
+    width: auto;
+    max-width: none;
+    max-height: calc(100vh - 112px);
+    overflow: auto;
+  }
+  .sku-column-controls { width: 100%; min-width: 0; }
+}
+
+@media (max-width: 720px) {
+  html { font-size: 13px; }
+  .page, main, .knowledge-base { padding: var(--ui-space-3); }
+  .shell-header { margin-bottom: var(--ui-space-3); }
+  .tab-strip, .subsection-strip, .settings-group-tabs, .card-tabs,
+  .warehouse-switcher, .settings-tabs, .feedbacks-subtabs,
+  .prices-subtabs, .research-section-tabs {
+    flex-wrap: nowrap;
+    width: 100%;
+    overflow-x: auto;
+  }
+  .unified-tab-button, .tab-button, .subsection-button,
+  .settings-tab-button, .card-tab-button, .warehouse-switch,
+  .feedbacks-subtab-button, .prices-subtab-button, .research-section-tab { flex: 0 0 auto; }
+  .research-form-grid, .autoanswers-control-grid, .autoanswers-filter-grid,
+  .calculation-grid, .grid, .totals { grid-template-columns: 1fr; }
+  .operator-embed-panel { padding: var(--ui-space-2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
