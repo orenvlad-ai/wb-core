@@ -1910,8 +1910,30 @@
     }
 
     [data-vitrina-incident-policy-badge][hidden],
-    [data-vitrina-incident-quality-badge][hidden] {
+    [data-vitrina-incident-quality-badge][hidden],
+    [data-table-snapshot-summary][hidden] {
       display: none;
+    }
+
+    .table-snapshot-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      min-height: 22px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+
+    .table-snapshot-summary [data-vitrina-incident-quality-badge] {
+      border-radius: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--muted-strong);
     }
 
     .table-summary-line {
@@ -1932,16 +1954,6 @@
     }
 
     .table-summary-token {
-      white-space: nowrap;
-    }
-
-    .table-summary-separator {
-      color: var(--muted);
-    }
-
-    .table-summary-freshness {
-      color: var(--muted-strong);
-      font-weight: 700;
       white-space: nowrap;
     }
 
@@ -5308,10 +5320,12 @@
             <div class="table-heading-left">
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
               <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>С инцидентами</span>
-              <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
+              <div class="table-snapshot-summary" data-table-snapshot-summary hidden>
+                <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
+                <p class="table-summary-line" data-table-summary-line hidden></p>
+              </div>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
                 <div class="toolbar-field toolbar-field-range">
                   <span class="filter-label">Диапазон</span>
@@ -6671,6 +6685,7 @@
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
     const tableMetaNode = document.querySelector("[data-table-meta]");
+    const tableSnapshotSummaryNode = document.querySelector("[data-table-snapshot-summary]");
     const tableSummaryLineNode = document.querySelector("[data-table-summary-line]");
     const tableStateNode = document.querySelector("[data-table-state]");
     const stateTitleNode = document.querySelector("[data-state-title]");
@@ -9056,6 +9071,14 @@
       vitrinaIncidentPolicyBadge.title = String(badge.detail || "");
     }
 
+    function syncTableSnapshotSummaryVisibility() {
+      if (!tableSnapshotSummaryNode) return;
+      tableSnapshotSummaryNode.hidden = Boolean(
+        (!vitrinaIncidentQualityBadge || vitrinaIncidentQualityBadge.hidden) &&
+        (!tableSummaryLineNode || tableSummaryLineNode.hidden)
+      );
+    }
+
     function renderVitrinaIncidentQualityBadge(quality) {
       if (!vitrinaIncidentQualityBadge) return;
       const active = Boolean(
@@ -9066,6 +9089,7 @@
       vitrinaIncidentQualityBadge.hidden = !active;
       if (!active) {
         vitrinaIncidentQualityBadge.removeAttribute("title");
+        syncTableSnapshotSummaryVisibility();
         return;
       }
       const snapshotAt = formatTimestampDisplay(
@@ -9080,6 +9104,7 @@
         "aria-label",
         vitrinaIncidentQualityBadge.title
       );
+      syncTableSnapshotSummaryVisibility();
     }
 
     async function applyWbIncidentPolicy() {
@@ -12144,9 +12169,6 @@
       const statusCard = sourceCards.find(function(card) {
         return String((card && card.card_id) || "") === "status";
       });
-      const dataFreshnessCard = sourceCards.find(function(card) {
-        return String((card && card.card_id) || "") === "data_freshness";
-      });
       const parts = [];
       if (pageRefreshCard) {
         const updatedText = formatSummaryCardValue(pageRefreshCard, {suppressTimezone: true, noSeconds: true});
@@ -12158,15 +12180,6 @@
           );
         }
       }
-      if (dataFreshnessCard) {
-        const freshnessText = formatSummaryCardValue(dataFreshnessCard, {suppressTimezone: true, noSeconds: true}) || "нет данных";
-        parts.push(
-          '<span class="table-summary-token table-summary-freshness" data-table-summary-freshness' +
-            (dataFreshnessCard.updated_at ? ' data-table-summary-freshness-at="' + escapeHtml(dataFreshnessCard.updated_at) + '"' : "") +
-            (dataFreshnessCard.source ? ' data-table-summary-freshness-source="' + escapeHtml(dataFreshnessCard.source) + '"' : "") +
-            '>свеж: ' + escapeHtml(freshnessText) + '</span>'
-        );
-      }
       if (statusCard) {
         const statusText = compactLoadStatusText(statusCard);
         const statusTone = compactLoadStatusTone(statusCard, statusText);
@@ -12175,7 +12188,8 @@
         setLoadStatusLamp("нет данных", "neutral");
       }
       tableSummaryLineNode.hidden = parts.length === 0;
-      tableSummaryLineNode.innerHTML = parts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
+      tableSummaryLineNode.innerHTML = parts.join("");
+      syncTableSnapshotSummaryVisibility();
     }
 
     function composeSummaryCards(cards) {
