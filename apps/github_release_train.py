@@ -15,9 +15,10 @@ import json
 import os
 from pathlib import Path
 import ssl
+import subprocess
 import sys
 import time
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -76,6 +77,8 @@ from packages.application.finance_migration_deploy_lease import (
 REPO_ONLY_LABEL = "scope:repo-only"
 LIVE_RUNTIME_LABEL = "scope:live-runtime"
 PRODUCTION_MUTATION_LABEL = "scope:production-mutation"
+
+CANONICAL_GITHUB_REPOSITORY = "orenvlad-ai/wb-core"
 
 STANDARD_TASK_LABEL = "task:standard"
 LOOP_TASK_LABEL = "task:loop"
@@ -5393,6 +5396,60 @@ def _api_from_env() -> GitHubApi:
     )
 
 
+def _local_gh_auth_token() -> str:
+    """Read the existing local gh credential without echoing it."""
+
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "local queue-status requires GITHUB_TOKEN or an authenticated gh CLI"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(
+            "local queue-status could not read the authenticated gh credential"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("local queue-status timed out while reading gh auth") from exc
+    token = result.stdout.strip()
+    if not token:
+        raise ValueError("authenticated gh CLI returned an empty token")
+    return token
+
+
+def _queue_status_api_from_env(
+    *,
+    environ: Mapping[str, str] | None = None,
+    gh_token_reader: Callable[[], str] | None = None,
+) -> GitHubApi:
+    """Build the read-only Watcher API, with a local authenticated-gh fallback."""
+
+    env = os.environ if environ is None else environ
+    repository = env.get("GITHUB_REPOSITORY", "").strip()
+    token = env.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        if env.get("GITHUB_ACTIONS", "").strip().lower() == "true":
+            raise ValueError("GITHUB_TOKEN is required in GitHub Actions")
+        if repository and repository != CANONICAL_GITHUB_REPOSITORY:
+            raise ValueError(
+                "local queue-status gh fallback is restricted to orenvlad-ai/wb-core"
+            )
+        repository = CANONICAL_GITHUB_REPOSITORY
+        token = (gh_token_reader or _local_gh_auth_token)().strip()
+    ensure_ca_bundle()
+    return GitHubApi(
+        repository=repository,
+        token=token,
+        api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
+    )
+
+
 def _json_print(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -6054,7 +6111,7 @@ def command_handle_comment(args: argparse.Namespace) -> int:
 def command_queue_status(_: argparse.Namespace) -> int:
     """Read-only snapshot for the global Watcher; never refreshes owner state."""
 
-    api = _api_from_env()
+    api = _queue_status_api_from_env()
     labels = (
         STAGED_LABEL,
         READY_LABEL,
