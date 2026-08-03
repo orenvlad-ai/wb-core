@@ -609,6 +609,7 @@ TRANSITION_MATRIX = {
     READY_LABEL: frozenset({RUNNING_LABEL, BLOCKED_LABEL, SUPERSEDED_LABEL}),
     RUNNING_LABEL: frozenset(
         {
+            STAGED_LABEL,
             READY_LABEL,
             AWAITING_AGENT_LABEL,
             AWAITING_UI_LABEL,

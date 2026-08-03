@@ -183,6 +183,17 @@ class ReleaseClassificationBlocked(ReleaseBlocked):
         self.code = code
 
 
+class ReleaseReadmissionRequired(ReleaseTrainError):
+    """Mechanical main sync changed an admitted STANDARD head without failing it."""
+
+    def __init__(self, *, head_sha: str, task_id: str, revision: int, passport_digest: str) -> None:
+        super().__init__("exact head changed during trusted main synchronization")
+        self.head_sha = head_sha
+        self.task_id = task_id
+        self.revision = revision
+        self.passport_digest = passport_digest
+
+
 class GitHubApiError(ReleaseTrainError):
     def __init__(self, status: int, message: str, payload: Any = None) -> None:
         super().__init__(f"GitHub API {status}: {message}")
@@ -3373,9 +3384,15 @@ def admit_orchestration_release(
         raise ReleaseBlocked("orchestration admission head SHA is stale")
     if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
         raise ReleaseBlocked("orchestration admission requires an open non-draft PR")
-    if task_class_from_labels(labels) != STANDARD_TASK_LABEL:
-        raise ReleaseBlocked("orchestration admission currently applies to STANDARD PRs")
+    task_class = task_class_from_labels(labels)
     scope_from_labels(labels)
+    state = release_state_from_labels(labels)
+    if task_class == LOOP_TASK_LABEL:
+        loop_registration_kind(api, pull)
+        if state != READY_LABEL:
+            raise ReleaseBlocked("LOOP orchestration admission requires registered release:ready")
+    elif state != STAGED_LABEL:
+        raise ReleaseBlocked("STANDARD executor must leave the PR in release:staged")
     if not _has_successful_check(api, actual_head, check_name):
         raise ReleaseBlocked(
             f"orchestration admission requires successful {check_name!r} on exact head"
@@ -3392,14 +3409,12 @@ def admit_orchestration_release(
         if READY_LABEL in labels or RUNNING_LABEL in labels or labels & TERMINAL_LABELS:
             api.dispatch_workflow("release-train.yml", "main")
             return "already-admitted"
-    state = release_state_from_labels(labels)
-    if state != STAGED_LABEL:
-        raise ReleaseBlocked("executor must leave the PR in release:staged before admission")
-
     lane = release_lane_state(api)
     if lane["status"] == "conflict":
         raise ReleaseBlocked("release lane owner is ambiguous")
     owner_pr = command.pr
+    active: list[dict[str, Any]] = []
+    allow_loop_recovery = False
     if lane["status"] == "owned":
         owner_pr = int(lane["owner_pr"])
         if lane["task_id"] != command.task_id:
@@ -3411,8 +3426,13 @@ def admit_orchestration_release(
             and release_state_from_labels(label_names(item))
             in {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL, HALTED_LABEL}
         ]
-        if active:
-            return "waiting-own-pr"
+        if task_class == LOOP_TASK_LABEL and active:
+            root = loop_root_from_labels(labels)
+            allow_loop_recovery = bool(root) and all(
+                release_state_from_labels(label_names(item)) == AWAITING_UI_LABEL
+                and loop_root_from_labels(label_names(item)) == root
+                for item in active
+            )
     else:
         lane_values = {
             "operation": "acquire",
@@ -3437,13 +3457,17 @@ def admit_orchestration_release(
         "revision": command.revision,
         "task": command.task_id,
     }
-    api.add_comment(
-        command.pr,
-        f"Watcher admitted exact head `{command.head_sha}` for logical task "
-        f"`{command.task_id}`.\n\n"
-        + _proof_marker(ORCHESTRATION_ADMISSION_PROOF_MARKER, **proof_values),
-    )
-    set_release_state(api, command.pr, READY_LABEL, current_labels=labels)
+    if existing is None:
+        api.add_comment(
+            command.pr,
+            f"Watcher admitted exact head `{command.head_sha}` for logical task "
+            f"`{command.task_id}`.\n\n"
+            + _proof_marker(ORCHESTRATION_ADMISSION_PROOF_MARKER, **proof_values),
+        )
+    if active and not allow_loop_recovery:
+        return "waiting-own-pr"
+    if task_class == STANDARD_TASK_LABEL:
+        set_release_state(api, command.pr, READY_LABEL, current_labels=labels)
     api.dispatch_workflow("release-train.yml", "main")
     return "admitted"
 
@@ -3460,7 +3484,24 @@ def release_orchestration_lane(
         raise ReleaseBlocked("release-lane is restricted to trusted-main Actions")
     if association.upper() not in ORCHESTRATION_ASSOCIATIONS or not actor:
         raise ReleaseBlocked("release-lane requires OWNER or MEMBER association")
+    proof_values = {
+        "evidence": command.evidence_digest,
+        "operation": "release",
+        "outcome": command.outcome,
+        "owner_pr": command.pr,
+        "revision": command.revision,
+        "task": command.task_id,
+    }
+    existing_release = _has_comment_proof(
+        api,
+        command.pr,
+        RELEASE_LANE_PROOF_MARKER,
+        **proof_values,
+    )
     lane = release_lane_state(api)
+    if existing_release and lane.get("status") == "idle":
+        api.dispatch_workflow("release-train.yml", "main")
+        return "already-released"
     if lane.get("status") != "owned" or int(lane.get("owner_pr") or 0) != command.pr:
         raise ReleaseBlocked("release-lane command must target the current exact owner")
     if lane.get("task_id") != command.task_id:
@@ -3481,19 +3522,12 @@ def release_orchestration_lane(
             "release lane cannot be released while task has unsafe active PRs: "
             + ", ".join(unsafe)
         )
-    proof_values = {
-        "evidence": command.evidence_digest,
-        "operation": "release",
-        "outcome": command.outcome,
-        "owner_pr": command.pr,
-        "revision": command.revision,
-        "task": command.task_id,
-    }
-    api.add_comment(
-        command.pr,
-        f"Watcher released the logical-task lane with outcome `{command.outcome}`.\n\n"
-        + _proof_marker(RELEASE_LANE_PROOF_MARKER, **proof_values),
-    )
+    if not existing_release:
+        api.add_comment(
+            command.pr,
+            f"Watcher released the logical-task lane with outcome `{command.outcome}`.\n\n"
+            + _proof_marker(RELEASE_LANE_PROOF_MARKER, **proof_values),
+        )
     api.remove_label(command.pr, RELEASE_LANE_OWNER_LABEL)
     api.dispatch_workflow("release-train.yml", "main")
     return "released"
@@ -3530,6 +3564,27 @@ def retire_legacy_release(
     labels = label_names(pull)
     head = str((pull.get("head") or {}).get("sha") or "").lower()
     merge = str(pull.get("merge_commit_sha") or "").lower()
+    proof_values = {
+        "head": head,
+        "manifest": actual_manifest,
+        "merge": merge,
+        "pr": command.pr,
+    }
+    existing_proof = _has_comment_proof(
+        api,
+        command.pr,
+        LEGACY_RETIREMENT_PROOF_MARKER,
+        **proof_values,
+    )
+    if (
+        RETIRED_LABEL in labels
+        and existing_proof
+        and bool(pull.get("merged"))
+        and head == command.head_sha
+        and str(entry.get("head_sha") or "").lower() == head
+        and str(entry.get("merge_sha") or "").lower() == merge
+    ):
+        return RETIRED_LABEL
     if (
         not bool(pull.get("merged"))
         or BLOCKED_LABEL not in labels
@@ -3539,18 +3594,13 @@ def retire_legacy_release(
         or str(entry.get("merge_sha") or "").lower() != merge
     ):
         raise ReleaseBlocked("legacy retirement PR/head/merge/state no longer matches manifest")
-    proof_values = {
-        "head": head,
-        "manifest": actual_manifest,
-        "merge": merge,
-        "pr": command.pr,
-    }
-    api.add_comment(
-        command.pr,
-        "Historical task was confirmed complete by the owner and retired from active "
-        "orchestration without claiming missing production evidence.\n\n"
-        + _proof_marker(LEGACY_RETIREMENT_PROOF_MARKER, **proof_values),
-    )
+    if not existing_proof:
+        api.add_comment(
+            command.pr,
+            "Historical task was confirmed complete by the owner and retired from active "
+            "orchestration without claiming missing production evidence.\n\n"
+            + _proof_marker(LEGACY_RETIREMENT_PROOF_MARKER, **proof_values),
+        )
     set_release_state(api, command.pr, RETIRED_LABEL, current_labels=labels)
     return RETIRED_LABEL
 
@@ -3730,10 +3780,6 @@ def select_candidate(
                 task_class = task_class_from_labels(labels)
             except ReleaseBlocked:
                 continue
-            if task_class == LOOP_TASK_LABEL:
-                if lane.get("status") != "owned":
-                    admitted_ready.append(item)
-                continue
             admission = orchestration_admission(api, pull)
             if (
                 admission is not None
@@ -3894,6 +3940,7 @@ def prepare_candidate(
     check_name: str,
     timeout_seconds: int,
     poll_seconds: float,
+    orchestration_required: bool = False,
 ) -> Candidate:
     pull = api.get_pull(number)
     labels = label_names(pull)
@@ -3918,6 +3965,17 @@ def prepare_candidate(
     head_ref = str((pull.get("head") or {}).get("ref") or "")
     if not head_sha or not head_ref:
         raise ReleaseBlocked("PR head identity is missing")
+    lane = release_lane_state(api)
+    orchestration_enforced = orchestration_required or lane.get("status") == "owned"
+    admission: dict[str, Any] | None = None
+    if orchestration_enforced:
+        if lane.get("status") != "owned":
+            raise ReleaseBlocked("orchestration enforcement requires a proven release lane owner")
+        admission = orchestration_admission(api, pull)
+        if admission is None:
+            raise ReleaseBlocked("exact-head orchestration admission proof is missing")
+        if admission["task_id"] != lane.get("task_id"):
+            raise ReleaseBlocked("orchestration admission does not match the release lane task")
     set_release_state(
         api,
         number,
@@ -3970,6 +4028,35 @@ def prepare_candidate(
     final_task_class, final_loop_root = _validate_task_context(api, number, final_labels, scope)
     if final_task_class != task_class or final_loop_root != loop_root:
         raise ReleaseBlocked("PR task class or LOOP recovery link changed while baseline CI was running")
+    if orchestration_enforced:
+        final_lane = release_lane_state(api)
+        final_admission = orchestration_admission(api, pull)
+        if final_lane.get("status") != "owned" or final_lane.get("task_id") != admission["task_id"]:
+            raise ReleaseBlocked("release lane identity changed while baseline CI was running")
+        if final_admission is None:
+            if task_class == STANDARD_TASK_LABEL and final_head_sha != admission["head"]:
+                set_release_state(
+                    api,
+                    number,
+                    STAGED_LABEL,
+                    current_labels=final_labels,
+                    comment=(
+                        "Release Train синхронизировал PR с current `main`; новый exact head "
+                        f"`{final_head_sha}` должен быть повторно допущен Watcher без blocker."
+                    ),
+                )
+                raise ReleaseReadmissionRequired(
+                    head_sha=final_head_sha,
+                    task_id=str(admission["task_id"]),
+                    revision=int(admission["revision"]),
+                    passport_digest=str(admission["passport_digest"]),
+                )
+            raise ReleaseBlocked("exact-head orchestration admission became stale during prepare")
+        if any(
+            final_admission[key] != admission[key]
+            for key in ("task_id", "revision", "passport_digest")
+        ):
+            raise ReleaseBlocked("orchestration admission identity changed while baseline CI was running")
     if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
         raise ReleaseBlocked("PR is no longer an open non-draft change")
     if str((pull.get("base") or {}).get("ref") or "") != "main":
@@ -4006,7 +4093,12 @@ def require_deploy_environment(deploy_env: Mapping[str, str]) -> None:
         raise ReleaseBlocked("missing GitHub production secrets: " + ", ".join(missing))
 
 
-def merge_candidate(api: ReleaseApi, candidate: Candidate) -> MergeResult:
+def merge_candidate(
+    api: ReleaseApi,
+    candidate: Candidate,
+    *,
+    orchestration_required: bool = False,
+) -> MergeResult:
     pull = api.get_pull(candidate.number)
     labels = label_names(pull)
     if bool(pull.get("merged")) and str(pull.get("merge_commit_sha") or ""):
@@ -4031,6 +4123,16 @@ def merge_candidate(api: ReleaseApi, candidate: Candidate) -> MergeResult:
     current_head = str((pull.get("head") or {}).get("sha") or "")
     if current_head != candidate.head_sha:
         raise ReleaseBlocked("PR head changed after CI; enqueue it again after fresh checks")
+    lane = release_lane_state(api)
+    if orchestration_required or lane.get("status") == "owned":
+        admission = orchestration_admission(api, pull)
+        if (
+            lane.get("status") != "owned"
+            or admission is None
+            or admission["task_id"] != lane.get("task_id")
+            or admission["head"] != candidate.head_sha
+        ):
+            raise ReleaseBlocked("merge requires current exact-head orchestration admission and lane")
     comparison = api.compare("main", candidate.head_sha)
     if int(comparison.get("behind_by") or 0) > 0:
         raise ReleaseBlocked("main advanced after CI; synchronize the PR and run fresh checks")
@@ -4451,17 +4553,21 @@ def retry_blocked_release(
         number,
         f"Release Train retry accepted after `{check_name}` succeeded on exact head `{actual_head}`.\n\n{proof}",
     )
-    target = (
-        READY_LABEL
-        if task_class == LOOP_TASK_LABEL
-        or (
-            not orchestration_required
-            and not _repo_owned_marker_fields(
+    orchestration_enforced = (
+        orchestration_required
+        or release_lane_state(api).get("status") == "owned"
+        or bool(
+            _repo_owned_marker_fields(
                 api,
                 number,
                 ORCHESTRATION_ADMISSION_PROOF_MARKER,
             )
         )
+    )
+    target = (
+        READY_LABEL
+        if task_class == LOOP_TASK_LABEL
+        or not orchestration_enforced
         else STAGED_LABEL
     )
     set_release_state(api, number, target, current_labels=labels)
@@ -5494,7 +5600,33 @@ def command_prepare(args: argparse.Namespace) -> int:
             check_name=args.check_name,
             timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
+            orchestration_required=os.environ.get(
+                "WB_CORE_ORCHESTRATION_REQUIRED", ""
+            ).strip().casefold()
+            in {"1", "true", "yes", "on"},
         )
+    except ReleaseReadmissionRequired as exc:
+        write_github_output(
+            args.output_path,
+            {
+                "readmission_required": True,
+                "head_sha": exc.head_sha,
+                "orchestration_task_id": exc.task_id,
+                "orchestration_revision": exc.revision,
+                "passport_digest": exc.passport_digest,
+            },
+        )
+        _json_print(
+            {
+                "status": "readmission-required",
+                "pr_number": args.pr,
+                "head_sha": exc.head_sha,
+                "task_id": exc.task_id,
+                "revision": exc.revision,
+                "passport_digest": exc.passport_digest,
+            }
+        )
+        return 0
     except ReleaseClassificationBlocked as exc:
         mark_classification_blocked(api, args.pr, exc)
         _json_print(
@@ -5570,7 +5702,14 @@ def command_merge(args: argparse.Namespace) -> int:
         agent_acknowledged=args.task_class == LOOP_TASK_LABEL,
     )
     try:
-        result = merge_candidate(api, candidate)
+        result = merge_candidate(
+            api,
+            candidate,
+            orchestration_required=os.environ.get(
+                "WB_CORE_ORCHESTRATION_REQUIRED", ""
+            ).strip().casefold()
+            in {"1", "true", "yes", "on"},
+        )
     except ReleaseClassificationBlocked as exc:
         mark_classification_blocked(api, args.pr, exc)
         _json_print(

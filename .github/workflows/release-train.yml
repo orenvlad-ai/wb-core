@@ -50,6 +50,7 @@ jobs:
     timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
       ORCHESTRATION_COMMAND: ${{ github.event.comment.body }}
       ORCHESTRATION_ACTOR: ${{ github.event.comment.user.login }}
       ORCHESTRATION_ASSOCIATION: ${{ github.event.comment.author_association }}
@@ -458,6 +459,7 @@ jobs:
       agent_acknowledged: ${{ steps.prepare.outputs.agent_acknowledged }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -545,6 +547,7 @@ jobs:
     timeout-minutes: 20
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -605,6 +608,7 @@ jobs:
     environment: production
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
       WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
       WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
     steps:
@@ -670,37 +674,16 @@ jobs:
           pypdf==6.4.1 reportlab==4.4.5
 
       - name: Deploy and verify exact merge SHA
-        id: deploy
         if: steps.merge.outputs.skip_release != 'true'
-        continue-on-error: true
         env:
           WB_CORE_RELEASE_PR: ${{ needs.select.outputs.pr_number }}
           WB_CORE_RELEASE_HEAD: ${{ needs.prepare.outputs.head_sha }}
         run: python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
 
-      - name: Reconcile bounded exact-SHA settling state
-        id: reconcile_after_deploy
-        if: >-
-          steps.merge.outputs.skip_release != 'true' &&
-          steps.deploy.outcome == 'failure'
-        continue-on-error: true
-        run: >-
-          python3 apps/hosted_runtime_transport_reconcile.py
-          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
-          --expected-sha "${{ steps.merge.outputs.merge_sha }}"
-          --pr "${{ needs.select.outputs.pr_number }}"
-          --head "${{ needs.prepare.outputs.head_sha }}"
-          --merge "${{ steps.merge.outputs.merge_sha }}"
-          --failed-stage readback
-          --attempts 5
-          --output "$RUNNER_TEMP/wb-core-release-reconcile.json"
-
       - name: Mark production completion
         if: >-
           steps.merge.outputs.skip_release != 'true' &&
-          needs.prepare.outputs.task_class == 'task:standard' &&
-          (steps.deploy.outcome == 'success' ||
-          steps.reconcile_after_deploy.outcome == 'success')
+          needs.prepare.outputs.task_class == 'task:standard'
         run: >-
           python3 apps/github_release_train.py complete-standard
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -709,9 +692,7 @@ jobs:
 
       - name: Open production UI gate for LOOP
         if: >-
-          needs.prepare.outputs.task_class == 'task:loop' &&
-          (steps.deploy.outcome == 'success' ||
-          steps.reconcile_after_deploy.outcome == 'success')
+          needs.prepare.outputs.task_class == 'task:loop'
         run: >-
           python3 apps/github_release_train.py await-ui
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -735,8 +716,7 @@ jobs:
         if: >-
           steps.merge.outputs.merge_sha != '' &&
           steps.merge.outputs.skip_release != 'true' &&
-          steps.deploy.outcome == 'failure' &&
-          steps.reconcile_after_deploy.outcome != 'success'
+          failure()
         run: >-
           python3 apps/github_release_train.py halt-merged
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -747,14 +727,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP/wb-core-release-key" "$RUNNER_TEMP/wb-core-known-hosts" \
-            "$RUNNER_TEMP/wb-core-release-reconcile.json" "$HOME/.ssh/config"
+          rm -f "$RUNNER_TEMP/wb-core-release-key" "$RUNNER_TEMP/wb-core-known-hosts" "$HOME/.ssh/config"
 
       - name: Continue release queue
         if: >-
           always() &&
-          (((steps.deploy.outcome == 'success' ||
-          steps.reconcile_after_deploy.outcome == 'success') &&
-          needs.prepare.outputs.task_class == 'task:standard') ||
+          ((success() && needs.prepare.outputs.task_class == 'task:standard') ||
           (failure() && steps.merge.outputs.merge_sha == ''))
         run: python3 apps/github_release_train.py dispatch-next
